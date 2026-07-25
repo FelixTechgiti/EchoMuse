@@ -56,7 +56,22 @@ BYTES_PER_SEC = SPEAKER_RATE * 2
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 
-LEAD_S          = 1.5   # feed-ahead target over realtime
+# Feed-ahead target over realtime. The device buffers audioChanDepth=128
+# periods x 42.7ms = ~5.46s, so 1.5s left roughly four seconds of hardware
+# buffer unused — and control-plane RTT measurement shows stalls of 1.8s and
+# 2.6s during playback on a healthy-looking link, each of which drained that
+# 1.5s and produced an audible dropout (reported repeatedly 2026-07-25).
+#
+# Raising this does NOT make pause/stop/voice-preempt less responsive: those
+# are instant because of speaker_flush (which drains the device buffer) plus
+# the discard-until-EOS contract (which swallows whatever is still in TCP),
+# not because the lead is short. 4.0s keeps ~1.4s of headroom under the
+# device's own depth so the feed can never outrun audioCh.
+#
+# This is MITIGATION, not a cure: it rides out the stalls rather than
+# explaining them. The stalls are still unexplained — see the RTT
+# instrumentation and docs/led-ring-states.md-era investigation notes.
+LEAD_S          = 4.0
 RESUME_REWIND_S = 1.0   # replay this much before the pause bookmark
 DRAIN_FUDGE_S   = 1.1   # device prime hold — same constant class as turns
 # How long to wait for the first decoded audio after a seek before deciding
