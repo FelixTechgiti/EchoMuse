@@ -118,6 +118,28 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	}
 }
 
+// CancelDisplay ends the volume arc's hold early, releasing the ring back to
+// whatever wants to paint next.
+//
+// The hold exists to stop turn animations — which repaint every ~80ms — from
+// stomping the arc within a frame of it appearing. It was never meant to
+// outrank a deliberate press: adjusting the volume and immediately pressing
+// the action button left the arc sitting there for the rest of its 2s with no
+// sign the device had started listening.
+//
+// Deliberately does NOT repaint. The caller is about to start a turn, so its
+// listening frame lands within a round trip; clearing to black here would put
+// a visible dark gap between the two. The arc simply stops being sovereign.
+func (vc *volumeController) CancelDisplay() {
+	vc.mu.Lock()
+	if vc.timer != nil {
+		vc.timer.Stop()
+		vc.timer = nil
+	}
+	vc.displayActive = false
+	vc.mu.Unlock()
+}
+
 // Get returns current volume level.
 func (vc *volumeController) Get() int {
 	vc.mu.Lock()

@@ -178,7 +178,7 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 | A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
 | A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
 | A7 | **MUTED** | any | **Blocked device-side — event never sent** (`cmd/server.go:149`) | Red ring unchanged — **silent by design** (see §6 Q1) | — | [today, keep] |
-| A9 | VOL-DISPLAY | LINKED | Send button event; arc keeps the ring for its window | Arc completes, then hands back to the turn animation | Starts turn normally | [today] |
+| A9 | VOL-DISPLAY | LINKED | Send button event **and cancel the arc's hold** (`CancelVolumeDisplay`) | Arc stops being sovereign; the turn's listening frame paints as soon as it arrives | Starts turn normally | [today] |
 
 ### 4.2 Mute button — clickType 113 (device-local, never leaves the device)
 
@@ -429,8 +429,12 @@ longer free, and its floor is set by the worst legitimate round trip.
 
 - **Mute is device-sovereign.** Correct with no controller, wedged controller,
   or lying controller. Persisted locally; survives OTA slot flips.
-- **The volume arc owns the ring for its full 2s window.** Turn animations
-  repaint every ~80ms and would otherwise stomp it within one frame.
+- **The volume arc owns the ring against *animations* for its 2s window.**
+  Turn animations repaint every ~80ms and would otherwise stomp it within one
+  frame. It does **not** outrank a deliberate action-button press, which
+  cancels the hold — the arc is protection from repaint churn, not from the
+  user (2026-07-25: pressing the button after a volume change gave no sign
+  the device was listening until the window expired).
 - **Arc expiry is mute-aware.** It must restore red when muted, never hand back
   to controller state.
 - **`ttlSec` dead-man stays.** It is the only protection against a controller
