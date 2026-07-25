@@ -66,3 +66,70 @@ def test_pride_rotates_whole_palette():
     for i in range(em_scenes.NUM_LEDS):
         a, b = f1[i], f0[(i - 1) % em_scenes.NUM_LEDS]
         assert (a["r"], a["g"], a["b"]) == (b["r"], b["g"], b["b"])
+
+
+# ─── meter response curve (dashboard-tunable) ────────────────────────────────
+
+def test_meter_curve_omits_absent_keys():
+    """
+    Absent config keys must NOT be sent: an empty override means "use the
+    firmware default", which lets the device move its defaults without every
+    stored config pinning the old ones.
+    """
+    anim = em_scenes.resolve({})["meter_anim"]
+    for k in ("attack", "decay", "floor", "gamma", "ref", "curve"):
+        assert k not in anim
+
+
+def test_meter_curve_passes_through_and_clamps():
+    anim = em_scenes.resolve({
+        "meterDecay": 0.5, "meterFloor": 0.0,
+        "meterGamma": 99, "meterRef": -1, "meterCurve": "bogus",
+    })["meter_anim"]
+    assert anim["decay"] == 0.5
+    assert anim["floor"] == 0.0          # 0 is a real value, not "absent"
+    assert anim["gamma"] == 3.5          # clamped to the top of the range
+    assert anim["ref"] == 0.02           # clamped to the bottom
+    assert "curve" not in anim           # unparseable is dropped, not crashed
+
+
+def test_turn_state_ttls_are_bounded():
+    """
+    A controller that dies mid-turn used to leave the ring animating for
+    three minutes. Each phase's TTL must now be bounded by what that phase
+    can legitimately take.
+    """
+    scene = em_scenes.resolve({})
+    assert scene["listening_anim"]["ttlSec"] <= 30
+    # The spinner spans HA think time AND the TTS fetch, so its TTL has to
+    # outlast _fetch_tts_audio's timeout (60s, two attempts) or it clears
+    # the ring during exactly the long responses that need it. Guard the
+    # coupling so moving one without the other fails here.
+    assert scene["spin_anim"]["ttlSec"] >= 120
+    assert scene["spin_anim"]["ttlSec"] <= 180
+
+
+def test_meter_ttl_scales_with_response_length():
+    """
+    The meter TTL must always exceed the response it is showing — a fixed
+    value would clear the ring part-way through a long answer, which is the
+    exact bug the playback_stats rendezvous fixes at the other end.
+    """
+    assert em_scenes.meter_ttl(0.5) >= 30           # short clips get a floor
+    for seconds in (5, 30, 120, 600):
+        assert em_scenes.meter_ttl(seconds) > seconds * 1.5
+
+
+def test_outcome_cues_are_self_clearing_and_distinct():
+    """
+    Cues must retire on the device's own ticker (no follow-up message to
+    lose) and must be told apart by rhythm, since colour is already spoken
+    for by mute/link/volume.
+    """
+    scene = em_scenes.resolve({})
+    ns, err = scene["nospeech_anim"], scene["error_anim"]
+    for a in (ns, err):
+        assert a["pattern"] == "pulse"
+        assert 0 < a["ttlSec"] <= 2
+    assert ns["periodMs"] != err["periodMs"]
+    assert err["periodMs"] < ns["periodMs"]   # error reads as more agitated

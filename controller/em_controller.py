@@ -321,6 +321,17 @@ class Device:
         # playback_send_ms, which only times writing into the socket and
         # completes almost instantly however slow the link is.
         self.playback_send_t0: float | None = None
+        # Set when the device reports playback_stats for the stream being
+        # played. This is the authoritative "the audio has finished" signal
+        # — the device emits it once its audio channel has drained after
+        # EOS, i.e. when the last period has gone to ALSA. Cleared at the
+        # start of every speaker stream; awaited by _run_post_turn_playback
+        # in place of the wall-clock estimate that used to clear the ring
+        # while the device was still playing (up to 6.1s early, 2026-07-24).
+        self.playback_done = asyncio.Event()
+        # Outcome of the most recently persisted turn, set by em_esphome and
+        # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
+        self.last_turn_outcome: str | None = None
         self.playback_send_ms: int = -1
         self.playback_eq_ms:   int = -1
 
@@ -472,6 +483,47 @@ async def leds_off(device: Device):
         await device.send_led_anim({"pattern": "off"})
     else:
         await device.set_leds(_make_leds(0, 0, 0))
+
+
+# Turn outcomes that get a distinguishing ring cue at turn end. Everything
+# else ("ok", "cancelled") ends silently: the user either heard a reply or
+# pressed the button themselves, so a cue would be noise.
+#
+# Rhythm carries the meaning, not colour — a new colour would collide with
+# red (mute), orange (link down) or cyan (volume), and the point of the
+# cue is to be understandable without a legend. One slow throb reads as
+# "nothing heard"; fast blinks read as "something went wrong".
+_OUTCOME_ANIM = {
+    "no_speech":     "nospeech_anim",
+    "no_tts":        "error_anim",
+    "tts_error":     "error_anim",
+    "timeout":       "error_anim",
+    "stream_timeout": "error_anim",
+}
+
+
+async def _leds_turn_end(device: Device):
+    """
+    Clear the ring at turn end, playing a brief self-clearing cue first if
+    the turn ended in a way the user would otherwise have no signal for.
+
+    The cue anims carry a 1s TTL, so the device retires them on its own
+    ticker with no follow-up message — nothing to leak if the controller
+    dies in between, and a continuation/barge repaint simply supersedes it
+    via the animator's generation counter.
+    """
+    outcome = device.last_turn_outcome
+    device.last_turn_outcome = None
+    key = _OUTCOME_ANIM.get(outcome or "")
+    # Barge-in re-enters a fresh turn immediately and repaints listening —
+    # a cue there would flash for a few frames and read as a glitch.
+    if key and device.led_anim_capable and not device.barge_detected:
+        anim = device.led_scene.get(key)
+        if anim:
+            log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
+            await device.send_led_anim(anim)
+            return
+    await leds_off(device)
 
 
 async def leds_listening(device: Device):
@@ -721,6 +773,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
     )
     cancel_task    = asyncio.create_task(device.cancel_event.wait())
+    device.playback_done.clear()
+    done_task      = asyncio.create_task(device.playback_done.wait())
     stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
     t_stream_start = asyncio.get_event_loop().time()
     # Opens the delivery window measured against the device's
@@ -737,41 +791,58 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         stream_task.cancel()
     else:
         if not device.cancel_event.is_set():
-            # Mono S16LE, plus the device's prime hold: playback doesn't
-            # start until ~1s of audio is buffered (or EOS for short clips),
-            # so the buffer finishes draining up to that much later than
-            # audio_duration alone suggests. Overestimating slightly is fine
-            # — this sleep races cancel_event, and barge-in keeps the mic
-            # running regardless.
+            # Wait for the DEVICE to say it finished, rather than estimating.
+            #
+            # The old code slept `audio_duration - elapsed` and declared
+            # completion. Two things made that wrong, and both bite hardest
+            # on exactly the links that need the most patience: `elapsed` is
+            # socket-write time (which completes near-instantly however slow
+            # the wire is) and was *subtracted*, and the estimate had no
+            # visibility of how long the device's own buffer took to drain.
+            # Measured 2026-07-24: the ring cleared 6.1s before the audio
+            # actually stopped on a Retreat turn, 3.2s early on Lounge.
+            #
+            # playback_stats is emitted once the device's audio channel has
+            # drained after EOS, so it is the real end of audio. The timeout
+            # is only a backstop for the report never arriving (device drop,
+            # pre-v2.9 firmware): generous, because ending the turn early is
+            # the failure we are fixing. cancel_event is still raced — a
+            # barge-in or a mute usually lands in this window, and an
+            # uncancellable wait here is what caused the 5.7s dead window
+            # fixed on 2026-07-10.
             audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
             elapsed        = asyncio.get_event_loop().time() - t_stream_start
-            remaining      = max(0.0, audio_duration - elapsed)
             device.playback_send_ms = int(elapsed * 1000)
+            timeout        = audio_duration * 2 + 10.0
             log.info(
                 f"[{device.device_id}] Socket write took {elapsed:.1f}s "
-                f"(NOT delivery — see delivery_ms), sleeping {remaining:.1f}s "
-                f"for buffer drain (total={audio_duration:.1f}s)"
+                f"(NOT delivery — see delivery_ms), awaiting device "
+                f"playback_stats (est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
             )
-            if remaining > 0:
-                # The drain sleep must race cancel_event too: the WS write
-                # finishes well ahead of real-time playback, so a barge-in
-                # usually lands HERE, not mid-stream. An uncancellable sleep
-                # left the turn hanging for the rest of the response length
-                # after the device had already flushed — no listening LEDs,
-                # and the user's follow-up words piling into voice_queue
-                # (observed 5.7s dead window, 2026-07-10).
-                sleep_task = asyncio.create_task(asyncio.sleep(remaining))
-                await asyncio.wait(
-                    [sleep_task, cancel_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                sleep_task.cancel()
+            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+            await asyncio.wait(
+                [done_task, cancel_task, timeout_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            timeout_task.cancel()
             if device.cancel_event.is_set():
-                log.info(f"[{device.device_id}] Cancelled during buffer drain")
+                log.info(f"[{device.device_id}] Cancelled during playback drain")
+            elif done_task.done():
+                actual = asyncio.get_event_loop().time() - t_stream_start
+                log.info(
+                    f"[{device.device_id}] Playback complete "
+                    f"(device-confirmed after {actual:.1f}s, est {audio_duration:.1f}s)"
+                )
             else:
-                log.info(f"[{device.device_id}] Playback complete")
+                # Ring held the full backstop. Either the device never
+                # reported (worth knowing) or delivery was pathological.
+                log.warning(
+                    f"[{device.device_id}] Playback completion timed out after "
+                    f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
+                )
 
     cancel_task.cancel()
+    done_task.cancel()
 
 
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):
@@ -840,7 +911,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         await spin_task
                     except asyncio.CancelledError:
                         pass
-                await leds_off(device)
+                await _leds_turn_end(device)
 
             async def on_thinking_esphome():
                 nonlocal spin_task, watcher
@@ -879,7 +950,16 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     # the ALSA write). Replaces the thinking spinner on
                     # the device; spin_task keeps waiting on stop_event
                     # and its finally still clears the ring at turn end.
-                    await device.send_led_anim(device.led_scene["meter_anim"])
+                    #
+                    # TTL is sized to THIS response — a fixed dead-man would
+                    # eventually clear the ring part-way through a long
+                    # answer, which is the very bug being fixed elsewhere in
+                    # this turn path.
+                    meter = dict(device.led_scene["meter_anim"])
+                    meter["ttlSec"] = em_scenes.meter_ttl(
+                        len(voice_response) / (SPEAKER_RATE * 2)
+                    )
+                    await device.send_led_anim(meter)
                 if device.barge_in_enabled:
                     # Barge-in (§3.2): keep the mic running through
                     # playback — the device's AEC subtracts the speaker
@@ -1823,6 +1903,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     periods   = int(msg.get("periods", 0))
                     underruns = int(msg.get("underruns", 0))
                     pstats    = msg.get("stats") or {}
+                    # Release _run_post_turn_playback: this report IS the
+                    # end of audio, and the ring clears on it rather than
+                    # on a wall-clock guess.
+                    device.playback_done.set()
                     # Delivery window: first speaker frame sent -> this
                     # report. The metric the 07-20 investigation lacked —
                     # "Streaming took Xs" times the socket write and reads

@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestSpinFrame(t *testing.T) {
 	spec := AnimSpec{
@@ -72,5 +75,65 @@ func TestPaletteFrame(t *testing.T) {
 	frame = paletteFrame([][3]uint8{{1, 0, 0}, {2, 0, 0}})
 	if frame[0].R != 1 || frame[1].R != 2 || frame[2].R != 0 {
 		t.Fatalf("partial palette wrong: %+v", frame[:3])
+	}
+}
+
+func TestResolveMeterDefaultsAndClamps(t *testing.T) {
+	// Absent fields fall back to the shipped curve.
+	a, d, f, g, r, c := resolveMeter(AnimSpec{Pattern: "meter"})
+	if a != meterDefaults.attack || d != meterDefaults.decay ||
+		f != meterDefaults.floor || g != meterDefaults.gamma ||
+		r != meterDefaults.ref || c != meterDefaults.curve {
+		t.Fatalf("defaults not applied: %v %v %v %v %v %v", a, d, f, g, r, c)
+	}
+
+	// floor=0 must survive: it is a legitimate value (fully dark at
+	// silence), which is the whole reason these fields are pointers.
+	zero := 0.0
+	_, _, f0, _, _, _ := resolveMeter(AnimSpec{Floor: &zero})
+	if f0 != 0.0 {
+		t.Fatalf("floor 0 not honoured, got %v", f0)
+	}
+
+	// Out-of-range values clamp rather than producing a dead ring: a
+	// config push must not be able to break the display.
+	huge, neg := 99.0, -5.0
+	at, dc, fl, gm, rf, cv := resolveMeter(AnimSpec{
+		Attack: &huge, Decay: &neg, Floor: &huge,
+		Gamma: &neg, Ref: &neg, Curve: &huge,
+	})
+	if at != 1.0 || dc != 0.02 || fl != 0.6 || gm != 1.0 || rf != 0.02 || cv != 2.0 {
+		t.Fatalf("clamping wrong: %v %v %v %v %v %v", at, dc, fl, gm, rf, cv)
+	}
+}
+
+// TestMeterCurveIsVisiblyVaried is the regression guard for the reported
+// "too subtle to distinguish from a solid ring" bug. It asserts the shipped
+// curve produces a wide PERCEPTUAL swing across ordinary speech levels —
+// the old curve (sqrt(rms/0.35), floor .15, no gamma) managed only ~23%.
+func TestMeterCurveIsVisiblyVaried(t *testing.T) {
+	_, _, floor, gamma, ref, curve := resolveMeter(AnimSpec{Pattern: "meter"})
+	span := 1.0 - floor
+
+	// Perceived lightness of a painted duty cycle b is ~b^(1/gamma), so
+	// with the gamma encoding the perceptual value is just floor+span*env.
+	perceived := func(rms float64) float64 {
+		env := math.Pow(math.Min(1, rms/ref), curve)
+		b := math.Pow(floor+span*env, gamma)
+		return math.Pow(b, 1.0/gamma)
+	}
+
+	quiet, loud := perceived(0.02), perceived(0.20)
+	if got := loud - quiet; got < 0.55 {
+		t.Fatalf("perceptual swing across speech only %.2f, want >=0.55 "+
+			"(quiet=%.2f loud=%.2f) — meter will read as a solid ring", got, quiet, loud)
+	}
+	// Silence must still be visibly lit: the ring belongs to the turn.
+	if s := perceived(0.0); s < 0.03 {
+		t.Fatalf("silence too dark (%.3f) — ring reads as off mid-response", s)
+	}
+	// And full scale must not clip below full brightness.
+	if p := perceived(1.0); p < 0.99 {
+		t.Fatalf("peak not full brightness: %.3f", p)
 	}
 }

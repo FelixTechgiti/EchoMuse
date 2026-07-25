@@ -1196,7 +1196,20 @@ async def _fetch_tts_audio(url: str) -> bytes:
     for attempt in range(2):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                # 60s, not 10s: HA's tts_proxy generates the audio while we
+                # hold this GET open, so this is a synthesis deadline, not a
+                # download one. Whether that shows up here or in tts_gen
+                # depends on the engine — a streaming-capable one hands over
+                # the URL early and does the work during the fetch, which is
+                # how a long response (a read-aloud story) blew the old 10s
+                # cap. Reported by @kopiro in #28.
+                #
+                # The proper fix is to stop buffering the whole response:
+                # em_player already streams a URL through ffmpeg into the
+                # same 0x02 plane with StreamingEQ, and pointing that at TTS
+                # would remove this deadline AND start playback seconds
+                # sooner. Until then this is a deliberate band-aid.
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     resp.raise_for_status()
                     audio_bytes = await resp.read()
             break
@@ -1547,6 +1560,10 @@ async def _persist_turn(device, turn_record: dict) -> None:
             turn_record["send_ms"] = device.playback_send_ms
             turn_record["eq_ms"]   = device.playback_eq_ms
         pending = None
+    # Surface the outcome to the turn loop's ring cleanup. Without this
+    # every ending looks identical to the user — "I didn't hear you",
+    # "HA errored" and "done, nothing to say" all just turn the ring off.
+    device.last_turn_outcome = turn_record.get("outcome")
     try:
         turn_id = await loop.run_in_executor(
             None, db.insert_turn, device.device_id, turn_record

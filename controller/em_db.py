@@ -139,6 +139,18 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
+    # Playback "meter" ring response curve — how hard the ring throbs with
+    # the speaker level. Device-side defaults live in animator.go
+    # (meterDefaults) and these mirror them; both are clamped independently.
+    # Exposed as config because it is a taste parameter that needs several
+    # passes in a real room, and a firmware OTA per pass is not a sane
+    # tuning loop. See docs/led-ring-states.md.
+    "meterAttack":      0.6,   # envelope rise per 40ms tick
+    "meterDecay":       0.30,  # fall per tick; ~133ms tracks syllable rate
+    "meterFloor":       0.06,  # perceptual brightness at silence
+    "meterGamma":       2.2,   # >1 expands the dark end so the swing reads
+    "meterRef":         0.22,  # speaker RMS mapped to full brightness
+    "meterCurve":       0.7,   # <1 lifts quiet consonants
     # agcEnabled: automatic gain control (lockMic/button turn streams only).
     # Disable to hear raw mic levels. (nsEnabled/RNNoise removed 2026-07-12
     # with the device-side RNNoise code — a stale nsEnabled key in stored

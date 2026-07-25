@@ -3122,6 +3122,7 @@ function DeviceConfigForm({ config, onChange, disabled }) {
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
   const [advMics, setAdvMics] = useState(false);
+  const [advRing, setAdvRing] = useState(false);
 
   const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
   const mono = "'DM Mono',monospace";
@@ -3350,6 +3351,34 @@ function DeviceConfigForm({ config, onChange, disabled }) {
             </div>
           )}
         </div>
+        <StageAdvanced open={advRing} onToggle={() => setAdvRing(o => !o)} disabledStyle={inputStyle}>
+          <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, marginBottom: 12 }}>
+            While a response plays, the ring throbs with the live speaker level. These shape how
+            hard it throbs — the device renders it locally, so changes apply on the next response
+            with no restart. Defaults are tuned for speech; raise Decay and Gamma for a punchier
+            ring, lower them for a calmer one.
+          </div>
+          <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 24px' }}>
+            <Slider label="Decay" sub="how fast it falls — higher tracks individual syllables"
+              value={config.meterDecay ?? 0.30} min={0.02} max={1} step={0.02}
+              onChange={v => set('meterDecay', v)}/>
+            <Slider label="Attack" sub="how fast it rises on a peak"
+              value={config.meterAttack ?? 0.6} min={0.05} max={1} step={0.05}
+              onChange={v => set('meterAttack', v)}/>
+            <Slider label="Gamma" sub="contrast — higher makes the swing more visible"
+              value={config.meterGamma ?? 2.2} min={1} max={3.5} step={0.1}
+              onChange={v => set('meterGamma', v)}/>
+            <Slider label="Floor" sub="brightness during silence; 0 = fully dark between words"
+              value={config.meterFloor ?? 0.06} min={0} max={0.6} step={0.02}
+              onChange={v => set('meterFloor', v)}/>
+            <Slider label="Reference" sub="speaker level mapped to full brightness — lower = more sensitive"
+              value={config.meterRef ?? 0.22} min={0.02} max={1} step={0.02}
+              onChange={v => set('meterRef', v)}/>
+            <Slider label="Curve" sub="below 1 lifts quiet consonants into view"
+              value={config.meterCurve ?? 0.7} min={0.3} max={2} step={0.05}
+              onChange={v => set('meterCurve', v)}/>
+          </div>
+        </StageAdvanced>
       </Stage>
 
       {/* 05 ADVANCED — button-turn internals: processing + speech gate */}

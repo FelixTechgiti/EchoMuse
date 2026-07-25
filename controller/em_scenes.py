@@ -84,6 +84,51 @@ def _leds(palette: list) -> list:
     return [{"id": i, "r": r, "g": g, "b": b} for i, (r, g, b) in enumerate(palette)]
 
 
+# Seconds added on top of a response's own duration when sizing the meter
+# ring's dead-man TTL. Also the placeholder TTL on the base spec.
+METER_TTL_PAD = 20
+
+# Dead-man TTL for the thinking spinner. It must outlast everything the
+# spinner spans — HA's think time AND the TTS fetch — because the ring is
+# showing "working on it" for the whole of both. That makes it coupled to
+# _fetch_tts_audio's timeout (60s, x2 attempts): a shorter TTL would clear
+# the ring part-way through exactly the long responses that need it most,
+# which is the same class of bug as the playback estimate this release
+# replaces. Keep these two in step if either moves.
+SPIN_TTL = 135
+
+# Meter response-curve config keys → the wire field the device reads, with
+# the range the dashboard offers. The device clamps independently
+# (resolveMeter in animator.go) — this is the UI range, not the guard.
+_METER_KEYS = {
+    "meterAttack": ("attack", 0.05, 1.0),
+    "meterDecay":  ("decay",  0.02, 1.0),
+    "meterFloor":  ("floor",  0.0,  0.6),
+    "meterGamma":  ("gamma",  1.0,  3.5),
+    "meterRef":    ("ref",    0.02, 1.0),
+    "meterCurve":  ("curve",  0.3,  2.0),
+}
+
+
+def _meter_curve(config: dict) -> dict:
+    """
+    Pull the meter response-curve overrides out of a device config.
+
+    Only keys actually present are emitted: an absent field means "use the
+    firmware default", which keeps the wire spec small and lets the device
+    move its defaults without every stored config pinning the old ones.
+    """
+    out = {}
+    for cfg_key, (wire_key, lo, hi) in _METER_KEYS.items():
+        if cfg_key not in config or config[cfg_key] is None:
+            continue
+        try:
+            out[wire_key] = min(hi, max(lo, float(config[cfg_key])))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def resolve(config: dict) -> dict:
     """
     Turn a device config dict into a render-ready scene. Unknown scene
@@ -123,25 +168,33 @@ def resolve(config: dict) -> dict:
     # so spinner smoothness stops depending on controller/WiFi jitter.
     # ttlSec is a dead-man switch: if the controller dies mid-turn the
     # ring self-clears instead of spinning forever.
+    # TTLs are bounded by what each phase can legitimately take, not by a
+    # single generous constant. The old flat 180s meant a controller that
+    # died mid-turn left the ring animating for three minutes, which reads
+    # as broken long before it self-clears. Ceilings used: the mic stream's
+    # 20s hard cap for listening, and observed worst-case HA think time of
+    # 14.7s (2026-07-25, n=57) for the spinner — each with ~2-3x headroom.
+    # meter is the exception: response length is unbounded, so its TTL is
+    # set per playback from the actual audio duration (see METER_TTL_PAD).
     if preset["rotate"]:
         spin_anim = {
             "pattern":  "rotate",
             "colors":   [list(c) for c in preset["listening"]],
             "periodMs": 80,
-            "ttlSec":   180,
+            "ttlSec":   SPIN_TTL,
         }
     else:
         spin_anim = {
             "pattern":  "spin",
             "colors":   [list(preset["spin_head"]), list(preset["spin_trail"])],
             "periodMs": 80,
-            "ttlSec":   180,
+            "ttlSec":   SPIN_TTL,
         }
     listening_anim = {
         "pattern":   "solid",
         "colors":    [list(c) for c in preset["listening"]],
         "listening": True,
-        "ttlSec":    180,
+        "ttlSec":    30,
     }
     # Playback: the ring throbs with the live speaker level (device-side
     # RMS at the ALSA write). Solid scenes throb the spinner head colour;
@@ -151,8 +204,18 @@ def resolve(config: dict) -> dict:
     meter_anim = {
         "pattern": "meter",
         "colors":  [list(c) for c in meter_palette],
-        "ttlSec":  180,
+        # Placeholder — the caller overrides this per playback with
+        # meter_ttl(audio_seconds). A long TTS must never self-clear its own
+        # ring mid-response, which a fixed TTL would eventually do.
+        "ttlSec":  METER_TTL_PAD,
+        **_meter_curve(config or {}),
     }
+
+    # A brief self-clearing cue played at turn end so outcomes are
+    # distinguishable. Rhythm carries the meaning, not colour: adding a new
+    # colour would collide with red (mute) / orange (link) / cyan (volume).
+    outcome_colors = ([list(preset["spin_head"])] if not preset["rotate"]
+                      else [list(c) for c in preset["listening"]])
 
     return {
         "name":           name,
@@ -161,4 +224,24 @@ def resolve(config: dict) -> dict:
         "listening_anim": listening_anim,
         "spin_anim":      spin_anim,
         "meter_anim":     meter_anim,
+        # One slow throb — "I was listening and heard nothing."
+        "nospeech_anim":  {
+            "pattern": "pulse", "colors": outcome_colors,
+            "periodMs": 900, "ttlSec": 1,
+        },
+        # Fast agitated blinks — "something went wrong."
+        "error_anim":     {
+            "pattern": "pulse", "colors": outcome_colors,
+            "periodMs": 220, "ttlSec": 1,
+        },
     }
+
+
+def meter_ttl(audio_seconds: float) -> int:
+    """
+    Dead-man TTL for a playback meter ring, sized to the response actually
+    being played. Bounded below so a very short clip still gets a sane
+    window, and padded so a slow link (delivery has been observed at ~2x
+    the audio duration) cannot trip it mid-response.
+    """
+    return int(max(30.0, audio_seconds * 2.0 + METER_TTL_PAD))
