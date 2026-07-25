@@ -48,7 +48,7 @@ expiry.
 | 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses only | `volume.go:145` |
 | 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/echomuse/state.json` | `mute.go:132` |
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
-| 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` (180s) expires | Controller-specified, device-rendered | `animator.go:53` |
+| 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
 | 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
 | 6 | **Idle** | All off | — | — | — |
 
@@ -178,7 +178,7 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 | A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
 | A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
 | A7 | **MUTED** | any | **Blocked device-side — event never sent** (`cmd/server.go:149`) | Red ring unchanged — **silent by design** (see §6 Q1) | — | [today, keep] |
-| A9 | VOL-DISPLAY | LINKED | Send button event; arc keeps the ring for its window | Arc completes, then hands back to the turn animation | Starts turn normally | [today] |
+| A9 | VOL-DISPLAY | LINKED | Send button event **and cancel the arc's hold** (`CancelVolumeDisplay`) | Arc stops being sovereign; the turn's listening frame paints as soon as it arrives | Starts turn normally | [today] |
 
 ### 4.2 Mute button — clickType 113 (device-local, never leaves the device)
 
@@ -214,7 +214,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | C4 | `led_anim` `off` | any unsuppressed | Ring black | [today] |
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |
-| C7 | No replacement within `ttlSec` (180s) | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
+| C7 | No replacement within `ttlSec` | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
 
 ### 4.5 Audio / link lifecycle
 
@@ -429,8 +429,12 @@ longer free, and its floor is set by the worst legitimate round trip.
 
 - **Mute is device-sovereign.** Correct with no controller, wedged controller,
   or lying controller. Persisted locally; survives OTA slot flips.
-- **The volume arc owns the ring for its full 2s window.** Turn animations
-  repaint every ~80ms and would otherwise stomp it within one frame.
+- **The volume arc owns the ring against *animations* for its 2s window.**
+  Turn animations repaint every ~80ms and would otherwise stomp it within one
+  frame. It does **not** outrank a deliberate action-button press, which
+  cancels the hold — the arc is protection from repaint churn, not from the
+  user (2026-07-25: pressing the button after a volume change gave no sign
+  the device was listening until the window expired).
 - **Arc expiry is mute-aware.** It must restore red when muted, never hand back
   to controller state.
 - **`ttlSec` dead-man stays.** It is the only protection against a controller

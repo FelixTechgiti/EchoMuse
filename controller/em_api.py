@@ -49,6 +49,7 @@ import websockets
 import em_db as db
 import em_auth as auth
 import em_ble_proxy
+import em_config_sections as sections_mod
 import em_oww_models
 import em_pki
 import em_scenes
@@ -560,16 +561,60 @@ async def _post_approve(request: web.Request) -> web.Response:
     return _ok({"device_id": device_id, "label": label})
 
 
+async def _apply_live_config(device_id: str, live, effective: dict) -> None:
+    """
+    Push an effective config to a connected device and refresh the
+    controller-side mirrors of it.
+
+    Extracted because the per-device and fleet endpoints both did this
+    inline, and a mirror added to one but not the other is a bug that reads
+    as working — the same shape as the v7 stats-relay miss (PR #23). Take
+    the EFFECTIVE config, never a request body: with per-section scoping a
+    body is partial by design, and a device must always be sent the whole
+    resolved picture.
+    """
+    await live.send_control({"type": "config", **effective})
+    if "owwThreshold" in effective:
+        live.oww_threshold = float(effective["owwThreshold"])
+    if "owwModel" in effective:
+        live.oww_model = effective["owwModel"]
+        # Refresh HA's wake-word dropdown (lazy import — em_esphome imports
+        # em_api at module level).
+        import em_esphome
+        em_esphome.update_oww_model(device_id, effective["owwModel"])
+    if "owwSpeexNs" in effective:
+        live.oww_speex_ns = bool(effective["owwSpeexNs"])
+    if "nsAsr" in effective:
+        live.ns_asr = bool(effective["nsAsr"])
+    if "bargeInEnabled" in effective:
+        live.barge_in_enabled = bool(effective["bargeInEnabled"])
+    if "bargeInThreshold" in effective:
+        live.barge_threshold = float(effective["bargeInThreshold"])
+    if "wakeArbitrationMs" in effective:
+        live.wake_arb_ms = int(effective["wakeArbitrationMs"])
+    if "eqBands" in effective:
+        live.eq_bands = effective["eqBands"]
+    if "eqLoudness" in effective:
+        live.eq_loudness = bool(effective["eqLoudness"])
+    live.led_scene = em_scenes.resolve(effective)
+
+
 @auth.require_auth
 async def _get_device_config(request: web.Request) -> web.Response:
-    """GET /api/devices/{id}/config — returns effective config and override flag."""
+    """GET /api/devices/{id}/config — effective config, scoping, and fleet view."""
     device_id = request.match_info["id"]
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
     config = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
-    return _ok({"config": config, "use_global_config": bool(row["use_global_config"])})
+    sections = await loop.run_in_executor(None, db.get_device_config_sections, device_id)
+    return _ok({
+        "config":            config,
+        "config_sections":   sections,
+        # Compat view for older readers: no overridden sections == fleet.
+        "use_global_config": not sections,
+    })
 
 
 @auth.require_admin
@@ -577,20 +622,21 @@ async def _post_device_config(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/config
 
-    Body may include use_global_config (bool) and any config fields.
+    Body may include config_sections (list of section ids this device
+    overrides), any config fields, and — for older clients —
+    use_global_config (bool).
 
-    If use_global_config=true: revert device to fleet defaults. The config
-    fields in the body are ignored — the effective config is the global one.
+    Scoping is per section (see em_config_sections). Values supplied for a
+    section the device does not override are ignored: the device follows the
+    fleet there, and storing shadow values would silently resurrect them if
+    the section were ever switched back.
 
-    If use_global_config=false: enable per-device override. Config fields
-    in the body are persisted as the device's own config and pushed live.
-    If the device was previously on global, set_device_use_global(False)
-    is called first, which marks the flag without touching the config
-    column — the supplied config is then written over it.
+    use_global_config is accepted as a compat alias: true == override
+    nothing, false == override everything. That is exactly what the boolean
+    meant before v8.
 
-    If use_global_config is absent: behave as before (update config only,
-    leave the flag unchanged). This path is used by the global config push
-    to all on-global devices — it should not alter per-device flag state.
+    If neither key is present the device's current scoping is left alone and
+    only the in-scope values are updated.
     """
     device_id = request.match_info["id"]
     body = await _json_body(request)
@@ -600,88 +646,89 @@ async def _post_device_config(request: web.Request) -> web.Response:
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
-    use_global = body.pop("use_global_config", None)  # extract flag, not a config key
-    explicit_replace = bool(body.pop("replace", False))
+    sections_body     = body.pop("config_sections", None)
+    use_global        = body.pop("use_global_config", None)
+    explicit_replace  = bool(body.pop("replace", False))
 
-    # Same replace-not-merge trap as the global endpoint (see _dropped_keys).
-    # Only checked on the paths that actually persist the body; reverting to
-    # global deliberately discards it.
-    if use_global is not True:
-        stored = await loop.run_in_executor(
-            None, db.get_device_config, device_id
+    # Compat: map the old boolean onto the section model.
+    if sections_body is None and use_global is not None:
+        sections_body = [] if use_global else list(sections_mod.SECTION_IDS)
+
+    if sections_body is None:
+        new_sections = await loop.run_in_executor(
+            None, db.get_device_config_sections, device_id
         )
-        dropped = _dropped_keys(body, stored)
-        if dropped and not explicit_replace:
-            return _error(
-                "would_drop_keys",
-                f"This body would delete {len(dropped)} existing setting(s): "
-                f"{', '.join(dropped)}. Config POSTs replace rather than "
-                f"merge — send the full config (read-modify-write), or pass "
-                f"replace=true if the deletion is intended.",
-                409,
-            )
-
-    if use_global is True:
-        # Revert to global: reset flag + config column, ignore body
-        await loop.run_in_executor(None, db.set_device_use_global, device_id, True)
-        config = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
-    elif use_global is False:
-        # Enable per-device override: mark flag, then write supplied config
-        await loop.run_in_executor(None, db.set_device_use_global, device_id, False)
-        config = body
-        await loop.run_in_executor(None, db.set_device_config, device_id, config)
     else:
-        # No flag in body — plain config update, flag unchanged
-        config = body
-        await loop.run_in_executor(None, db.set_device_config, device_id, config)
+        if not isinstance(sections_body, list):
+            return _error("bad_request", "config_sections must be a list", 400)
+        unknown = [s for s in sections_body if s not in sections_mod.SECTIONS]
+        if unknown:
+            return _error(
+                "bad_request",
+                f"Unknown config section(s): {', '.join(map(str, unknown))}. "
+                f"Valid: {', '.join(sections_mod.SECTION_IDS)}.",
+                400,
+            )
+        new_sections = sections_mod.normalise(sections_body)
 
-    # Push effective config to live device if connected
+    in_scope = sections_mod.keys_for(new_sections) | sections_mod.STATE_KEYS
+
+    # Same replace-not-merge trap as the global endpoint (see _dropped_keys),
+    # but scoped: only keys that REMAIN in scope can be accidentally dropped.
+    # Keys leaving scope are being deliberately handed back to the fleet, and
+    # flagging those would make every legitimate un-override a 409.
+    stored = await loop.run_in_executor(None, db.get_device_config, device_id)
+    stored_in_scope = {k: v for k, v in stored.items() if k in in_scope}
+    dropped = _dropped_keys(body, stored_in_scope)
+    if dropped and not explicit_replace:
+        return _error(
+            "would_drop_keys",
+            f"This body would delete {len(dropped)} existing setting(s): "
+            f"{', '.join(dropped)}. Config POSTs replace rather than "
+            f"merge — send the full config (read-modify-write), or pass "
+            f"replace=true if the deletion is intended.",
+            409,
+        )
+
+    # Apply scoping first: set_device_config_sections prunes the values of
+    # any section no longer overridden, so what follows writes into an
+    # already-clean picture.
+    if sections_body is not None:
+        await loop.run_in_executor(
+            None, db.set_device_config_sections, device_id, new_sections
+        )
+    values = {k: v for k, v in body.items() if k in in_scope}
+    if values:
+        current = await loop.run_in_executor(None, db.get_device_config, device_id)
+        await loop.run_in_executor(
+            None, db.set_device_config, device_id, {**current, **values}
+        )
+
+    config = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+
+    # Push the EFFECTIVE config — with per-section scoping the body is
+    # partial by design, so the device must be sent the resolved picture.
     pushed = False
     live = _devices.get(device_id)
     if live is not None:
-        await live.send_control({"type": "config", **config})
-        if "owwThreshold" in config:
-            live.oww_threshold = float(config["owwThreshold"])
-        if "owwModel" in config:
-            live.oww_model = config["owwModel"]
-            # Refresh HA's wake-word dropdown (lazy import — em_esphome
-            # imports em_api at module level).
-            import em_esphome
-            em_esphome.update_oww_model(device_id, config["owwModel"])
-        if "owwSpeexNs" in config:
-            live.oww_speex_ns = bool(config["owwSpeexNs"])
-        if "nsAsr" in config:
-            live.ns_asr = bool(config["nsAsr"])
-        if "bargeInEnabled" in config:
-            live.barge_in_enabled = bool(config["bargeInEnabled"])
-        if "bargeInThreshold" in config:
-            live.barge_threshold = float(config["bargeInThreshold"])
-        if "wakeArbitrationMs" in config:
-            live.wake_arb_ms = int(config["wakeArbitrationMs"])
-        if "eqBands" in config:
-            live.eq_bands = config["eqBands"]
-        if "eqLoudness" in config:
-            live.eq_loudness = bool(config["eqLoudness"])
-        if any(k in config for k in ("ledScene", "ledListenColor", "ledThinkColor")):
-            # Scene resolution needs the full config (custom colours may not
-            # be in a partial body) — re-read the effective config.
-            eff = await loop.run_in_executor(
-                None, db.get_effective_device_config, device_id
-            )
-            live.led_scene = em_scenes.resolve(eff)
+        await _apply_live_config(device_id, live, config)
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
 
     # BT proxy lifecycle follows bleProxyEnabled in the *effective* config —
-    # reconcile unconditionally (idempotent): a revert-to-global changes the
+    # reconcile unconditionally (idempotent): re-scoping a section changes the
     # effective value without the key appearing in the body.
     await em_ble_proxy.reconcile(device_id)
 
-    effective_use_global = use_global if use_global is not None else bool(row["use_global_config"])
     await _push_event({"type": "device_update", "device_id": device_id,
-                       "state": {"config": config, "use_global_config": effective_use_global}})
+                       "state": {"config": config,
+                                 "config_sections": new_sections,
+                                 "use_global_config": not new_sections}})
     return _ok({"device_id": device_id, "config": config,
-                "use_global_config": effective_use_global, "pushed": pushed})
+                "config_sections": new_sections,
+                "use_global_config": not new_sections, "pushed": pushed})
 
 
 @auth.require_admin
@@ -2098,9 +2145,14 @@ async def _post_global_config(request: web.Request) -> web.Response:
     """
     POST /api/global/config
 
-    Persists new fleet-wide device defaults, then pushes the updated config
-    to every currently-connected device that still has use_global_config=1.
-    Devices with per-device overrides are not affected.
+    Persists new fleet-wide device defaults, then pushes each connected
+    device its freshly resolved EFFECTIVE config.
+
+    Since v8 that means every connected device, not just fully-inheriting
+    ones: a device overriding only Ring still follows the fleet for
+    Microphones, Wake word and the rest, so it has to receive this change.
+    Each device gets its own resolved config rather than the raw body —
+    sending the body would blow away exactly the overrides being respected.
 
     The body REPLACES the stored config. A body that would drop existing
     keys is refused with 409 unless it sets replace=true — see
@@ -2126,47 +2178,26 @@ async def _post_global_config(request: web.Request) -> web.Response:
 
     await loop.run_in_executor(None, db.set_global_device_config, config)
 
-    # Push to all connected devices on global config
+    # Push every connected device its own resolved effective config.
     pushed = []
     for device_id, live in list(_devices.items()):
-        row = await loop.run_in_executor(None, db.get_device, device_id)
-        if row is None or not row["use_global_config"]:
-            continue
-        await live.send_control({"type": "config", **config})
-        if "owwThreshold" in config:
-            live.oww_threshold = float(config["owwThreshold"])
-        if "owwModel" in config:
-            live.oww_model = config["owwModel"]
-            # Refresh HA's wake-word dropdown (lazy import — em_esphome
-            # imports em_api at module level).
-            import em_esphome
-            em_esphome.update_oww_model(device_id, config["owwModel"])
-        if "owwSpeexNs" in config:
-            live.oww_speex_ns = bool(config["owwSpeexNs"])
-        if "nsAsr" in config:
-            live.ns_asr = bool(config["nsAsr"])
-        if "bargeInEnabled" in config:
-            live.barge_in_enabled = bool(config["bargeInEnabled"])
-        if "bargeInThreshold" in config:
-            live.barge_threshold = float(config["bargeInThreshold"])
-        if "wakeArbitrationMs" in config:
-            live.wake_arb_ms = int(config["wakeArbitrationMs"])
-        if "eqBands" in config:
-            live.eq_bands = config["eqBands"]
-        if "eqLoudness" in config:
-            live.eq_loudness = bool(config["eqLoudness"])
-        live.led_scene = em_scenes.resolve(config)
+        effective = await loop.run_in_executor(
+            None, db.get_effective_device_config, device_id
+        )
+        await _apply_live_config(device_id, live, effective)
         pushed.append(device_id)
 
     if pushed:
         log.info(f"[api] Global config pushed to {len(pushed)} device(s): {pushed}")
 
-    # Reconcile BT proxies for every approved on-global device — offline
-    # ones included (proxy mDNS/port lifecycle is independent of the
-    # device connection, unlike the config push above).
+    # Reconcile BT proxies for every approved device — offline ones included
+    # (proxy mDNS/port lifecycle is independent of the device connection,
+    # unlike the config push above). No longer filtered on inheritance: a
+    # device overriding some other section still tracks the fleet's
+    # bleProxyEnabled, and reconcile is idempotent either way.
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
     for row in all_rows:
-        if row["approved"] and row["use_global_config"]:
+        if row["approved"]:
             await em_ble_proxy.reconcile(row["device_id"])
 
     return _ok({"config": config, "pushed_to": pushed})
@@ -2536,6 +2567,37 @@ def _require_str(body: dict, key: str) -> str:
 
 # ─── Device state merge ───────────────────────────────────────────────────────
 
+def _stored_volume(row):
+    """Last-known volume as an HA 0..1 float, from the persisted config."""
+    try:
+        level = json.loads(row["config"] or "{}").get("startupVolume")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if level is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(level) / 175.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_sections(row) -> list:
+    """
+    Overridden config sections from a device row, tolerant of a row that
+    predates the v8 column or carries unparseable JSON — either way the safe
+    reading is "overrides nothing", which shows the device as fleet-scoped
+    rather than inventing overrides it does not have.
+    """
+    try:
+        raw = row["config_sections"]
+    except (IndexError, KeyError):
+        return []
+    try:
+        return sections_mod.normalise(json.loads(raw or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 def _merge_device(row) -> dict:
     """
     Merge a DB device row with live in-memory state.
@@ -2558,7 +2620,9 @@ def _merge_device(row) -> dict:
         "first_seen":         row["first_seen"],
         "last_seen":          row["last_seen"],
         "config":             json.loads(row["config"] or "{}"),
-        "use_global_config":  bool(row["use_global_config"]),
+        "config_sections":    _row_sections(row),
+        # Compat view for older readers: no overridden sections == fleet.
+        "use_global_config":  not _row_sections(row),
         "esphome_port":       row["esphome_api_port"],
         "ble_proxy_port":     row["ble_proxy_port"],
         # Live — defaults when device is not connected
@@ -2568,6 +2632,12 @@ def _merge_device(row) -> dict:
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,
+        # Volume is persisted device state, not config (see
+        # em_config_sections.STATE_KEYS): the live level while connected,
+        # otherwise the last one the device reported, so an offline device
+        # still shows where it will come back.
+        "volume":           (live.volume if live is not None
+                             else _stored_volume(row)),
         # Controller-side BT proxy state — non-None only while the device's
         # bleProxyEnabled config has a proxy server instantiated.
         "bleProxy":         em_ble_proxy.get_status(device_id),

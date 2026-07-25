@@ -1,0 +1,192 @@
+"""
+Config section scoping — the fleet-vs-device unit.
+
+The load-bearing test here is test_every_config_key_belongs_somewhere: a key
+in DEFAULT_DEVICE_CONFIG that belongs to no section can never be overridden
+per device and never appears in the dashboard, and nothing else would notice.
+"""
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+import em_db
+import em_config_sections as cs
+
+
+DASHBOARD = Path(__file__).resolve().parents[1] / "static" / "dashboard.jsx"
+
+
+# ─── The partition must stay total ───────────────────────────────────────────
+
+def test_every_config_key_belongs_somewhere():
+    """
+    Every DEFAULT_DEVICE_CONFIG key is either in exactly one section or
+    explicitly declared state. Adding a config key without assigning it a
+    section makes it silently un-overridable — this is the guard for that.
+    """
+    mapped = set()
+    for sid, section in cs.SECTIONS.items():
+        for key in section["keys"]:
+            assert key not in mapped, f"{key} appears in more than one section"
+            mapped.add(key)
+
+    defaults = set(em_db.DEFAULT_DEVICE_CONFIG)
+    orphans = defaults - mapped - cs.STATE_KEYS
+    assert not orphans, (
+        f"config key(s) belong to no section and are not declared state: "
+        f"{sorted(orphans)} — add them to em_config_sections.SECTIONS"
+    )
+    strays = mapped - defaults
+    assert not strays, (
+        f"section(s) reference key(s) that are not real config: {sorted(strays)}"
+    )
+
+
+def test_state_keys_are_not_in_any_section():
+    mapped = {k for s in cs.SECTIONS.values() for k in s["keys"]}
+    assert not (cs.STATE_KEYS & mapped), (
+        "a STATE_KEY must not also be section-scoped — it is never "
+        "fleet-inherited, so offering it as an overridable setting is a lie"
+    )
+
+
+def test_dashboard_section_map_matches_python():
+    """
+    The dashboard carries its own copy of the section->keys map for
+    rendering. If the two drift, a control ends up under a toggle that does
+    not govern it — visibly fine, silently wrong. Python is canonical.
+    """
+    src = DASHBOARD.read_text()
+    m = re.search(r"const CONFIG_SECTIONS\s*=\s*(\{.*?\n\});", src, re.S)
+    assert m, "CONFIG_SECTIONS not found in dashboard.jsx"
+    # The literal is JSON-compatible by construction (see the comment above
+    # it in dashboard.jsx) so it can be compared rather than eyeballed.
+    js = json.loads(m.group(1))
+    assert set(js) == set(cs.SECTIONS), (
+        f"section ids differ: dashboard={sorted(js)} python={sorted(cs.SECTIONS)}"
+    )
+    for sid, keys in js.items():
+        assert sorted(keys) == sorted(cs.SECTIONS[sid]["keys"]), (
+            f"section '{sid}' keys differ between dashboard and Python"
+        )
+
+
+# ─── Resolution ──────────────────────────────────────────────────────────────
+
+def _glob():
+    return {"owwThreshold": 0.5, "ledScene": "standard", "micGainDb": 24,
+            "agcEnabled": True, "bleProxyEnabled": False, "eqLoudness": False}
+
+
+def test_no_sections_is_pure_fleet():
+    dev = {"owwThreshold": 0.9, "ledScene": "pride"}
+    out = cs.merge(_glob(), dev, [])
+    assert out["owwThreshold"] == 0.5
+    assert out["ledScene"] == "standard"
+
+
+def test_only_the_overridden_section_wins():
+    dev = {"owwThreshold": 0.9, "ledScene": "pride", "micGainDb": 40}
+    out = cs.merge(_glob(), dev, ["ring"])
+    assert out["ledScene"] == "pride"       # overridden section
+    assert out["owwThreshold"] == 0.5       # fleet
+    assert out["micGainDb"] == 24           # fleet
+
+
+def test_all_sections_reproduces_the_old_full_override():
+    dev = {"owwThreshold": 0.9, "ledScene": "pride", "micGainDb": 40}
+    out = cs.merge(_glob(), dev, list(cs.SECTION_IDS))
+    for k, v in dev.items():
+        assert out[k] == v
+
+
+def test_state_keys_always_come_from_the_device():
+    """
+    startupVolume is this device's hardware state. Inheriting it from the
+    fleet would bring a device back at another room's volume.
+    """
+    glob = {**_glob(), "startupVolume": 85}
+    out = cs.merge(glob, {"startupVolume": 40}, [])
+    assert out["startupVolume"] == 40, "state key was clobbered by the fleet"
+
+
+def test_unknown_section_ids_are_dropped():
+    assert cs.normalise(["ring", "nonsense", "wakeword"]) == ["wakeword", "ring"]
+    assert cs.normalise(None) == []
+
+
+def test_normalise_is_canonically_ordered():
+    """Stored order must not depend on click order, or diffs churn."""
+    assert cs.normalise(["bluetooth", "playback"]) == ["playback", "bluetooth"]
+
+
+def test_summarise_reads_naturally():
+    assert cs.summarise([]) == "Fleet"
+    assert cs.summarise(["ring"]).startswith("Local override")
+    assert "1 of 6" in cs.summarise(["ring"])
+    assert "6 of 6" in cs.summarise(list(cs.SECTION_IDS))
+
+
+# ─── Migration equivalence ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, 6)])
+def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
+    """
+    The v8 migration must leave every device's effective config unchanged:
+    inherit-everything -> no sections, override-everything -> all sections.
+    """
+    db_path = tmp_path / "t.db"
+    em_db.init(str(db_path))
+    em_db.register_new_device("dev1", "10.0.0.9", "vtest")
+    with em_db._tx() as conn:
+        conn.execute(
+            "UPDATE devices SET use_global_config = ?, config = ? WHERE device_id = 'dev1'",
+            (use_global, json.dumps({"ledScene": "pride", "micGainDb": 40})),
+        )
+        conn.execute(
+            "UPDATE devices SET config_sections = ? WHERE device_id = 'dev1'",
+            (json.dumps([] if use_global else list(cs.SECTION_IDS)),),
+        )
+    assert len(em_db.get_device_config_sections("dev1")) == expected
+    eff = em_db.get_effective_device_config("dev1")
+    if use_global:
+        assert eff["ledScene"] == em_db.DEFAULT_DEVICE_CONFIG["ledScene"]
+    else:
+        assert eff["ledScene"] == "pride"
+        assert eff["micGainDb"] == 40
+
+
+def test_reverting_a_section_discards_its_values(tmp_path):
+    """
+    Revert discards rather than remembers, so a section that follows the
+    fleet holds no shadow values waiting to reappear months later.
+    """
+    em_db.init(str(tmp_path / "t.db"))
+    em_db.register_new_device("dev1", "10.0.0.9", "vtest")
+    em_db.set_device_config_sections("dev1", ["ring", "microphones"])
+    em_db.set_device_config("dev1", {"ledScene": "pride", "micGainDb": 40})
+
+    em_db.set_device_config_sections("dev1", ["microphones"])
+    stored = em_db.get_device_config("dev1")
+    assert "ledScene" not in stored, "reverted section left a shadow value"
+    assert stored["micGainDb"] == 40, "still-overridden section lost its value"
+
+    # And re-overriding starts from the fleet, not the discarded value.
+    em_db.set_device_config_sections("dev1", ["ring", "microphones"])
+    eff = em_db.get_effective_device_config("dev1")
+    assert eff["ledScene"] == em_db.DEFAULT_DEVICE_CONFIG["ledScene"]
+
+
+def test_state_key_survives_full_revert(tmp_path):
+    """
+    Reverting every section must not wipe startupVolume — that would make a
+    device come back at the fleet's volume after any scoping change.
+    """
+    em_db.init(str(tmp_path / "t.db"))
+    em_db.register_new_device("dev1", "10.0.0.9", "vtest")
+    em_db.set_device_config_sections("dev1", list(cs.SECTION_IDS))
+    em_db.set_device_config("dev1", {"ledScene": "pride", "startupVolume": 40})
+    em_db.set_device_config_sections("dev1", [])
+    assert em_db.get_effective_device_config("dev1")["startupVolume"] == 40

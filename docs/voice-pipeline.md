@@ -129,11 +129,18 @@ The controller runs openwakeword, a small neural network, over each
 device's stream, scoring every moment: "how much did that sound like the
 wake word?" Cross the sensitivity bar and the conversation starts.
 
-With more than one device online, detections landing within the
-**arbitration window** (~300ms, configurable) are pooled and only the
-Echo that heard you best — loudest relative to its own room's background —
-answers; the others stand down silently. One utterance, one response,
-even in earshot of two devices.
+With more than one device online, the **first** Echo to hear you answers
+straight away, and any other device detecting the same word within the
+**arbitration window** (default 700ms, configurable) stands down silently.
+One utterance, one response, even in earshot of two devices — and no added
+latency, because the winner claims the turn on the spot rather than waiting
+out the window.
+
+An earlier design instead waited out the window and gave the turn to
+whichever device heard you *best*. It was dropped for two measured reasons:
+it taxed every wake by ~364ms even with nothing competing, and the
+signal-to-noise winner produced a *worse* transcript than the device that
+simply heard you first.
 
 **Benefit:** because this runs on the controller rather than the Dot, you
 can change the wake word or sensitivity live from the dashboard, see every
@@ -189,8 +196,19 @@ hardware's native rate: the satellite tells Home Assistant what format the
 speaker wants (48kHz mono), so recent HA versions transcode at source, and
 ffmpeg covers anything else during decode.
 
+While it plays, the ring throbs in time with the audio, and it clears when
+the Dot reports that it has *actually* finished rather than when the
+controller estimates it should have. The old estimate could clear the ring
+several seconds before the speaker stopped on a slow WiFi link — the device
+is the only party that knows when its own buffer runs dry.
+
 **Benefit:** centrally-applied EQ means every device gets consistent,
 tuned sound, adjustable live from the dashboard.
+
+**Caveat:** the whole reply is currently fetched, decoded and EQ'd before a
+single sample plays, so you wait for the entire response to be generated
+before hearing the start of it. Streaming it — which the music path above
+already does — is the obvious next improvement.
 
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but

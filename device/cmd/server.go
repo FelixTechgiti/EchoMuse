@@ -150,6 +150,14 @@ func main() {
 			log.Println("Dot button blocked — mic is muted")
 			return
 		}
+		// A press outranks the volume arc: adjusting volume and immediately
+		// pressing the button used to leave the arc holding the ring for the
+		// rest of its 2s window, with nothing showing that the device had
+		// started listening. Release, not press, so it lines up with the
+		// event the controller actually starts a turn on.
+		if event.ClickType == pkgbuttons.DotClick && !event.Down {
+			s.CancelVolumeDisplay()
+		}
 		controlClient.SendButton(event)
 	})
 	if err != nil {

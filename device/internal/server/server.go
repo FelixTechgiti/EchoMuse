@@ -217,6 +217,12 @@ func (s *Server) IsMuted() bool {
 	return s.mute.IsMuted()
 }
 
+// CancelVolumeDisplay releases the volume arc's 2s hold on the ring so a
+// turn's listening frame can paint immediately. See volumeController.
+func (s *Server) CancelVolumeDisplay() {
+	s.volume.CancelDisplay()
+}
+
 // RestoreMuteRing re-applies the red mute ring. Called on reconnect to
 // recover the visual state that the orange pulse animation overwrote.
 func (s *Server) RestoreMuteRing() {
