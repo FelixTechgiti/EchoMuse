@@ -791,7 +791,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [config, setConfig] = useState({ ...device.config });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [useGlobalConfig, setUseGlobalConfig] = useState(device.use_global_config ?? true);
+  // Which config sections this device overrides (ids from CONFIG_SECTIONS).
+  // Empty = follows the fleet entirely, which is what use_global_config
+  // meant before per-section scoping.
+  const [sections, setSections] = useState(device.config_sections ?? []);
   const [logs, setLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [pushLog, setPushLog] = useState([]);
@@ -863,15 +866,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   async function pushConfig() {
     setSaving(true);
     try {
-      const body = useGlobalConfig
-        ? { use_global_config: true }
-        : { use_global_config: false, ...config };
+      // Send the scoping plus the full effective config. The controller
+      // keeps only the values belonging to overridden sections, so sending
+      // everything is safe and keeps the clobber guard satisfied (it sees no
+      // in-scope key going missing).
+      const body = { config_sections: sections, ...config };
       const res = await API.post(`/api/devices/${device.device_id}/config`, body);
       setDirty(false);
       // Keep parent device list in sync so re-opening the modal is consistent
       if (onDeviceConfigChange) {
         onDeviceConfigChange(device.device_id, {
           config: res.config,
+          config_sections: res.config_sections,
           use_global_config: res.use_global_config,
         });
       }
@@ -1116,7 +1122,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
             const stoText  = s?.storageTotalMb != null
               ? `${(s.storageUsedMb/1024).toFixed(1)} / ${(s.storageTotalMb/1024).toFixed(1)} GB` : null;
-            const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
+            // device.config holds ONLY the overridden sections' values (the DB
+            // prunes the rest), so a plain merge over the fleet config is
+            // exactly the effective config.
+            const cfgEff = { ...(globalConfig || {}), ...(device.config || {}) };
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
@@ -1129,11 +1138,24 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {row('Firmware', device.firmware_ver || '—')}
                     {row('WiFi network', s?.wifiSsid || '—')}
                     {row('ESPHome port', device.esphome_port != null ? String(device.esphome_port) : '—')}
-                    {row('Last seen', relTime(device.last_seen))}
-                    {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
+                    {/* One row, not two. "Connected: Yes" plus "Last seen"
+                        was redundant in both directions — while connected the
+                        last-seen time says nothing, and while offline the
+                        Yes/No says nothing the timestamp doesn't. Merging
+                        them frees a row for Volume without the panel growing. */}
+                    {row('Status',
+                         device.connected ? 'Online' : `Offline · last seen ${relTime(device.last_seen)}`,
+                         device.connected ? '#286040' : '#c0601a')}
+                    {row('Volume', device.volume != null
+                         ? `${Math.round(device.volume * 100)}%`
+                         : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? '#286040' : '#806010') : undefined)}
-                    {row('Config', (device.use_global_config ?? true) ? 'Fleet' : 'Device override')}
+                    {row('Config', (() => {
+                      const n = (device.config_sections ?? []).length;
+                      const total = Object.keys(CONFIG_SECTIONS).length;
+                      return n === 0 ? 'Fleet' : `Local override (${n} of ${total})`;
+                    })())}
                     {isAdmin && device.connected && !device.linkTls && (
                       <div style={{ marginTop: 8 }}>
                         <Pill small accent disabled={securing} onClick={doSecureLink}>
@@ -1188,7 +1210,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* ACTIVITY — voice-turn observability; its own tab (genuinely
               useful, was cramped at the bottom of Status). */}
           {tab === 'activity' && (() => {
-            const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
+            // device.config holds ONLY the overridden sections' values (the DB
+            // prunes the rest), so a plain merge over the fleet config is
+            // exactly the effective config.
+            const cfgEff = { ...(globalConfig || {}), ...(device.config || {}) };
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
@@ -1213,58 +1238,58 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <ConnectivityTab device={device} row={row}/>
               </div>
 
-              {/* Global override toggle */}
+              {/* Scoping summary. Each section below carries its own
+                  Fleet/Device switch — this is just the roll-up plus a way
+                  back to fully inheriting. */}
               {isAdmin && globalConfig && (
                 <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  background: useGlobalConfig ? 'rgba(64,88,120,0.08)' : 'rgba(40,96,64,0.08)',
-                  border: `1px solid ${useGlobalConfig ? 'rgba(64,88,120,0.2)' : 'rgba(40,96,64,0.2)'}`,
-                  borderRadius: 8, padding: '12px 16px', marginBottom: 24,
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                  background: sections.length ? 'rgba(40,96,64,0.08)' : 'rgba(64,88,120,0.08)',
+                  border: `1px solid ${sections.length ? 'rgba(40,96,64,0.2)' : 'rgba(64,88,120,0.2)'}`,
+                  borderRadius: 8, padding: '12px 16px', marginBottom: 24, flexWrap: 'wrap',
                 }}>
                   <div>
                     <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>
-                      {useGlobalConfig ? 'Using fleet config' : 'Device-specific config'}
+                      {sections.length
+                        ? `Local override (${sections.length} of ${Object.keys(CONFIG_SECTIONS).length})`
+                        : 'Following fleet config'}
                     </div>
                     <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 3 }}>
-                      {useGlobalConfig
-                        ? 'Enable override to customise settings for this device only'
-                        : 'Disable override to revert this device to fleet defaults'}
+                      {sections.length
+                        ? `Overriding: ${sections.map(s => SECTION_LABELS[s] || s).join(', ')} — everything else tracks the fleet`
+                        : 'Switch any section below to Device to customise just that part'}
                     </div>
                   </div>
-                  <Toggle
-                    label="" sub=""
-                    value={!useGlobalConfig}
-                    onChange={enabled => {
-                      if (enabled) {
-                        // Enabling per-device: seed from current global config
-                        setConfig({ ...(globalConfig || device.config) });
-                        setUseGlobalConfig(false);
-                        setDirty(true);
-                      } else {
-                        // Reverting to global
-                        setUseGlobalConfig(true);
-                        setDirty(true);
-                      }
-                    }}
-                  />
+                  {sections.length > 0 && (
+                    <Pill onClick={() => { setSections([]); setDirty(true); }}>
+                      Revert all to fleet
+                    </Pill>
+                  )}
                 </div>
               )}
 
-              {/* Config form — read-only when on global, editable when overridden */}
+              {/* Config form — each stage editable only when scoped to Device */}
               <DeviceConfigForm
-                config={useGlobalConfig ? (globalConfig || config) : config}
+                config={config}
                 onChange={(k, v) => setConf(k, v)}
-                disabled={useGlobalConfig}
+                disabled={!isAdmin}
+                sections={sections}
+                onScopeChange={(id, local) => {
+                  setSections(prev => local
+                    ? [...prev, id]
+                    : prev.filter(s => s !== id));
+                  setDirty(true);
+                }}
               />
 
               {isAdmin && dirty && (
                 <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
                   <Pill accent disabled={saving} onClick={pushConfig}>
-                    {saving ? 'Pushing…' : useGlobalConfig ? 'Revert to fleet config' : 'Push config'}
+                    {saving ? 'Pushing…' : 'Push config'}
                   </Pill>
                   <Pill onClick={() => {
                     setConfig({ ...device.config });
-                    setUseGlobalConfig(device.use_global_config ?? true);
+                    setSections(device.config_sections ?? []);
                     setDirty(false);
                   }}>Cancel</Pill>
                 </div>
@@ -3008,7 +3033,64 @@ function EqSliders({ bands, onChange, disabled }) {
 // the subtree every render, breaking slider drags mid-gesture).
 const STAGE_MONO = "'DM Mono',monospace";
 
-function Stage({ n, title, chips, desc, children }) {
+// Mirror of em_config_sections.SECTIONS — which config keys each stage owns,
+// so a stage can be scoped to the fleet or to this device independently.
+//
+// Python is canonical. This literal is deliberately plain JSON (no comments,
+// no trailing commas, double quotes) because tests/test_config_sections.py
+// parses it straight out of this file and fails if the two ever drift — a
+// control sitting under a toggle that does not govern it would look fine and
+// be silently wrong.
+const CONFIG_SECTIONS = {
+  "playback": ["eqBands", "eqLoudness"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr"],
+  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
+  "bluetooth": ["bleProxyEnabled"]
+};
+
+// Display labels for the section ids, and the reverse key -> section index
+// that lets a write be gated by the section owning the key it touches.
+const SECTION_LABELS = {
+  playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
+  ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth',
+};
+const KEY_SECTION = {};
+Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
+  keys.forEach(k => { KEY_SECTION[k] = sid; });
+});
+
+// ScopeToggle — per-stage Fleet/Device switch. Shown only on a device's
+// config (the fleet view has nothing to inherit from).
+function ScopeToggle({ local, onChange, disabled }) {
+  const btn = (active, label, next, title) => (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={() => !disabled && onChange(next)}
+      style={{
+        fontFamily: STAGE_MONO, fontSize: 9, letterSpacing: '0.08em',
+        textTransform: 'uppercase', padding: '3px 8px', border: 'none',
+        cursor: disabled ? 'default' : 'pointer',
+        background: active ? (next ? 'rgba(40,96,64,0.16)' : 'rgba(64,88,120,0.16)') : 'transparent',
+        color: active ? (next ? '#286040' : '#405878') : 'var(--muted)',
+        fontWeight: active ? 600 : 400,
+      }}>{label}</button>
+  );
+  return (
+    <div style={{
+      display: 'inline-flex', borderRadius: 6, overflow: 'hidden',
+      border: '1px solid rgba(0,0,0,0.12)', opacity: disabled ? 0.5 : 1,
+    }}>
+      {btn(!local, 'Fleet', false, 'Follow the fleet-wide setting for this section')}
+      {btn(local, 'Device', true, 'Override this section for this device only')}
+    </div>
+  );
+}
+
+function Stage({ n, title, chips, desc, children, scope, dim }) {
   return (
     <Panel>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -3016,10 +3098,12 @@ function Stage({ n, title, chips, desc, children }) {
           <span style={{ fontFamily: STAGE_MONO, fontSize: 10, color: 'var(--muted)' }}>{n}</span>
           <span style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>{title}</span>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>{chips}</div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{chips}{scope}</div>
       </div>
       <div style={{ fontFamily: STAGE_MONO, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 14 }}>{desc}</div>
-      {children}
+      {/* dim: a section following the fleet is shown read-only rather than
+          hidden, so you can still see what it is inheriting. */}
+      <div style={dim}>{children}</div>
     </Panel>
   );
 }
@@ -3039,8 +3123,31 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
   );
 }
 
-function DeviceConfigForm({ config, onChange, disabled }) {
-  const set = disabled ? () => {} : onChange;
+function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange }) {
+  // sections == null means the fleet-config view: nothing to inherit from, so
+  // no per-section switches and every control is live.
+  const scoped = Array.isArray(sections);
+  const isLocal = id => !scoped || sections.includes(id);
+
+  // Writes are gated by the OWNING SECTION rather than per control. Deriving
+  // the section from the key means every existing and future control becomes
+  // read-only automatically when its section follows the fleet — there is no
+  // per-input plumbing to forget.
+  const set = (k, v) => {
+    if (disabled) return;
+    if (scoped && !isLocal(KEY_SECTION[k])) return;
+    onChange(k, v);
+  };
+
+  // Per-stage props: the Fleet/Device switch, and the dimming for a stage
+  // that is currently inheriting.
+  const scopeEl = id => scoped
+    ? <ScopeToggle local={isLocal(id)} disabled={disabled}
+        onChange={local => onScopeChange && onScopeChange(id, local)}/>
+    : null;
+  const secStyle = id => (disabled || !isLocal(id))
+    ? { opacity: 0.45, pointerEvents: 'none' }
+    : {};
 
   // Derive current mic preset from beamAngle
   const angle = config.beamAngle ?? -1;
@@ -3144,7 +3251,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 01 PLAYBACK */}
       <Stage n="01" title="Playback"
         chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip tone="device">Speaker</ScopeChip></>}
-        desc="Response audio: Home Assistant TTS → parametric EQ → resample → device speaker. Presets set the faders; drag any fader for a custom curve.">
+        desc="Response audio: Home Assistant TTS → parametric EQ → resample → device speaker. Presets set the faders; drag any fader for a custom curve."
+        scope={scopeEl('playback')} dim={secStyle('playback')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28, alignItems: 'start' }}>
           <div>
             <EqCurve bands={bands}/>
@@ -3162,20 +3270,17 @@ function DeviceConfigForm({ config, onChange, disabled }) {
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
-            <div style={{ marginTop: 8 }}>
-              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Startup volume</div>
-              <div style={{ fontFamily: mono, fontSize: 26, color: '#405878', textAlign: 'center', marginBottom: 6, textShadow: '0 0 12px rgba(64,88,120,0.3)', ...inputStyle }}>
-                {config.startupVolume ?? 70}%
-              </div>
-              <div style={inputStyle}>
-                <input type="range" min={0} max={100} step={1} value={config.startupVolume ?? 70}
-                  style={{ width: '100%' }}
-                  onChange={e => set('startupVolume', Number(e.target.value))}/>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                  <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Silent</span>
-                  <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Full</span>
-                </div>
-              </div>
+            {/* The startup-volume slider used to live here and was removed
+                (2026-07-25): volume is persisted device STATE, not a setting.
+                The controller writes it from every volume_state report and
+                the device only re-applies it on the first config push per
+                run — so moving this slider did nothing until the device
+                restarted, and any real volume change overwrote it. Current
+                volume is now shown read-only on the Status tab. */}
+            <div style={{ marginTop: 8, fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6 }}>
+              Volume is remembered per device and restored after a reboot.
+              Change it from Home Assistant or the device buttons; the current
+              level is shown on the Status tab.
             </div>
           </div>
         </div>
@@ -3184,7 +3289,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 02 WAKE WORD */}
       <Stage n="02" title="Wake word"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
-        desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab).">
+        desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab)."
+        scope={scopeEl('wakeword')} dim={secStyle('wakeword')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
             {WW_MODELS.map(m => (
@@ -3258,7 +3364,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 03 MICROPHONES */}
       <Stage n="03" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
-        desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears.">
+        desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
+        scope={scopeEl('microphones')} dim={secStyle('microphones')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20, alignItems: 'center' }}>
           <DeviceDiagram
             activeMics={PRESETS[currentPreset].activeMics}
@@ -3302,7 +3409,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 04 RING */}
       <Stage n="04" title="Ring"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
-        desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off.">
+        desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off."
+        scope={scopeEl('ring')} dim={secStyle('ring')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
             {RING_SCENES.map(sc => (
@@ -3384,7 +3492,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
       <Stage n="05" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
-        desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path.">
+        desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
+        scope={scopeEl('advanced')} dim={secStyle('advanced')}>
         {subHeader('Turn processing', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
@@ -3400,7 +3509,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       {/* 06 BLUETOOTH */}
       <Stage n="06" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
-        desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible).">
+        desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
+        scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
         </div>

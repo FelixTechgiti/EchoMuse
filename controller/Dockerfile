@@ -61,6 +61,7 @@ COPY em_ble_proxy.py .
 COPY em_oww_models.py .
 COPY em_arbiter.py .
 COPY em_player.py .
+COPY em_config_sections.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
