@@ -495,7 +495,22 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 
 		case "ping":
-			c.writeJSON(map[string]string{"type": "pong"})
+			// Echo the controller's sequence id so it can pair the reply
+			// with the send it timed. The device deliberately does NOT
+			// stamp its own clock: Echos boot with bogus clocks pre-NTP
+			// (the same reason TLS verification is clamped to build time),
+			// so RTT is measured entirely controller-side against one
+			// monotonic clock. Without an id, the unsolicited keepalive
+			// pongs below are indistinguishable from replies and would be
+			// paired with whatever ping happened to be outstanding.
+			var ping struct {
+				ID json.RawMessage `json:"id"`
+			}
+			if err := json.Unmarshal(raw, &ping); err == nil && len(ping.ID) > 0 {
+				c.writeJSON(map[string]any{"type": "pong", "id": ping.ID})
+			} else {
+				c.writeJSON(map[string]string{"type": "pong"})
+			}
 
 		case "pong":
 			// ignore

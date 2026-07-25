@@ -442,6 +442,45 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '8' WHERE key = 'schema_version';
     """,
+
+    # ── v9 — control-plane RTT ───────────────────────────────────────────────
+    #
+    # The RF layer is opaque on this hardware: the MTK driver leaves
+    # retry/discard/missed-beacon at zero in /proc/net/wireless and reports
+    # NOISE=9999, so tx_errors/tx_dropped/rx_crc (added in v7) are
+    # STRUCTURALLY zero here and prove nothing either way. RTT measures the
+    # latency that actually degrades the experience, needs no driver support,
+    # and separates the hypotheses: contention makes latency track load,
+    # power-save makes it spike when idle. Hence excursions are split by
+    # whether the device was busy when the probe went out.
+    """
+    ALTER TABLE device_metrics ADD COLUMN rtt_sum_ms          INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN rtt_samples         INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN rtt_min_ms          INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN rtt_max_ms          INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN rtt_excursions      INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN rtt_excursions_idle INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '9' WHERE key = 'schema_version';
+    """,
+
+    # ── v10 — RTT idle-sample denominator ───────────────────────────────────
+    #
+    # Added immediately after v9 because v9 shipped without it and the
+    # excursion split is meaningless without a denominator: "every excursion
+    # happened while idle" is vacuous when almost every SAMPLE is idle.
+    #
+    # This is its own migration rather than an edit to v9 for the reason
+    # stated at the top of this list — migrations are APPEND-ONLY. Editing v9
+    # after a DB had already reached schema_version 9 meant the column was
+    # never created, and every stats report then failed with "no column named
+    # rtt_samples_idle", disconnecting all three devices in a loop
+    # (2026-07-25, caught within a minute by the post-deploy error check).
+    """
+    ALTER TABLE device_metrics ADD COLUMN rtt_samples_idle INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '10' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -1375,9 +1414,12 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 rssi_sum, rssi_samples, rssi_min,
                 link_speed_last, link_speed_min, wifi_freq_last,
                 wifi_bssid_last, tx_bytes_sum, rx_bytes_sum,
-                tx_errors_sum, tx_dropped_sum, rx_crc_sum
+                tx_errors_sum, tx_dropped_sum, rx_crc_sum,
+                rtt_sum_ms, rtt_samples, rtt_min_ms, rtt_max_ms,
+                rtt_excursions, rtt_excursions_idle, rtt_samples_idle
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -1408,7 +1450,24 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 rx_bytes_sum     = rx_bytes_sum   + excluded.rx_bytes_sum,
                 tx_errors_sum    = tx_errors_sum  + excluded.tx_errors_sum,
                 tx_dropped_sum   = tx_dropped_sum + excluded.tx_dropped_sum,
-                rx_crc_sum       = rx_crc_sum     + excluded.rx_crc_sum
+                rx_crc_sum       = rx_crc_sum     + excluded.rx_crc_sum,
+                -- RTT arrives pre-aggregated over the window between stats
+                -- reports, so sums accumulate and the extremes take the
+                -- better/worse of the two. NULL means no samples landed in
+                -- that window and must not poison the running min.
+                rtt_sum_ms       = rtt_sum_ms  + excluded.rtt_sum_ms,
+                rtt_samples      = rtt_samples + excluded.rtt_samples,
+                rtt_min_ms       = CASE
+                    WHEN excluded.rtt_min_ms IS NULL THEN rtt_min_ms
+                    ELSE MIN(COALESCE(rtt_min_ms, excluded.rtt_min_ms), excluded.rtt_min_ms)
+                END,
+                rtt_max_ms       = CASE
+                    WHEN excluded.rtt_max_ms IS NULL THEN rtt_max_ms
+                    ELSE MAX(COALESCE(rtt_max_ms, excluded.rtt_max_ms), excluded.rtt_max_ms)
+                END,
+                rtt_excursions      = rtt_excursions      + excluded.rtt_excursions,
+                rtt_excursions_idle = rtt_excursions_idle + excluded.rtt_excursions_idle,
+                rtt_samples_idle    = rtt_samples_idle    + excluded.rtt_samples_idle
             """,
             (
                 device_id, hour_ts,
@@ -1427,6 +1486,14 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 int(stats.get("txBytes") or 0), int(stats.get("rxBytes") or 0),
                 int(stats.get("txErrors") or 0), int(stats.get("txDropped") or 0),
                 int(stats.get("rxCrcErrors") or 0),
+                # RTT is controller-measured and folded into the same report
+                # (see Device.drain_rtt). Absent when no probe completed in
+                # the window — NULL rather than 0 so the min stays honest.
+                int(stats.get("rttSumMs") or 0), int(stats.get("rttSamples") or 0),
+                stats.get("rttMinMs"), stats.get("rttMaxMs"),
+                int(stats.get("rttExcursions") or 0),
+                int(stats.get("rttExcursionsIdle") or 0),
+                int(stats.get("rttSamplesIdle") or 0),
             ),
         )
         conn.execute(
@@ -1459,6 +1526,42 @@ def get_device_metrics(device_id: str, since: float) -> list[dict]:
             "storage_total_mb": r["storage_total_mb"],
             "rssi_avg":         round(r["rssi_sum"] / r["rssi_samples"], 1) if r["rssi_samples"] else None,
             "rssi_min":         r["rssi_min"],
+            # Link identity + throughput (v7). These were persisted but never
+            # surfaced here, so the activity API could not answer "was the
+            # link different when this went wrong?".
+            "link_speed_last":  r["link_speed_last"],
+            "link_speed_min":   r["link_speed_min"],
+            "wifi_freq_last":   r["wifi_freq_last"],
+            "wifi_bssid_last":  r["wifi_bssid_last"],
+            "tx_bytes":         r["tx_bytes_sum"],
+            "rx_bytes":         r["rx_bytes_sum"],
+            # NOTE: tx_errors/tx_dropped/rx_crc are deliberately NOT exposed.
+            # The MTK driver leaves every one of them at zero regardless of
+            # link quality (/proc/net/wireless reports no retries or missed
+            # beacons, signal_poll reports NOISE=9999), so surfacing them
+            # would invite reading "0 errors" as "healthy link" — which is
+            # exactly the mistake they caused on 2026-07-25.
+            #
+            # Control-plane RTT (v9) is the latency signal that actually
+            # works on this hardware. excursions_idle vs excursions is the
+            # discriminator: contention makes latency track load, power-save
+            # makes it spike when the device is doing nothing.
+            "rtt_avg_ms":       round(r["rtt_sum_ms"] / r["rtt_samples"], 1) if r["rtt_samples"] else None,
+            "rtt_min_ms":       r["rtt_min_ms"],
+            "rtt_max_ms":       r["rtt_max_ms"],
+            "rtt_samples":      r["rtt_samples"],
+            "rtt_excursions":      r["rtt_excursions"],
+            "rtt_excursions_idle": r["rtt_excursions_idle"],
+            "rtt_samples_idle":    r["rtt_samples_idle"],
+            # Excursion RATE per state — the actual discriminator. Comparing
+            # raw counts is vacuous when almost every sample is idle.
+            "rtt_excursion_pct_idle": (
+                round(100.0 * r["rtt_excursions_idle"] / r["rtt_samples_idle"], 1)
+                if r["rtt_samples_idle"] else None),
+            "rtt_excursion_pct_busy": (
+                round(100.0 * (r["rtt_excursions"] - r["rtt_excursions_idle"])
+                      / (r["rtt_samples"] - r["rtt_samples_idle"]), 1)
+                if (r["rtt_samples"] - r["rtt_samples_idle"]) else None),
         })
     return out
 

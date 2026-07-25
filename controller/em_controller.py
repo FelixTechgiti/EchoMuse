@@ -147,6 +147,21 @@ SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
 # must allow for the delayed start.
 SPEAKER_PRIME_SECONDS = 1.1
 
+# Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
+# characterising jitter needs samples, and one tiny JSON message per device
+# per 5s is negligible next to the 256 kbps continuous mic upload each
+# device already holds open. Samples are aggregated in memory and flushed on
+# the existing ~30s stats report, so the DB cost is unchanged.
+PING_INTERVAL_SEC = 5.0
+# A sample at or above this counts as an excursion. 200ms is well clear of a
+# healthy hop (Office measures 264ms median for a whole audio round trip
+# including frame batching) while catching the ~1s tail under investigation.
+RTT_EXCURSION_MS = 200
+# Outstanding pings older than this are abandoned — a reply that late is not
+# a latency measurement, it is a lost packet, and keeping them would grow
+# ping_sent without bound across a long disconnect.
+PING_TIMEOUT_SEC = 60.0
+
 # LEDs
 NUM_LEDS = 12
 
@@ -332,6 +347,77 @@ class Device:
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
+
+        # ── Control-plane RTT ────────────────────────────────────────────
+        # End-to-end latency is the one thing the RF layer cannot tell us on
+        # this hardware: the MTK driver leaves retry/discard/missed-beacon
+        # at zero in /proc/net/wireless and reports NOISE=9999, and there is
+        # no `iw` binary. So the tx/rx/error counters cannot distinguish a
+        # healthy link from a struggling one — while RTT measures the thing
+        # that actually degrades the experience, needs no driver support,
+        # and discriminates between the live hypotheses: contention makes
+        # latency track LOAD, whereas WiFi power-save makes it spike when
+        # IDLE, quantised to the beacon interval.
+        #
+        # Accumulated in memory and flushed on the device's existing ~30s
+        # stats report, so this costs no write the loop wasn't making.
+        self.ping_seq   = 0
+        self.ping_sent: dict[int, float] = {}   # seq -> monotonic send time
+        self.ping_busy: dict[int, bool]  = {}   # seq -> device busy at send
+        self.rtt_last_ms: int | None = None
+        self.rtt_sum_ms  = 0
+        self.rtt_count   = 0
+        self.rtt_min_ms: int | None = None
+        self.rtt_max_ms: int | None = None
+        self.rtt_excursions      = 0   # samples over RTT_EXCURSION_MS
+        self.rtt_excursions_idle = 0   # ...of which the device was idle
+        # Denominator for the above. Without it, "every excursion happened
+        # while idle" is vacuous: almost every SAMPLE is idle, because
+        # devices spend most of their life not in a turn. The discriminator
+        # is the excursion RATE per state, not the raw count.
+        self.rtt_samples_idle    = 0
+
+    def is_busy(self) -> bool:
+        """Whether this device was doing anything when a ping went out."""
+        return bool(
+            self.voice_lock.locked()
+            or self.speaking
+            or em_player.is_playing(self.device_id)
+        )
+
+    def record_rtt(self, rtt_ms: int, was_busy: bool) -> None:
+        self.rtt_last_ms = rtt_ms
+        self.rtt_sum_ms += rtt_ms
+        self.rtt_count  += 1
+        if not was_busy:
+            self.rtt_samples_idle += 1
+        if self.rtt_min_ms is None or rtt_ms < self.rtt_min_ms:
+            self.rtt_min_ms = rtt_ms
+        if self.rtt_max_ms is None or rtt_ms > self.rtt_max_ms:
+            self.rtt_max_ms = rtt_ms
+        if rtt_ms >= RTT_EXCURSION_MS:
+            self.rtt_excursions += 1
+            if not was_busy:
+                self.rtt_excursions_idle += 1
+
+    def drain_rtt(self) -> dict:
+        """Take the accumulated window and reset. Empty dict if no samples."""
+        if not self.rtt_count:
+            return {}
+        out = {
+            "rttSumMs":         self.rtt_sum_ms,
+            "rttSamples":       self.rtt_count,
+            "rttMinMs":         self.rtt_min_ms,
+            "rttMaxMs":         self.rtt_max_ms,
+            "rttExcursions":    self.rtt_excursions,
+            "rttExcursionsIdle": self.rtt_excursions_idle,
+            "rttSamplesIdle":   self.rtt_samples_idle,
+        }
+        self.rtt_sum_ms = self.rtt_count = 0
+        self.rtt_min_ms = self.rtt_max_ms = None
+        self.rtt_excursions = self.rtt_excursions_idle = 0
+        self.rtt_samples_idle = 0
+        return out
         self.playback_send_ms: int = -1
         self.playback_eq_ms:   int = -1
 
@@ -1753,8 +1839,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
         async def ping_loop():
             while True:
-                await asyncio.sleep(30)
-                await device.ping()
+                await asyncio.sleep(PING_INTERVAL_SEC)
+                now = loop.time()
+                # Abandon replies that never came — a very late pong is a
+                # lost packet, not a latency sample.
+                stale = [q for q, t in device.ping_sent.items()
+                         if now - t > PING_TIMEOUT_SEC]
+                for q in stale:
+                    device.ping_sent.pop(q, None)
+                device.ping_seq += 1
+                seq = device.ping_seq
+                device.ping_sent[seq] = now
+                # Record busyness at SEND time: the discriminator is whether
+                # the device was doing anything when the probe went out, and
+                # by the time the reply lands a turn may have started or
+                # ended.
+                device.ping_busy[seq] = device.is_busy()
+                await device.send_control({"type": "ping", "id": seq})
 
         ping_task = asyncio.create_task(ping_loop())
         oww_task  = asyncio.create_task(wake_word_listener(device))
@@ -1847,7 +1948,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     # last_seen refresh rides the same executor hop: a stats
                     # report IS proof of life, and without it last_seen only
                     # ever recorded the last *connect*.
-                    def _persist_stats(_id=device_id, _s=device.stats):
+                    # RTT is controller-measured, not relayed from the
+                    # device message, so it is merged in here rather than
+                    # coming through the allowlist above. drain_rtt() takes
+                    # and resets the window accumulated since the last
+                    # report, so no sample is counted twice.
+                    _metrics = {**device.stats, **device.drain_rtt()}
+                    def _persist_stats(_id=device_id, _s=_metrics):
                         db.record_device_stats(_id, _s)
                         db.touch_device_seen(_id)
                     await loop.run_in_executor(None, _persist_stats)
@@ -1986,6 +2093,22 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     await api._push_log_event(device_id, level, "device", message)
 
                 elif msg_type == "pong":
+                    # Solicited pong (carries our sequence id) -> an RTT
+                    # sample. Unsolicited keepalive pongs have no id and are
+                    # ignored here; pairing one with whatever ping happened
+                    # to be outstanding would invent a measurement.
+                    _seq = msg.get("id")
+                    if _seq is not None:
+                        _sent = device.ping_sent.pop(_seq, None)
+                        _busy = device.ping_busy.pop(_seq, False)
+                        if _sent is not None:
+                            _rtt = int((loop.time() - _sent) * 1000)
+                            device.record_rtt(_rtt, _busy)
+                            if _rtt >= RTT_EXCURSION_MS:
+                                log.info(
+                                    f"[{device_id}] RTT excursion: {_rtt}ms "
+                                    f"({'busy' if _busy else 'idle'})"
+                                )
                     pass
 
                 else:

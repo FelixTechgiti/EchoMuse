@@ -1175,6 +1175,20 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         <SignalBars rssi={s?.wifiRssi ?? null}/>
                       </div>
                     </div>
+                    {/* Control-plane round trip. The only latency signal
+                        available on this hardware — the WiFi driver reports
+                        no retries and no noise floor, so RSSI alone can't
+                        tell a healthy link from a struggling one. Amber
+                        past 200ms, red past 1s. */}
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Latency</span>
+                      <span style={{
+                        fontFamily:"'DM Mono',monospace", fontSize:10,
+                        color: device.rttMs == null ? 'var(--text2)'
+                             : device.rttMs >= 1000 ? '#c0301a'
+                             : device.rttMs >= 200  ? '#c0601a' : '#286040',
+                      }}>{device.rttMs != null ? `${device.rttMs} ms` : '—'}</span>
+                    </div>
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
                 </div>
