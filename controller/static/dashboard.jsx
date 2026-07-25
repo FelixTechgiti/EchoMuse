@@ -1245,8 +1245,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <div style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
                   background: sections.length ? 'rgba(40,96,64,0.08)' : 'rgba(64,88,120,0.08)',
-                  border: `1px solid ${sections.length ? 'rgba(40,96,64,0.2)' : 'rgba(64,88,120,0.2)'}`,
-                  borderRadius: 8, padding: '12px 16px', marginBottom: 24, flexWrap: 'wrap',
+                  border: `1px solid ${sections.length ? 'rgba(40,96,64,0.25)' : 'rgba(64,88,120,0.25)'}`,
+                  // Same left-edge cue as an overridden section below, so the
+                  // roll-up and the sections it summarises read as one system.
+                  borderLeft: `3px solid ${sections.length ? SCOPE_DEVICE : SCOPE_FLEET}`,
+                  borderRadius: 8, padding: '12px 14px', marginBottom: 24, flexWrap: 'wrap',
                 }}>
                   <div>
                     <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>
@@ -3063,6 +3066,14 @@ Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
 
 // ScopeToggle — per-stage Fleet/Device switch. Shown only on a device's
 // config (the fleet view has nothing to inherit from).
+// The two states are filled SOLID rather than tinted. At the 0.12-0.16 alpha
+// the rest of the page uses, this sat beside the ScopeChips in the same
+// colours and read as another chip — a label, not something you could press.
+// Solid fill plus a "SCOPE" caption makes it legible as a control and makes
+// the current state obvious across a scrolling page.
+const SCOPE_FLEET  = '#405878';  // same blue as the "controller" ScopeChip
+const SCOPE_DEVICE = '#286040';  // same green as the "device" ScopeChip
+
 function ScopeToggle({ local, onChange, disabled }) {
   const btn = (active, label, next, title) => (
     <button
@@ -3071,28 +3082,42 @@ function ScopeToggle({ local, onChange, disabled }) {
       disabled={disabled}
       onClick={() => !disabled && onChange(next)}
       style={{
-        fontFamily: STAGE_MONO, fontSize: 9, letterSpacing: '0.08em',
-        textTransform: 'uppercase', padding: '3px 8px', border: 'none',
+        fontFamily: STAGE_MONO, fontSize: 9, letterSpacing: '0.1em',
+        textTransform: 'uppercase', padding: '4px 10px', border: 'none',
         cursor: disabled ? 'default' : 'pointer',
-        background: active ? (next ? 'rgba(40,96,64,0.16)' : 'rgba(64,88,120,0.16)') : 'transparent',
-        color: active ? (next ? '#286040' : '#405878') : 'var(--muted)',
+        background: active ? (next ? SCOPE_DEVICE : SCOPE_FLEET) : 'transparent',
+        color: active ? '#f2efe9' : 'var(--muted)',
         fontWeight: active ? 600 : 400,
+        transition: 'background 0.15s, color 0.15s',
       }}>{label}</button>
   );
   return (
-    <div style={{
-      display: 'inline-flex', borderRadius: 6, overflow: 'hidden',
-      border: '1px solid rgba(0,0,0,0.12)', opacity: disabled ? 0.5 : 1,
-    }}>
-      {btn(!local, 'Fleet', false, 'Follow the fleet-wide setting for this section')}
-      {btn(local, 'Device', true, 'Override this section for this device only')}
-    </div>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, opacity: disabled ? 0.5 : 1 }}>
+      <span style={{
+        fontFamily: STAGE_MONO, fontSize: 8, letterSpacing: '0.12em',
+        textTransform: 'uppercase', color: 'var(--muted)',
+      }}>Scope</span>
+      <span style={{
+        display: 'inline-flex', borderRadius: 6, overflow: 'hidden',
+        border: `1px solid ${local ? SCOPE_DEVICE : SCOPE_FLEET}`,
+        background: 'rgba(0,0,0,0.04)',
+      }}>
+        {btn(!local, 'Fleet', false, 'This section follows the fleet-wide setting')}
+        {btn(local, 'Device', true, 'Override this section for this device only')}
+      </span>
+    </span>
   );
 }
 
-function Stage({ n, title, chips, desc, children, scope, dim }) {
+function Stage({ n, title, chips, desc, children, scope, dim, overridden }) {
   return (
-    <Panel>
+    // A device-overridden section carries a green left edge, so which parts
+    // of a device differ from the fleet is visible while scrolling rather
+    // than only from the toggle in each header.
+    <Panel style={overridden ? {
+      borderLeft: `3px solid ${SCOPE_DEVICE}`,
+      paddingLeft: 14,
+    } : undefined}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <span style={{ fontFamily: STAGE_MONO, fontSize: 10, color: 'var(--muted)' }}>{n}</span>
@@ -3252,7 +3277,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="01" title="Playback"
         chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip tone="device">Speaker</ScopeChip></>}
         desc="Response audio: Home Assistant TTS → parametric EQ → resample → device speaker. Presets set the faders; drag any fader for a custom curve."
-        scope={scopeEl('playback')} dim={secStyle('playback')}>
+        scope={scopeEl('playback')} dim={secStyle('playback')} overridden={scoped && isLocal('playback')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28, alignItems: 'start' }}>
           <div>
             <EqCurve bands={bands}/>
@@ -3290,7 +3315,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="02" title="Wake word"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab)."
-        scope={scopeEl('wakeword')} dim={secStyle('wakeword')}>
+        scope={scopeEl('wakeword')} dim={secStyle('wakeword')} overridden={scoped && isLocal('wakeword')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
             {WW_MODELS.map(m => (
@@ -3365,7 +3390,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="03" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
-        scope={scopeEl('microphones')} dim={secStyle('microphones')}>
+        scope={scopeEl('microphones')} dim={secStyle('microphones')} overridden={scoped && isLocal('microphones')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20, alignItems: 'center' }}>
           <DeviceDiagram
             activeMics={PRESETS[currentPreset].activeMics}
@@ -3410,7 +3435,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="04" title="Ring"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off."
-        scope={scopeEl('ring')} dim={secStyle('ring')}>
+        scope={scopeEl('ring')} dim={secStyle('ring')} overridden={scoped && isLocal('ring')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
             {RING_SCENES.map(sc => (
@@ -3493,7 +3518,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="05" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
         desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
-        scope={scopeEl('advanced')} dim={secStyle('advanced')}>
+        scope={scopeEl('advanced')} dim={secStyle('advanced')} overridden={scoped && isLocal('advanced')}>
         {subHeader('Turn processing', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
@@ -3510,7 +3535,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
       <Stage n="06" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
         desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
-        scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
+        scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')} overridden={scoped && isLocal('bluetooth')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
         </div>
