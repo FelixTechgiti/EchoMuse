@@ -38,7 +38,10 @@ them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
 
 Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
 ESPHome port, current volume, whether the config is fleet or overridden,
-resource meters, and the Bluetooth-proxy diagnostics panel when enabled —
+resource meters including **Latency** (the round trip to the device — amber
+past 200ms, red past 1s; the only link-health signal the Echo's WiFi driver
+actually provides, since it reports no retry or noise figures), and the
+Bluetooth-proxy diagnostics panel when enabled —
 the Status row reads `Online`, or `Offline` with how long ago the device was
 last heard from) and **Activity** (voice-turn history — what was heard, how it was
 transcribed, wake-word scores, playback underruns, near-misses). Activity

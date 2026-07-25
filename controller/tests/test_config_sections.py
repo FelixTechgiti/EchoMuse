@@ -190,3 +190,33 @@ def test_state_key_survives_full_revert(tmp_path):
     em_db.set_device_config("dev1", {"ledScene": "pride", "startupVolume": 40})
     em_db.set_device_config_sections("dev1", [])
     assert em_db.get_effective_device_config("dev1")["startupVolume"] == 40
+
+
+def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path):
+    """
+    v8 backfilled config_sections but left the config column alone, so a
+    fully-inheriting device still stored a value for every key. The device
+    was unaffected (merge only reads in-scope keys) but the dashboard merged
+    the stored dict over the fleet config and showed stale settings under
+    sections that claimed to be following the fleet.
+    """
+    db_path = tmp_path / "t.db"
+    em_db.init(str(db_path))
+    em_db.register_new_device("dev1", "10.0.0.9", "vtest")
+    # Simulate a v8-migrated row: no sections, but a full stored config.
+    with em_db._tx() as conn:
+        conn.execute(
+            "UPDATE devices SET config_sections = '[]', config = ? WHERE device_id = 'dev1'",
+            (json.dumps({"ledScene": "malevolent", "owwModel": "hey_mycroft_v0.1",
+                         "micGainDb": 40, "startupVolume": 42}),),
+        )
+        conn.execute("UPDATE system_config SET value = '10' WHERE key = 'schema_version'")
+
+    em_db._migrate(em_db._conn)
+
+    stored = em_db.get_device_config("dev1")
+    assert "ledScene" not in stored, "out-of-scope value survived the prune"
+    assert "owwModel" not in stored
+    assert "micGainDb" not in stored
+    # State keys are never section-scoped and must survive.
+    assert stored["startupVolume"] == 42

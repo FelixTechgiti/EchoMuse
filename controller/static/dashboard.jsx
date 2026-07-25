@@ -788,7 +788,9 @@ function ConnectivityTab({ device, row }) {
 
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
   const [tab, setTab] = useState('status');
-  const [config, setConfig] = useState({ ...device.config });
+  // Seed from the EFFECTIVE config, not the raw stored one — see
+  // effectiveConfig(). A migrated row's stored dict is not the truth.
+  const [config, setConfig] = useState(() => effectiveConfig(globalConfig, device));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   // Which config sections this device overrides (ids from CONFIG_SECTIONS).
@@ -1122,10 +1124,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
             const stoText  = s?.storageTotalMb != null
               ? `${(s.storageUsedMb/1024).toFixed(1)} / ${(s.storageTotalMb/1024).toFixed(1)} GB` : null;
-            // device.config holds ONLY the overridden sections' values (the DB
-            // prunes the rest), so a plain merge over the fleet config is
-            // exactly the effective config.
-            const cfgEff = { ...(globalConfig || {}), ...(device.config || {}) };
+            const cfgEff = effectiveConfig(globalConfig, device);
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
@@ -1175,6 +1174,20 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         <SignalBars rssi={s?.wifiRssi ?? null}/>
                       </div>
                     </div>
+                    {/* Control-plane round trip. The only latency signal
+                        available on this hardware — the WiFi driver reports
+                        no retries and no noise floor, so RSSI alone can't
+                        tell a healthy link from a struggling one. Amber
+                        past 200ms, red past 1s. */}
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Latency</span>
+                      <span style={{
+                        fontFamily:"'DM Mono',monospace", fontSize:10,
+                        color: device.rttMs == null ? 'var(--text2)'
+                             : device.rttMs >= 1000 ? '#c0301a'
+                             : device.rttMs >= 200  ? '#c0601a' : '#286040',
+                      }}>{device.rttMs != null ? `${device.rttMs} ms` : '—'}</span>
+                    </div>
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
                 </div>
@@ -1210,10 +1223,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* ACTIVITY — voice-turn observability; its own tab (genuinely
               useful, was cramped at the bottom of Status). */}
           {tab === 'activity' && (() => {
-            // device.config holds ONLY the overridden sections' values (the DB
-            // prunes the rest), so a plain merge over the fleet config is
-            // exactly the effective config.
-            const cfgEff = { ...(globalConfig || {}), ...(device.config || {}) };
+            const cfgEff = effectiveConfig(globalConfig, device);
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
@@ -1288,7 +1298,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {saving ? 'Pushing…' : 'Push config'}
                   </Pill>
                   <Pill onClick={() => {
-                    setConfig({ ...device.config });
+                    setConfig(effectiveConfig(globalConfig, device));
                     setSections(device.config_sections ?? []);
                     setDirty(false);
                   }}>Cancel</Pill>
@@ -3060,6 +3070,26 @@ const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
   keys.forEach(k => { KEY_SECTION[k] = sid; });
 });
+// Mirror of em_config_sections.STATE_KEYS — always the device's own,
+// never fleet-inherited, whatever the section scoping says.
+const STATE_KEYS = ['startupVolume'];
+
+// Effective config = fleet, with the device's own values layered over it for
+// the sections it overrides. This must FILTER rather than blind-merge
+// device.config: a row migrated from the pre-v8 boolean still carries values
+// for every section, so a plain merge shows a device's stale settings while
+// every stage claims to be following the fleet (observed on Office, which
+// displayed hey_rhasspy/standard while actually running hey_mycroft/malevolent).
+function effectiveConfig(globalConfig, device) {
+  const secs = device.config_sections ?? [];
+  const own  = device.config || {};
+  const out  = { ...(globalConfig || {}) };
+  Object.keys(own).forEach(k => {
+    const sec = KEY_SECTION[k];
+    if ((sec && secs.includes(sec)) || STATE_KEYS.includes(k)) out[k] = own[k];
+  });
+  return out;
+}
 
 // ScopeToggle — per-stage Fleet/Device switch. Shown only on a device's
 // config (the fleet view has nothing to inherit from).

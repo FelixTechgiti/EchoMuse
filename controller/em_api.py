@@ -2632,6 +2632,10 @@ def _merge_device(row) -> dict:
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,
+        # Control-plane round trip, controller-measured. The RF counters are
+        # structurally zero on this hardware (the MTK driver populates
+        # neither retries nor noise), so this is the only latency signal.
+        "rttMs":            getattr(live, "rtt_last_ms", None) if live else None,
         # Volume is persisted device state, not config (see
         # em_config_sections.STATE_KEYS): the live level while connected,
         # otherwise the last one the device reported, so an offline device

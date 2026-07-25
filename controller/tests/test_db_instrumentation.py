@@ -171,6 +171,14 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     assert body, "could not locate the stats handler allowlist"
     allowlist = set(re.findall(r'"(\w+)":\s*msg\.get', body.group(1)))
 
+    # RTT is measured controller-side rather than relayed from the device
+    # message, so it reaches record_device_stats through Device.drain_rtt()
+    # merged into the same dict. Same failure mode, different source: a key
+    # the DB writer reads but drain_rtt never emits is silently always NULL.
+    drain = re.search(r"def drain_rtt\(.*?\n(?=    def |\n\n)", ctrl, re.S)
+    assert drain, "could not locate Device.drain_rtt"
+    allowlist |= set(re.findall(r'"(\w+)":', drain.group(0)))
+
     record = re.search(r"def record_device_stats\(.*?\n(?=def )", dbsrc, re.S)
     assert record, "could not locate record_device_stats"
     consumed = set(re.findall(r'stats\.get\("(\w+)"\)', record.group(0)))
@@ -180,3 +188,97 @@ def test_stats_relay_allowlist_covers_every_device_stat():
         f"record_device_stats reads {missing} but the em_controller stats "
         f"handler never copies them — they will always be None"
     )
+
+
+# ─── v9 — control-plane RTT ──────────────────────────────────────────────────
+
+def test_migrates_to_head(fresh_db):
+    """Head of MIGRATIONS, so appending one without bumping its own
+    schema_version statement fails here rather than in production."""
+    expected = str(len(db.MIGRATIONS))
+    assert db._q1("SELECT value FROM system_config WHERE key='schema_version'")["value"] == expected
+
+
+def test_rtt_accumulates_and_keeps_extremes(fresh_db):
+    db.register_new_device("dev1", "10.0.0.9", "vtest")
+    db.record_device_stats("dev1", {
+        "cpuPct": 5.0, "memUsedMb": 100,
+        "rttSumMs": 300, "rttSamples": 6, "rttMinMs": 30, "rttMaxMs": 90,
+        "rttExcursions": 0, "rttExcursionsIdle": 0,
+    })
+    db.record_device_stats("dev1", {
+        "cpuPct": 5.0, "memUsedMb": 100,
+        "rttSumMs": 1400, "rttSamples": 6, "rttMinMs": 40, "rttMaxMs": 1100,
+        "rttExcursions": 2, "rttExcursionsIdle": 2,
+    })
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["rtt_samples"] == 12
+    assert m["rtt_avg_ms"] == round(1700 / 12, 1)
+    assert m["rtt_min_ms"] == 30    # best across both windows
+    assert m["rtt_max_ms"] == 1100  # worst across both windows
+    assert m["rtt_excursions"] == 2
+    assert m["rtt_excursions_idle"] == 2
+
+
+def test_window_without_rtt_samples_does_not_poison_the_minimum(fresh_db):
+    """
+    A stats report can land with no completed probe in its window. That must
+    not reset the running minimum to 0 — the same class of bug as
+    link_speed's absent-means-not-sampled.
+    """
+    db.register_new_device("dev1", "10.0.0.9", "vtest")
+    db.record_device_stats("dev1", {
+        "cpuPct": 5.0, "memUsedMb": 100,
+        "rttSumMs": 120, "rttSamples": 3, "rttMinMs": 35, "rttMaxMs": 50,
+    })
+    db.record_device_stats("dev1", {"cpuPct": 5.0, "memUsedMb": 100})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["rtt_min_ms"] == 35
+    assert m["rtt_max_ms"] == 50
+    assert m["rtt_samples"] == 3
+
+
+def test_driver_dead_counters_are_not_surfaced(fresh_db):
+    """
+    tx_errors/tx_dropped/rx_crc read zero on this hardware regardless of link
+    quality, so they must not appear in the read API where a zero would be
+    mistaken for health.
+    """
+    db.register_new_device("dev1", "10.0.0.9", "vtest")
+    db.record_device_stats("dev1", {"cpuPct": 5.0, "memUsedMb": 100})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    for dead in ("tx_errors", "tx_dropped", "rx_crc"):
+        assert dead not in m
+
+
+def test_excursion_rate_not_raw_count_is_the_discriminator(fresh_db):
+    """
+    "Every excursion happened while idle" is vacuous if almost every SAMPLE
+    is idle — which is the normal case, since devices spend most of their
+    life outside a turn. The read API must expose per-state RATES so the
+    comparison is meaningful.
+    """
+    db.register_new_device("dev1", "10.0.0.9", "vtest")
+    # 100 samples: 90 idle with 9 excursions (10%), 10 busy with 5 (50%).
+    db.record_device_stats("dev1", {
+        "cpuPct": 5.0, "memUsedMb": 100,
+        "rttSumMs": 5000, "rttSamples": 100, "rttMinMs": 5, "rttMaxMs": 900,
+        "rttExcursions": 14, "rttExcursionsIdle": 9, "rttSamplesIdle": 90,
+    })
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["rtt_excursion_pct_idle"] == 10.0
+    assert m["rtt_excursion_pct_busy"] == 50.0
+
+
+def test_excursion_rates_are_none_without_samples_in_that_state(fresh_db):
+    """No busy samples must read None, not 0% — absence of data is not
+    evidence of a clean state."""
+    db.register_new_device("dev1", "10.0.0.9", "vtest")
+    db.record_device_stats("dev1", {
+        "cpuPct": 5.0, "memUsedMb": 100,
+        "rttSumMs": 500, "rttSamples": 10, "rttMinMs": 5, "rttMaxMs": 90,
+        "rttExcursions": 1, "rttExcursionsIdle": 1, "rttSamplesIdle": 10,
+    })
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["rtt_excursion_pct_idle"] == 10.0
+    assert m["rtt_excursion_pct_busy"] is None

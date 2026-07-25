@@ -22,8 +22,11 @@ Design constraints this encodes:
   pause; pausing cancels the feed (its EOS goes out first — the flush
   discard arms until EOS, exactly the barge-in dance), flushes the
   device buffer, and remembers the play position. Resume restarts
-  ffmpeg with `-ss` a moment before the bookmark (non-seekable live
-  streams just rejoin the live edge — ffmpeg ignores -ss it can't do).
+  ffmpeg with `-ss` a moment before the bookmark. ffmpeg does NOT
+  ignore a seek it cannot perform — on a non-seekable live stream it
+  decodes and discards input until it reaches the timestamp, so a
+  173s bookmark means 173s of silence. A first-chunk deadline
+  (SEEK_STALL_S) catches that and rejoins the live edge instead.
 - **Voice preempts music.** interrupt()/resume_interrupted() bracket
   voice turns and announcements: an active session pauses for the
   duration and resumes afterwards. The wake stream stays live during
@@ -53,9 +56,32 @@ BYTES_PER_SEC = SPEAKER_RATE * 2
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 
-LEAD_S          = 1.5   # feed-ahead target over realtime
+# Feed-ahead target over realtime. The device buffers audioChanDepth=128
+# periods x 42.7ms = ~5.46s, so 1.5s left roughly four seconds of hardware
+# buffer unused — and control-plane RTT measurement shows stalls of 1.8s and
+# 2.6s during playback on a healthy-looking link, each of which drained that
+# 1.5s and produced an audible dropout (reported repeatedly 2026-07-25).
+#
+# Raising this does NOT make pause/stop/voice-preempt less responsive: those
+# are instant because of speaker_flush (which drains the device buffer) plus
+# the discard-until-EOS contract (which swallows whatever is still in TCP),
+# not because the lead is short. 4.0s keeps ~1.4s of headroom under the
+# device's own depth so the feed can never outrun audioCh.
+#
+# This is MITIGATION, not a cure: it rides out the stalls rather than
+# explaining them. The stalls are still unexplained — see the RTT
+# instrumentation and docs/led-ring-states.md-era investigation notes.
+LEAD_S          = 4.0
 RESUME_REWIND_S = 1.0   # replay this much before the pause bookmark
 DRAIN_FUDGE_S   = 1.1   # device prime hold — same constant class as turns
+# How long to wait for the first decoded audio after a seek before deciding
+# the stream cannot actually seek. ffmpeg's -ss is an INPUT seek: on a
+# seekable file it is a fast demuxer jump and audio appears at once, but on a
+# non-seekable live stream ffmpeg decodes and DISCARDS input until it reaches
+# the timestamp — so resuming a 173s bookmark on a continuous stream waits
+# ~173s of wall clock producing silence. Generous enough not to fire on a
+# slow-starting seekable source.
+SEEK_STALL_S    = 5.0
 
 IDLE, PLAYING, PAUSED = "idle", "playing", "paused"
 
@@ -141,6 +167,16 @@ class MediaSession:
         self._proc = None
 
     # ── decoder (stubbed in tests) ────────────────────────────────────────
+
+    @staticmethod
+    async def _kill_decoder(proc) -> None:
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
 
     async def _spawn_decoder(self, url: str, position_s: float):
         """ffmpeg → s16le/48k/mono on stdout. Returns the process."""
@@ -254,12 +290,42 @@ class MediaSession:
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
+
+            # A seek we cannot actually perform produces no audio at all
+            # rather than failing loudly (see SEEK_STALL_S). Give the first
+            # chunk a deadline and, if it does not arrive, rejoin the live
+            # edge — for a continuous stream that IS the right resume point,
+            # and it is strictly better than silence. Observed 2026-07-25:
+            # a voice turn over a Music Assistant flow stream resumed at
+            # 173.6s and the device stayed silent while HA showed playing.
+            pending = None
+            if start_pos > 0.5:
+                try:
+                    pending = await asyncio.wait_for(
+                        proc.stdout.readexactly(SPEAKER_BYTES), SEEK_STALL_S)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        f"[{self.device_id}] No audio {SEEK_STALL_S:.0f}s after "
+                        f"seeking to {start_pos:.1f}s — stream is not seekable; "
+                        f"rejoining the live edge"
+                    )
+                    await self._kill_decoder(proc)
+                    start_pos = self._pos = 0.0
+                    proc = await self._spawn_decoder(self.url, 0.0)
+                    self._proc = proc
+                except asyncio.IncompleteReadError as e:
+                    pending = (e.partial + bytes(SPEAKER_BYTES - len(e.partial))
+                               ) if e.partial else None
+
             seg_start = loop.time()
             await self._push_state()
 
             while True:
                 try:
-                    chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
+                    if pending is not None:
+                        chunk, pending = pending, None
+                    else:
+                        chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
                 except asyncio.IncompleteReadError as e:
                     chunk = e.partial
                     if chunk:

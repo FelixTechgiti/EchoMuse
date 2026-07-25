@@ -36,6 +36,11 @@ class FakeProc:
         self.killed = True
         self.returncode = -9
 
+    async def wait(self):
+        # Mirrors asyncio.subprocess.Process.wait so the double stays
+        # faithful to the API the code actually calls.
+        return self.returncode
+
 
 class StubSession(MediaSession):
     """MediaSession with the decoder stubbed out; records spawn calls."""
@@ -187,3 +192,48 @@ def test_device_gone_abandons_without_wire_traffic():
 def test_module_state_helpers():
     assert em_player.state("nope") == IDLE
     assert not em_player.is_playing("nope")
+
+
+def test_unseekable_resume_rejoins_live_edge_instead_of_going_silent():
+    """
+    Regression for 2026-07-25: a voice turn over a Music Assistant flow
+    stream paused at 173.6s, resumed with `-ss 173.6`, and the device stayed
+    silent while HA still showed playing.
+
+    ffmpeg's -ss is an INPUT seek. On a seekable file it is a fast demuxer
+    jump; on a continuous live stream ffmpeg decodes and DISCARDS input until
+    it reaches the timestamp, so the bookmark becomes a wall-clock wait. The
+    feed must notice that no audio arrived and rejoin the live edge.
+    """
+    device = FakeDevice("lounge")
+    _wire(device)
+    em_player.SEEK_STALL_S = 0.05   # keep the test fast
+
+    class UnseekableSession(StubSession):
+        async def _spawn_decoder(self, url, position_s):
+            self.spawns.append(position_s)
+            # A seek this stream cannot honour: never emits anything.
+            # Position 0 (the live edge) plays normally.
+            proc = FakeProc(3, endless=(position_s > 0.5))
+            if position_s > 0.5:
+                proc.stdout = asyncio.StreamReader()   # silent forever
+            self.procs.append(proc)
+            return proc
+
+    s = UnseekableSession("lounge", periods=3)
+    s.url = "http://ma/flow/endless.flac"
+    s._pos = 173.6
+    s.state = PAUSED
+
+    asyncio.run(_drive(s))
+
+    assert s.spawns[0] == 173.6, "should try the bookmark first"
+    assert 0.0 in s.spawns[1:], "did not fall back to the live edge"
+    assert s.procs[0].killed, "stalled decoder was left running"
+    assert device.data_frames, "device received no audio at all"
+
+
+async def _drive(session):
+    await session.resume()
+    if session._task is not None:
+        await asyncio.wait_for(session._task, timeout=5)
