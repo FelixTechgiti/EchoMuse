@@ -37,6 +37,66 @@ type AnimSpec struct {
 	// TTLSec auto-clears the ring if no newer spec arrives — protects
 	// against a controller that died mid-turn. 0 → no TTL.
 	TTLSec int `json:"ttlSec"`
+
+	// ── meter-only response curve ────────────────────────────────────────
+	// Pointer-typed so 0 is expressible and "absent" is distinguishable
+	// from "zero" (same reason micGainDb is a pointer in ConfigMessage).
+	// Nil fields fall back to the meterDefaults below.
+	//
+	// Tunable from the dashboard because this is a *taste* parameter: the
+	// original fixed curve measured only ~23% perceived brightness
+	// variation on speech (see docs/led-ring-states.md), and finding a
+	// value that reads well in a real room takes several passes. Shipping
+	// them as config turns that loop into a page refresh instead of a
+	// firmware OTA per iteration.
+	Attack *float64 `json:"attack"` // envelope rise coefficient per 40ms tick
+	Decay  *float64 `json:"decay"`  // envelope fall coefficient per 40ms tick
+	Floor  *float64 `json:"floor"`  // perceptual brightness at silence
+	Gamma  *float64 `json:"gamma"`  // output gamma; >1 expands the dark end
+	Ref    *float64 `json:"ref"`    // RMS mapped to full scale
+	Curve  *float64 `json:"curve"`  // input exponent; <1 lifts quiet detail
+}
+
+// meterDefaults are the shipped response curve. Derived in
+// docs/led-ring-states.md §"Why it's barely visible":
+//   - decay 0.30 → τ≈133ms, which tracks syllables (150-250ms). The old
+//     0.12 gave τ≈333ms and smoothed everything below phrase rate away,
+//     which is why the ring looked nearly static during speech.
+//   - floor 0.06 + gamma 2.2: the paint is (floor+span*env)^gamma, so the
+//     value is a *perceptual* target rather than a raw duty cycle. Without
+//     the gamma the eye sees roughly the 1/2.2 power of the linear swing,
+//     which is what compressed the old range into invisibility.
+//   - ref 0.22 / curve 0.7 replace sqrt(rms/0.35): a gentler lift that
+//     keeps quiet consonants visible without squashing normal speech into
+//     the top of the range.
+var meterDefaults = struct {
+	attack, decay, floor, gamma, ref, curve float64
+}{
+	attack: 0.6,
+	decay:  0.30,
+	floor:  0.06,
+	gamma:  2.2,
+	ref:    0.22,
+	curve:  0.7,
+}
+
+// resolveMeter returns spec's meter parameters with defaults filled in and
+// each value clamped to a range that cannot produce a dead or seizure-grade
+// ring — a bad config push must not be able to break the display.
+func resolveMeter(spec AnimSpec) (attack, decay, floor, gamma, ref, curve float64) {
+	pick := func(p *float64, def, lo, hi float64) float64 {
+		if p == nil {
+			return def
+		}
+		return math.Min(hi, math.Max(lo, *p))
+	}
+	attack = pick(spec.Attack, meterDefaults.attack, 0.05, 1.0)
+	decay = pick(spec.Decay, meterDefaults.decay, 0.02, 1.0)
+	floor = pick(spec.Floor, meterDefaults.floor, 0.0, 0.6)
+	gamma = pick(spec.Gamma, meterDefaults.gamma, 1.0, 3.5)
+	ref = pick(spec.Ref, meterDefaults.ref, 0.02, 1.0)
+	curve = pick(spec.Curve, meterDefaults.curve, 0.3, 2.0)
+	return
 }
 
 // animator owns the ring animation goroutine. One animation at a time; a
@@ -180,16 +240,19 @@ func (s *Server) runPulse(gen int, spec AnimSpec) {
 }
 
 // runMeter throbs the palette with the live speaker level: fast attack,
-// slow decay envelope over the RMS the speaker reports at its ALSA write —
-// so the ring follows what is audible *now*, not the controller's send
-// pace (~5.5s of device buffer sits between the two). A 15% floor keeps
-// the ring visibly owned by the turn through inter-word silence.
+// decay envelope over the RMS the speaker reports at its ALSA write — so
+// the ring follows what is audible *now*, not the controller's send pace
+// (~5.5s of device buffer sits between the two). The floor keeps the ring
+// visibly owned by the turn through inter-word silence. Response curve is
+// config-tunable — see AnimSpec's meter fields and meterDefaults.
 func (s *Server) runMeter(gen int, spec AnimSpec) {
 	var deadline time.Time
 	if spec.TTLSec > 0 {
 		deadline = time.Now().Add(time.Duration(spec.TTLSec) * time.Second)
 	}
 	base := paletteFrame(spec.Colors)
+	attack, decay, floor, gamma, ref, curve := resolveMeter(spec)
+	span := 1.0 - floor
 	env := 0.0
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
@@ -204,15 +267,19 @@ func (s *Server) runMeter(gen int, spec AnimSpec) {
 			}
 			return
 		}
-		// Speech RMS at the speaker typically peaks ~0.2-0.4 full-scale;
-		// sqrt lifts the quiet tail so consonants still register.
-		level := math.Sqrt(math.Min(1, s.getAudioLevel()/0.35))
+		// Input curve: normalise the speaker RMS against ref, then apply
+		// curve (<1 lifts quiet detail so consonants register).
+		level := math.Pow(math.Min(1, s.getAudioLevel()/ref), curve)
 		if level > env {
-			env += 0.6 * (level - env) // fast attack
+			env += attack * (level - env) // fast attack
 		} else {
-			env += 0.12 * (level - env) // slow decay
+			env += decay * (level - env) // decay tracks syllable rate
 		}
-		b := 0.15 + 0.85*env
+		// floor+span*env is a PERCEPTUAL brightness target; raising it to
+		// gamma converts to the duty cycle that the eye reads as that
+		// target. Painting the target directly (the pre-2026-07-25
+		// behaviour) is what made the throb near-invisible.
+		b := math.Pow(floor+span*env, gamma)
 		s.SetLEDs(scaleFrame(base, b), boolPtr(false))
 		<-ticker.C
 	}

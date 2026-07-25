@@ -1560,6 +1560,10 @@ async def _persist_turn(device, turn_record: dict) -> None:
             turn_record["send_ms"] = device.playback_send_ms
             turn_record["eq_ms"]   = device.playback_eq_ms
         pending = None
+    # Surface the outcome to the turn loop's ring cleanup. Without this
+    # every ending looks identical to the user — "I didn't hear you",
+    # "HA errored" and "done, nothing to say" all just turn the ring off.
+    device.last_turn_outcome = turn_record.get("outcome")
     try:
         turn_id = await loop.run_in_executor(
             None, db.insert_turn, device.device_id, turn_record
