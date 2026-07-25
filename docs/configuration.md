@@ -7,9 +7,27 @@ language.
 
 - **Fleet config** (gear icon → Fleet Config): the defaults every device
   uses.
-- **Per-device config** (device page → Config tab): flip the override toggle
-  and that device gets its own copy of the settings, ignoring fleet changes
-  until you flip it back.
+- **Per-device config** (device page → Config tab): each section carries its
+  own **Fleet / Device** switch in its header.
+
+Scoping is **per section**, not all-or-nothing. Leave a section on *Fleet*
+and it keeps following the fleet-wide value, including future changes. Flip
+it to *Device* and only that section becomes this device's own — everything
+else carries on tracking the fleet.
+
+So a Dot in a small room can have its own **Ring** scene and its own
+**Microphones** gain while still picking up every fleet change to the wake
+word, EQ and Bluetooth settings. Before this, one override forked *all* the
+settings and froze them against fleet changes permanently.
+
+A section showing *Fleet* is displayed read-only rather than hidden, so you
+can always see what it is inheriting. The banner at the top of the tab
+summarises — `Fleet`, or `Local override (2 of 6)` with the sections named —
+and **Revert all to fleet** puts everything back.
+
+Flipping a section back to *Fleet* **discards** the values it was holding.
+There is no hidden shadow copy waiting to reappear if you flip it to *Device*
+again months later; it starts from the fleet value.
 
 Changes apply **immediately** — no restarts, no rebuilds. The Config tab
 opens with the device's **network (WiFi)** settings at the top — always
@@ -19,8 +37,10 @@ them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
 **Bluetooth**.
 
 Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
-ESPHome port, resource meters, and the Bluetooth-proxy diagnostics panel when
-enabled) and **Activity** (voice-turn history — what was heard, how it was
+ESPHome port, current volume, whether the config is fleet or overridden,
+resource meters, and the Bluetooth-proxy diagnostics panel when enabled —
+the Status row reads `Online`, or `Offline` with how long ago the device was
+last heard from) and **Activity** (voice-turn history — what was heard, how it was
 transcribed, wake-word scores, playback underruns, near-misses). Activity
 history is stored in the controller's database, so it survives controller
 and device restarts; hourly hardware trends (CPU, memory, WiFi signal) are
@@ -47,14 +67,23 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
-### Startup volume
-The volume the device comes back with after a reboot or power cut. Since
-v2.9.4 this **tracks the volume you actually use**: every change you make —
+### Volume
+Volume **tracks what you actually use** and survives reboots: every change —
 buttons, Home Assistant slider, wherever — is remembered by the controller
-and restored when the device reconnects after a restart. Set it low in the
-evening and a midnight power blip brings it back low. The slider here is
-the stored restore point; it updates itself as you change volume, so you
-rarely need to touch it.
+and restored when the device reconnects. Set it low in the evening and a
+midnight power blip brings it back low.
+
+There is no volume slider in this section. There used to be, and it was
+misleading: the device only re-applies the stored level on the first config
+push after it boots, so moving the slider did nothing until the device
+restarted — and any real volume change overwrote it in the meantime. Volume
+is remembered device state rather than a setting you dial in, so the current
+level is now shown read-only on the **Status** tab. Change it from Home
+Assistant or the device buttons.
+
+It is also never inherited from the fleet, whatever the section's Fleet /
+Device switch says — otherwise a device would come back at another room's
+volume.
 
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —
@@ -81,12 +110,21 @@ deletes it.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
-used to start two competing conversations. Now detections landing within
-this window (default 300ms) are pooled and only the device that heard you
-best — loudest relative to its own room's background noise — answers; the
-others quietly stand down. The cost is that every wake waits out the
-window before responding, so don't crank it; 0 disables, and it never
-applies when only one device is online.
+used to start two competing conversations. Now the **first device to hear
+you answers immediately**, and any other device detecting the same word
+within this window (default 700ms) quietly stands down.
+
+There is **no latency cost**: the winner claims the turn on the spot rather
+than waiting out the window, so a solo wake is exactly as fast as it was
+before. The window only decides how long afterwards a second device counts
+as "the same utterance". `0` disables it, and it never applies when only
+one device is online.
+
+An earlier version instead waited out the window and gave the turn to
+whichever device heard you *best*. That was dropped: it taxed every wake by
+~364ms even when nothing was competing, and field data showed the
+signal-to-noise winner produced a *worse* transcript than the device that
+simply heard you first.
 
 ### Sensitivity (Precise ↔ Eager)
 The confidence bar the recogniser must clear.
@@ -209,6 +247,43 @@ means the microphones are off — it's a privacy indicator, not decoration)
 and the cyan volume arc. The directional "which mic is listening" highlight
 also adapts automatically: it brightens the scene's ring colour rather than
 painting green.
+
+The volume arc holds the ring for about two seconds so a turn animation
+can't wipe it the instant it appears — but **pressing the action button
+cancels it immediately**, so adjusting the volume and then talking to the
+device still shows you the listening ring straight away.
+
+### How a turn ends
+The ring tells you *why* a conversation stopped, using rhythm rather than
+colour (red, orange and cyan already mean mute, no-controller and volume):
+
+- **One slow throb** — the device was listening and heard nothing.
+- **A few quick blinks** — something went wrong (Home Assistant errored, or
+  no speech came back).
+- **Ring simply goes out** — normal end, or you cancelled it yourself.
+
+The ring also now clears when the audio *actually* finishes, rather than
+when the controller estimates it should have. On a slow WiFi link the old
+estimate could clear the ring several seconds before the Dot had stopped
+talking.
+
+### Meter response (Advanced)
+While a response plays the ring throbs with the live speaker level. The
+**Advanced** panel here shapes how hard it throbs — the device renders it
+locally, so changes apply on the next response with no restart:
+
+- **Decay** — how fast it falls. Higher tracks individual syllables; lower
+  reads as a slow swell.
+- **Attack** — how fast it rises on a peak.
+- **Gamma** — contrast. Higher makes the swing more visible.
+- **Floor** — brightness during silence. `0` goes fully dark between words.
+- **Reference** — the speaker level mapped to full brightness. Lower is more
+  sensitive.
+- **Curve** — below `1` lifts quiet consonants into view.
+
+These are taste settings, which is exactly why they're adjustable here
+rather than baked into firmware. The defaults are tuned for speech; if the
+ring looks too static, raise **Decay** and **Gamma** first.
 
 ## 05 — Advanced
 
