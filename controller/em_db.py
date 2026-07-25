@@ -29,6 +29,8 @@ import time
 from contextlib import contextmanager
 from typing import Optional
 
+import em_config_sections
+
 log = logging.getLogger("echomuse.db")
 
 # ─── Default device config ────────────────────────────────────────────────────
@@ -414,6 +416,32 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '7' WHERE key = 'schema_version';
     """,
+
+    # ── v8 — per-section fleet/device config scoping ─────────────────────────
+    #
+    # use_global_config was one boolean for the whole config, so overriding a
+    # single setting on one device forked every other setting too and froze
+    # them against future fleet changes. config_sections replaces it with the
+    # set of sections a device overrides (ids from em_config_sections).
+    #
+    # The backfill is lossless in both directions:
+    #   use_global_config = 1  ->  '[]'    (inherits everything, as before)
+    #   use_global_config = 0  ->  all ids (overrides everything, as before)
+    # so every device's effective config is byte-identical across the upgrade.
+    #
+    # use_global_config is KEPT rather than dropped: SQLite cannot drop a
+    # column without a table rebuild, and it stays useful as the compat view
+    # (no sections overridden == following the fleet), which older API
+    # consumers and the migration itself both rely on.
+    """
+    ALTER TABLE devices ADD COLUMN config_sections TEXT NOT NULL DEFAULT '[]';
+
+    UPDATE devices
+       SET config_sections = '["playback","wakeword","microphones","ring","advanced","bluetooth"]'
+     WHERE use_global_config = 0;
+
+    UPDATE system_config SET value = '8' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -625,6 +653,29 @@ def upsert_device_seen(
         )
 
 
+def touch_device_seen(device_id: str) -> None:
+    """
+    Refresh last_seen only — the device is alive right now.
+
+    upsert_device_seen fires on connect, which made last_seen mean "last
+    CONNECTED": a device online and healthy for hours still displayed a
+    last_seen from whenever it last reconnected (observed 2026-07-25:
+    all three devices reading 88-91 minutes stale while streaming audio
+    fine). That is precisely backwards from what the field is for —
+    knowing when a device went away.
+
+    Called from the ~30s stats report, so last_seen is at most one report
+    stale while connected and lands within ~30s of the truth when a device
+    drops. It rides the same executor hop as record_device_stats, so it
+    adds no write the loop wasn't already making.
+    """
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET last_seen = ? WHERE device_id = ?",
+            (_now(), device_id),
+        )
+
+
 def get_device_token(device_id: str) -> Optional[str]:
     """Return the device's link-auth token, or None if never issued."""
     row = _q1("SELECT token FROM devices WHERE device_id = ?", (device_id,))
@@ -767,22 +818,68 @@ def set_global_device_config(config: dict) -> None:
         )
 
 
+def get_device_config_sections(device_id: str) -> list:
+    """The section ids this device overrides. Empty list = follows the fleet."""
+    row = _q1("SELECT config_sections FROM devices WHERE device_id = ?", (device_id,))
+    if row is None:
+        return []
+    try:
+        return em_config_sections.normalise(json.loads(row["config_sections"]) or [])
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[db] Invalid config_sections for {device_id} — treating as fleet")
+        return []
+
+
+def set_device_config_sections(device_id: str, section_ids) -> list:
+    """
+    Set which sections this device overrides, and drop the stored values for
+    any section it no longer does.
+
+    Discarding on revert is deliberate and matches the pre-v8 behaviour of
+    set_device_use_global (which reset the whole config to a copy of global):
+    a section that follows the fleet should hold no stale shadow values that
+    silently reappear if it is toggled back months later.
+
+    use_global_config is kept in step as the compat view for older readers.
+    """
+    sections = em_config_sections.normalise(section_ids)
+    kept = em_config_sections.keys_for(sections) | em_config_sections.STATE_KEYS
+    stored = get_device_config(device_id)
+    pruned = {k: v for k, v in stored.items() if k in kept}
+    with _tx() as conn:
+        conn.execute(
+            """
+            UPDATE devices
+               SET config_sections   = ?,
+                   config            = ?,
+                   use_global_config = ?
+             WHERE device_id = ?
+            """,
+            (json.dumps(sections), json.dumps(pruned),
+             0 if sections else 1, device_id),
+        )
+    return sections
+
+
 def get_effective_device_config(device_id: str) -> dict:
     """
     Return the config that should be pushed to a device.
 
-    If use_global_config=1 (or the device is not found), returns the
-    fleet-wide global config — but always overrides startupVolume with
-    the device's own stored value. Volume is hardware state set at
-    provisioning time; it should never be clobbered by a fleet default.
+    Fleet config, with this device's own values layered over it for whichever
+    sections it overrides (see em_config_sections). No overridden sections =
+    pure fleet config. Every section overridden = fully device-specific, which
+    is what the pre-v8 use_global_config=0 meant.
 
-    If use_global_config=0, returns the device's own config entirely.
+    STATE_KEYS (startupVolume) always come from the device when present,
+    regardless of scoping — that is this device's own hardware state, and
+    inheriting it from the fleet would bring a device back at another room's
+    volume.
 
     This is the authoritative source for what config a device should
     actually run — use it in device_connected() and any config-push path.
     """
     row = _q1(
-        "SELECT use_global_config, config FROM devices WHERE device_id = ?",
+        "SELECT config_sections, config FROM devices WHERE device_id = ?",
         (device_id,),
     )
     if row is None:
@@ -794,14 +891,17 @@ def get_effective_device_config(device_id: str) -> dict:
         log.warning(f"[db] Invalid config JSON for {device_id} — using global")
         per_device = {}
 
-    if row["use_global_config"]:
-        config = get_global_device_config()
-        # startupVolume is per-device hardware state — never inherit from global
-        if "startupVolume" in per_device:
-            config["startupVolume"] = per_device["startupVolume"]
-        return config
-    else:
-        return per_device or get_global_device_config()
+    try:
+        sections = em_config_sections.normalise(
+            json.loads(row["config_sections"]) or []
+        )
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[db] Invalid config_sections for {device_id} — using global")
+        sections = []
+
+    return em_config_sections.merge(
+        get_global_device_config(), per_device, sections
+    )
 
 
 def set_device_use_global(device_id: str, enabled: bool) -> None:

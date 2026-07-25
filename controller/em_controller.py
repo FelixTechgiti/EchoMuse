@@ -1843,10 +1843,14 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     if msg.get("ble"):
                         em_ble_proxy.update_stats(device_id, msg["ble"])
                     # Fold into the persistent hourly rollup (CPU/RAM/storage/
-                    # RSSI trends) — one cheap upsert per ~30s report.
-                    await loop.run_in_executor(
-                        None, db.record_device_stats, device_id, device.stats
-                    )
+                    # RSSI trends) — one cheap upsert per ~30s report. The
+                    # last_seen refresh rides the same executor hop: a stats
+                    # report IS proof of life, and without it last_seen only
+                    # ever recorded the last *connect*.
+                    def _persist_stats(_id=device_id, _s=device.stats):
+                        db.record_device_stats(_id, _s)
+                        db.touch_device_seen(_id)
+                    await loop.run_in_executor(None, _persist_stats)
                     await api._push_event({
                         "type":      "device_update",
                         "device_id": device_id,
@@ -2022,6 +2026,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 db.log_device(
                     device.device_id, "info", "controller", "Disconnected"
                 )
+                # Stamp the moment it went away, so "last seen" is exact for
+                # an offline device rather than up to one stats report stale.
+                db.touch_device_seen(device.device_id)
                 _devices.pop(device.device_id, None)
                 await api.notify_device_disconnected(device.device_id)
                 await esphome.device_disconnected(device.device_id)
