@@ -481,7 +481,51 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '10' WHERE key = 'schema_version';
     """,
+
+    # ── v11 — prune configs to match their scoping ──────────────────────────
+    #
+    # v8 backfilled config_sections but left the config column alone, so a
+    # device that had been fully inheriting still stored a value for every
+    # key. Harmless to the DEVICE (get_effective_device_config only reads
+    # in-scope keys) but not to the dashboard, which merged the stored dict
+    # over the fleet config and so displayed a device's stale settings while
+    # every section claimed to be following the fleet — Office showed
+    # hey_rhasspy/standard while actually running hey_mycroft/malevolent.
+    #
+    # The display bug is fixed properly in dashboard.jsx (filter, don't
+    # merge). This makes the stored state honest as well, so the invariant
+    # asserted in set_device_config_sections holds for migrated rows too.
+    # Marked as a no-op SQL statement; the real work runs in Python below,
+    # because pruning needs the section map.
+    """
+    UPDATE system_config SET value = '11' WHERE key = 'schema_version';
+    """,
 ]
+
+# Post-migration fixups that need Python rather than SQL. Keyed by the schema
+# version they belong to; run once, immediately after that migration applies.
+def _fixup_v11(conn) -> None:
+    rows = conn.execute("SELECT device_id, config, config_sections FROM devices").fetchall()
+    for row in rows:
+        try:
+            cfg  = json.loads(row["config"] or "{}") or {}
+            secs = em_config_sections.normalise(json.loads(row["config_sections"] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        keep = em_config_sections.keys_for(secs) | em_config_sections.STATE_KEYS
+        pruned = {k: v for k, v in cfg.items() if k in keep}
+        if len(pruned) != len(cfg):
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
+            )
+            log.info(
+                f"[db] v11: pruned {len(cfg) - len(pruned)} out-of-scope config "
+                f"key(s) from {row['device_id']}"
+            )
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -578,6 +622,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         log.info(f"Applying migration v{version}")
         try:
             conn.executescript(sql)
+            # Some migrations need data work that SQL cannot express (e.g.
+            # pruning JSON config against the section map). Runs inside the
+            # same transaction as its DDL so a failure rolls both back.
+            fixup = _MIGRATION_FIXUPS.get(version)
+            if fixup is not None:
+                fixup(conn)
             conn.commit()
         except Exception as e:
             conn.rollback()
