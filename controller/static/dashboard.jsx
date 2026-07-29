@@ -44,6 +44,23 @@ const API = {
     return data;
   },
 
+  // Binary GET. Sessions are Bearer-header-only (no cookie is ever set), so
+  // anything the browser fetches for itself — an <a download>, an <audio
+  // src> — would 401. Everything binary comes through here and is handed on
+  // as an object URL, which also keeps the token out of the URL bar.
+  async blob(path) {
+    const h = {};
+    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
+    const r = await fetch(path, { headers: h });
+    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (!r.ok) {
+      let data = { code: 'error', status: r.status };
+      try { data = await r.json(); } catch {}
+      throw data;
+    }
+    return r.blob();
+  },
+
   async upload(path, file, fieldName = 'binary') {
     const h = {};
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
@@ -526,9 +543,71 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
+
+  // Saved utterances — play in place or download the WAV. Both go through
+  // one fetched object URL per turn (API.blob; see the auth note there), so
+  // playing then downloading costs one transfer, not two.
+  const [playing, setPlaying] = useState(null);   // turn_id currently sounding
+  const [gone, setGone]       = useState(() => new Set()); // 404 = pruned
+  const audioRef = useRef(null);
+  const urlsRef  = useRef({});    // turn_id -> object URL
+
+  const stopAudio = () => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setPlaying(null);
+  };
+
+  // Retention is a small per-device file count, far shorter than the turn
+  // history, so a row naming a recording that no longer exists is ordinary.
+  // Mark it gone and drop its controls rather than surfacing an error.
+  const audioUrl = async t => {
+    if (urlsRef.current[t.turn_id]) return urlsRef.current[t.turn_id];
+    try {
+      const url = URL.createObjectURL(await API.blob(
+        `/api/devices/${deviceId}/turns/${t.turn_id}/audio`));
+      urlsRef.current[t.turn_id] = url;
+      return url;
+    } catch {
+      setGone(g => new Set(g).add(t.turn_id));
+      return null;
+    }
+  };
+
+  const toggleAudio = async t => {
+    const wasPlaying = playing === t.turn_id;
+    stopAudio();
+    if (wasPlaying) return;
+    const url = await audioUrl(t);
+    if (!url) return;
+    const el = new Audio(url);
+    el.onended = el.onerror = () => setPlaying(p => (p === t.turn_id ? null : p));
+    audioRef.current = el;
+    setPlaying(t.turn_id);
+    el.play().catch(() => setPlaying(p => (p === t.turn_id ? null : p)));
+  };
+
+  const downloadAudio = async t => {
+    const url = await audioUrl(t);
+    if (!url) return;
+    const when = new Date(t.ts * 1000).toISOString().slice(0, 19).replace(/[:T]/g, '');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(deviceLabel || deviceId).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}-${when}.wav`;
+    a.click();
+  };
+
+  useEffect(() => () => {
+    stopAudio();
+    // Object URLs pin their blob in memory until revoked — a few minutes on
+    // the Activity tab would otherwise leak every recording played.
+    Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
+    urlsRef.current = {};
+  }, []);
+
+  const anyAudio = turns.some(t => t.audio_file);
 
   const ok = turns.filter(t => t.outcome === 'ok');
   const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
@@ -571,6 +650,11 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
                 {s.label}
               </span>
             ))}
+            {(recordingsOn || anyAudio) && (
+              <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginLeft: 'auto' }}>
+                ▶ hear the mic{anyAudio ? '' : ' — next turn'}
+              </span>
+            )}
           </div>
 
           {/* One stacked bar per turn, newest first — own scroll container */}
@@ -595,6 +679,20 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', width: 34, flexShrink: 0 }}>{fmtS(seg.shown)}</span>
                 <span style={{ fontFamily: mono, fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.08em', width: 62, flexShrink: 0, color: failed ? '#a04010' : '#286040' }}>
                   {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
+                </span>
+                {/* Saved utterance: listen in place, or download the WAV.
+                    The slot is reserved even when a turn has no recording so
+                    the columns stay aligned as the retention window rolls. */}
+                <span style={{ width: 34, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                  {t.audio_file && !gone.has(t.turn_id) && (<>
+                    <button onClick={() => toggleAudio(t)}
+                      title={playing === t.turn_id ? 'Stop' : 'Play the mic audio for this turn'}
+                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: playing === t.turn_id ? '#a04010' : 'var(--text2)' }}>
+                      {playing === t.turn_id ? '▮' : '▶'}
+                    </button>
+                    <button onClick={() => downloadAudio(t)} title="Download the WAV"
+                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: 'var(--muted)' }}>⤓</button>
+                  </>)}
                 </span>
               </div>
             );
@@ -1230,6 +1328,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
                   <TurnObservability
                     turns={turns}
+                    deviceId={device.device_id}
+                    deviceLabel={device.label}
+                    recordingsOn={cfgEff.saveUtterances}
                     nearMisses={device.owwNearMisses}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.dot}
@@ -3054,7 +3155,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
   "bluetooth": ["bleProxyEnabled"]
@@ -3448,6 +3549,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
             <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
             <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
             <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
+            <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
         </StageAdvanced>
       </Stage>

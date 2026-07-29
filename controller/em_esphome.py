@@ -68,6 +68,7 @@ from zeroconf import ServiceInfo
 import em_db as db
 import em_api as api
 import em_ns
+import em_recordings
 import em_oww_models
 import em_player
 
@@ -948,6 +949,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         ns_debug_raw = bytearray()
         ns_debug_out = bytearray()
 
+        # Utterance capture (saveUtterances): keep what the mic actually sent
+        # so it can be listened to from the Activity tab. Buffered PRE-NS —
+        # the question this answers is "how good is the capture", and it is
+        # also the input you would judge NS against. Read once per turn, so
+        # toggling the setting mid-turn can't leave a half-recorded stream.
+        # Cleared unconditionally: a stale buffer from an earlier turn must
+        # never be attributed to this one.
+        capture     = bytearray() if getattr(device, "save_utterances", False) else None
+        device.last_utterance_pcm = None
+
         # Preroll discard — drop wake-word tail from voice_queue before
         # streaming to HA. Wake turns pass VOICE_PREROLL_DISCARD; button and
         # continuation turns pass 0 (see C3 — they have no wake-word tail to
@@ -1112,6 +1123,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # the beam to ch6 omni.
                     asyncio.ensure_future(device.beam_lock())
 
+                if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
+                    capture.extend(payload)
+
                 if denoiser is not None:
                     raw_payload = payload
                     try:
@@ -1145,6 +1159,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Validation tooling: when NS_DEBUG_DIR is set, persist what
             # STT actually received next to what the mic actually sent.
             em_ns.dump_debug_pair(self._log_name, bytes(ns_debug_raw), bytes(ns_debug_out))
+            # Hand the captured utterance to _persist_turn, which owns the
+            # write (it has the rowid the filename is keyed on). In `finally`
+            # so a cancelled or errored turn still saves what it heard —
+            # those are exactly the turns worth listening back to.
+            if capture:
+                device.last_utterance_pcm = bytes(capture)
 
     def disconnect(self) -> None:
         """
@@ -1529,6 +1549,46 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     device.turn_history.append(turn_record)
 
 
+async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
+    """
+    Write the turn's captured mic audio (if saveUtterances is on) to
+    recordings/ and record the filename on the turn row.
+
+    Runs after the insert because the filename is keyed on the rowid. The
+    buffer is consumed here — a turn that never streamed audio must not
+    inherit the previous turn's recording, and holding ~1MB of speech on
+    the Device past its one use has no upside.
+
+    Best-effort throughout: a full disk or a read-only volume costs the
+    recording, never the turn.
+    """
+    pcm = getattr(device, "last_utterance_pcm", None)
+    device.last_utterance_pcm = None
+    if not pcm:
+        return
+    try:
+        name = await asyncio.get_running_loop().run_in_executor(
+            None, em_recordings.save, device.device_id, turn_id, pcm
+        )
+    except Exception as e:
+        log.warning(f"[{device.device_id}] Utterance save failed: {e}")
+        return
+    if not name:
+        return
+    turn_record["audio_file"] = name
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None, db.set_turn_audio, turn_id, name
+        )
+    except Exception as e:
+        log.warning(f"[{device.device_id}] Utterance link failed: {e}")
+        return
+    log.info(
+        f"[{device.device_id}] Utterance saved: {name} "
+        f"({em_recordings.duration_ms(len(pcm)) / 1000:.1f}s)"
+    )
+
+
 async def _persist_turn(device, turn_record: dict) -> None:
     """
     Write a completed turn to SQLite (survives controller restarts) and
@@ -1569,6 +1629,7 @@ async def _persist_turn(device, turn_record: dict) -> None:
             None, db.insert_turn, device.device_id, turn_record
         )
         turn_record["turn_id"] = turn_id
+        await _save_utterance(device, turn_id, turn_record)
         if played and "underruns" not in turn_record:
             # Playback happened but its stats haven't arrived — leave the
             # rendezvous open for handle_control's playback_stats branch.

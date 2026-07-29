@@ -4,6 +4,27 @@
 
 ---
 
+> ### 👋 Looking for how to *set up* EchoMuse? Start with the [Quickstart](docs/quickstart.md).
+>
+> **This file is not the onboarding guide.** It is two things: the low-level
+> reference for the one-time rooting of a Dot (the numbered steps below), and
+> — in the **Changelog** at the very bottom — the project's **engineering
+> journal**: a long-form record of what we built, what broke, and what we got
+> wrong, kept in the open on purpose.
+>
+> It is written for someone with a soldering-iron-adjacent tolerance for
+> detail, and it is very long. If you want to get a Dot talking, you want:
+>
+> | Start here | |
+> |---|---|
+> | **[Quickstart](docs/quickstart.md)** | Zero to talking to your Dot — install, first run, device approval, Home Assistant. **The actual onboarding guide.** |
+> | [Configuration Guide](docs/configuration.md) | Every dashboard setting in plain language. |
+> | [The Voice Pipeline, Explained](docs/voice-pipeline.md) | How your voice gets from the mics to Home Assistant and back. |
+>
+> The Quickstart sends you back here for the rooting step, and only that step.
+
+---
+
 The Amazon Echo Dot 2nd Gen (codename: biscuit) has a small but dedicated hacking community. Most existing guides stop at tethered root — you get a root shell, but only while the device is connected to a computer running a patched preloader. Every reboot requires the cable.
 
 This guide goes further. By combining the persistent amonet unlock with a boot image patch and a pre-seeded Magisk grant database, you get **persistent root that survives reboots** — no cable required after setup. Then we go further still and get EchoMuse running as a proper init service with full hardware access including working speaker audio.
@@ -1426,6 +1447,24 @@ done
   Then the stream kept glitching regardless. The device buffers `audioChanDepth` 128 periods × 42.7ms ≈ 5.46s, but the feed held only 1.5s ahead of realtime, leaving roughly four seconds of hardware buffer unused — and the RTT instrumentation from earlier the same day had just measured 1812ms and 2610ms stalls during that very playback, each longer than the 1.5s being maintained. Lead raised to 4.0s with ~1.4s headroom under the device's depth. The old comment claimed the short lead was what made pause/stop/voice-preempt instant; it is not, `speaker_flush` plus the discard-until-EOS contract are, and the lead only governs what is in flight. Explicitly mitigation rather than cure, and the code says so — it rides out the stalls without explaining them.
 
   A footnote on method: the reported symptom was twice dismissed as user error ("put it down to muppetry on my part") and was twice a genuine defect with a timestamp. The instrumentation is what made the difference between a shrug and a fix.
+
+- 2026-07-29 (**hear the microphone — utterance recordings, schema v12**): from Reddit feedback after the project was shared publicly. The request was simply to be able to listen to captured audio to judge mic quality, and it lands on a real gap: every mic-tuning decision on this project — `micGainDb` at +24dB, the beamformer's channel choice, whether `nsAsr` helps or hurts — has been made by *inference* from wake scores and garbled transcripts. A bad transcript tells you something went wrong; it does not tell you whether the room was noisy, the gain was low, or the denoiser ate a consonant. Thirty seconds of listening does.
+
+  Opt-in per device (`saveUtterances`, Config → Microphones → Advanced). The audio streamed to Home Assistant for a turn is kept as a 16kHz mono WAV; each row in the Activity tab grows a ▶ and a ⤓. Captured **pre-NS** deliberately — raw capture is the question being asked, and it is also the input you would judge noise suppression against.
+
+  Three decisions worth recording, each of which could reasonably have gone the other way:
+
+  **Default off, and it should stay off.** This is the only feature in the project that writes recognisable speech to disk. That deserves to be a decision someone makes rather than a default they discover later, and the cost of the wrong default here is not symmetric.
+
+  **Retention is a hard per-device file count (10), not a time window or a share of the turn history.** `TURN_RETENTION` is far longer, so a turn row can outlive its recording — meaning **a non-NULL `audio_file` is a claim to check, not to trust**. Every reader resolves through `em_recordings.resolve`, which treats a missing file as an ordinary 404 rather than an error, and also re-checks that the file belongs to the device in the URL, since the endpoint takes device and turn id from the same path. Files are ordered for pruning by turn id parsed from the filename rather than by mtime, so a volume restored from a backup that flattened timestamps still prunes correctly.
+
+  **The dashboard fetches the WAV through `API.blob`, not an `<a href download>`.** Sessions here are Bearer-header-only — no cookie is ever set — so anything the browser fetches on its own behalf gets a 401. This is the second time that has caught us out (the xterm.js shell hit it and was solved with a `?token=` query param). The blob route is the better answer anyway: play and download share one transfer, and the token never reaches the URL bar.
+
+  Two things the test suite caught that a human review plausibly would not have. The Dockerfile guard flagged the missing `COPY em_recordings.py` — that would have crash-looped the container at import, and it is the same class of miss the guard was written for. And `test_v11_prunes_out_of_scope_values_from_migrated_rows` failed on `duplicate column name: audio_file`: it rewinds `schema_version` to 10 and re-runs `_migrate`, so it re-applied v12 to a database that already had it. That test would have broken on *every* future migration, not just this one, so it is now pinned to `MIGRATIONS[:11]` — a test that fails for a reason unrelated to what it asserts is a test that will eventually be ignored.
+
+  Deployed the same day. Migration v11 → v12 clean against the live DB (snapshot first, per the pre-flight discipline; 496 turns intact), no errors, all three devices back on wss with satellites and BLE proxies reconnected.
+
+- 2026-07-29 (**this document was being read as the onboarding guide**): people arriving from the public post were starting here and bouncing off, which is fair — it opens with preloader flashing and SELinux patching. That was never the intent. SETUP.md is two things, the rooting reference and this journal, and neither is where a newcomer should start. A banner at the top now says so and points at `docs/quickstart.md`, which is the actual onboarding path. Recording it because the failure was invisible from the inside: the file is perfectly well organised *if you already know what it is*, and no amount of internal structure fixes a document whose first job is to tell you it is not the one you want.
 
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

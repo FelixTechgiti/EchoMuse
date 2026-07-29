@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3 as _sqlite3
 import tempfile
 import time
@@ -52,6 +53,7 @@ import em_ble_proxy
 import em_config_sections as sections_mod
 import em_oww_models
 import em_pki
+import em_recordings
 import em_scenes
 from version import VERSION as CONTROLLER_VERSION
 
@@ -210,6 +212,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
+    app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
@@ -411,6 +414,57 @@ async def _get_device_turns(request: web.Request) -> web.Response:
 
 
 @auth.require_auth
+async def _get_turn_audio(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/turns/{turn}/audio — the saved mic audio for
+    one voice turn, as a downloadable WAV.
+
+    Only turns captured while saveUtterances was on have one, and only the
+    newest em_recordings.KEEP_PER_DEVICE per device survive — a turn row
+    older than that window still carries the filename but the file is gone,
+    so a 404 here is an ordinary outcome, not an error state.
+
+    The filename is derived from (device, turn) rather than taken from the
+    row: em_recordings.resolve then re-checks that the file belongs to the
+    device in the URL, so a turn id from another device can't be used to
+    reach its audio."""
+    device_id = request.match_info["id"]
+    try:
+        turn_id = int(request.match_info["turn"])
+    except ValueError:
+        return _error("bad_request", "turn must be an integer", 400)
+
+    loop = asyncio.get_event_loop()
+    row  = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+
+    name = em_recordings.filename(device_id, turn_id)
+    path = em_recordings.resolve(device_id, name) if name else None
+    if path is None:
+        return _error("no_recording",
+                      "No saved audio for this turn", 404)
+
+    label = _slug(row["label"] or device_id)
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type":        "audio/wav",
+            "Content-Disposition": f'attachment; filename="{label}-turn{turn_id}.wav"',
+            # Recordings are immutable once written and their names are
+            # unique per turn, but the retention window means a name can
+            # stop resolving — so cache privately and briefly, never shared.
+            "Cache-Control":       "private, max-age=60",
+        },
+    )
+
+
+def _slug(text: str) -> str:
+    """Lowercase ASCII slug, safe for a Content-Disposition filename."""
+    out = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
+    return out or "device"
+
+
+@auth.require_auth
 async def _get_device_activity(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/activity?days=7 — aggregated activity stats
     for trend review: per-day turn buckets (counts, outcomes, latency
@@ -586,6 +640,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
         live.ns_asr = bool(effective["nsAsr"])
+    if "saveUtterances" in effective:
+        live.save_utterances = bool(effective["saveUtterances"])
     if "bargeInEnabled" in effective:
         live.barge_in_enabled = bool(effective["bargeInEnabled"])
     if "bargeInThreshold" in effective:

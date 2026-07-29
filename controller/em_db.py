@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 import em_config_sections
+import em_recordings
 
 log = logging.getLogger("echomuse.db")
 
@@ -120,6 +121,16 @@ DEFAULT_DEVICE_CONFIG = {
     # files are missing (bare-metal without NS_MODEL_DIR) the flag
     # degrades to raw streaming with a warning.
     "nsAsr":            False,
+    # saveUtterances: keep the mic audio of the last few voice turns
+    # (em_recordings.KEEP_PER_DEVICE) as WAVs, downloadable from the
+    # Activity tab. Diagnostic tooling for "is my mic any good" — the
+    # question you otherwise have to answer by inference from a bad
+    # transcript. Default OFF and deliberately so: this is the only feature
+    # that writes recognisable speech to disk, and turning it on should be
+    # a decision, not a default someone discovers later. Controller-side
+    # only (the device never sees the audio again); the key rides the
+    # config channel and the device ignores it, same as wakeArbitrationMs.
+    "saveUtterances":   False,
     # bleProxyEnabled: BLE proxy (device-side passive scan over the raw HCI
     # transport, forwarded to HA as a separate ESPHome bluetooth_proxy
     # device — em_ble_proxy.py). Default off: enabling durably disables the
@@ -499,6 +510,20 @@ MIGRATIONS: list[str] = [
     # because pruning needs the section map.
     """
     UPDATE system_config SET value = '11' WHERE key = 'schema_version';
+    """,
+
+    # ── v12 — utterance recordings ──────────────────────────────────────────
+    #
+    # Filename (not a blob) of the saved mic audio for this turn. The WAV
+    # itself lives in recordings/ beside this DB and is retained by file
+    # count per device (em_recordings.KEEP_PER_DEVICE), which is a much
+    # shorter window than TURN_RETENTION — so a non-NULL audio_file on an
+    # older row is a claim to CHECK, not to trust. Every reader resolves
+    # through em_recordings and treats a missing file as "no recording".
+    """
+    ALTER TABLE turns ADD COLUMN audio_file TEXT;
+
+    UPDATE system_config SET value = '12' WHERE key = 'schema_version';
     """,
 ]
 
@@ -1040,10 +1065,21 @@ def delete_device(device_id: str) -> None:
 
     This is a hard delete — use with care. Logs are removed first to
     satisfy the foreign key constraint.
+
+    Saved utterance recordings live on disk rather than in the DB, so no
+    cascade reaches them — they are unlinked explicitly here. Leaving a
+    deleted device's speech behind on the volume is the one leftover that
+    actually matters.
     """
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
+    try:
+        removed = em_recordings.delete_device(device_id)
+        if removed:
+            log.info(f"[db] Removed {removed} recording(s) for {device_id}")
+    except Exception as e:
+        log.warning(f"[db] Recording cleanup failed for {device_id}: {e}")
     log.info(f"[db] Device deleted: {device_id}")
 
 
@@ -1290,6 +1326,10 @@ _TURN_COLUMNS = {
     "send_ms":          "send_ms",
     "delivery_ms":      "delivery_ms",
     "eq_ms":            "eq_ms",
+    # v12 — filename of the saved utterance WAV, written by set_turn_audio
+    # after the insert (the name is keyed on the rowid). Always NULL at
+    # insert time; listed here so get_turns returns it.
+    "audio_file":       "audio_file",
 }
 
 
@@ -1358,6 +1398,22 @@ def set_turn_playback(turn_id: int, periods: int, underruns: int,
                 stats.get("bytesRecv"),
                 turn_id,
             ),
+        )
+
+
+def set_turn_audio(turn_id: int, audio_file: Optional[str]) -> None:
+    """
+    Attach a saved utterance recording to a persisted turn.
+
+    Separate from insert_turn because the filename is keyed on the rowid
+    that insert_turn returns — naming by timestamp instead would collide
+    across devices and give the download endpoint nothing to bind the file
+    to its turn with.
+    """
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE turns SET audio_file = ? WHERE id = ?",
+            (audio_file, turn_id),
         )
 
 

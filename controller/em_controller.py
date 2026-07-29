@@ -258,6 +258,15 @@ class Device:
         # nsAsr: controller-side DTLN noise suppression on the ASR-bound
         # turn stream only (em_ns.py; wake stream stays raw).
         self.ns_asr:        bool  = False
+        # saveUtterances: keep this turn's ASR-bound mic audio and write it
+        # to recordings/ at turn end (em_recordings). Read per turn, so
+        # switching it off stops the next turn being captured, not the one
+        # already streaming.
+        self.save_utterances: bool = False
+        # This turn's captured mic audio, handed from _stream_mic_audio to
+        # _persist_turn (which owns the write — it has the rowid the
+        # filename is keyed on) and consumed there.
+        self.last_utterance_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         # LED ring scene — render-ready palette/spinner from em_scenes,
@@ -1788,6 +1797,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
+        device.save_utterances = bool(config.get("saveUtterances", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)

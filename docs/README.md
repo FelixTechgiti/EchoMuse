@@ -12,8 +12,10 @@ walkthroughs welcome.
 
 Deeper technical references live elsewhere:
 
-- [SETUP.md](../SETUP.md) — the full device rooting/provisioning guide,
-  architecture internals, protocol documentation, troubleshooting, and the
-  complete changelog.
+- [SETUP.md](../SETUP.md) — two things, neither of them an onboarding guide:
+  the full device rooting/provisioning reference (plus architecture
+  internals, protocol documentation and troubleshooting), and the project's
+  **engineering journal** in the changelog at the bottom — a long-form record
+  of what was built, what broke, and what we got wrong.
 - [CLAUDE.md](../CLAUDE.md) — codebase orientation for developers (and AI
   assistants).
