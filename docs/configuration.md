@@ -44,7 +44,9 @@ actually provides, since it reports no retry or noise figures), and the
 Bluetooth-proxy diagnostics panel when enabled —
 the Status row reads `Online`, or `Offline` with how long ago the device was
 last heard from) and **Activity** (voice-turn history — what was heard, how it was
-transcribed, wake-word scores, playback underruns, near-misses). Activity
+transcribed, wake-word scores, playback underruns, near-misses, and — if
+**Save utterances** is on — the recorded audio of each turn, playable and
+downloadable). Activity
 history is stored in the controller's database, so it survives controller
 and device restarts; hourly hardware trends (CPU, memory, WiFi signal) are
 kept for 180 days and available via the API
@@ -223,6 +225,35 @@ tuning knobs:
   Raising it can silently disable cancellation entirely.
 - **AEC tail** — how much room echo/reverberation the canceller models.
   Default 300ms; raise toward 500 in big empty-sounding rooms.
+
+**Save utterances** — keeps the microphone audio of recent voice turns so you
+can *listen* to what the Dot actually heard. The **Activity** tab then shows
+a ▶ (play here) and a ⤓ (download the WAV) on every turn that has a
+recording.
+
+This is the honest way to answer "is my microphone any good?". Without it
+you're guessing from a garbled transcript, which can't tell you whether the
+room was noisy, the gain was too low, or the denoiser chewed a word. Thirty
+seconds of listening usually settles it — and it's the only sensible way to
+A/B **Mic gain**, the pickup presets, or **Noise suppression**, since you can
+compare the same phrase before and after.
+
+**Off by default, and worth thinking about before switching on.** This is the
+only setting that stores recognisable speech on the controller. What's kept:
+the **last 10 turns per device**, as plain WAV files in the controller's data
+folder, each overwritten as newer ones arrive. Only the audio sent for
+recognition is saved — never the always-on wake-word listening, which is
+discarded continuously and never written anywhere.
+
+Turning the setting back off stops new recordings immediately, but **leaves
+the ones already saved where they are** — deliberately, so that switching off
+doesn't destroy samples you were part-way through comparing. They stay until
+newer recordings push them out (which needs the setting back on) or you
+delete the device, which removes its recordings too. To clear them out sooner,
+delete the files from the controller's `data/recordings/` folder.
+
+A turn recorded a while ago may show no buttons — that just means its
+recording has aged past the last 10 and the turn history has outlived it.
 
 ---
 

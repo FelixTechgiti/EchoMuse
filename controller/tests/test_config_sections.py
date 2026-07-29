@@ -192,7 +192,7 @@ def test_state_key_survives_full_revert(tmp_path):
     assert em_db.get_effective_device_config("dev1")["startupVolume"] == 40
 
 
-def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path):
+def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path, monkeypatch):
     """
     v8 backfilled config_sections but left the config column alone, so a
     fully-inheriting device still stored a value for every key. The device
@@ -212,6 +212,12 @@ def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path):
         )
         conn.execute("UPDATE system_config SET value = '10' WHERE key = 'schema_version'")
 
+    # Replay v11 ONLY. Rewinding schema_version and re-running _migrate would
+    # otherwise re-apply every migration appended after v11 to a DB that has
+    # already had them (v12's ALTER fails with "duplicate column"), so this
+    # test would break on each new migration rather than on a real v11
+    # regression. Migrations are append-only, so the prefix is stable.
+    monkeypatch.setattr(em_db, "MIGRATIONS", em_db.MIGRATIONS[:11])
     em_db._migrate(em_db._conn)
 
     stored = em_db.get_device_config("dev1")

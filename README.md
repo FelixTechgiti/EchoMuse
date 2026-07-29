@@ -31,7 +31,9 @@ hear the answer through the Dot's speaker. The hardware you already own
 - **Fleet dashboard** — provisioning wizard, per-device or global config
   pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
   automatic fallback, root shell, logs, and per-turn activity analytics
-  (wake scores, near-misses, latencies, playback underruns).
+  (wake scores, near-misses, latencies, playback underruns). Optionally keep
+  the last few turns' mic audio to play back — the only honest way to judge
+  capture quality and tune gain by ear rather than by inference.
 - **Encrypted device link** — TLS with a controller-generated CA plus
   per-device tokens; the wizard installs credentials automatically.
 
@@ -59,9 +61,14 @@ the original SDK that made this hardware accessible.
 
 ## Before you start
 
-Your Echo Dot must be rooted with persistent root. The full rooting guide —
-and a detailed engineering journal of how every subsystem was figured out —
-is in [`SETUP.md`](SETUP.md).
+**New here? Start with the [quickstart](docs/quickstart.md)** — it's the
+guided path from zero to talking to your Dot, and it sends you to the
+rooting guide at the right moment rather than opening with it.
+
+Your Echo Dot must be rooted with persistent root. That guide — along with a
+detailed engineering journal of how every subsystem was figured out — is in
+[`SETUP.md`](SETUP.md), which is a reference and a build log rather than a
+walkthrough.
 
 The short version:
 - Persistent unlock via [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) (R0rt1z2)

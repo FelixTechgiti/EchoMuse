@@ -38,6 +38,7 @@ SECTIONS: dict[str, dict] = {
             "adcMicpga", "adcDigitalGain", "micGainDb",
             "beamformingEnabled", "beamAngle",
             "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr",
+            "saveUtterances",
         ],
     },
     "ring": {
