@@ -610,6 +610,24 @@ Ch7, Ch8 → unconnected
 
 **Frequency-domain beamforming** (implemented in `bf_capture` diagnostic tool): A frequency-domain delay-and-sum implementation exists applying exact phase shifts via FFT. Testing confirmed the approach works — flat spectral response, no interpolation artefacts. For voice pickup at typical conversational distances the SNR improvement over mic selection is marginal; mic selection remains the production path. The `bf_capture` tool is retained for future research.
 
+**Why that result is structural, not an implementation shortfall.** Recorded 2026-07-29 after the frequency-domain result was very nearly re-proposed as a fix for far-field reach: the note above says the gain was marginal, but not *why*, and without the why it reads like something worth another go. It isn't.
+
+Delay-and-sum improves SNR only against noise that is **spatially uncorrelated** between the mics. In a diffuse (reverberant room) field the coherence between two mics separated by *d* is `sinc(2fd/c)`, and at this aperture that stays near unity right across the speech band:
+
+| Freq | Aperture/λ (72mm) | Coherence @36mm (adjacent) | @72mm (opposite) |
+|---|---|---|---|
+| 300 Hz | 0.06 | 0.99 | 0.97 |
+| 500 Hz | 0.10 | 0.98 | 0.93 |
+| 1 kHz | 0.21 | 0.93 | 0.73 |
+| 2 kHz | 0.42 | 0.73 | 0.18 |
+| 4 kHz | 0.84 | 0.18 | −0.16 |
+
+Below ~1.5kHz — where most speech energy is — every mic is hearing between 84% and 99% the *same* noise, so there is essentially nothing for a sum to cancel. Useful decorrelation only begins around 2kHz, and the 36mm adjacent spacing puts the spatial aliasing limit at `c/2d` = **4.76kHz**. That leaves a working window of roughly 2–4.7kHz, which is exactly why the measured improvement was marginal. It is a property of the 72mm aperture, not of the algorithm or the code: no better delay-and-sum implementation changes it.
+
+The class of algorithm that *does* extract directivity from a sub-wavelength aperture is **superdirective / differential** beamforming (and is presumably close to what the XMOS front-end in purpose-built far-field kit is doing). It is not a free upgrade: superdirective designs trade directly against **white noise gain**, amplifying uncorrelated sensor self-noise by 20dB or more at low frequencies on a 0.1λ aperture, and they need per-element magnitude and phase calibration to come anywhere near theory. Seven MEMS capsules spread across four unmatched TLV320ADC3101s, on a CPU already at ~18–20% baseline just running the mic pipeline, is not the substrate for that. Filed as a research curiosity, not a roadmap item.
+
+**Practical consequence for far-field reach:** it is not a beamforming problem on this hardware, and not recoverable by a config change either — the ch6-vs-best-perimeter SNR difference is negligible at conversational distance (see the `beamformingEnabled` note in `em_db.py`). Reach here is set by the room's noise floor, distance and placement. The 2026-07-29 utterance analysis measured 8.7dB of noise-floor drift between two runs of the *same phrase* at ~1.3m, enough on its own to flip the transcript. The levers that genuinely exist are single-channel: `nsAsr`, wake model choice, and moving the device.
+
 **How Amazon does it:** Amazon's `amazon.speech.sim` reads the same raw 9-channel array via Android AudioRecord and does software processing. There is no hardware beamforming output channel. The MediaTek MAGI Conference DOA feature (in `audio.primary.mt8163.so`) is designed for phone call use cases and is not active in voice assistant mode on this device.
 
 ---
