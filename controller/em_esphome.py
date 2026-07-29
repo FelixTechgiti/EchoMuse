@@ -949,13 +949,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         ns_debug_raw = bytearray()
         ns_debug_out = bytearray()
 
-        # Utterance capture (saveUtterances): keep what the mic actually sent
-        # so it can be listened to from the Activity tab. Buffered PRE-NS —
-        # the question this answers is "how good is the capture", and it is
-        # also the input you would judge NS against. Read once per turn, so
-        # toggling the setting mid-turn can't leave a half-recorded stream.
-        # Cleared unconditionally: a stale buffer from an earlier turn must
-        # never be attributed to this one.
+        # Utterance capture (saveUtterances): keep what was sent to HA for
+        # recognition, so it can be listened to from the Activity tab. The
+        # buffer is filled POST-NS, further down this loop — see the comment
+        # at the tap. Read once per turn, so toggling the setting mid-turn
+        # can't leave a half-recorded stream. Cleared unconditionally: a stale
+        # buffer from an earlier turn must never be attributed to this one.
         capture     = bytearray() if getattr(device, "save_utterances", False) else None
         device.last_utterance_pcm = None
 
@@ -1123,9 +1122,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # the beam to ch6 omni.
                     asyncio.ensure_future(device.beam_lock())
 
-                if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
-                    capture.extend(payload)
-
                 if denoiser is not None:
                     raw_payload = payload
                     try:
@@ -1143,6 +1139,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         if em_ns.DEBUG_DIR:
                             ns_debug_raw.extend(raw_payload)
                             ns_debug_out.extend(payload)
+
+                # Utterance capture sits HERE, below the denoiser, so the saved
+                # file is byte-for-byte what goes on the wire to HA — i.e. what
+                # STT actually heard. Tapping above NS (as this first shipped)
+                # answered "how good is the mic" but could not answer "why was
+                # the transcript wrong" on any device with nsAsr on, which is
+                # the question people actually ask. If NS fails mid-turn the
+                # payload falls back to raw for the rest of the turn and the
+                # capture follows it, which stays correct by construction.
+                if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
+                    capture.extend(payload)
 
                 if self._trace:
                     self._trace.audio_frames += 1

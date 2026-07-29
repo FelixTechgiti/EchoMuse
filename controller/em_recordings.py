@@ -16,10 +16,12 @@ by turn id parsed out of the filename rather than mtime: ids are monotonic
 rowids, so the order is exact even if the volume is restored from a backup
 that flattened timestamps.
 
-The audio written is what the controller streamed to Home Assistant for
-recognition, before noise suppression (`nsAsr`) — the raw device stream is
-the mic-quality question being asked, and it's also the input you'd tune
-NS against. 16kHz mono S16_LE, matching the ESPHome satellite wire format.
+The audio written is exactly what the controller streamed to Home Assistant
+for recognition — tapped BELOW noise suppression, so on a device with
+`nsAsr` on the file is the denoised stream, not the raw mic. That is the
+point: a recording that isn't what STT heard can tell you the room was
+noisy but never why a transcript came back wrong. 16kHz mono S16_LE,
+matching the ESPHome satellite wire format.
 
 Pure path/filesystem logic (no aiohttp, no db import) so it can be unit
 tested; em_esphome writes through it and em_api serves from it.
