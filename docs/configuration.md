@@ -226,10 +226,15 @@ tuning knobs:
 - **AEC tail** — how much room echo/reverberation the canceller models.
   Default 300ms; raise toward 500 in big empty-sounding rooms.
 
-**Save utterances** — keeps the microphone audio of recent voice turns so you
-can *listen* to what the Dot actually heard. The **Activity** tab then shows
+**Save utterances** — keeps the audio of recent voice turns so you can
+*listen* to what was sent for transcription. The **Activity** tab then shows
 a ▶ (play here) and a ⤓ (download the WAV) on every turn that has a
 recording.
+
+What's saved is the audio **exactly as speech-to-text received it** — so if
+**Noise suppression** is on, you're hearing the cleaned-up version, not the
+raw microphone. That's deliberate: when a transcript comes back wrong, the
+only recording that can explain it is the one the recogniser actually heard.
 
 This is the honest way to answer "is my microphone any good?". Without it
 you're guessing from a garbled transcript, which can't tell you whether the
