@@ -152,6 +152,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/server/` | Local state machine: mute, volume, LED mode priority |
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
 | `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
+| `internal/wakeword/` | openWakeWord streaming feature pipeline (mel ring → 76-frame windows → embedding ring → classifier). Pure Go: inference sits behind the `Inferer` interface so the buffering is host-testable with no ONNX/cgo. Validated tensor-for-tensor against Python via a golden fixture (`testdata/`, regenerate with `gen_fixture.py`) |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
