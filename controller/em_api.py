@@ -247,6 +247,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/latest_binary", _get_provision_latest_binary)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
+    app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
     # Live events WebSocket
     app.router.add_get("/api/events", _ws_events)
@@ -1307,6 +1308,9 @@ async def _run_update(device_id: str, release: dict,
         # Sync the startup script while we're here — OTA is the only update
         # path existing devices have for it (see _sync_start_script).
         await _sync_start_script(live, device_id)
+        # Payload drift is not limited to the start script — the debloat
+        # halves had no update path at all until 2026-07-30.
+        await _sync_debloat(live, device_id)
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
         await _push_log_event(device_id, "info", "controller",
@@ -1752,6 +1756,124 @@ async def _sync_start_script(live, device_id: str) -> None:
     await asyncio.sleep(1.0)
 
 
+# Magisk service.d location of the boot-time debloat script. Installed by the
+# provisioning wizard; synced from here afterwards.
+DEBLOAT_SCRIPT_PATH = "/sbin/.core/img/.core/service.d/echomuse-debloat.sh"
+
+
+def _debloat_packages() -> list[str]:
+    """The pm-hide list from the canonical payload, comments stripped."""
+    try:
+        raw = (PAYLOADS_DIR / "debloat_packages.txt").read_text()
+    except OSError as e:
+        log.error(f"[api] debloat_packages.txt unreadable: {e}")
+        return []
+    return [ln.strip() for ln in raw.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+async def _sync_debloat(live, device_id: str) -> None:
+    """
+    Heal debloat drift on a device that is already in the field.
+
+    The debloat has two halves and neither had an update path. The boot script
+    was installed once by the provisioning wizard, and the pm-hide list was
+    applied once at the same time — so a device provisioned before a list grew
+    never receives the addition. Found 2026-07-30 when round 2 added
+    com.amazon.whad and every existing device needed a manual push.
+
+    Both halves are reconciled here, idempotently, so this is safe to run as
+    often as you like:
+
+      * the script by md5 against the canonical payload, replaced by rename so
+        the running shell keeps reading the old inode (same reasoning as
+        _sync_start_script — it takes effect on the next device reboot);
+      * the hide list by asking the device which of those packages are still
+        VISIBLE and hiding only those. One `pm list packages` costs about a
+        second; `pm hide` is slow enough per call that hiding all 32
+        unconditionally would add half a minute for nothing.
+
+    Best-effort throughout: a failure logs and returns, and never blocks the
+    firmware update this normally rides along with.
+
+    Note what hiding does NOT do: com.amazon.whad is PERSISTENT, so hiding it
+    leaves the running instance alive until the next reboot (am force-stop is a
+    no-op on it — measured). That matches the rest of the debloat's semantics
+    rather than being a shortcoming of this function, and it is why the log
+    line says "next reboot".
+    """
+    # ── half 1: the boot script ──────────────────────────────────────────────
+    try:
+        script = (PAYLOADS_DIR / "echomuse-debloat.sh").read_bytes()
+    except OSError as e:
+        log.error(f"[api] echomuse-debloat.sh payload unreadable — skipping sync: {e}")
+        script = None
+
+    if script is not None:
+        want = hashlib.md5(script).hexdigest()
+        out = await _shell_run(live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null")
+        if want not in out:
+            # An empty result also lands here — a device provisioned before the
+            # script existed has no file at all, and installing it is right.
+            await asyncio.sleep(1.0)
+            await _push_log_event(device_id, "info", "controller",
+                                  "debloat script out of date — syncing canonical version")
+            tmp = DEBLOAT_SCRIPT_PATH + ".new"
+            if await _stream_file_to_device(live, script, tmp):
+                await asyncio.sleep(1.0)
+                res = await _shell_run(live,
+                    f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
+                    f'if [ "$NEW" = "{want}" ]; then '
+                    f'mv {tmp} {DEBLOAT_SCRIPT_PATH} && chmod 755 {DEBLOAT_SCRIPT_PATH} '
+                    f'&& echo DEBLOAT_SYNCED; '
+                    f'else rm -f {tmp}; echo DEBLOAT_MD5_MISMATCH:$NEW; fi')
+                await _push_log_event(
+                    device_id,
+                    "info" if "DEBLOAT_SYNCED" in res else "warn", "controller",
+                    "debloat script synced — daemon stops take effect on next device reboot"
+                    if "DEBLOAT_SYNCED" in res else
+                    f"debloat script sync failed ({res.strip() or 'no output'})")
+            else:
+                await _push_log_event(device_id, "warn", "controller",
+                                      "debloat script sync failed (transfer)")
+            await asyncio.sleep(1.0)
+
+    # ── half 2: the pm-hide list ─────────────────────────────────────────────
+    pkgs = _debloat_packages()
+    if not pkgs:
+        return
+    # Built as a file rather than a long inline list: 30-odd package names is
+    # over a kilobyte of command line, and a shell command that is *usually*
+    # short enough is the kind of thing that breaks on the day someone adds the
+    # thirty-third package.
+    listing = ("\n".join(pkgs) + "\n").encode()
+    remote_list = "/data/local/tmp/em_debloat_pkgs.txt"
+    if not await _stream_file_to_device(live, listing, remote_list, mode="644"):
+        await _push_log_event(device_id, "warn", "controller",
+                              "debloat hide-list sync failed (transfer)")
+        return
+    await asyncio.sleep(1.0)
+
+    res = await _shell_run(live,
+        f'VIS=$(pm list packages); N=0; '
+        f'while read p; do '
+        f'case "$VIS" in *"package:$p"*) pm hide "$p" >/dev/null 2>&1 && N=$((N+1));; esac; '
+        f'done < {remote_list}; '
+        f'rm -f {remote_list}; echo HIDDEN_APPLIED:$N', timeout=120.0)
+    applied = 0
+    for tok in res.split():
+        if tok.startswith("HIDDEN_APPLIED:"):
+            try:
+                applied = int(tok.split(":", 1)[1])
+            except ValueError:
+                pass
+    if applied:
+        await _push_log_event(device_id, "info", "controller",
+                              f"debloat: hid {applied} newly-listed package(s) — "
+                              f"persistent ones stop at the next device reboot")
+    await asyncio.sleep(1.0)
+
+
 async def _exec_shell(live, cmd: str) -> None:
     """Send a command to the device shell and return immediately (fire-and-forget)."""
     try:
@@ -2108,6 +2230,34 @@ async def _post_secure_link(request: web.Request) -> web.Response:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
     task = asyncio.create_task(_run_secure_link(device_id))
+    task.add_done_callback(_log_task_exception_api)
+    return _ok({"started": True})
+
+
+@auth.require_admin
+async def _post_debloat(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/debloat
+
+    Re-apply the debloat payloads to a live device: sync the boot script and
+    hide any newly-listed packages.
+
+    This exists because the OTA-time sync cannot reach every device. A device
+    already running the latest firmware will not be updated again, so it would
+    never receive a payload change — which is exactly the situation the first
+    device hit (Lounge was current when round 2 landed). Idempotent, so
+    pressing it twice costs a `pm list packages` and nothing else.
+    """
+    device_id = request.match_info["id"]
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    # No explicit shell release here: _shell_run and _stream_file_to_device each
+    # acquire and release the session in their own finally, which is why
+    # _sync_start_script does not either. Releasing it from out here could close
+    # a session a concurrent caller had opened.
+    task = asyncio.create_task(_sync_debloat(live, device_id))
     task.add_done_callback(_log_task_exception_api)
     return _ok({"started": True})
 

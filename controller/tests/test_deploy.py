@@ -94,3 +94,63 @@ def test_release_workflow_publishes_the_tag_annotation():
           / ".github" / "workflows" / "release.yml").read_text()
     assert "body_path:" in wf, "the release must publish notes from a file"
     assert "%(contents)" in wf, "notes must come from the tag annotation"
+
+
+def test_every_device_payload_has_an_update_path():
+    """
+    A payload installed only at provisioning drifts forever.
+
+    This has now bitten twice: start_server.sh (Lounge was a revision behind
+    Office, 2026-07-11) and the debloat pair (round 2 added a package and every
+    fielded device needed a manual push, 2026-07-30). Both fixes were the same
+    shape — an md5-compared sync riding the OTA — so this asserts that every
+    file in device_payloads/ is named by a sync function, and fails when a
+    fourth payload is added without one.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+    payloads = sorted(p.name for p in (root / "device_payloads").iterdir() if p.is_file())
+    assert payloads, "device_payloads/ is empty — has it moved?"
+
+    for name in payloads:
+        assert name in api, (
+            f"{name} has no update path: nothing in em_api.py references it. "
+            f"A payload installed only by the provisioning wizard drifts on every "
+            f"device already in the field."
+        )
+
+
+def test_debloat_sync_reconciles_both_halves():
+    """
+    The debloat is a boot script AND a pm-hide list. Round 2 added a *package*,
+    so a sync that only refreshed the script would have looked like it worked
+    and changed nothing on any device.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    fn = api[api.index("async def _sync_debloat"):]
+    fn = fn[:fn.index("\nasync def ", 1)] if "\nasync def " in fn[1:] else fn
+
+    assert "echomuse-debloat.sh" in fn, "the boot script half must be synced"
+    assert "_debloat_packages()" in fn, "the pm-hide half must be reconciled"
+    assert "pm hide" in fn, "drifted packages must actually be hidden"
+    # Rename-based replacement: the running shell keeps the old inode.
+    assert "mv " in fn and ".new" in fn, \
+        "the script must be replaced by rename, not written in place"
+    # md5 both before (skip when in sync) and after (verify the transfer).
+    assert fn.count("md5") >= 2, "sync must md5-compare and md5-verify"
+
+
+def test_debloat_reachable_without_an_ota():
+    """
+    The OTA-time sync cannot reach a device already on the latest firmware —
+    which is the exact case that exposed the gap. A manual trigger is required,
+    not a nicety.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+    assert '"/api/devices/{id}/debloat"' in api, "no manual debloat endpoint registered"
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+    assert "/debloat`" in jsx, "the dashboard must be able to trigger it"

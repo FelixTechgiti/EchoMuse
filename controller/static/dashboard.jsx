@@ -953,6 +953,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [securing, setSecuring] = useState(false);
+  const [debloating, setDebloating] = useState(false);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -1037,6 +1038,21 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     } catch(e) { alert(e.error || 'Secure link failed'); }
     // Leave the button disabled briefly — transfer + reconnect takes ~10s.
     setTimeout(() => setSecuring(false), 15000);
+  }
+
+  async function doDebloat() {
+    // Re-applies both debloat halves: syncs the boot script and hides any
+    // package added to the list since this device was provisioned. Needed
+    // because the OTA-time sync cannot reach a device already running the
+    // latest firmware. Idempotent, and the daemon stops for PERSISTENT
+    // packages only take hold on the next reboot — hence the wording.
+    setDebloating(true);
+    try {
+      await API.post(`/api/devices/${device.device_id}/debloat`, {});
+      alert('Debloat re-applied. Newly hidden packages stop at the next device reboot — '
+            + 'watch the device log for details.');
+    } catch(e) { alert(e.error || 'Debloat failed'); }
+    setTimeout(() => setDebloating(false), 8000);
   }
 
   async function doUpdate() {
@@ -1313,10 +1329,21 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       const total = Object.keys(CONFIG_SECTIONS).length;
                       return n === 0 ? 'Fleet' : `Local override (${n} of ${total})`;
                     })())}
-                    {isAdmin && device.connected && !device.linkTls && (
-                      <div style={{ marginTop: 8 }}>
-                        <Pill small accent disabled={securing} onClick={doSecureLink}>
-                          {securing ? 'Securing…' : 'Secure link'}
+                    {isAdmin && device.connected && (
+                      <div style={{ marginTop: 8, display:'flex', gap:8, flexWrap:'wrap' }}>
+                        {!device.linkTls && (
+                          <Pill small accent disabled={securing} onClick={doSecureLink}>
+                            {securing ? 'Securing…' : 'Secure link'}
+                          </Pill>
+                        )}
+                        {/* Payload re-apply. Unlike Secure link this is always
+                            offered: there is no device state that says whether
+                            the debloat list has moved on since provisioning, and
+                            the operation is idempotent, so offering it costs
+                            nothing and hiding it would leave a device with no
+                            way to catch up. */}
+                        <Pill small disabled={debloating} onClick={doDebloat}>
+                          {debloating ? 'Applying…' : 'Re-apply debloat'}
                         </Pill>
                       </div>
                     )}
