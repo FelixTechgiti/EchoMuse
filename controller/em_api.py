@@ -1854,12 +1854,36 @@ async def _sync_debloat(live, device_id: str) -> None:
         return
     await asyncio.sleep(1.0)
 
+    # Two details here were learned by getting them wrong (2026-07-30).
+    #
+    # The list is iterated with `for` over a variable, NOT `while read < file`:
+    # `pm` is a wrapper that starts app_process, and a command inside a read
+    # loop can consume the loop's own stdin, silently ending it early. `pm hide`
+    # also gets </dev/null for the same reason.
+    #
+    # And the end state is VERIFIED by re-listing rather than trusting the
+    # return code of each hide, so a partial failure cannot read as success.
+    #
+    # The match is `grep -qx`, ANCHORED to the whole line, and that is the
+    # important part. A shell `case "$VIS" in *"package:$p"*)` looks equivalent
+    # and is not: `package:com.amazon.tcomm` is also a substring of
+    # `package:com.amazon.tcomm.client`, so three packages appeared un-hidden
+    # because a *different*, longer-named package was visible. That produced a
+    # confident warning about a FireOS limitation that did not exist — `pm hide`
+    # had worked, and dumpsys said hidden=true throughout.
     res = await _shell_run(live,
-        f'VIS=$(pm list packages); N=0; '
-        f'while read p; do '
-        f'case "$VIS" in *"package:$p"*) pm hide "$p" >/dev/null 2>&1 && N=$((N+1));; esac; '
-        f'done < {remote_list}; '
-        f'rm -f {remote_list}; echo HIDDEN_APPLIED:$N', timeout=120.0)
+        f'PKGS=$(cat {remote_list}); VIS=$(pm list packages); N=0; '
+        f'for p in $PKGS; do '
+        f'if echo "$VIS" | busybox grep -qx "package:$p"; then '
+        f'pm hide "$p" >/dev/null 2>&1 </dev/null && N=$((N+1)); fi; '
+        f'done; '
+        f'VIS2=$(pm list packages); LEFT=""; '
+        f'for p in $PKGS; do '
+        f'if echo "$VIS2" | busybox grep -qx "package:$p"; then LEFT="$LEFT $p"; fi; '
+        f'done; '
+        f'rm -f {remote_list}; '
+        f'echo HIDDEN_APPLIED:$N; echo STILL_VISIBLE:$LEFT', timeout=180.0)
+
     applied = 0
     for tok in res.split():
         if tok.startswith("HIDDEN_APPLIED:"):
@@ -1867,10 +1891,18 @@ async def _sync_debloat(live, device_id: str) -> None:
                 applied = int(tok.split(":", 1)[1])
             except ValueError:
                 pass
+    still = ""
+    for line in res.splitlines():
+        if line.strip().startswith("STILL_VISIBLE:"):
+            still = line.split(":", 1)[1].strip()
     if applied:
         await _push_log_event(device_id, "info", "controller",
                               f"debloat: hid {applied} newly-listed package(s) — "
                               f"persistent ones stop at the next device reboot")
+    if still:
+        await _push_log_event(device_id, "warn", "controller",
+                              f"debloat: {len(still.split())} package(s) could not be "
+                              f"hidden and are still active: {still}")
     await asyncio.sleep(1.0)
 
 
