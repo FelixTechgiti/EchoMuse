@@ -1977,6 +1977,16 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         "txDropped":     msg.get("txDropped"),
                         "rxCrcErrors":   msg.get("rxCrcErrors"),
                         "ble":           msg.get("ble"),
+                        # Thermals + CPU topology. coresOnline is not optional
+                        # context: cpuPct is a share of ONLINE capacity, so the
+                        # same work halves its percentage when hotplug adds a
+                        # core. thermalCoreLimit < coresTotal means the thermal
+                        # governor is capping capacity.
+                        "cpuTempC":         msg.get("cpuTempC"),
+                        "maxTempC":         msg.get("maxTempC"),
+                        "coresOnline":      msg.get("coresOnline"),
+                        "coresTotal":       msg.get("coresTotal"),
+                        "thermalCoreLimit": msg.get("thermalCoreLimit"),
                         # v13 on-device shadow window summary, absent when the
                         # device is not scoring (see the allowlist note above:
                         # DeviceStats, here, and the consumer below).

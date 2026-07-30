@@ -1216,7 +1216,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* STATUS */}
           {tab === 'status' && (() => {
             const s = device.stats || null;
-            const cpuText  = s?.cpuPct    != null ? `${s.cpuPct.toFixed(0)}%` : null;
+            // cpuPct comes from the aggregate /proc/stat line, so it is a
+            // share of ONLINE capacity — and MTK parks 3 of this SoC's 4 cores
+            // when idle. The same work reads as half the percentage once a
+            // second core comes up, so the core count belongs next to it or
+            // the number invites the wrong conclusion.
+            const cpuText  = s?.cpuPct != null
+              ? `${s.cpuPct.toFixed(0)}%` + (s.coresOnline ? ` · ${s.coresOnline}/${s.coresTotal ?? '?'} cores` : '')
+              : null;
+            // Thermals: mtktscpu is the CPU zone, maxTempC the hottest of all
+            // 11 zones (the PMIC and board sensors can run warmer). Amber past
+            // 70C, red past 85C — well below this SoC's limits, because the
+            // point is early warning. thermalCoreLimit below coresTotal means
+            // the thermal governor is already capping capacity, which is the
+            // signal that actually matters and shows up before temperature
+            // looks alarming.
+            const tempC    = s?.cpuTempC ?? null;
+            const tempHot  = s?.maxTempC ?? null;
+            const throttled = s?.thermalCoreLimit != null && s?.coresTotal != null
+                              && s.thermalCoreLimit < s.coresTotal;
             const ramText  = s?.memUsedMb != null ? `${s.memUsedMb} / ${s.memTotalMb} MB` : null;
             const ramPct   = s?.memTotalMb? s.memUsedMb/s.memTotalMb*100 : null;
             const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
@@ -1285,6 +1303,20 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                              : device.rttMs >= 1000 ? '#c0301a'
                              : device.rttMs >= 200  ? '#c0601a' : '#286040',
                       }}>{device.rttMs != null ? `${device.rttMs} ms` : '—'}</span>
+                    </div>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Temp</span>
+                      <span style={{
+                        fontFamily:"'DM Mono',monospace", fontSize:10,
+                        color: tempC == null ? 'var(--text2)'
+                             : tempC >= 85 ? '#c0301a'
+                             : tempC >= 70 ? '#c0601a' : '#286040',
+                      }}>
+                        {tempC != null
+                          ? `${tempC.toFixed(1)}°C` + (tempHot != null && tempHot > tempC + 1 ? ` · ${tempHot.toFixed(1)} peak` : '')
+                          : '—'}
+                        {throttled && <span style={{ color:'#c0301a' }}>{` · throttled ${s.thermalCoreLimit}/${s.coresTotal}`}</span>}
+                      </span>
                     </div>
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>

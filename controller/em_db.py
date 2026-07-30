@@ -565,6 +565,36 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '13' WHERE key = 'schema_version';
     """,
+
+    # ── v14 — thermals and CPU topology ─────────────────────────────────────
+    #
+    # cpu_temp_* / max_temp_max: this SoC has 11 thermal zones; mtktscpu is the
+    # CPU and the max-of-all catches a PMIC or board sensor running hotter than
+    # the CPU, which is where trouble shows up first.
+    #
+    # cores_online_* exists because cpu_pct is NOT self-describing: it comes
+    # from the aggregate /proc/stat line, so it is a share of ONLINE capacity,
+    # and MTK parks 3 of 4 cores when idle. The same absolute work reads as half
+    # the percentage once a second core comes up — so a cpu_pct series without
+    # the core count beside it can show a "drop" that is purely a change of
+    # divisor. cores_online_min is the interesting end: it is the tightest the
+    # device ever was.
+    #
+    # thermal_limit_min < cores_total means the thermal governor capped capacity
+    # at some point in the hour, which is the throttling signal that matters
+    # more than any single temperature.
+    """
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_sum     REAL    NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_samples INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_max     REAL;
+    ALTER TABLE device_metrics ADD COLUMN max_temp_max     REAL;
+    ALTER TABLE device_metrics ADD COLUMN cores_online_last INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN cores_online_min  INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN cores_total       INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN thermal_limit_min INTEGER;
+
+    UPDATE system_config SET value = '14' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1574,6 +1604,11 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     mem     = stats.get("memUsedMb")
     rssi    = stats.get("wifiRssi")
     link_speed = stats.get("linkSpeedMbps")
+    cpu_temp   = stats.get("cpuTempC")
+    max_temp   = stats.get("maxTempC")
+    cores_on   = stats.get("coresOnline")
+    cores_tot  = stats.get("coresTotal")
+    therm_lim  = stats.get("thermalCoreLimit")
     with _tx() as conn:
         conn.execute(
             """
@@ -1585,10 +1620,14 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 wifi_bssid_last, tx_bytes_sum, rx_bytes_sum,
                 tx_errors_sum, tx_dropped_sum, rx_crc_sum,
                 rtt_sum_ms, rtt_samples, rtt_min_ms, rtt_max_ms,
-                rtt_excursions, rtt_excursions_idle, rtt_samples_idle
+                rtt_excursions, rtt_excursions_idle, rtt_samples_idle,
+                cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
+                cores_online_last, cores_online_min, cores_total,
+                thermal_limit_min
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -1607,6 +1646,28 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 -- mid-hour should be visible as the new one); link_speed_min
                 -- keeps the worst PHY rate seen, which is the number that
                 -- matters when hunting a throughput collapse.
+                -- Thermals: sum/samples for a mean that ignores reports where
+                -- the sensor was unreadable, plus the peak. cores_online_min is
+                -- the tightest the device ever ran; thermal_limit_min below
+                -- cores_total means throttling happened this hour.
+                cpu_temp_sum     = cpu_temp_sum + excluded.cpu_temp_sum,
+                cpu_temp_samples = cpu_temp_samples + excluded.cpu_temp_samples,
+                cpu_temp_max     = MAX(COALESCE(cpu_temp_max, excluded.cpu_temp_max),
+                                       COALESCE(excluded.cpu_temp_max, cpu_temp_max)),
+                max_temp_max     = MAX(COALESCE(max_temp_max, excluded.max_temp_max),
+                                       COALESCE(excluded.max_temp_max, max_temp_max)),
+                cores_online_last = COALESCE(excluded.cores_online_last, cores_online_last),
+                cores_online_min  = CASE
+                    WHEN excluded.cores_online_min IS NULL THEN cores_online_min
+                    ELSE MIN(COALESCE(cores_online_min, excluded.cores_online_min),
+                             excluded.cores_online_min)
+                END,
+                cores_total       = COALESCE(excluded.cores_total, cores_total),
+                thermal_limit_min = CASE
+                    WHEN excluded.thermal_limit_min IS NULL THEN thermal_limit_min
+                    ELSE MIN(COALESCE(thermal_limit_min, excluded.thermal_limit_min),
+                             excluded.thermal_limit_min)
+                END,
                 link_speed_last  = COALESCE(excluded.link_speed_last, link_speed_last),
                 link_speed_min   = CASE
                     WHEN excluded.link_speed_min IS NULL THEN link_speed_min
@@ -1663,6 +1724,17 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 int(stats.get("rttExcursions") or 0),
                 int(stats.get("rttExcursionsIdle") or 0),
                 int(stats.get("rttSamplesIdle") or 0),
+                # Thermals. NULL, never 0, when a sensor was unreadable — a
+                # zeroed temperature would drag a mean down and read as a cool
+                # device, which is the wrong direction for a safety metric.
+                float(cpu_temp) if cpu_temp is not None else 0.0,
+                1 if cpu_temp is not None else 0,
+                float(cpu_temp) if cpu_temp is not None else None,
+                float(max_temp) if max_temp is not None else None,
+                int(cores_on) if cores_on else None,
+                int(cores_on) if cores_on else None,
+                int(cores_tot) if cores_tot else None,
+                int(therm_lim) if therm_lim else None,
             ),
         )
         conn.execute(
@@ -1698,6 +1770,20 @@ def get_device_metrics(device_id: str, since: float) -> list[dict]:
             # Link identity + throughput (v7). These were persisted but never
             # surfaced here, so the activity API could not answer "was the
             # link different when this went wrong?".
+            # Thermals + topology (v14). cpu_temp_avg divides by its OWN
+            # sample count, not `samples`: a report where the sensor was
+            # unreadable must not dilute the mean.
+            "cpu_temp_avg":      round(r["cpu_temp_sum"] / r["cpu_temp_samples"], 1) if r["cpu_temp_samples"] else None,
+            "cpu_temp_max":      r["cpu_temp_max"],
+            "max_temp_max":      r["max_temp_max"],
+            # cores_online is what makes cpu_avg legible — that percentage is a
+            # share of ONLINE capacity, so a series can appear to halve when
+            # only the divisor changed.
+            "cores_online_last": r["cores_online_last"],
+            "cores_online_min":  r["cores_online_min"],
+            "cores_total":       r["cores_total"],
+            # Below cores_total means the thermal governor capped capacity.
+            "thermal_limit_min": r["thermal_limit_min"],
             "link_speed_last":  r["link_speed_last"],
             "link_speed_min":   r["link_speed_min"],
             "wifi_freq_last":   r["wifi_freq_last"],

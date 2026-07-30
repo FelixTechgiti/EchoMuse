@@ -350,3 +350,60 @@ def test_shadow_counters_do_not_disturb_near_miss_columns(fresh_db):
     assert r["near_misses"] == 3
     assert r["near_miss_max"] == 0.44
     assert r["dev_frames"] == 10
+
+
+# ── v14 — thermals and CPU topology ──────────────────────────────────────────
+
+def test_migrates_to_v14(fresh_db):
+    assert int(db.get_config("schema_version")) >= 14
+
+
+def test_device_metrics_has_thermal_columns(fresh_db):
+    cols = _cols("device_metrics")
+    for c in ("cpu_temp_sum", "cpu_temp_samples", "cpu_temp_max", "max_temp_max",
+              "cores_online_last", "cores_online_min", "cores_total",
+              "thermal_limit_min"):
+        assert c in cols, f"device_metrics.{c} missing"
+
+
+def test_thermal_stats_relay_and_rollup(fresh_db):
+    """The relay guard: a device stat has to be named in DeviceStats (Go), the
+    em_controller allowlist AND here, or it is silently dropped. This covers
+    the third."""
+    db.record_device_stats("dev-t", {
+        "cpuPct": 25.0, "memUsedMb": 200, "cpuTempC": 33.0, "maxTempC": 34.2,
+        "coresOnline": 2, "coresTotal": 4, "thermalCoreLimit": 4,
+    })
+    db.record_device_stats("dev-t", {
+        "cpuPct": 51.0, "memUsedMb": 205, "cpuTempC": 39.0, "maxTempC": 41.0,
+        "coresOnline": 1, "coresTotal": 4, "thermalCoreLimit": 3,
+    })
+    m = db.get_device_metrics("dev-t", 0)[0]
+    assert m["cpu_temp_avg"] == 36.0, "mean of 33 and 39"
+    assert m["cpu_temp_max"] == 39.0
+    assert m["max_temp_max"] == 41.0
+    assert m["cores_online_last"] == 1
+    assert m["cores_online_min"] == 1, "the tightest the device ever ran"
+    assert m["cores_total"] == 4
+    assert m["thermal_limit_min"] == 3, "throttling happened this hour"
+
+
+def test_unreadable_temp_does_not_dilute_the_mean(fresh_db):
+    """A missing sensor reading must be skipped, not counted as 0C — averaging
+    a zero in reads as a cool device, which is the wrong direction for a metric
+    whose whole job is to warn."""
+    db.record_device_stats("dev-u", {"cpuPct": 20.0, "cpuTempC": 40.0})
+    db.record_device_stats("dev-u", {"cpuPct": 20.0})  # sensor unreadable
+    m = db.get_device_metrics("dev-u", 0)[0]
+    assert m["samples"] == 2
+    assert m["cpu_temp_avg"] == 40.0, "one temp sample, not 20.0"
+
+
+def test_metrics_without_thermals_stay_null(fresh_db):
+    """Older firmware sends no thermal fields; those must read as absent rather
+    than as a 0C device with 0 cores."""
+    db.record_device_stats("dev-old", {"cpuPct": 22.0, "memUsedMb": 180})
+    m = db.get_device_metrics("dev-old", 0)[0]
+    assert m["cpu_temp_avg"] is None
+    assert m["cores_online_last"] is None
+    assert m["thermal_limit_min"] is None

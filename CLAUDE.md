@@ -233,6 +233,44 @@ reproduces Python and reports the real CPU cost. It costs ~38% of one core
 permanently on top of the ~18-20% mic-pipeline baseline, so **enable it on one
 device at a time**.
 
+## CPU topology, thermals and why `cpuPct` lies
+
+The MT8163 is a **quad-core** Cortex-A53 (`/sys/devices/system/cpu/present` =
+`0-3`) and MediaTek's hotplug strategy parks all but cpu0 when idle. So
+`/proc/cpuinfo` showing one processor is a **power state, not a limit** — a
+mistake worth not making twice, because it turns a comfortable measurement into
+an apparent ceiling.
+
+HPS (`/proc/hps/`) governs it: `up_threshold=80` / `up_times=2` bring another
+core online after two samples above 80% utilisation, `down_threshold=70` /
+`down_times=20` park it again (slowly), `rush_boost_threshold=98`,
+`input_boost_cpu_num=2` boosts on button presses. cpu0 runs at 1.3GHz — its
+maximum — under the `interactive` governor, so no frequency headroom is being
+withheld. The `num_limit_*` files are ceilings (all 4 = nothing capping);
+**`num_base_perf_serv` is the FLOOR**, and the firmware raises it to 2 at
+startup (`applyCoreFloor`). That is deliberate: the mic pipeline has a hard
+160ms deadline and now shares a core with wake word inference running in ~31ms
+bursts, and a floor of 2 lets them run in parallel instead of relying on
+hotplug reacting to a burst that has already begun. It is procfs, so it does
+not survive a reboot — hence applying it in the binary, which re-applies every
+start. Do NOT write `cpu1/online` directly: HPS re-parks it within
+`down_times`, giving a setting that appears to work and silently stops.
+
+**`cpuPct` is a share of ONLINE capacity**, derived from the aggregate
+`/proc/stat` line. The same absolute work therefore reads as *half* the
+percentage once a second core comes up — measured on Lounge, 51% on one core
+became 25.5% on two with the workload unchanged. Always read it next to
+`coresOnline`; a `cpu_avg` series without the core count can show a "drop" that
+is purely a change of divisor. That is why both are reported and persisted.
+
+Thermals: 11 zones. `mtktscpu` is the CPU/SoC (reported as `cpuTempC`),
+`mtktspmic` the PMIC and `tmp103` a discrete board sensor; `maxTempC` is the
+hottest of all of them, because trouble does not always appear on the zone you
+thought to watch. Idle sits at 31–34°C, nowhere near throttling.
+**`thermalCoreLimit` (`num_limit_thermal`) is the sharpest throttling signal
+this SoC offers** — below `coresTotal` means the governor is already capping
+capacity, which bites well before any temperature reading looks alarming.
+
 ## Persistent activity stats
 
 Every voice turn is persisted to SQLite at completion (`turns` table, `db.insert_turn` from `em_esphome`): trigger, wake model/score/threshold, room noise floor at detection, outcome, STT text, stage latencies, and playback underruns.
