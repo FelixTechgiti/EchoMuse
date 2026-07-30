@@ -257,7 +257,7 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
-		applyShadowConfig(dataClient, controlClient)
+		applyShadowConfig(dataClient, controlClient, pcmSpeaker)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -467,6 +467,7 @@ func shadowStats(dc *client.DataClient) interface{} {
 		"notReady":  st.NotReady,
 		"crossings": st.Crossings,
 		"maxScore":  st.MaxScore,
+		"threshold": st.Threshold,
 		"errors":    st.Errors,
 		"lastErr":   st.LastErr,
 		"ready":     sc.Ready(),
@@ -819,7 +820,8 @@ var shadowState struct {
 // reports until someone puts them there. It is logged once per distinct reason
 // rather than on every config push, and the device carries on with
 // controller-side wake word exactly as before.
-func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient) {
+func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
+	spk *speaker.PcmSpeaker) {
 	snap := config.Get().Snapshot()
 	mode, model := snap.OwwOnDevice, snap.OwwModel
 	threshold := float32(snap.OwwThreshold)
@@ -833,9 +835,14 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient) {
 		return
 	}
 
-	// Already running for this model: only the threshold can change live.
+	// Already running for this model: thresholds can change live.
 	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
 		sc.SetThreshold(threshold)
+		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
+			sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
+		} else {
+			sc.SetBargeThreshold(0, nil)
+		}
 		return
 	}
 
@@ -850,6 +857,12 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient) {
 		dc.SetShadowScorer(nil)
 		shadowState.mode, shadowState.model = mode, model
 		return
+	}
+	// Mirror the controller's barge-in behaviour: while the speaker is
+	// streaming its wake bar drops to bargeInThreshold, and a device scoring
+	// against the normal threshold would disagree on every barge-in.
+	if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
+		sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
 	}
 	dc.SetShadowScorer(sc)
 	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""

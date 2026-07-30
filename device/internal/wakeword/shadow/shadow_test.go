@@ -311,3 +311,102 @@ func (s *Scorer) peek() Stats {
 	defer s.mu.Unlock()
 	return s.stats
 }
+
+// TestBargeThresholdAppliesOnlyWhileSpeaking is the fix for the bug that made
+// every barge-in look like an on-device miss: the controller lowers its wake bar
+// to bargeInThreshold during playback (echo at the mic is ~25dB louder than the
+// person, so speech-over-TTS scores are depressed), and a device scoring against
+// the normal threshold is not answering the same question.
+func TestBargeThresholdAppliesOnlyWhileSpeaking(t *testing.T) {
+	var speaking bool
+	var mu sync.Mutex
+	var crosses int
+
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetBargeThreshold(0.10, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return speaking
+	})
+
+	// A score of 0.2 is below the normal bar and above the barge bar.
+	inf.set(0.2, 0)
+	pushAll(t, s, wakeword.FeatWindow+2)
+	mu.Lock()
+	got := crosses
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("crossed at 0.2 with the speaker idle (bar should be 0.5)")
+	}
+	if thr := s.peek().Threshold; thr != 0.5 {
+		t.Errorf("reported threshold %v while idle, want 0.5", thr)
+	}
+
+	// Now the speaker is streaming: the same score must cross.
+	mu.Lock()
+	speaking = true
+	mu.Unlock()
+	s.Drain()
+	pushAll(t, s, 3)
+	waitFor(t, "a barge crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses >= 1
+	})
+	if thr := s.peek().Threshold; thr != 0.10 {
+		t.Errorf("reported threshold %v while speaking, want 0.10", thr)
+	}
+}
+
+// TestBargeThresholdIgnoredWhenUnset keeps an un-configured scorer behaving
+// exactly as before — a controller that never sends a barge threshold must not
+// change the device's behaviour.
+func TestBargeThresholdIgnoredWhenUnset(t *testing.T) {
+	inf := &fakeInferer{}
+	var fired int
+	var mu sync.Mutex
+	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	})
+	defer s.Close()
+	// Speaker "active", but no barge threshold configured.
+	s.SetBargeThreshold(0, func() bool { return true })
+	inf.set(0.2, 0)
+	pushAll(t, s, wakeword.FeatWindow+2)
+	mu.Lock()
+	defer mu.Unlock()
+	if fired != 0 {
+		t.Errorf("crossed at 0.2 with no barge threshold set")
+	}
+}
+
+// TestBargeThresholdNeverRaisesTheBar: if someone configures a barge threshold
+// ABOVE the normal one, the normal one still wins. The barge threshold exists to
+// make detection easier during playback, never harder.
+func TestBargeThresholdNeverRaisesTheBar(t *testing.T) {
+	inf := &fakeInferer{}
+	var fired int
+	var mu sync.Mutex
+	s := NewScorer(inf, 0.3, func(float32, time.Time) {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetBargeThreshold(0.9, func() bool { return true })
+	inf.set(0.4, 0) // above the normal 0.3, below the misconfigured 0.9
+	pushAll(t, s, wakeword.FeatWindow+2)
+	waitFor(t, "a crossing at the normal threshold", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return fired >= 1
+	})
+}

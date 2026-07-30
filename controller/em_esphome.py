@@ -1644,6 +1644,10 @@ async def _persist_turn(device, turn_record: dict) -> None:
         turn_record["dev_shadow"]        = 1 if device.shadow.active else None
         turn_record["dev_wake_score"]    = dev_score
         turn_record["dev_wake_delta_ms"] = dev_delta
+        # The bar the DEVICE was using. Without it a non-crossing cannot be
+        # judged: this controller may have woken at a lower barge-in threshold,
+        # which the device was never asked to match.
+        turn_record["dev_threshold"]     = device.shadow.threshold
         if device.shadow.active:
             log.info(
                 f"[{device.device_id}] shadow comparison: controller "

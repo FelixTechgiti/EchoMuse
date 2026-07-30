@@ -394,6 +394,23 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 	}
 }
 
+// IsStreaming reports whether a 0x02 stream is currently mid-flight.
+//
+// Added for on-device wake word scoring: while the speaker is playing, the
+// controller lowers its wake threshold to bargeInThreshold, because echo at the
+// mic is ~25dB louder than the person and speech-over-TTS scores are depressed.
+// The device has to know when it is playing in order to mirror that, or it
+// disagrees with the controller on every barge-in.
+//
+// Reads under stateMu rather than an atomic on purpose: streamActive is one half
+// of a pair guarded together with `discarding` (see the field comment), and
+// reading it outside that lock is what the pairing exists to prevent.
+func (p *PcmSpeaker) IsStreaming() bool {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.streamActive
+}
+
 // EndStream marks the in-flight stream as complete. Called by the WS client
 // on the 0x03 EOS frame — always after every 0x02 period of that stream has
 // already been handed to PumpPeriod (frames are processed sequentially on

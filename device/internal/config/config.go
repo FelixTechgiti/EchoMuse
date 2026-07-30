@@ -30,6 +30,15 @@ type Device struct {
 	// Wake word
 	OwwThreshold float64
 	OwwModel     string
+	// BargeInEnabled / BargeInThreshold mirror the controller's barge-in
+	// settings. The device needs them for on-device scoring: while the speaker
+	// is streaming, the controller lowers its wake bar to BargeInThreshold
+	// (echo at the mic is ~25dB louder than the person, so speech-over-TTS
+	// scores are depressed). A device scoring against the normal threshold
+	// during playback is not answering the same question, which made every
+	// barge-in look like an on-device miss.
+	BargeInEnabled   bool
+	BargeInThreshold float64
 	// OwwOnDevice selects on-device wake word scoring: "off" or "shadow".
 	// Shadow mode scores the wake stream locally and reports what it would
 	// have detected, without acting on it, so device and controller can be
@@ -110,6 +119,7 @@ func (d *Device) loadDefaults() {
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.3)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
+	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.10)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -154,6 +164,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwOnDevice != "" {
 		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
+	}
+	if msg.BargeInEnabled != nil {
+		d.BargeInEnabled = *msg.BargeInEnabled
+	}
+	if msg.BargeInThreshold > 0 {
+		d.BargeInThreshold = msg.BargeInThreshold
 	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
@@ -201,6 +217,9 @@ func (d *Device) Snapshot() ConfigMessage {
 	// writing the same bool on a config push. Copy to a local like
 	// beamAngle/agcEnabled above.
 	beamformingEnabled := d.BeamformingEnabled
+	// Same reason as beamformingEnabled above: copy, never point into the
+	// mutex-guarded struct.
+	bargeInEnabled := d.BargeInEnabled
 	agcEnabled := true
 	if d.AgcEnabled != nil {
 		agcEnabled = *d.AgcEnabled
@@ -222,6 +241,8 @@ func (d *Device) Snapshot() ConfigMessage {
 		OwwThreshold:       d.OwwThreshold,
 		OwwModel:           d.OwwModel,
 		OwwOnDevice:        d.OwwOnDevice,
+		BargeInEnabled:     &bargeInEnabled,
+		BargeInThreshold:   d.BargeInThreshold,
 		StartupVolume:      d.StartupVolume,
 		AdcDigitalGain:     d.AdcDigitalGain,
 		AdcMicpga:          d.AdcMicpga,
@@ -250,6 +271,8 @@ type ConfigMessage struct {
 	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
 	OwwModel           string   `json:"owwModel,omitempty"`
 	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
+	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`

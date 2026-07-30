@@ -1542,7 +1542,17 @@ async def wake_word_listener(device: Device):
                         device.last_wake = {
                             "model":       model_key,
                             "score":       round(float(score), 4),
-                            "threshold":   device.oww_threshold,
+                            # The EFFECTIVE threshold this wake actually cleared,
+                            # not the nominal one. During playback with barge-in
+                            # enabled the bar drops to bargeInThreshold, and
+                            # recording 0.5 there produced rows that contradicted
+                            # themselves — wake_score 0.055 against
+                            # wake_threshold 0.5, i.e. "woke below its own bar"
+                            # (present in the data since at least 2026-07-25).
+                            # It is also what lets the on-device comparison tell
+                            # a real miss from a wake the device was never asked
+                            # to look for.
+                            "threshold":   round(float(eff_threshold), 4),
                             "noise_floor": round(device.noise_floor, 5),
                         }
                         device.oww_paused.set()
@@ -2013,6 +2023,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     # reading as a miss.
                     _sh = msg.get("owwShadow") or {}
                     device.shadow.active = bool(_sh)
+                    if _sh and _sh.get("threshold"):
+                        try:
+                            device.shadow.threshold = float(_sh["threshold"])
+                        except (TypeError, ValueError):
+                            pass
                     if _sh:
                         if _sh.get("drops") or _sh.get("errors"):
                             log.warning(

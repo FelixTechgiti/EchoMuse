@@ -595,6 +595,24 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '14' WHERE key = 'schema_version';
     """,
+
+    # ── v15 — the device's own wake threshold, per turn ─────────────────────
+    #
+    # Needed to tell a real on-device miss from a comparison that was never
+    # valid. The controller lowers its wake bar to bargeInThreshold while the
+    # speaker is playing (echo at the mic is ~25dB louder than the person), so
+    # a turn that fired at 0.055 was not something a device scoring against
+    # 0.5 could have caught. Before this, those were counted as misses and the
+    # agreement figure was pessimistic.
+    #
+    # NULL means the device did not report a threshold (firmware predating it),
+    # in which case the turn is counted as neither agreed nor missed rather
+    # than guessed at.
+    """
+    ALTER TABLE turns ADD COLUMN dev_threshold REAL;
+
+    UPDATE system_config SET value = '15' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1402,6 +1420,9 @@ _TURN_COLUMNS = {
     "dev_wake_score":    "dev_wake_score",
     "dev_wake_delta_ms": "dev_wake_delta_ms",
     "dev_shadow":        "dev_shadow",
+    # v15 — the threshold the device was scoring against, so a non-crossing can
+    # be judged rather than assumed to be a miss.
+    "dev_threshold":     "dev_threshold",
     # v12 — filename of the saved utterance WAV, written by set_turn_audio
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.

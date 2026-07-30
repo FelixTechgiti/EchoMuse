@@ -407,3 +407,40 @@ def test_metrics_without_thermals_stay_null(fresh_db):
     assert m["cpu_temp_avg"] is None
     assert m["cores_online_last"] is None
     assert m["thermal_limit_min"] is None
+
+
+# ── v15 — the device's own threshold, per turn ────────────────────────────────
+
+def test_migrates_to_v15(fresh_db):
+    assert int(db.get_config("schema_version")) >= 15
+
+
+def test_turns_has_dev_threshold(fresh_db):
+    assert "dev_threshold" in _cols("turns")
+
+
+def test_barge_in_turn_records_the_threshold_it_actually_cleared(fresh_db):
+    """
+    A wake that fires during playback clears bargeInThreshold, not owwThreshold.
+    Recording the nominal 0.5 produced rows that contradicted themselves —
+    wake_score 0.055 against wake_threshold 0.5, i.e. "woke below its own bar" —
+    and left the on-device comparison unable to tell a real miss from a question
+    the device was never asked.
+    """
+    turn_id = db.insert_turn("dev-b", {
+        "ts": 1_800_000_100,
+        "trigger": "wakeword(0.055)",
+        "wake_score": 0.055,
+        "wake_threshold": 0.05,   # the barge bar it cleared, not the nominal 0.5
+        "dev_shadow": 1,
+        "dev_threshold": 0.5,     # what the device was scoring against
+        "dev_wake_score": None,   # so it did not cross — but fairly so
+        "outcome": "ok",
+    })
+    r = db._q("SELECT * FROM turns WHERE id = ?", (turn_id,))[0]
+    assert r["wake_score"] >= r["wake_threshold"], \
+        "a turn must not record a score below the threshold it cleared"
+    assert r["dev_threshold"] == 0.5
+    # The comparison logic in em_api treats this as NOT comparable, because the
+    # controller's bar (0.10) is below the device's (0.5).
+    assert r["wake_threshold"] < r["dev_threshold"]

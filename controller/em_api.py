@@ -579,14 +579,36 @@ async def _get_device_activity(request: web.Request) -> web.Response:
     # Denominator is turns where the device was KNOWN to be scoring
     # (dev_shadow=1); a NULL score on those is a genuine miss, whereas a NULL
     # anywhere else is absence of data and must not be counted either way.
-    compared   = [t for t in turns if (t["dev_shadow"] or 0) == 1]
+    scoring    = [t for t in turns if (t["dev_shadow"] or 0) == 1]
+    # A turn is only COMPARABLE if the device was scoring against a bar this
+    # controller's wake would have cleared. During playback the controller drops
+    # to bargeInThreshold, so a turn that fired at 0.055 was never something a
+    # device scoring against 0.5 could have caught — counting those as misses
+    # made the agreement figure pessimistic, which is how this was found.
+    # A device that reports no threshold (older firmware) is also not comparable:
+    # unknown, rather than guessed at.
+    def _comparable(t) -> bool:
+        dev_thr = t["dev_threshold"]
+        if dev_thr is None:
+            return False
+        wake_thr = t["wake_threshold"]
+        return wake_thr is not None and wake_thr >= dev_thr
+
+    compared   = [t for t in scoring if _comparable(t)]
+    incomparable = len(scoring) - len(compared)
     agreed     = [t for t in compared if t["dev_wake_score"] is not None]
     deltas     = sorted(t["dev_wake_delta_ms"] for t in agreed
                         if t["dev_wake_delta_ms"] is not None)
     dev_scores = [t["dev_wake_score"] for t in agreed]
     crossings  = sum(r["dev_crossings"] or 0 for r in counters)
     shadow_out = {
+        "turns_scoring":  len(scoring),
         "turns_compared": len(compared),
+        # Turns where the device was scoring but the comparison is not valid —
+        # the controller used a lower (barge-in) bar, or the device's threshold
+        # is unknown. Reported rather than hidden: a large number here means the
+        # agreement figure is describing a small slice of reality.
+        "not_comparable": incomparable,
         "agreed":         len(agreed),
         "missed":         len(compared) - len(agreed),
         "agreement_pct":  round(100.0 * len(agreed) / len(compared), 1) if compared else None,

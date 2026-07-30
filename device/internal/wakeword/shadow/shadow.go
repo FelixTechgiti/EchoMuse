@@ -55,6 +55,13 @@ type Stats struct {
 	// MaxScore is the highest score seen. This is the number that says whether
 	// a device is nearly detecting or nowhere close.
 	MaxScore float32
+	// Threshold is the crossing threshold in force at the end of the window.
+	// Reported because the controller cannot judge a non-crossing without it:
+	// during playback the controller lowers its own bar to the barge-in
+	// threshold, and a device scoring against the normal one was never asked
+	// the same question. Without this the comparison records every barge-in as
+	// an on-device miss.
+	Threshold float32
 	// Errors counts inference failures, with the most recent message. An
 	// inference error is not fatal here: the scorer keeps going, because
 	// losing shadow data is always preferable to losing the audio path.
@@ -66,8 +73,14 @@ type Stats struct {
 type Scorer struct {
 	det       *wakeword.Detector
 	threshold float32
-	refract   time.Duration
-	onCross   func(score float32, at time.Time)
+	// bargeThreshold is used instead of threshold while the speaker is
+	// streaming, mirroring the controller's own effective threshold. Zero
+	// disables the behaviour, so a controller that never sends one leaves the
+	// scorer exactly as it was.
+	bargeThreshold float32
+	speakerActive  func() bool
+	refract        time.Duration
+	onCross        func(score float32, at time.Time)
 
 	ch   chan []int16
 	done chan struct{}
@@ -112,6 +125,31 @@ func (s *Scorer) SetThreshold(t float32) {
 	s.mu.Lock()
 	s.threshold = t
 	s.mu.Unlock()
+}
+
+// SetBargeThreshold sets the threshold used while the speaker is streaming, and
+// the predicate for "is it streaming". Pass 0 (or a nil predicate) to score
+// against the normal threshold at all times.
+//
+// This mirrors the controller: echo at the mic is ~25dB louder than the person,
+// so speech-over-TTS scores are depressed and the controller drops its bar to
+// bargeInThreshold during playback. A device that did not do the same would
+// disagree with the controller on every barge-in — and did, which is how this
+// was found.
+func (s *Scorer) SetBargeThreshold(t float32, active func() bool) {
+	s.mu.Lock()
+	s.bargeThreshold = t
+	s.speakerActive = active
+	s.mu.Unlock()
+}
+
+// effectiveThreshold picks the bar currently in force. Caller holds mu.
+func (s *Scorer) effectiveThresholdLocked() float32 {
+	if s.bargeThreshold > 0 && s.speakerActive != nil && s.speakerActive() &&
+		s.bargeThreshold < s.threshold {
+		return s.bargeThreshold
+	}
+	return s.threshold
 }
 
 // Push queues one chunk of 16kHz mono PCM. It never blocks and never fails:
@@ -210,7 +248,8 @@ func (s *Scorer) run() {
 		s.mu.Lock()
 		reset := s.resetReq
 		s.resetReq = false
-		threshold := s.threshold
+		threshold := s.effectiveThresholdLocked()
+		s.stats.Threshold = threshold
 		s.mu.Unlock()
 
 		if reset {

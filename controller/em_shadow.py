@@ -73,6 +73,12 @@ class ShadowTracker:
         # NULL score cannot make on its own, and the reason turns store a
         # dev_shadow flag alongside the score.
         self.active: bool = False
+        # The crossing threshold the device last reported it was using. Needed
+        # to judge a NON-crossing: the controller drops its own bar to
+        # bargeInThreshold during playback, and a device scoring against the
+        # normal threshold was never asked the same question. Without this,
+        # every barge-in was recorded as an on-device miss.
+        self.threshold: float | None = None
 
     def record_cross(self, score, age_ms, at_now: float | None = None) -> bool:
         """

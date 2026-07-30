@@ -214,6 +214,20 @@ Three things are load-bearing:
   converts against its own monotonic clock — same reasoning as the RTT
   instrumentation.
 
+**Thresholds must match or the comparison is meaningless.** The controller drops
+its wake bar to `bargeInThreshold` while the speaker is streaming (echo at the
+mic is ~25dB louder than the person, so speech-over-TTS scores are depressed), so
+the device mirrors that: `shadow.Scorer.SetBargeThreshold` uses the lower bar
+while `PcmSpeaker.IsStreaming()` is true, and never *raises* the bar if
+misconfigured above the normal one. The device reports the threshold in force
+with each window summary; it lands on the turn as `dev_threshold` (schema v15).
+`turns.wake_threshold` now records the **effective** threshold the wake actually
+cleared, not the nominal one — recording 0.5 for a wake that fired at 0.055 made
+rows self-contradictory (present in data since at least 2026-07-25) and made
+every barge-in look like an on-device miss. The activity rollup therefore reports
+three buckets, not two: agreed, missed, and **not_comparable** (controller used a
+lower bar, or the device's threshold is unknown).
+
 Correlation (`em_shadow.ShadowTracker`, schema v13) happens at turn-persist
 time, not at detection: the crossing report can land after the wake it belongs
 to, and by turn end it has had seconds to arrive. The nearest crossing within
