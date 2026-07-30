@@ -945,6 +945,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
   const [localFile, setLocalFile] = useState(null);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(device.label || '');
@@ -1513,66 +1514,79 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </Pill>
                   </div>
                 </div>
-                {/* What the update actually changes. Deciding whether to push
-                    firmware to a device you rely on, from a version number
-                    alone, is a guess rather than a decision — so the notes are
-                    shown here, at the point of that decision, and only when
-                    there is something to decide.
+                {/* Action bar, directly under the version it acts on.
+                    "Push update" used to live in its own panel BELOW this one,
+                    so reaching the button people come to this tab to press
+                    meant scrolling past everything else — and putting release
+                    notes above it made that worse. Reads top to bottom as
+                    state, then act, then detail. */}
+                <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginTop:16 }}>
+                  <Pill accent={device.connected && !pushing && needsUpdate}
+                        disabled={!device.connected || pushing || !needsUpdate}
+                        onClick={doUpdate}>
+                    {pushing && !localFile ? 'Updating…'
+                      : needsUpdate ? `Update to ${release?.version || 'latest'}` : 'Up to date'}
+                  </Pill>
+                  {device.firmware_previous && (
+                    <Pill disabled={!device.connected || pushing} onClick={doRollback}>
+                      Roll back to {device.firmware_previous}
+                    </Pill>
+                  )}
+                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', lineHeight:1.5, flex:'1 1 220px', minWidth:0 }}>
+                    A/B slots — the previous binary stays available, and the device
+                    rolls itself back if an update fails to start.
+                  </span>
+                </div>
 
-                    Rendered as preformatted text on purpose: the body is
-                    markdown, no markdown renderer is bundled (React and xterm
-                    are the only vendored libs), and pulling one in to style a
-                    release note would be a poor trade. Simply-written notes
-                    read fine as text, and the GitHub link is there for the
-                    rest. */}
+                {/* Release notes, collapsed to one line: a click from the
+                    decision, never in front of the action. Same disclosure
+                    idiom as the Advanced sections.
+
+                    Preformatted rather than rendered markdown on purpose —
+                    React and xterm are the only vendored libraries, and adding
+                    a markdown renderer to style a release note is a poor
+                    trade. Simply-written notes read fine as text, and the
+                    GitHub link covers the rest. */}
                 {needsUpdate && release?.notes && (
-                  <div style={{ marginTop:14, paddingTop:14, borderTop:'1px solid rgba(0,0,0,0.08)' }}>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:8 }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>
-                        What&apos;s in {release.version}
-                      </span>
+                  <div style={{ marginTop:14, borderTop:'1px solid rgba(0,0,0,0.08)', paddingTop:10 }}>
+                    <div onClick={() => setNotesOpen(o => !o)} style={{
+                      fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                      textTransform:'uppercase', letterSpacing:'0.15em', cursor:'pointer',
+                      userSelect:'none', display:'flex', alignItems:'center', gap:6,
+                    }}>
+                      <span>{notesOpen ? '▾' : '▸'}</span>
+                      What&apos;s in {release.version}
                       {release.published_at && (
-                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                        <span style={{ marginLeft:'auto', letterSpacing:0, textTransform:'none' }}>
                           {new Date(release.published_at).toLocaleDateString()}
                         </span>
                       )}
                     </div>
-                    <pre style={{
-                      fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.65,
-                      color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
-                      margin:0, maxHeight:260, overflowY:'auto',
-                    }}>{release.notes}</pre>
-                    {release.release_url && (
-                      <a href={release.release_url} target="_blank" rel="noreferrer"
-                         style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
-                                  display:'inline-block', marginTop:8 }}>
-                        View release on GitHub →
-                      </a>
+                    {notesOpen && (
+                      <>
+                        <pre style={{
+                          fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.65,
+                          color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
+                          margin:'12px 0 0', maxHeight:320, overflowY:'auto',
+                        }}>{release.notes}</pre>
+                        {release.release_url && (
+                          <a href={release.release_url} target="_blank" rel="noreferrer"
+                             style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                                      display:'inline-block', marginTop:8 }}>
+                            View release on GitHub →
+                          </a>
+                        )}
+                      </>
                     )}
                   </div>
                 )}
               </Panel>
 
-              {/* Deploy sources, side by side */}
-              <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
-                <Panel label="GitHub Release">
-                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
-                    Deploy the latest tagged release build to this device. A/B slots — the previous binary stays available for rollback.
-                  </div>
-                  <div style={{ display:'flex', gap:10 }}>
-                    <Pill accent={device.connected && !pushing && needsUpdate}
-                          disabled={!device.connected || pushing || !needsUpdate}
-                          onClick={doUpdate}>
-                      {pushing && !localFile ? 'Updating…' : 'Push update'}
-                    </Pill>
-                    {device.firmware_previous && (
-                      <Pill disabled={!device.connected || pushing} onClick={doRollback}>
-                        Roll back
-                      </Pill>
-                    )}
-                  </div>
-                </Panel>
-
+              {/* The GitHub Release panel that used to sit here held one
+                  button, which now lives beside the version state above.
+                  Local Build remains as the developer path — correctly
+                  secondary, and no longer competing for the top half. */}
+              <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr', gap:16 }}>
                 <Panel label="Local Build">
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
                     Deploy a binary compiled on your machine (device/build/server from compile.sh).
