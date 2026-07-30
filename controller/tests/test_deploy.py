@@ -154,3 +154,39 @@ def test_debloat_reachable_without_an_ota():
     assert '"/api/devices/{id}/debloat"' in api, "no manual debloat endpoint registered"
     jsx = (root / "static" / "dashboard.jsx").read_text()
     assert "/debloat`" in jsx, "the dashboard must be able to trigger it"
+
+
+def test_stale_release_cache_is_not_returned_when_it_has_aged_out():
+    """
+    _get_cached_release used to fire a refresh into the background and return
+    the STALE value. Two consequences, both seen on 2026-07-30: the dashboard
+    reported "there's an update" only after someone pressed Check now, and an
+    OTA pushed v2.9.9 while v2.9.10 was the current release.
+
+    The refresh is now awaited when the DB cache has aged past the check
+    interval, falling back to the stale value only if the fetch fails.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    fn = api[api.index("async def _get_cached_release"):]
+    fn = fn[:fn.index("\nasync def ", 1)]
+
+    assert "await _fetch_latest_release()" in fn, \
+        "an aged-out cache must be refreshed synchronously, not in the background"
+    assert "asyncio.create_task(_fetch_latest_release())" not in fn, \
+        "fire-and-forget refresh returns the stale value to this caller"
+
+
+def test_release_change_is_pushed_to_open_dashboards():
+    """A tab already showing the Updates panel should not sit on the old
+    version until someone reloads."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+    assert '"type":         "release_update"' in api or '"release_update"' in api, \
+        "a release change must be broadcast on the event stream"
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+    # And the tab must keep asking, as a fallback for a missed event.
+    upd = jsx[jsx.index("if (tab !== 'updates') return;"):]
+    assert "setInterval" in upd[:600], \
+        "the Updates tab must refresh while open, not fetch once on entry"

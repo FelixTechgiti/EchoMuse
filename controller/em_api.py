@@ -2676,10 +2676,26 @@ async def _get_cached_release() -> Optional[dict]:
         }
         _release_cache_ts = time.monotonic()
 
-        # Re-poll in background if DB cache is older than check interval
+        # If the DB cache has aged out, AWAIT the refresh rather than firing it
+        # into the background and returning the stale value.
+        #
+        # Returning stale here is why "there's an update" showed up
+        # inconsistently and why an OTA could push the previous release: the
+        # caller — dashboard or update endpoint — got the old version and the
+        # fresh one only landed in the cache afterwards, for whoever asked
+        # next. It cost one wrong OTA (v2.9.9 pushed while v2.9.10 was
+        # current, 2026-07-30).
+        #
+        # The cost is a single GitHub round trip, bounded by the 10s timeout in
+        # _fetch_latest_release, and only on the first request after the
+        # interval lapses — release_poll_loop normally refreshes ahead of any
+        # caller. A failed refresh falls through to the stale cache, which is
+        # better than no answer.
         interval = int(db.get_config("update_check_interval", "3600") or 3600)
         if not last_check or (time.time() - float(last_check)) > interval:
-            asyncio.create_task(_fetch_latest_release())
+            fresh = await _fetch_latest_release()
+            if fresh:
+                return fresh
 
         return _release_cache
 
@@ -2750,6 +2766,8 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         # .github/workflows/release.yml), which is why tags are annotated.
         notes = (release.get("body") or "").strip()
 
+        previous_tag = db.get_config("latest_version")
+
         # Persist to DB
         db.set_config("latest_version",    tag)
         db.set_config("latest_binary_url", download_url)
@@ -2769,6 +2787,18 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         _release_cache_ts = time.monotonic()
 
         log.info(f"[api] Latest release: {tag}")
+        if tag != previous_tag:
+            # Tell any open dashboard, so a tab that is already showing the
+            # Updates panel does not sit on the old version until someone
+            # reloads or presses Check now.
+            log.info(f"[api] Release changed {previous_tag or '(none)'} -> {tag}")
+            await _push_event({
+                "type":         "release_update",
+                "version":      tag,
+                "notes":        notes,
+                "release_url":  release.get("html_url") or "",
+                "published_at": release.get("published_at") or "",
+            })
         return _release_cache
 
     except Exception as e:

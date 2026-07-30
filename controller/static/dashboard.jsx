@@ -975,6 +975,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }, [tab, device.device_id]);
 
+  // Keep asking while the Updates tab is open.
+  //
+  // It used to fetch exactly once on tab entry, so a tab left open never
+  // learned about a new release and "there's an update" appeared to require
+  // pressing Check now. The Activity tab already refreshes on a timer for the
+  // same reason; this is that pattern. 30s rather than Activity's 10s because
+  // releases are hours apart, and the server side now returns fresh data
+  // rather than a stale cache, so each poll is worth something.
+  useEffect(() => {
+    if (tab !== 'updates') return;
+    let live = true;
+    const iv = setInterval(() => {
+      API.get('/api/releases/latest')
+        .then(r => { if (live) setRelease(r); })
+        .catch(() => {});
+    }, 30000);
+    return () => { live = false; clearInterval(iv); };
+  }, [tab, device.device_id]);
+
   // Turn observability — fetch on Activity tab entry, refresh every 10s while
   // the tab is open (turn history is in-memory on the controller).
   useEffect(() => {
