@@ -18,7 +18,13 @@
 # since 2026-07-15, pulled verbatim 2026-07-18.)
 (
   sleep 45
-  for svc in vitals_service perfmonitord perfrecoveryd shblemeshd meshmgrservice drm; do
+  # whad_cc is the native half of com.amazon.whad (hidden in
+  # debloat_packages.txt) and avahi-daemon is the mDNS responder it finds
+  # peers with. Neither has a consumer once Whole Home Audio is gone: the
+  # EchoMuse firmware resolves the controller with its own in-process mDNS
+  # (grandcat/zeroconf), not through avahi. Added 2026-07-30.
+  for svc in vitals_service perfmonitord perfrecoveryd shblemeshd meshmgrservice drm \
+             whad_cc avahi-daemon; do
     stop "$svc"
   done
 ) &

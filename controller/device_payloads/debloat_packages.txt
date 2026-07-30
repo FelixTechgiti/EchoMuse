@@ -45,4 +45,5 @@ com.amazon.mediaplayeragent
 com.amazon.platformsettings
 com.amazon.swags
 com.amazon.tcomm
+com.amazon.whad
 com.amazon.whisperjoin.middleware
