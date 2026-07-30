@@ -297,11 +297,38 @@ async def _serve_spa(request: web.Request) -> web.Response:
 
 
 async def _serve_dashboard(request: web.Request) -> web.Response:
-    """Serve dashboard.html for /dashboard."""
+    """
+    Serve dashboard.html for /dashboard, with the JS bundle cache-busted.
+
+    add_static sends Last-Modified and ETag but no Cache-Control, so browsers
+    apply HEURISTIC freshness and serve a cached dashboard.js without
+    revalidating. The failure mode is nasty because it is invisible from the
+    server side: the deploy is correct, the file on disk is correct, the
+    compiled bundle is correct, and the browser shows the previous UI — which
+    reads as "my change did not work" and sends you looking in the wrong place.
+    It cost exactly that on 2026-07-30 when the new thermal row did not appear.
+
+    So the bundle URL carries the file's mtime. That changes on every rebuild
+    regardless of version numbering (controller_version is "dev" for local
+    builds and would not bust between two dev deploys), and the wrapper itself
+    is sent no-cache so the new URL is always seen — it is 3KB, revalidating it
+    costs nothing.
+    """
     dashboard = STATIC_DIR / "dashboard.html"
     if not dashboard.exists():
         return web.Response(status=503, text="dashboard.html not found in static/")
-    return web.FileResponse(dashboard)
+    html = dashboard.read_text(encoding="utf-8")
+    bundle = STATIC_DIR / "dashboard.js"
+    if bundle.exists():
+        html = html.replace(
+            "/static/dashboard.js",
+            f"/static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+        )
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 async def _redirect_root(request: web.Request) -> web.Response:

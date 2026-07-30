@@ -21,3 +21,32 @@ def test_dockerfile_copies_every_controller_module():
         f"Dockerfile is missing COPY lines for {missing} — the container "
         f"will crash-loop at import time"
     )
+
+
+def test_dashboard_bundle_is_cache_busted():
+    """
+    /dashboard must not hand the browser a bare /static/dashboard.js URL.
+
+    aiohttp's add_static sends Last-Modified and ETag but no Cache-Control, so
+    browsers apply heuristic freshness and serve a stale bundle without
+    revalidating. That failure is invisible server-side — deploy correct, file
+    correct, compiled bundle correct, browser showing the previous UI — so it
+    reads as "my change didn't work" and sends you hunting in the wrong place.
+    Asserted at the source level because the alternative is starting an aiohttp
+    app, which this suite deliberately does not do.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    handler = src[src.index("async def _serve_dashboard"):]
+    handler = handler[:handler.index("\nasync def ", 1)]
+
+    assert "dashboard.js?v=" in handler, \
+        "the bundle URL must carry a cache-busting token"
+    assert "no-cache" in handler, \
+        "dashboard.html itself must be revalidated, or the new URL is never seen"
+    # A version-string token would not change between two local "dev" builds;
+    # mtime changes on every rebuild.
+    assert "st_mtime" in handler, \
+        "cache-bust on the bundle's mtime, not on a version string"
