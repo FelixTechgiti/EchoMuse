@@ -330,6 +330,47 @@ function SignalBars({ rssi }) {
   );
 }
 
+// Severity palette, shared with StatBar and SignalBars. The panel previously
+// carried two: these desaturated tones and a brighter set (#c0301a and
+// friends) that had crept in on the latency row, which is why the scalar
+// metrics read as bolted on rather than designed.
+const SEV = { ok: '#3a6a50', warn: '#8a6010', bad: '#9a3020', none: 'transparent' };
+
+// MicroMeter is a 2px severity bar. It exists so the scalar metrics
+// (link/latency/temp) share a visual grammar with the capacity bars above
+// them, instead of being three bare numbers stacked at the end of the panel.
+function MicroMeter({ pct, sev }) {
+  return (
+    <div style={{ height:2, borderRadius:1, background:'rgba(0,0,0,0.10)', overflow:'hidden', marginTop:5 }}>
+      {pct != null && <div style={{ height:'100%', width:`${Math.max(2, Math.min(100, pct))}%`,
+        background:SEV[sev] ?? SEV.ok, borderRadius:1, transition:'width 0.6s' }}/>}
+    </div>
+  );
+}
+
+// StatTile is one cell of the scalar row: label, value, optional glyph, and a
+// headroom meter. `note` carries an exception worth seeing (thermal
+// throttling), which is the only thing here that should ever shout.
+function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
+  const dim = value == null;
+  return (
+    <div style={{ flex:'1 1 0', minWidth:0 }}>
+      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                    textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{label}</div>
+      <div style={{ display:'flex', alignItems:'baseline', gap:4, marginTop:3, minHeight:16 }}>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12,
+                       color: dim ? 'var(--muted)' : SEV[sev] ?? 'var(--text2)' }}>
+          {dim ? '—' : value}
+        </span>
+        {!dim && unit && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{unit}</span>}
+        {glyph && <span style={{ marginLeft:'auto', display:'flex', alignItems:'center' }}>{glyph}</span>}
+      </div>
+      <MicroMeter pct={dim ? null : pct} sev={sev}/>
+      {note && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:SEV.bad, marginTop:3 }}>{note}</div>}
+    </div>
+  );
+}
+
 function StatBar({ label, pct, text }) {
   const color = pct == null ? 'transparent'
               : pct > 85   ? '#9a3020'
@@ -1283,40 +1324,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
                     <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
                     <StatBar label="Storage" pct={stoPct}        text={stoText}/>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>WiFi</span>
-                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
-                        <SignalBars rssi={s?.wifiRssi ?? null}/>
-                      </div>
-                    </div>
-                    {/* Control-plane round trip. The only latency signal
-                        available on this hardware — the WiFi driver reports
-                        no retries and no noise floor, so RSSI alone can't
-                        tell a healthy link from a struggling one. Amber
-                        past 200ms, red past 1s. */}
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Latency</span>
-                      <span style={{
-                        fontFamily:"'DM Mono',monospace", fontSize:10,
-                        color: device.rttMs == null ? 'var(--text2)'
-                             : device.rttMs >= 1000 ? '#c0301a'
-                             : device.rttMs >= 200  ? '#c0601a' : '#286040',
-                      }}>{device.rttMs != null ? `${device.rttMs} ms` : '—'}</span>
-                    </div>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Temp</span>
-                      <span style={{
-                        fontFamily:"'DM Mono',monospace", fontSize:10,
-                        color: tempC == null ? 'var(--text2)'
-                             : tempC >= 85 ? '#c0301a'
-                             : tempC >= 70 ? '#c0601a' : '#286040',
-                      }}>
-                        {tempC != null
-                          ? `${tempC.toFixed(1)}°C` + (tempHot != null && tempHot > tempC + 1 ? ` · ${tempHot.toFixed(1)} peak` : '')
-                          : '—'}
-                        {throttled && <span style={{ color:'#c0301a' }}>{` · throttled ${s.thermalCoreLimit}/${s.coresTotal}`}</span>}
-                      </span>
+                    {/* Scalar health metrics as one deliberate row rather than
+                        three label/value lines stacked after the bars. Ordered
+                        by how often they are the answer on this hardware: the
+                        link first (the usual suspect — the RF counters are
+                        useless, so RSSI and RTT are all there is), thermals
+                        last because they are almost always boring, and loudly
+                        when they are not. Each carries a headroom meter so the
+                        row rhymes with the capacity bars above it. */}
+                    <div style={{ display:'flex', gap:14, marginTop:2 }}>
+                      <StatTile
+                        label="Link" value={s?.wifiRssi != null ? s.wifiRssi : null} unit="dBm"
+                        sev={s?.wifiRssi == null ? 'ok' : s.wifiRssi > -70 ? 'ok' : s.wifiRssi > -80 ? 'warn' : 'bad'}
+                        pct={s?.wifiRssi == null ? null : Math.max(0, Math.min(100, (s.wifiRssi + 95) / 35 * 100))}
+                        glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
+                      />
+                      {/* Amber past 200ms, red past 1s — the same thresholds the
+                          RTT instrumentation counts excursions against. */}
+                      <StatTile
+                        label="Latency" value={device.rttMs != null ? device.rttMs : null} unit="ms"
+                        sev={device.rttMs == null ? 'ok' : device.rttMs >= 1000 ? 'bad' : device.rttMs >= 200 ? 'warn' : 'ok'}
+                        pct={device.rttMs == null ? null : Math.min(100, device.rttMs / 500 * 100)}
+                      />
+                      {/* Scaled 20-90C so the meter shows real headroom; this
+                          SoC idles ~33C. thermalCoreLimit below the core count
+                          means the governor is already capping capacity, which
+                          bites before any temperature looks alarming — so that
+                          is the one thing in this row allowed to shout. */}
+                      <StatTile
+                        label="Temp" value={tempC != null ? tempC.toFixed(1) : null} unit="°C"
+                        sev={tempC == null ? 'ok' : tempC >= 85 ? 'bad' : tempC >= 70 ? 'warn' : 'ok'}
+                        pct={tempC == null ? null : Math.max(0, Math.min(100, (tempC - 20) / 70 * 100))}
+                        note={throttled ? `throttled ${s.thermalCoreLimit}/${s.coresTotal}` : null}
+                        glyph={tempHot != null && tempC != null && tempHot > tempC + 1
+                          ? <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{tempHot.toFixed(1)} max</span>
+                          : null}
+                      />
                     </div>
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
