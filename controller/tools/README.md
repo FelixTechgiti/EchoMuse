@@ -19,3 +19,10 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
 - **pull_so.py** — pull a file off the device (busybox base64 over the
   shell, echo disabled, split end-markers). Writes the decoded file to
   stdout: `python /tmp/pull_so.py /system/lib64/libled_hal.so > out.so`.
+- **push_file.py** — the other direction, for arbitrary paths (`ota.py`
+  only writes the firmware slot): `python /tmp/push_file.py <device_id>
+  /tmp/oww_probe /data/local/tmp/oww_probe --chmod 755`. Reconnects every
+  30s because the shell plane drops after ~50s under load, so it handles
+  multi-megabyte files; **deletes the destination first** unless
+  `--resume`, since resuming on size alone will append to a different file
+  and then report success. Success means md5 agreement, nothing less.

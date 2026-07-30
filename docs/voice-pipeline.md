@@ -118,6 +118,14 @@ which measurably improves its accuracy — and there's no on-device logic
 that can drift, misjudge your room, or degrade over days (both of which
 actually happened with earlier, cleverer designs; boring won).
 
+That uninterrupted stream is also what makes it possible to run the *same*
+recogniser on the Dot itself and compare the two on byte-identical audio —
+which is exactly what the experimental on-device scoring mode does, without
+being allowed to act on the result. It is also why gating this stream on
+"sounds like speech" would be harder than it looks: the recogniser's internal
+buffers assume continuity, and splicing gated bursts together measurably
+depresses its scores.
+
 **Caveat:** a constant ~32KB/s per device on your WiFi — about 1/6th of
 what streaming the *response* audio uses, so in practice a non-issue on any
 home network. And to be clear about privacy: the stream goes to *your*

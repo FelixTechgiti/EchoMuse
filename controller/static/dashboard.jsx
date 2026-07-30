@@ -330,6 +330,47 @@ function SignalBars({ rssi }) {
   );
 }
 
+// Severity palette, shared with StatBar and SignalBars. The panel previously
+// carried two: these desaturated tones and a brighter set (#c0301a and
+// friends) that had crept in on the latency row, which is why the scalar
+// metrics read as bolted on rather than designed.
+const SEV = { ok: '#3a6a50', warn: '#8a6010', bad: '#9a3020', none: 'transparent' };
+
+// MicroMeter is a 2px severity bar. It exists so the scalar metrics
+// (link/latency/temp) share a visual grammar with the capacity bars above
+// them, instead of being three bare numbers stacked at the end of the panel.
+function MicroMeter({ pct, sev }) {
+  return (
+    <div style={{ height:2, borderRadius:1, background:'rgba(0,0,0,0.10)', overflow:'hidden', marginTop:5 }}>
+      {pct != null && <div style={{ height:'100%', width:`${Math.max(2, Math.min(100, pct))}%`,
+        background:SEV[sev] ?? SEV.ok, borderRadius:1, transition:'width 0.6s' }}/>}
+    </div>
+  );
+}
+
+// StatTile is one cell of the scalar row: label, value, optional glyph, and a
+// headroom meter. `note` carries an exception worth seeing (thermal
+// throttling), which is the only thing here that should ever shout.
+function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
+  const dim = value == null;
+  return (
+    <div style={{ flex:'1 1 0', minWidth:0 }}>
+      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                    textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{label}</div>
+      <div style={{ display:'flex', alignItems:'baseline', gap:4, marginTop:3, minHeight:16 }}>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12,
+                       color: dim ? 'var(--muted)' : SEV[sev] ?? 'var(--text2)' }}>
+          {dim ? '—' : value}
+        </span>
+        {!dim && unit && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{unit}</span>}
+        {glyph && <span style={{ marginLeft:'auto', display:'flex', alignItems:'center' }}>{glyph}</span>}
+      </div>
+      <MicroMeter pct={dim ? null : pct} sev={sev}/>
+      {note && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:SEV.bad, marginTop:3 }}>{note}</div>}
+    </div>
+  );
+}
+
 function StatBar({ label, pct, text }) {
   const color = pct == null ? 'transparent'
               : pct > 85   ? '#9a3020'
@@ -1216,7 +1257,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* STATUS */}
           {tab === 'status' && (() => {
             const s = device.stats || null;
-            const cpuText  = s?.cpuPct    != null ? `${s.cpuPct.toFixed(0)}%` : null;
+            // cpuPct comes from the aggregate /proc/stat line, so it is a
+            // share of ONLINE capacity — and MTK parks 3 of this SoC's 4 cores
+            // when idle. The same work reads as half the percentage once a
+            // second core comes up, so the core count belongs next to it or
+            // the number invites the wrong conclusion.
+            const cpuText  = s?.cpuPct != null
+              ? `${s.cpuPct.toFixed(0)}%` + (s.coresOnline ? ` · ${s.coresOnline}/${s.coresTotal ?? '?'} cores` : '')
+              : null;
+            // Thermals: mtktscpu is the CPU zone, maxTempC the hottest of all
+            // 11 zones (the PMIC and board sensors can run warmer). Amber past
+            // 70C, red past 85C — well below this SoC's limits, because the
+            // point is early warning. thermalCoreLimit below coresTotal means
+            // the thermal governor is already capping capacity, which is the
+            // signal that actually matters and shows up before temperature
+            // looks alarming.
+            const tempC    = s?.cpuTempC ?? null;
+            const tempHot  = s?.maxTempC ?? null;
+            const throttled = s?.thermalCoreLimit != null && s?.coresTotal != null
+                              && s.thermalCoreLimit < s.coresTotal;
             const ramText  = s?.memUsedMb != null ? `${s.memUsedMb} / ${s.memTotalMb} MB` : null;
             const ramPct   = s?.memTotalMb? s.memUsedMb/s.memTotalMb*100 : null;
             const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
@@ -1265,26 +1324,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
                     <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
                     <StatBar label="Storage" pct={stoPct}        text={stoText}/>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>WiFi</span>
-                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
-                        <SignalBars rssi={s?.wifiRssi ?? null}/>
-                      </div>
-                    </div>
-                    {/* Control-plane round trip. The only latency signal
-                        available on this hardware — the WiFi driver reports
-                        no retries and no noise floor, so RSSI alone can't
-                        tell a healthy link from a struggling one. Amber
-                        past 200ms, red past 1s. */}
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6 }}>
-                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Latency</span>
-                      <span style={{
-                        fontFamily:"'DM Mono',monospace", fontSize:10,
-                        color: device.rttMs == null ? 'var(--text2)'
-                             : device.rttMs >= 1000 ? '#c0301a'
-                             : device.rttMs >= 200  ? '#c0601a' : '#286040',
-                      }}>{device.rttMs != null ? `${device.rttMs} ms` : '—'}</span>
+                    {/* Scalar health metrics as one deliberate row rather than
+                        three label/value lines stacked after the bars. Ordered
+                        by how often they are the answer on this hardware: the
+                        link first (the usual suspect — the RF counters are
+                        useless, so RSSI and RTT are all there is), thermals
+                        last because they are almost always boring, and loudly
+                        when they are not. Each carries a headroom meter so the
+                        row rhymes with the capacity bars above it. */}
+                    <div style={{ display:'flex', gap:14, marginTop:2 }}>
+                      <StatTile
+                        label="Link" value={s?.wifiRssi != null ? s.wifiRssi : null} unit="dBm"
+                        sev={s?.wifiRssi == null ? 'ok' : s.wifiRssi > -70 ? 'ok' : s.wifiRssi > -80 ? 'warn' : 'bad'}
+                        pct={s?.wifiRssi == null ? null : Math.max(0, Math.min(100, (s.wifiRssi + 95) / 35 * 100))}
+                        glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
+                      />
+                      {/* Amber past 200ms, red past 1s — the same thresholds the
+                          RTT instrumentation counts excursions against. */}
+                      <StatTile
+                        label="Latency" value={device.rttMs != null ? device.rttMs : null} unit="ms"
+                        sev={device.rttMs == null ? 'ok' : device.rttMs >= 1000 ? 'bad' : device.rttMs >= 200 ? 'warn' : 'ok'}
+                        pct={device.rttMs == null ? null : Math.min(100, device.rttMs / 500 * 100)}
+                      />
+                      {/* Scaled 20-90C so the meter shows real headroom; this
+                          SoC idles ~33C. thermalCoreLimit below the core count
+                          means the governor is already capping capacity, which
+                          bites before any temperature looks alarming — so that
+                          is the one thing in this row allowed to shout. */}
+                      <StatTile
+                        label="Temp" value={tempC != null ? tempC.toFixed(1) : null} unit="°C"
+                        sev={tempC == null ? 'ok' : tempC >= 85 ? 'bad' : tempC >= 70 ? 'warn' : 'ok'}
+                        pct={tempC == null ? null : Math.max(0, Math.min(100, (tempC - 20) / 70 * 100))}
+                        note={throttled ? `throttled ${s.thermalCoreLimit}/${s.coresTotal}` : null}
+                        glyph={tempHot != null && tempC != null && tempHot > tempC + 1
+                          ? <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{tempHot.toFixed(1)} max</span>
+                          : null}
+                      />
                     </div>
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
@@ -1438,6 +1513,44 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </Pill>
                   </div>
                 </div>
+                {/* What the update actually changes. Deciding whether to push
+                    firmware to a device you rely on, from a version number
+                    alone, is a guess rather than a decision — so the notes are
+                    shown here, at the point of that decision, and only when
+                    there is something to decide.
+
+                    Rendered as preformatted text on purpose: the body is
+                    markdown, no markdown renderer is bundled (React and xterm
+                    are the only vendored libs), and pulling one in to style a
+                    release note would be a poor trade. Simply-written notes
+                    read fine as text, and the GitHub link is there for the
+                    rest. */}
+                {needsUpdate && release?.notes && (
+                  <div style={{ marginTop:14, paddingTop:14, borderTop:'1px solid rgba(0,0,0,0.08)' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:8 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>
+                        What&apos;s in {release.version}
+                      </span>
+                      {release.published_at && (
+                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                          {new Date(release.published_at).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                    <pre style={{
+                      fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.65,
+                      color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
+                      margin:0, maxHeight:260, overflowY:'auto',
+                    }}>{release.notes}</pre>
+                    {release.release_url && (
+                      <a href={release.release_url} target="_blank" rel="noreferrer"
+                         style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                                  display:'inline-block', marginTop:8 }}>
+                        View release on GitHub →
+                      </a>
+                    )}
+                  </div>
+                )}
               </Panel>
 
               {/* Deploy sources, side by side */}
@@ -3154,7 +3267,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
@@ -3503,6 +3616,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
               <Slider label="Barge threshold" sub="wake confidence needed during playback — speech-over-TTS scores low, ~0.10 is typical with AEC" value={config.bargeInThreshold ?? 0.10} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
+              {/* owwOnDevice is off|shadow, so a toggle is the honest control
+                  today. A third mode (letting the device trigger turns itself)
+                  would need a select instead — and a rename of this label. */}
+              {/* Offered only when the device says it can do it. Capability,
+                  not firmware version: a toggle that silently does nothing on
+                  older firmware reads as a broken feature. */}
+              <Toggle
+                label="Score on device (shadow)"
+                sub={device.connected && !device.owwShadowCapable
+                  ? 'needs newer firmware on this Echo — it also runs the wake model locally and reports what it would have heard'
+                  : 'the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~0.5 of a core'}
+                value={(config.owwOnDevice ?? 'off') === 'shadow'}
+                onChange={device.connected && !device.owwShadowCapable
+                  ? undefined
+                  : (v => set('owwOnDevice', v ? 'shadow' : 'off'))}/>
             </div>
           </div>
         </div>

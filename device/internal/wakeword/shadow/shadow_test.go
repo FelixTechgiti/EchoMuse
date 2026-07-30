@@ -1,0 +1,313 @@
+package shadow
+
+import (
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/wakeword"
+)
+
+// fakeInferer stands in for ONNX Runtime: it returns correctly shaped tensors
+// and a score the test controls. This is the payoff of keeping inference behind
+// an interface — every property below is about the scorer's behaviour under
+// load, and none of it needs a model, a runtime, or a device.
+type fakeInferer struct {
+	mu    sync.Mutex
+	score float32
+	// delay simulates a slow device, which is how the drop path gets tested.
+	delay time.Duration
+	// failEmbed makes Embed return an error, to check the scorer survives it.
+	failEmbed bool
+	calls     int
+}
+
+func (f *fakeInferer) Melspec(samples []float32) ([]float32, int, error) {
+	// Mirror the real model's frame count so the Detector's windowing behaves
+	// as it does in production: ceil(samples/160 - 3).
+	frames := len(samples)/160 - 3
+	if frames < 0 {
+		frames = 0
+	}
+	return make([]float32, frames*wakeword.MelBins), frames, nil
+}
+
+func (f *fakeInferer) Embed(window []float32) ([]float32, error) {
+	f.mu.Lock()
+	f.calls++
+	d, fail := f.delay, f.failEmbed
+	f.mu.Unlock()
+	if fail {
+		return nil, errors.New("synthetic embed failure")
+	}
+	if d > 0 {
+		time.Sleep(d)
+	}
+	return make([]float32, wakeword.FeatDim), nil
+}
+
+func (f *fakeInferer) Classify(feats []float32) (float32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.score, nil
+}
+
+func (f *fakeInferer) set(score float32, delay time.Duration) {
+	f.mu.Lock()
+	f.score, f.delay = score, delay
+	f.mu.Unlock()
+}
+
+func frame() []int16 { return make([]int16, wakeword.ChunkSamples) }
+
+// pushAll feeds n frames WITHOUT overflowing the queue, waiting for each to be
+// accounted for before sending the next. A tight loop cannot be used where the
+// test depends on frames actually being scored: the queue is only queueFrames
+// deep, so pushing 16 frames at once drops half of them and the detector never
+// reaches Ready. (The flood tests below want exactly that behaviour, and push
+// in a tight loop on purpose.)
+func pushAll(t *testing.T, s *Scorer, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		before := s.processed()
+		s.Push(frame())
+		waitFor(t, "a frame to be scored", func() bool { return s.processed() > before })
+	}
+	if st := s.peek(); st.Drops != 0 {
+		t.Fatalf("warm-up dropped %d frames — the test is not measuring what it thinks", st.Drops)
+	}
+}
+
+// waitFor polls until cond holds, so tests do not depend on a fixed sleep for
+// work that happens on another goroutine.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestPushNeverBlocks is the property the whole design exists for: the mic
+// goroutine must not be delayed by inference, no matter how slow the device is.
+// With a scorer wedged on a very slow model, pushing far more frames than the
+// queue holds must still return promptly.
+func TestPushNeverBlocks(t *testing.T) {
+	inf := &fakeInferer{}
+	inf.set(0, 200*time.Millisecond) // pathologically slow
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+
+	start := time.Now()
+	for i := 0; i < queueFrames*10; i++ {
+		s.Push(frame())
+	}
+	elapsed := time.Since(start)
+
+	// Each frame would cost 200ms if Push waited; 80 frames would be 16s. A
+	// generous ceiling still separates the two behaviours by two orders.
+	if elapsed > time.Second {
+		t.Fatalf("pushing %d frames took %v — Push is blocking on inference",
+			queueFrames*10, elapsed)
+	}
+	st := s.Drain()
+	if st.Drops == 0 {
+		t.Error("expected drops when the scorer cannot keep up")
+	}
+	if st.Drops+st.Frames == 0 {
+		t.Error("no frames accounted for at all")
+	}
+}
+
+// TestDropsAreCountedNotSilent pins that a dropped frame is visible. A shadow
+// comparison running on a subset of the audio is still useful, but only if you
+// know that is what you are looking at.
+func TestDropsAreCountedNotSilent(t *testing.T) {
+	inf := &fakeInferer{}
+	inf.set(0, 50*time.Millisecond)
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+
+	const pushed = 40
+	for i := 0; i < pushed; i++ {
+		s.Push(frame())
+	}
+	// Let the queue drain so the accounting settles.
+	waitFor(t, "scorer to finish the queued frames", func() bool {
+		return s.processed()+s.peek().Drops >= pushed
+	})
+	st := s.Drain()
+	if got := st.Frames + st.Drops; got != pushed {
+		t.Errorf("accounted for %d frames (%d scored + %d dropped), pushed %d",
+			got, st.Frames, st.Drops, pushed)
+	}
+}
+
+// TestCrossingFiresOncePerUtterance covers the refractory period. Wake scores
+// stay above threshold for several consecutive frames, so an unguarded
+// implementation reports a burst of crossings for one utterance — which floods
+// the log and makes the controller's correlation match an arbitrary one of them.
+func TestCrossingFiresOncePerUtterance(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		crosses []float32
+	)
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(score float32, at time.Time) {
+		mu.Lock()
+		crosses = append(crosses, score)
+		mu.Unlock()
+	})
+	defer s.Close()
+
+	// Warm the detector past the not-ready window with silence.
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow)
+	waitFor(t, "detector to become ready", func() bool { return s.Ready() })
+
+	// Now a sustained "detection" spanning many frames.
+	inf.set(0.9, 0)
+	pushAll(t, s, 12)
+	waitFor(t, "a crossing to fire", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(crosses) >= 1
+	})
+	// Give any spurious extra crossings a chance to appear.
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	n := len(crosses)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("got %d crossings for one sustained utterance, want 1", n)
+	}
+	if st := s.Drain(); st.Crossings != 1 {
+		t.Errorf("stats recorded %d crossings, want 1", st.Crossings)
+	}
+}
+
+// TestBelowThresholdDoesNotCross keeps the obvious direction honest, and checks
+// MaxScore is reported — the number that distinguishes "nearly detecting" from
+// "nowhere close", which is the whole point of shadow mode when a wake is
+// missed.
+func TestBelowThresholdDoesNotCross(t *testing.T) {
+	var fired int
+	var mu sync.Mutex
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	})
+	defer s.Close()
+
+	inf.set(0.42, 0)
+	pushAll(t, s, wakeword.FeatWindow+5)
+
+	mu.Lock()
+	got := fired
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("%d crossings fired below threshold", got)
+	}
+	st := s.Drain()
+	if st.Crossings != 0 {
+		t.Errorf("recorded %d crossings below threshold", st.Crossings)
+	}
+	if st.MaxScore != 0.42 {
+		t.Errorf("MaxScore %v, want 0.42 — a missed wake needs the near-miss score", st.MaxScore)
+	}
+}
+
+// TestInferenceErrorsDoNotStopScoring: losing shadow data is always preferable
+// to losing the audio path, so an inference failure must be counted and
+// survived rather than killing the goroutine.
+func TestInferenceErrorsDoNotStopScoring(t *testing.T) {
+	inf := &fakeInferer{failEmbed: true}
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+
+	for i := 0; i < 5; i++ {
+		before := s.processed()
+		s.Push(frame())
+		waitFor(t, "a frame to be accounted for", func() bool { return s.processed() > before })
+	}
+	waitFor(t, "errors to be recorded", func() bool { return s.peek().Errors >= 5 })
+
+	// Recover, and confirm the scorer is still alive and scoring.
+	inf.mu.Lock()
+	inf.failEmbed = false
+	inf.mu.Unlock()
+	st := s.Drain()
+	if st.Errors < 5 || st.LastErr == "" {
+		t.Errorf("errors not recorded: %+v", st)
+	}
+
+	pushAll(t, s, wakeword.FeatWindow+2)
+	if st := s.peek(); st.Frames == 0 || st.Errors != 0 {
+		t.Errorf("scoring did not resume cleanly after errors: %+v", st)
+	}
+}
+
+// TestDrainZeroesCounters pins that stats are per-window, not cumulative since
+// boot: a series of windows is readable, a series of running totals is not.
+func TestDrainZeroesCounters(t *testing.T) {
+	inf := &fakeInferer{}
+	inf.set(0.3, 0)
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+
+	pushAll(t, s, wakeword.FeatWindow+1)
+	if first := s.Drain(); first.Frames == 0 {
+		t.Fatal("first Drain returned no frames")
+	}
+	if second := s.Drain(); second.Frames != 0 || second.MaxScore != 0 {
+		t.Errorf("second Drain returned %+v, want zeroed", second)
+	}
+}
+
+// TestResetClearsDetectorState guards the mic-restart case: a StopMic/StartMic
+// pair happens after every voice turn, and audio from before the gap must not
+// contribute to a score after it.
+func TestResetClearsDetectorState(t *testing.T) {
+	inf := &fakeInferer{}
+	inf.set(0.1, 0)
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+
+	pushAll(t, s, wakeword.FeatWindow)
+	waitFor(t, "detector to become ready", func() bool { return s.Ready() })
+
+	s.Reset()
+	// The reset is applied by the scorer goroutine on the next frame.
+	s.Push(frame())
+	waitFor(t, "reset to take effect", func() bool { return !s.Ready() })
+}
+
+// TestCloseIsIdempotent — Close runs on config changes and on shutdown, and
+// those can overlap.
+func TestCloseIsIdempotent(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	s.Close()
+	s.Close()
+}
+
+// processed and peek let tests observe the scorer without racing on state the
+// scorer goroutine owns, and without consuming the counters the way Drain does.
+func (s *Scorer) processed() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stats.Frames
+}
+
+func (s *Scorer) peek() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stats
+}

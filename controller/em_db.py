@@ -37,6 +37,14 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
+    # owwOnDevice: on-device wake word scoring. "off" or "shadow".
+    # Shadow scores the wake stream on the device and reports what it WOULD
+    # have detected, without acting on it, so the two can be compared on the
+    # same audio. Default off and it should stay that way: it costs ~38% of one
+    # core permanently on top of the ~18-20% mic-pipeline baseline, and it
+    # needs ONNX Runtime plus the models installed on the device out of band
+    # (they are not in the firmware). Enable on ONE device at a time.
+    "owwOnDevice":      "off",
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -524,6 +532,68 @@ MIGRATIONS: list[str] = [
     ALTER TABLE turns ADD COLUMN audio_file TEXT;
 
     UPDATE system_config SET value = '12' WHERE key = 'schema_version';
+    """,
+
+    # ── v13 — on-device wake word shadow mode ───────────────────────────────
+    #
+    # Two levels, because they answer different questions.
+    #
+    # Per turn (dev_wake_*): when the CONTROLLER woke, did the device agree,
+    # and how far apart were they? This is the comparison that decides whether
+    # on-device detection is good enough to trust. NULL means one of three
+    # things and they are not the same: shadow mode was off, the device's
+    # firmware predates it, or the device genuinely did not cross the threshold
+    # for this utterance. The third is a finding; the first two are absence of
+    # data. dev_shadow distinguishes them — 1 when the device was known to be
+    # scoring at the time, so a NULL score alongside it is a real miss.
+    #
+    # Per hour (wake_counters.dev_*): what did the device see when the
+    # controller did NOT wake? Crossings with no corresponding turn are the
+    # false-accept side of the comparison, which per-turn rows structurally
+    # cannot show. dev_frames is the denominator that makes the rest legible,
+    # and dev_drops says whether the device kept up at all — a shadow run that
+    # dropped half its frames is not evidence about detection quality.
+    """
+    ALTER TABLE turns ADD COLUMN dev_wake_score REAL;
+    ALTER TABLE turns ADD COLUMN dev_wake_delta_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN dev_shadow INTEGER;
+
+    ALTER TABLE wake_counters ADD COLUMN dev_frames    INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_drops     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_crossings INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_max_score REAL    NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '13' WHERE key = 'schema_version';
+    """,
+
+    # ── v14 — thermals and CPU topology ─────────────────────────────────────
+    #
+    # cpu_temp_* / max_temp_max: this SoC has 11 thermal zones; mtktscpu is the
+    # CPU and the max-of-all catches a PMIC or board sensor running hotter than
+    # the CPU, which is where trouble shows up first.
+    #
+    # cores_online_* exists because cpu_pct is NOT self-describing: it comes
+    # from the aggregate /proc/stat line, so it is a share of ONLINE capacity,
+    # and MTK parks 3 of 4 cores when idle. The same absolute work reads as half
+    # the percentage once a second core comes up — so a cpu_pct series without
+    # the core count beside it can show a "drop" that is purely a change of
+    # divisor. cores_online_min is the interesting end: it is the tightest the
+    # device ever was.
+    #
+    # thermal_limit_min < cores_total means the thermal governor capped capacity
+    # at some point in the hour, which is the throttling signal that matters
+    # more than any single temperature.
+    """
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_sum     REAL    NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_samples INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN cpu_temp_max     REAL;
+    ALTER TABLE device_metrics ADD COLUMN max_temp_max     REAL;
+    ALTER TABLE device_metrics ADD COLUMN cores_online_last INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN cores_online_min  INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN cores_total       INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN thermal_limit_min INTEGER;
+
+    UPDATE system_config SET value = '14' WHERE key = 'schema_version';
     """,
 ]
 
@@ -1326,6 +1396,12 @@ _TURN_COLUMNS = {
     "send_ms":          "send_ms",
     "delivery_ms":      "delivery_ms",
     "eq_ms":            "eq_ms",
+    # v13 — on-device shadow comparison. dev_shadow is the "was the device
+    # scoring at all" flag that stops a NULL dev_wake_score from being read as
+    # a miss when it is really absence of data.
+    "dev_wake_score":    "dev_wake_score",
+    "dev_wake_delta_ms": "dev_wake_delta_ms",
+    "dev_shadow":        "dev_shadow",
     # v12 — filename of the saved utterance WAV, written by set_turn_audio
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.
@@ -1469,20 +1545,37 @@ def bump_wake_counters(
     near_misses: int = 0,
     near_miss_max: float = 0.0,
     underruns: int = 0,
+    dev_frames: int = 0,
+    dev_drops: int = 0,
+    dev_crossings: int = 0,
+    dev_max_score: float = 0.0,
 ) -> None:
-    """Accumulate into the current hour's wake_counters row (upsert)."""
+    """
+    Accumulate into the current hour's wake_counters row (upsert).
+
+    The dev_* arguments are the on-device shadow window summary (schema v13),
+    which rides the device's existing ~30s stats report — so on-device scoring
+    adds one upsert per 30s per device and nothing per audio frame.
+    """
     hour_ts = int(time.time()) // 3600 * 3600
     with _tx() as conn:
         conn.execute(
             """
-            INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max, underruns)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max,
+                                       underruns, dev_frames, dev_drops, dev_crossings,
+                                       dev_max_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 near_misses   = near_misses + excluded.near_misses,
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
-                underruns     = underruns + excluded.underruns
+                underruns     = underruns + excluded.underruns,
+                dev_frames    = dev_frames + excluded.dev_frames,
+                dev_drops     = dev_drops + excluded.dev_drops,
+                dev_crossings = dev_crossings + excluded.dev_crossings,
+                dev_max_score = MAX(dev_max_score, excluded.dev_max_score)
             """,
-            (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns)),
+            (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns),
+             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",
@@ -1511,6 +1604,11 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     mem     = stats.get("memUsedMb")
     rssi    = stats.get("wifiRssi")
     link_speed = stats.get("linkSpeedMbps")
+    cpu_temp   = stats.get("cpuTempC")
+    max_temp   = stats.get("maxTempC")
+    cores_on   = stats.get("coresOnline")
+    cores_tot  = stats.get("coresTotal")
+    therm_lim  = stats.get("thermalCoreLimit")
     with _tx() as conn:
         conn.execute(
             """
@@ -1522,10 +1620,14 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 wifi_bssid_last, tx_bytes_sum, rx_bytes_sum,
                 tx_errors_sum, tx_dropped_sum, rx_crc_sum,
                 rtt_sum_ms, rtt_samples, rtt_min_ms, rtt_max_ms,
-                rtt_excursions, rtt_excursions_idle, rtt_samples_idle
+                rtt_excursions, rtt_excursions_idle, rtt_samples_idle,
+                cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
+                cores_online_last, cores_online_min, cores_total,
+                thermal_limit_min
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -1544,6 +1646,28 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 -- mid-hour should be visible as the new one); link_speed_min
                 -- keeps the worst PHY rate seen, which is the number that
                 -- matters when hunting a throughput collapse.
+                -- Thermals: sum/samples for a mean that ignores reports where
+                -- the sensor was unreadable, plus the peak. cores_online_min is
+                -- the tightest the device ever ran; thermal_limit_min below
+                -- cores_total means throttling happened this hour.
+                cpu_temp_sum     = cpu_temp_sum + excluded.cpu_temp_sum,
+                cpu_temp_samples = cpu_temp_samples + excluded.cpu_temp_samples,
+                cpu_temp_max     = MAX(COALESCE(cpu_temp_max, excluded.cpu_temp_max),
+                                       COALESCE(excluded.cpu_temp_max, cpu_temp_max)),
+                max_temp_max     = MAX(COALESCE(max_temp_max, excluded.max_temp_max),
+                                       COALESCE(excluded.max_temp_max, max_temp_max)),
+                cores_online_last = COALESCE(excluded.cores_online_last, cores_online_last),
+                cores_online_min  = CASE
+                    WHEN excluded.cores_online_min IS NULL THEN cores_online_min
+                    ELSE MIN(COALESCE(cores_online_min, excluded.cores_online_min),
+                             excluded.cores_online_min)
+                END,
+                cores_total       = COALESCE(excluded.cores_total, cores_total),
+                thermal_limit_min = CASE
+                    WHEN excluded.thermal_limit_min IS NULL THEN thermal_limit_min
+                    ELSE MIN(COALESCE(thermal_limit_min, excluded.thermal_limit_min),
+                             excluded.thermal_limit_min)
+                END,
                 link_speed_last  = COALESCE(excluded.link_speed_last, link_speed_last),
                 link_speed_min   = CASE
                     WHEN excluded.link_speed_min IS NULL THEN link_speed_min
@@ -1600,6 +1724,17 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 int(stats.get("rttExcursions") or 0),
                 int(stats.get("rttExcursionsIdle") or 0),
                 int(stats.get("rttSamplesIdle") or 0),
+                # Thermals. NULL, never 0, when a sensor was unreadable — a
+                # zeroed temperature would drag a mean down and read as a cool
+                # device, which is the wrong direction for a safety metric.
+                float(cpu_temp) if cpu_temp is not None else 0.0,
+                1 if cpu_temp is not None else 0,
+                float(cpu_temp) if cpu_temp is not None else None,
+                float(max_temp) if max_temp is not None else None,
+                int(cores_on) if cores_on else None,
+                int(cores_on) if cores_on else None,
+                int(cores_tot) if cores_tot else None,
+                int(therm_lim) if therm_lim else None,
             ),
         )
         conn.execute(
@@ -1635,6 +1770,20 @@ def get_device_metrics(device_id: str, since: float) -> list[dict]:
             # Link identity + throughput (v7). These were persisted but never
             # surfaced here, so the activity API could not answer "was the
             # link different when this went wrong?".
+            # Thermals + topology (v14). cpu_temp_avg divides by its OWN
+            # sample count, not `samples`: a report where the sensor was
+            # unreadable must not dilute the mean.
+            "cpu_temp_avg":      round(r["cpu_temp_sum"] / r["cpu_temp_samples"], 1) if r["cpu_temp_samples"] else None,
+            "cpu_temp_max":      r["cpu_temp_max"],
+            "max_temp_max":      r["max_temp_max"],
+            # cores_online is what makes cpu_avg legible — that percentage is a
+            # share of ONLINE capacity, so a series can appear to halve when
+            # only the divisor changed.
+            "cores_online_last": r["cores_online_last"],
+            "cores_online_min":  r["cores_online_min"],
+            "cores_total":       r["cores_total"],
+            # Below cores_total means the thermal governor capped capacity.
+            "thermal_limit_min": r["thermal_limit_min"],
             "link_speed_last":  r["link_speed_last"],
             "link_speed_min":   r["link_speed_min"],
             "wifi_freq_last":   r["wifi_freq_last"],

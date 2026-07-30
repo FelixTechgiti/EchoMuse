@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"log"
 	"math"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"os/signal"
 	"runtime"
 	"runtime/pprof"
@@ -26,6 +29,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
@@ -51,6 +55,11 @@ func main() {
 	// `stop acebutton` / `stop ledcontroller` in the hardware bindings.
 	// Idempotent: a no-op on boots where init never starts it (Lounge).
 	exec.Command("stop", "smarthomewifid").Run()
+
+	// Keep a second CPU core online. procfs, so this has to be re-applied on
+	// every start — see applyCoreFloor for why the mic pipeline's 160ms
+	// deadline makes it worth doing.
+	applyCoreFloor()
 
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
@@ -221,6 +230,7 @@ func main() {
 		go func() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.OwwShadow = shadowStats(dataClient)
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -247,6 +257,7 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
+		applyShadowConfig(dataClient, controlClient)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -399,6 +410,7 @@ func main() {
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.OwwShadow = shadowStats(dataClient)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -439,6 +451,28 @@ func main() {
 
 // ─── Hardware stats collection ────────────────────────────────────────────────
 
+// shadowStats drains the on-device wake word counters for this reporting
+// window, or nil when shadow mode is off — nil marshals the field away, so the
+// controller can tell "off" from "on and saw nothing", which are very different
+// answers to "why were there no detections".
+func shadowStats(dc *client.DataClient) interface{} {
+	sc := dc.ShadowScorer()
+	if sc == nil {
+		return nil
+	}
+	st := sc.Drain()
+	return map[string]interface{}{
+		"frames":    st.Frames,
+		"drops":     st.Drops,
+		"notReady":  st.NotReady,
+		"crossings": st.Crossings,
+		"maxScore":  st.MaxScore,
+		"errors":    st.Errors,
+		"lastErr":   st.LastErr,
+		"ready":     sc.Ready(),
+	}
+}
+
 func collectStats() client.DeviceStats {
 	cpuPct := cpuPercent()
 	memUsed, memTotal := memStats()
@@ -446,7 +480,13 @@ func collectStats() client.DeviceStats {
 	rssi := wifiRSSI()
 	tx, rx, txErr, txDrop, rxCrc := netDeltas()
 	speed, freq, bssid := linkInfo()
+	cpuC, maxC, coreLimit := thermals()
 	return client.DeviceStats{
+		CPUTempC:         cpuC,
+		MaxTempC:         maxC,
+		CoresOnline:      coresOnline(),
+		CoresTotal:       coresTotal(),
+		ThermalCoreLimit: coreLimit,
 		CPUPct:         cpuPct,
 		MemUsedMb:      memUsed,
 		MemTotalMb:     memTotal,
@@ -759,6 +799,64 @@ func applyAecConfig(canceller *aec.Canceller) {
 // applyBleConfig starts/stops the BLE proxy scanner from the current
 // effective config. SetEnabled is idempotent, so calling it on every config
 // push is free.
+// shadowState remembers what the live scorer was built for, so a config push
+// that changes neither the mode nor the model does not rebuild it. Rebuilding
+// means reloading a 12MB runtime and starting a fresh ~1.28s not-ready window,
+// and config pushes arrive on every reconnect — so "idempotent unless something
+// changed" is the difference between a stable shadow run and one that is
+// perpetually warming up.
+var shadowState struct {
+	mode    string
+	model   string
+	lastErr string
+}
+
+// applyShadowConfig starts, stops or re-points on-device wake word scoring from
+// the current effective config.
+//
+// Failure to load is an ordinary condition, not an error state: the runtime and
+// models are installed out of band, so "not installed" is what every device
+// reports until someone puts them there. It is logged once per distinct reason
+// rather than on every config push, and the device carries on with
+// controller-side wake word exactly as before.
+func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient) {
+	snap := config.Get().Snapshot()
+	mode, model := snap.OwwOnDevice, snap.OwwModel
+	threshold := float32(snap.OwwThreshold)
+
+	if mode != config.OnDeviceShadow {
+		if dc.ShadowScorer() != nil {
+			dc.SetShadowScorer(nil)
+			log.Printf("[shadow] on-device wake word disabled")
+		}
+		shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+		return
+	}
+
+	// Already running for this model: only the threshold can change live.
+	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
+		sc.SetThreshold(threshold)
+		return
+	}
+
+	sc, err := shadow.Open(model, threshold, func(score float32, at time.Time) {
+		cc.SendOwwShadowCross(score, time.Since(at).Milliseconds())
+	})
+	if err != nil {
+		if msg := err.Error(); msg != shadowState.lastErr {
+			shadowState.lastErr = msg
+			log.Printf("[shadow] not started: %v", err)
+		}
+		dc.SetShadowScorer(nil)
+		shadowState.mode, shadowState.model = mode, model
+		return
+	}
+	dc.SetShadowScorer(sc)
+	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — reporting only, not triggering",
+		sc.Info(), threshold)
+}
+
 func applyBleConfig(scanner *bluetooth.Scanner) {
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
@@ -830,4 +928,216 @@ func pulseWhite(ctx context.Context, s *server.Server) {
 			step = (step + 1) % (periodMs / stepMs)
 		}
 	}
+}
+
+// ─── Thermals and core hotplug ────────────────────────────────────────────────
+//
+// Two facts about this SoC make these worth reporting, and they are related.
+//
+// The MT8163 is a QUAD-core Cortex-A53, but MediaTek's hotplug strategy parks
+// cores that are not needed: /sys/devices/system/cpu/online is usually just
+// "0". A second core comes online only after utilisation holds above
+// /proc/hps/up_threshold (80%) for up_times (2) samples. So a device sitting
+// at 54% is not near a ceiling — it is comfortably inside one core's budget
+// with three more parked.
+//
+// That directly undermines cpuPct, which is derived from the aggregate
+// /proc/stat line and is therefore a share of ONLINE capacity: the same
+// absolute work halves its reported percentage the moment a second core
+// appears. Reporting coresOnline alongside it is what makes the number
+// interpretable rather than merely available.
+//
+// Thermals matter for the opposite reason — to show there is nothing to worry
+// about, or to show when there is. thermalCoreLimit is the sharpest indicator
+// this SoC offers: it is how many cores the thermal governor will currently
+// permit, so anything below 4 means throttling has begun, which shows up as
+// capacity loss long before a temperature reading looks alarming.
+
+// thermalZones maps a zone type ("mtktscpu") to its temp file. Resolved once —
+// the names are stable for the life of the boot, and rescanning 11 sysfs
+// directories every 30s to learn nothing would be silly.
+var (
+	thermalOnce  sync.Once
+	thermalByType map[string]string
+)
+
+func resolveThermalZones() map[string]string {
+	thermalOnce.Do(func() {
+		thermalByType = map[string]string{}
+		dirs, err := filepath.Glob("/sys/class/thermal/thermal_zone*")
+		if err != nil {
+			return
+		}
+		for _, d := range dirs {
+			b, err := os.ReadFile(filepath.Join(d, "type"))
+			if err != nil {
+				continue
+			}
+			thermalByType[strings.TrimSpace(string(b))] = filepath.Join(d, "temp")
+		}
+		log.Printf("[thermal] %d zones: %s", len(thermalByType), strings.Join(zoneTypes(), " "))
+	})
+	return thermalByType
+}
+
+func zoneTypes() []string {
+	out := make([]string, 0, len(thermalByType))
+	for t := range thermalByType {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// readMilliC reads a sysfs temperature (millidegrees C) as degrees.
+func readMilliC(path string) (float64, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	// Sanity bound: a plausible reading is roughly -20..150C. Some MTK zones
+	// report a sentinel (0, or a huge value) when their sensor is not wired,
+	// and averaging that into a trend would quietly ruin it — the same reason
+	// the RF counters are deliberately not surfaced.
+	c := float64(n) / 1000.0
+	if c < -20 || c > 150 {
+		return 0, false
+	}
+	return c, true
+}
+
+// thermals returns the CPU zone temperature, the hottest zone of any kind, and
+// how many cores the thermal governor currently permits.
+//
+// mtktscpu is the SoC/CPU zone. The hottest-of-all figure is reported too
+// because the PMIC and board sensors can run warmer than the CPU, and a device
+// in trouble will not necessarily show it on the zone you thought to watch.
+func thermals() (cpuC *float64, maxC *float64, coreLimit int) {
+	zones := resolveThermalZones()
+	if c, ok := readMilliC(zones["mtktscpu"]); ok {
+		cpuC = &c
+	}
+	var hottest float64
+	var any bool
+	for _, p := range zones {
+		if c, ok := readMilliC(p); ok && (!any || c > hottest) {
+			hottest, any = c, true
+		}
+	}
+	if any {
+		maxC = &hottest
+	}
+	// /proc/hps/num_limit_thermal — cores the thermal governor allows. Absent
+	// on a kernel without MTK HPS, reported as 0 = unknown rather than 0 cores.
+	if b, err := os.ReadFile("/proc/hps/num_limit_thermal"); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			coreLimit = n
+		}
+	}
+	return cpuC, maxC, coreLimit
+}
+
+// coresOnline counts online CPUs from /sys/devices/system/cpu/online, whose
+// format is a range list ("0", "0-3", "0,2-3").
+func coresOnline() int {
+	b, err := os.ReadFile("/sys/devices/system/cpu/online")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, part := range strings.Split(strings.TrimSpace(string(b)), ",") {
+		if part == "" {
+			continue
+		}
+		lo, hi, found := strings.Cut(part, "-")
+		a, err1 := strconv.Atoi(strings.TrimSpace(lo))
+		if !found {
+			if err1 == nil {
+				n++
+			}
+			continue
+		}
+		z, err2 := strconv.Atoi(strings.TrimSpace(hi))
+		if err1 == nil && err2 == nil && z >= a {
+			n += z - a + 1
+		}
+	}
+	return n
+}
+
+// hpsCoreFloor is the minimum number of CPU cores kept online.
+//
+// The MT8163 has four Cortex-A53 cores and MediaTek's hotplug strategy parks
+// all but one, bringing a second up only after utilisation holds above
+// /proc/hps/up_threshold (80%) for up_times (2) samples. That is a sensible
+// default for an idle appliance and a poor one for this workload: the mic
+// pipeline has a hard 160ms deadline (the ALSA ring's whole depth) and now
+// shares a core with wake word inference that runs in ~31ms bursts. Time-
+// slicing those on one core works — measured, zero stalls — but it works with
+// no margin for a coincidence, and it depends on hotplug reacting in time to a
+// burst that has already started.
+//
+// A floor of 2 lets the two actually run in parallel, and leaves up_threshold
+// to scale to 3 and 4 exactly as before. The cost is one A53 core out of idle,
+// which on a mains-powered device sitting at 33C is not a real cost: measured
+// +0.3C at the PMIC and no change at the CPU zone.
+//
+// Set via num_base_perf_serv, which is HPS's core-count FLOOR (the num_limit_*
+// files are its ceilings, all 4 here). Deliberately NOT done by writing
+// cpu1/online directly: HPS would re-park it within down_times samples, and
+// fighting the governor is how you get a setting that appears to work and
+// silently stops.
+const hpsCoreFloor = 2
+
+// applyCoreFloor raises the hotplug floor, best-effort.
+//
+// procfs, so it does not survive a reboot — which is why it lives here, in the
+// binary, rather than in a provisioning script: it travels with the firmware
+// and re-applies on every start. Absent on a kernel without MTK HPS, in which
+// case there is nothing to do and nothing to warn about.
+func applyCoreFloor() {
+	const path = "/proc/hps/num_base_perf_serv"
+	before, err := os.ReadFile(path)
+	if err != nil {
+		return // not an MTK HPS kernel
+	}
+	if strings.TrimSpace(string(before)) == strconv.Itoa(hpsCoreFloor) {
+		return
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(hpsCoreFloor)), 0o644); err != nil {
+		log.Printf("[cpu] could not raise core floor to %d: %v", hpsCoreFloor, err)
+		return
+	}
+	log.Printf("[cpu] core floor %s -> %d (online=%d, hotplug still scales above up_threshold)",
+		strings.TrimSpace(string(before)), hpsCoreFloor, coresOnline())
+}
+
+// coresTotal is how many cores the SoC has, online or parked. Reported so a
+// "1 of 4 online" reads as a power state rather than a one-core device — which
+// is how the MT8163's hotplug behaviour gets misread.
+func coresTotal() int {
+	b, err := os.ReadFile("/sys/devices/system/cpu/present")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, part := range strings.Split(strings.TrimSpace(string(b)), ",") {
+		lo, hi, found := strings.Cut(part, "-")
+		a, err1 := strconv.Atoi(strings.TrimSpace(lo))
+		if !found {
+			if err1 == nil {
+				n++
+			}
+			continue
+		}
+		z, err2 := strconv.Atoi(strings.TrimSpace(hi))
+		if err1 == nil && err2 == nil && z >= a {
+			n += z - a + 1
+		}
+	}
+	return n
 }

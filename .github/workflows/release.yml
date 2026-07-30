@@ -48,11 +48,29 @@ jobs:
           ls -lh device/build/server
           strings device/build/server | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
+      # Release notes come from the ANNOTATED TAG MESSAGE.
+      #
+      # The dashboard shows these to whoever is deciding whether to push
+      # firmware to a device they rely on, so they have to be written for that
+      # person: what changed, what to expect, whether anything is required of
+      # them. GitHub's generated notes are a commit list — useful to us,
+      # useless for that decision — so they are kept, below the real notes.
+      #
+      # A lightweight tag yields an empty body and the release falls back to
+      # the generated list. So: `git tag -a`, always.
+      - name: Release notes from the tag annotation
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/release-notes.md
+          echo "--- notes that will be published ---"
+          cat /tmp/release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           name: EchoMuse ${{ github.ref_name }}
           files: device/build/server
+          body_path: /tmp/release-notes.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

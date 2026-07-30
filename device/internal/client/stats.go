@@ -30,6 +30,25 @@ type DeviceStats struct {
 	// Ble carries the BLE scanner diagnostics snapshot (bluetooth.Stats),
 	// nil when the proxy has never been enabled this boot.
 	Ble interface{} `json:"ble,omitempty"`
+	// Thermals and CPU topology. CoresOnline is what makes CPUPct legible:
+	// that figure comes from the aggregate /proc/stat line, so it is a share
+	// of ONLINE capacity — the same absolute work reads as half the percentage
+	// once MTK's hotplug brings a second core up. Reporting one without the
+	// other invites the conclusion that load dropped when only the divisor
+	// changed. ThermalCoreLimit is the sharpest throttling signal this SoC
+	// offers: below 4 means the thermal governor is capping capacity, which
+	// bites long before a temperature reading looks alarming.
+	CPUTempC         *float64 `json:"cpuTempC"`
+	MaxTempC         *float64 `json:"maxTempC"`
+	CoresOnline      int      `json:"coresOnline,omitempty"`
+	CoresTotal       int      `json:"coresTotal,omitempty"`
+	ThermalCoreLimit int      `json:"thermalCoreLimit,omitempty"`
+	// OwwShadow carries the on-device wake word window summary
+	// (shadow.Stats), nil when shadow mode is off. Riding the existing 30s
+	// tick keeps the DB cost of on-device scoring at one upsert per 30s —
+	// the same cost class as every other counter here, and the reason
+	// per-frame scores are never sent.
+	OwwShadow interface{} `json:"owwShadow,omitempty"`
 }
 
 // SendStats sends a stats message to the controller.
@@ -52,6 +71,12 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"txErrors":       s.TxErrors,
 		"txDropped":      s.TxDropped,
 		"rxCrcErrors":    s.RxCrcErrors,
-		"ble":            s.Ble,
+		"ble":              s.Ble,
+		"owwShadow":        s.OwwShadow,
+		"cpuTempC":         s.CPUTempC,
+		"maxTempC":         s.MaxTempC,
+		"coresOnline":      s.CoresOnline,
+		"coresTotal":       s.CoresTotal,
+		"thermalCoreLimit": s.ThermalCoreLimit,
 	})
 }

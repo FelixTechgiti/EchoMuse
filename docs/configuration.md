@@ -36,11 +36,21 @@ fleet-inheritable sections, in order of how often you'll realistically touch
 them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
 **Bluetooth**.
 
+The **CPU** meter shows the core count beside the percentage — "27% · 2/4
+cores". The Dot has four CPU cores and parks the ones it isn't using, and the
+percentage is a share of the cores that are *awake*, so the same amount of
+work reads as a bigger number when fewer are. Without the core count beside
+it the figure can appear to halve when nothing actually changed.
+
 Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
 ESPHome port, current volume, whether the config is fleet or overridden,
 resource meters including **Latency** (the round trip to the device — amber
 past 200ms, red past 1s; the only link-health signal the Echo's WiFi driver
-actually provides, since it reports no retry or noise figures), and the
+actually provides, since it reports no retry or noise figures) and **Temp**
+(the Dot's CPU sensor, and the hottest of its eleven sensors when that's
+meaningfully warmer; it idles around 33°C, so anything amber is genuinely
+unusual — and if the chip's thermal governor ever starts capping CPU
+capacity, this is where it says so), and the
 Bluetooth-proxy diagnostics panel when enabled —
 the Status row reads `Online`, or `Offline` with how long ago the device was
 last heard from) and **Activity** (voice-turn history — what was heard, how it was
@@ -98,8 +108,10 @@ whether or not the controller is reachable.
 
 ## 02 — Wake word
 
-How the device decides you said the magic word. (This work actually happens
-on the controller, not the Dot — the Dot just streams audio to it.)
+How the device decides you said the magic word. By default this work happens
+on the controller, not the Dot — the Dot just streams audio to it. (The Dot
+*can* now also score locally, but only as a shadow comparison that changes
+nothing about behaviour — see **Score on device** below.)
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -165,6 +177,33 @@ Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
 commands are untouched). Worth trying in rooms with constant background
 noise (TV, air-con) if wake detection is unreliable there. Off by default —
 it's a "try it and compare" option.
+
+### Score on device (shadow)
+Experimental, off by default, and **changes nothing about how the Dot
+behaves**. With it on, the Echo runs the same wake-word model over the same
+audio and reports what it *would* have detected. It never triggers a turn.
+
+The point is to find out whether on-device detection is trustworthy before
+anything depends on it. Each voice turn's row in **Activity** gains the
+device's own score next to the controller's, and the per-device activity API
+returns an agreement summary (how often they agreed, how far apart in
+milliseconds, and crossings the device saw that never became a turn).
+
+Three things to know before turning it on:
+
+- **It needs files installed on the Dot** that aren't part of the firmware —
+  ONNX Runtime plus the wake-word models, about 15MB, placed in
+  `/data/local/share/echomuse/oww`. They're deliberately not shipped in the
+  firmware image, because that would double both the download and the space
+  each of the two firmware slots takes. Until they're there, the toggle does
+  nothing and the device log says which file is missing.
+- **It costs about half a CPU core, permanently**, because the wake stream is
+  always on. Measured on an Echo Dot Gen 2 that has capacity for it — the mic
+  pipeline was unaffected across hours of use, including during music
+  playback — but enable it on **one device at a time** and watch the
+  **Resources** panel on the Status tab.
+- **It needs recent firmware.** The toggle is disabled and says so on Echos
+  whose firmware predates the feature, rather than appearing to work.
 
 ---
 

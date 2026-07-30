@@ -297,11 +297,38 @@ async def _serve_spa(request: web.Request) -> web.Response:
 
 
 async def _serve_dashboard(request: web.Request) -> web.Response:
-    """Serve dashboard.html for /dashboard."""
+    """
+    Serve dashboard.html for /dashboard, with the JS bundle cache-busted.
+
+    add_static sends Last-Modified and ETag but no Cache-Control, so browsers
+    apply HEURISTIC freshness and serve a cached dashboard.js without
+    revalidating. The failure mode is nasty because it is invisible from the
+    server side: the deploy is correct, the file on disk is correct, the
+    compiled bundle is correct, and the browser shows the previous UI — which
+    reads as "my change did not work" and sends you looking in the wrong place.
+    It cost exactly that on 2026-07-30 when the new thermal row did not appear.
+
+    So the bundle URL carries the file's mtime. That changes on every rebuild
+    regardless of version numbering (controller_version is "dev" for local
+    builds and would not bust between two dev deploys), and the wrapper itself
+    is sent no-cache so the new URL is always seen — it is 3KB, revalidating it
+    costs nothing.
+    """
     dashboard = STATIC_DIR / "dashboard.html"
     if not dashboard.exists():
         return web.Response(status=503, text="dashboard.html not found in static/")
-    return web.FileResponse(dashboard)
+    html = dashboard.read_text(encoding="utf-8")
+    bundle = STATIC_DIR / "dashboard.js"
+    if bundle.exists():
+        html = html.replace(
+            "/static/dashboard.js",
+            f"/static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+        )
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 async def _redirect_root(request: web.Request) -> web.Response:
@@ -545,11 +572,50 @@ async def _get_device_activity(request: web.Request) -> web.Response:
         for name, m in models.items()
     }
 
+    # On-device shadow comparison (schema v13) — the verdict, computed here so
+    # a reader is not left to derive it from raw columns.
+    #
+    # Denominator is turns where the device was KNOWN to be scoring
+    # (dev_shadow=1); a NULL score on those is a genuine miss, whereas a NULL
+    # anywhere else is absence of data and must not be counted either way.
+    compared   = [t for t in turns if (t["dev_shadow"] or 0) == 1]
+    agreed     = [t for t in compared if t["dev_wake_score"] is not None]
+    deltas     = sorted(t["dev_wake_delta_ms"] for t in agreed
+                        if t["dev_wake_delta_ms"] is not None)
+    dev_scores = [t["dev_wake_score"] for t in agreed]
+    crossings  = sum(r["dev_crossings"] or 0 for r in counters)
+    shadow_out = {
+        "turns_compared": len(compared),
+        "agreed":         len(agreed),
+        "missed":         len(compared) - len(agreed),
+        "agreement_pct":  round(100.0 * len(agreed) / len(compared), 1) if compared else None,
+        # Signed: negative means the device crossed FIRST, which is the
+        # expected direction — it scores the frame it just captured while the
+        # controller scores the same frame after a network hop.
+        "delta_ms_p50":   pct(deltas, 0.50),
+        "delta_ms_p95":   pct(deltas, 0.95),
+        "dev_score_avg":  round(sum(dev_scores) / len(dev_scores), 3) if dev_scores else None,
+        "dev_score_min":  round(min(dev_scores), 3) if dev_scores else None,
+        "crossings":      crossings,
+        # Crossings that never matched a turn. This is the false-accept side of
+        # the comparison, which per-turn rows structurally cannot show — but it
+        # is an ESTIMATE, not a count: the hourly counters and the turn rows are
+        # pruned on different schedules (WAKE_COUNTER_RETENTION_DAYS vs
+        # TURN_RETENTION rows), so over a long window this drifts. Treat a
+        # small number as noise and a large one as worth investigating.
+        "unmatched_crossings": max(0, crossings - len(agreed)),
+        "frames":         sum(r["dev_frames"] or 0 for r in counters),
+        # Nonzero drops mean the device could not keep up, so every figure
+        # above is describing a subset of the audio.
+        "drops":          sum(r["dev_drops"] or 0 for r in counters),
+    }
+
     return _ok({
         "days":          days_out,
         "wake_models":   models_out,
         "wake_counters": [dict(r) for r in counters],
         "metrics":       metrics,
+        "shadow":        shadow_out,
     })
 
 
@@ -2397,7 +2463,13 @@ async def _get_cached_release() -> Optional[dict]:
     last_check = db.get_config("last_update_check")
 
     if version and url:
-        _release_cache = {"version": version, "url": url}
+        _release_cache = {
+            "version":      version,
+            "url":          url,
+            "notes":        db.get_config("latest_notes", "") or "",
+            "release_url":  db.get_config("latest_release_url", "") or "",
+            "published_at": db.get_config("latest_published_at", "") or "",
+        }
         _release_cache_ts = time.monotonic()
 
         # Re-poll in background if DB cache is older than check interval
@@ -2440,6 +2512,11 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         # `server` asset attached. The list is newest-first.
         tag = None
         binary = None
+        # Initialised explicitly: it is only assigned inside the loop, and
+        # while the `binary is None` return below happens to cover that today,
+        # relying on one guard to protect another variable is how a later edit
+        # introduces a NameError on a path nobody runs in testing.
+        release: dict = {}
         for data in releases:
             if data.get("draft") or data.get("prerelease"):
                 continue
@@ -2453,6 +2530,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
             if candidate_binary is None:
                 continue
             tag, binary = candidate_tag, candidate_binary
+            release = data
             break
 
         if binary is None:
@@ -2461,13 +2539,29 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
 
         download_url = binary["browser_download_url"]
 
+        # Release notes, so the dashboard can show WHAT an update changes
+        # rather than only that one exists. Deciding whether to push firmware
+        # to a device you rely on, from a version number alone, is not a
+        # decision — it is a guess. The body comes from the annotated tag (see
+        # .github/workflows/release.yml), which is why tags are annotated.
+        notes = (release.get("body") or "").strip()
+
         # Persist to DB
         db.set_config("latest_version",    tag)
         db.set_config("latest_binary_url", download_url)
+        db.set_config("latest_notes",      notes)
+        db.set_config("latest_release_url", release.get("html_url") or "")
+        db.set_config("latest_published_at", release.get("published_at") or "")
         db.set_config("last_update_check", str(time.time()))
 
         # Update in-memory cache
-        _release_cache    = {"version": tag, "url": download_url}
+        _release_cache    = {
+            "version":      tag,
+            "url":          download_url,
+            "notes":        notes,
+            "release_url":  release.get("html_url") or "",
+            "published_at": release.get("published_at") or "",
+        }
         _release_cache_ts = time.monotonic()
 
         log.info(f"[api] Latest release: {tag}")
@@ -2709,6 +2803,11 @@ def _merge_device(row) -> dict:
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).
         "owwNearMisses":    getattr(live, "oww_near_misses", 0) if live else 0,
+        # What this firmware can be asked to do, by capability rather than by
+        # version comparison. Drives whether the dashboard OFFERS on-device
+        # scoring: a toggle that silently does nothing on old firmware is worse
+        # than no toggle, because it looks like the feature is broken.
+        "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
         # Update state
