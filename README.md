@@ -18,6 +18,10 @@ hear the answer through the Dot's speaker. The hardware you already own
 - **Custom wake words** — train your own ("hey biscuit") from synthetic TTS
   speech with the bundled [`oww_forge/`](oww_forge/README.md) trainer, then
   install it from the dashboard in one click.
+- **On-device wake word (experimental)** — the Echo can run the wake model
+  itself and report what it *would* have detected, without acting on it, so
+  the two can be compared on identical audio before anything depends on it.
+  Off by default; see [docs/configuration.md](docs/configuration.md).
 - **Barge-in** — say the wake word over the assistant's own reply to cut it
   off, backed by an on-device echo canceller (vendored speexdsp).
 - **Multi-room done right** — one utterance in earshot of two Echos gets
@@ -52,7 +56,15 @@ The device is deliberately dumb: it captures, beamforms, and streams audio
 continuously, and plays what it's sent. Everything that can drift or
 misjudge — wake scoring, endpointing, noise suppression, EQ, arbitration —
 lives on the controller where it can be observed and updated fleet-wide.
+(The one exception is opt-in and observational: the Echo can *also* score the
+wake word locally and report what it would have detected, which is how we're
+measuring whether that belongs on the device at all.)
 The full tour is in [docs/voice-pipeline.md](docs/voice-pipeline.md).
+
+The two halves version independently, so any pairing of firmware and
+controller has to work. What a device can be asked to do is negotiated by
+**capability**, not by comparing version numbers — see
+[Compatibility](#compatibility).
 
 This project builds on [EchoGo](https://github.com/Binozo/EchoGo) by Binozo —
 the original SDK that made this hardware accessible.
@@ -135,6 +147,34 @@ UI; the output is a small `.onnx` you upload straight from the dashboard's
 Wake word panel, where it appears as a tile next to the stock models.
 
 ---
+
+## Compatibility
+
+Device firmware (`v*` tags) and the controller (`controller-v*` tags) are
+released independently, so at any moment you may be running new firmware
+against an older controller or the reverse — during a staged rollout, that is
+guaranteed. Two rules keep that safe:
+
+**Features are negotiated by capability, not version.** On connect, a device
+announces what it implements (`mic`, `speaker`, `leds`, `led_anim`, `buttons`,
+`oww_shadow`). The controller asks "does this device say it can?" rather than
+"is its version at least X" — because the latter means encoding release
+history into the controller, and it gets a dev build wrong immediately. A
+control that depends on a capability the device lacks is shown disabled with
+the reason, never as a control that silently does nothing. A test asserts the
+capability strings match across the Go and Python sources, because a typo
+there makes a feature permanently unavailable while looking exactly like
+unsupported hardware.
+
+**Both directions degrade to the old behaviour, never to a wrong answer.**
+Unknown JSON fields and unknown message types are ignored, so neither side
+breaks on data it does not understand. Where a new field records a
+measurement, its absence is stored as *no data* rather than as zero — an old
+device reporting no playback statistics must not read as "zero underruns",
+and one that cannot score wake words locally must not read as "scored and
+missed every time". That distinction is why several columns are nullable and
+why some carry a companion flag saying whether the device was even capable of
+producing them.
 
 ## Acknowledgements
 

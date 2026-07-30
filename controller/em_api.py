@@ -2463,7 +2463,13 @@ async def _get_cached_release() -> Optional[dict]:
     last_check = db.get_config("last_update_check")
 
     if version and url:
-        _release_cache = {"version": version, "url": url}
+        _release_cache = {
+            "version":      version,
+            "url":          url,
+            "notes":        db.get_config("latest_notes", "") or "",
+            "release_url":  db.get_config("latest_release_url", "") or "",
+            "published_at": db.get_config("latest_published_at", "") or "",
+        }
         _release_cache_ts = time.monotonic()
 
         # Re-poll in background if DB cache is older than check interval
@@ -2506,6 +2512,11 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         # `server` asset attached. The list is newest-first.
         tag = None
         binary = None
+        # Initialised explicitly: it is only assigned inside the loop, and
+        # while the `binary is None` return below happens to cover that today,
+        # relying on one guard to protect another variable is how a later edit
+        # introduces a NameError on a path nobody runs in testing.
+        release: dict = {}
         for data in releases:
             if data.get("draft") or data.get("prerelease"):
                 continue
@@ -2519,6 +2530,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
             if candidate_binary is None:
                 continue
             tag, binary = candidate_tag, candidate_binary
+            release = data
             break
 
         if binary is None:
@@ -2527,13 +2539,29 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
 
         download_url = binary["browser_download_url"]
 
+        # Release notes, so the dashboard can show WHAT an update changes
+        # rather than only that one exists. Deciding whether to push firmware
+        # to a device you rely on, from a version number alone, is not a
+        # decision — it is a guess. The body comes from the annotated tag (see
+        # .github/workflows/release.yml), which is why tags are annotated.
+        notes = (release.get("body") or "").strip()
+
         # Persist to DB
         db.set_config("latest_version",    tag)
         db.set_config("latest_binary_url", download_url)
+        db.set_config("latest_notes",      notes)
+        db.set_config("latest_release_url", release.get("html_url") or "")
+        db.set_config("latest_published_at", release.get("published_at") or "")
         db.set_config("last_update_check", str(time.time()))
 
         # Update in-memory cache
-        _release_cache    = {"version": tag, "url": download_url}
+        _release_cache    = {
+            "version":      tag,
+            "url":          download_url,
+            "notes":        notes,
+            "release_url":  release.get("html_url") or "",
+            "published_at": release.get("published_at") or "",
+        }
         _release_cache_ts = time.monotonic()
 
         log.info(f"[api] Latest release: {tag}")
@@ -2775,6 +2803,11 @@ def _merge_device(row) -> dict:
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).
         "owwNearMisses":    getattr(live, "oww_near_misses", 0) if live else 0,
+        # What this firmware can be asked to do, by capability rather than by
+        # version comparison. Drives whether the dashboard OFFERS on-device
+        # scoring: a toggle that silently does nothing on old firmware is worse
+        # than no toggle, because it looks like the feature is broken.
+        "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
         # Update state

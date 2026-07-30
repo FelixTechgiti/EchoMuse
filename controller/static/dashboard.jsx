@@ -1513,6 +1513,44 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </Pill>
                   </div>
                 </div>
+                {/* What the update actually changes. Deciding whether to push
+                    firmware to a device you rely on, from a version number
+                    alone, is a guess rather than a decision — so the notes are
+                    shown here, at the point of that decision, and only when
+                    there is something to decide.
+
+                    Rendered as preformatted text on purpose: the body is
+                    markdown, no markdown renderer is bundled (React and xterm
+                    are the only vendored libs), and pulling one in to style a
+                    release note would be a poor trade. Simply-written notes
+                    read fine as text, and the GitHub link is there for the
+                    rest. */}
+                {needsUpdate && release?.notes && (
+                  <div style={{ marginTop:14, paddingTop:14, borderTop:'1px solid rgba(0,0,0,0.08)' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:8 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>
+                        What&apos;s in {release.version}
+                      </span>
+                      {release.published_at && (
+                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                          {new Date(release.published_at).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                    <pre style={{
+                      fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.65,
+                      color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
+                      margin:0, maxHeight:260, overflowY:'auto',
+                    }}>{release.notes}</pre>
+                    {release.release_url && (
+                      <a href={release.release_url} target="_blank" rel="noreferrer"
+                         style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                                  display:'inline-block', marginTop:8 }}>
+                        View release on GitHub →
+                      </a>
+                    )}
+                  </div>
+                )}
               </Panel>
 
               {/* Deploy sources, side by side */}
@@ -3581,7 +3619,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
               {/* owwOnDevice is off|shadow, so a toggle is the honest control
                   today. A third mode (letting the device trigger turns itself)
                   would need a select instead — and a rename of this label. */}
-              <Toggle label="Score on device (shadow)" sub="the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~38% of a core" value={(config.owwOnDevice ?? 'off') === 'shadow'} onChange={v => set('owwOnDevice', v ? 'shadow' : 'off')}/>
+              {/* Offered only when the device says it can do it. Capability,
+                  not firmware version: a toggle that silently does nothing on
+                  older firmware reads as a broken feature. */}
+              <Toggle
+                label="Score on device (shadow)"
+                sub={device.connected && !device.owwShadowCapable
+                  ? 'needs newer firmware on this Echo — it also runs the wake model locally and reports what it would have heard'
+                  : 'the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~0.5 of a core'}
+                value={(config.owwOnDevice ?? 'off') === 'shadow'}
+                onChange={device.connected && !device.owwShadowCapable
+                  ? undefined
+                  : (v => set('owwOnDevice', v ? 'shadow' : 'off'))}/>
             </div>
           </div>
         </div>

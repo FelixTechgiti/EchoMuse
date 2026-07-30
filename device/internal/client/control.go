@@ -251,7 +251,16 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		"type":         "register",
 		"device_id":    c.deviceID,
 		"version":      Version,
-		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons"},
+		// Capabilities, not version strings, are how the controller decides
+		// what a device can be asked to do. A version comparison has to encode
+		// knowledge of our release history in the controller and gets it wrong
+		// the first time someone runs a dev build; a capability is the device
+		// stating what it implements. "oww_shadow" says this firmware can score
+		// the wake word locally (internal/wakeword/shadow) — the controller
+		// uses it to decide whether owwOnDevice is even offerable, so an older
+		// device shows "needs newer firmware" rather than a toggle that
+		// silently does nothing.
+		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons", "oww_shadow"},
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was

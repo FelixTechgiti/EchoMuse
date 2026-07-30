@@ -50,3 +50,47 @@ def test_dashboard_bundle_is_cache_busted():
     # mtime changes on every rebuild.
     assert "st_mtime" in handler, \
         "cache-bust on the bundle's mtime, not on a version string"
+
+
+def test_release_notes_survive_the_whole_relay():
+    """
+    Release notes have to make it through four places to be useful: captured
+    from the GitHub response, persisted, re-read into the cache after a
+    restart, and rendered. Miss any one and the dashboard shows a version
+    number with no way to judge it — which is the state this replaced.
+
+    The restart path is the one worth pinning: the in-memory cache is
+    populated from the DB when cold, so notes omitted there would appear on
+    first poll and silently vanish on every controller restart until the next
+    one.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    fetch = api[api.index("async def _fetch_latest_release"):]
+    fetch = fetch[:fetch.index("\nasync def ", 1)]
+    assert 'release.get("body")' in fetch or '.get("body")' in fetch, \
+        "the GitHub release body must be captured"
+    assert 'set_config("latest_notes"' in fetch, "notes must be persisted"
+
+    cached = api[api.index("    # Load from DB cache"):]
+    cached = cached[:cached.index("\nasync def ", 1)] if "\nasync def " in cached else cached
+    assert 'get_config("latest_notes"' in cached, \
+        "the DB-cache path must restore notes, or they vanish on restart"
+
+    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+    assert "release.notes" in jsx, "the dashboard must render the notes"
+
+
+def test_release_workflow_publishes_the_tag_annotation():
+    """
+    The notes shown in the dashboard come from the annotated tag, so the
+    workflow must publish that rather than only GitHub's generated commit
+    list. If this drifts, every future release silently shows a commit dump to
+    whoever is deciding whether to update.
+    """
+    from pathlib import Path
+    wf = (Path(__file__).resolve().parent.parent.parent
+          / ".github" / "workflows" / "release.yml").read_text()
+    assert "body_path:" in wf, "the release must publish notes from a file"
+    assert "%(contents)" in wf, "notes must come from the tag annotation"

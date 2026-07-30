@@ -479,6 +479,21 @@ class Device:
     def led_anim_capable(self) -> bool:
         return "led_anim" in (self.capabilities or [])
 
+    @property
+    def oww_shadow_capable(self) -> bool:
+        """
+        Whether this firmware can score the wake word on-device at all.
+
+        Capability, not version comparison: the device states what it
+        implements, so the controller needs no knowledge of our release history
+        and a dev build is not mistaken for an old one. This answers "could it"
+        — `shadow.active` answers "is it, right now", which is a different
+        question and comes from whether its stats reports carry a summary.
+        Both are needed: capability drives what the dashboard offers, activity
+        drives whether a missing per-turn score is a real miss.
+        """
+        return "oww_shadow" in (self.capabilities or [])
+
     async def send_led_anim(self, anim: dict):
         """
         Hand the ring to the device's local animation engine (led_anim

@@ -149,7 +149,9 @@ The LED ring tells you what's happening:
 ## Everyday things
 
 - **Updates**: when a new EchoMuse release is out, the dashboard shows an
-  update badge — one click updates the device over WiFi. If an update ever
+  update badge — one click updates the device over WiFi. The release notes
+  appear alongside it, so you can read what changed before deciding, rather
+  than judging by version number. If an update ever
   goes wrong, the device automatically rolls back to its previous version.
   **Deploy all** updates the whole fleet at once; it runs in the background,
   so you can close the dialog and reopen it from the header pill to check
