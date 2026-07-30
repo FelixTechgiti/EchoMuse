@@ -29,13 +29,22 @@ func Dir() string {
 }
 
 // ModelStem turns the controller's owwModel value into the classifier filename
-// stem. That value is a bare name for built-in models ("hey_jarvis_v0.1") and a
-// FILE PATH for custom ones, and openwakeword itself keys predictions by the
-// filename stem in both cases — so the device has to reduce it the same way or
-// it will look for a file that cannot exist.
+// stem, mirroring em_oww_models.prediction_key EXACTLY.
+//
+// That value is a bare name for built-in models ("hey_mycroft_v0.1") and a file
+// PATH for custom ones. Python's rule is: strip to the filename stem only when
+// the value ends in ".onnx", otherwise pass it through untouched.
+//
+// The untouched case is the whole point, and getting it wrong is not
+// hypothetical — an earlier version used filepath.Ext, which sees ".1" as the
+// extension of "hey_mycroft_v0.1" and went looking for hey_mycroft_v0.onnx. A
+// version suffix is not a file extension.
 func ModelStem(owwModel string) string {
-	stem := filepath.Base(strings.TrimSpace(owwModel))
-	return strings.TrimSuffix(stem, filepath.Ext(stem))
+	name := strings.TrimSpace(owwModel)
+	if !strings.HasSuffix(name, ".onnx") {
+		return name
+	}
+	return strings.TrimSuffix(filepath.Base(name), ".onnx")
 }
 
 // Open loads ONNX Runtime and the three models for owwModel, and starts a

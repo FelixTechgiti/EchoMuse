@@ -44,6 +44,24 @@ MAX_AGE_S = 10.0
 RING = 32
 
 
+def now() -> float:
+    """
+    The one clock for shadow correlation.
+
+    Both sides of the comparison — the controller's wake instant and the
+    converted crossing timestamps — must come from HERE. They are compared by
+    subtraction, so two callers reaching for "a monotonic clock" independently
+    is a correctness bug waiting to happen, and a quiet one: CPython's
+    asyncio loop.time() happens to BE time.monotonic() today, which means a
+    mismatch would produce plausible deltas right up until it didn't.
+
+    (It is also how the original version of this broke, differently: reaching
+    for time.monotonic() in em_controller, which does not import time, killed
+    the wake listener on the first detection.)
+    """
+    return time.monotonic()
+
+
 class ShadowTracker:
     """Per-device record of on-device crossings, and the matching logic."""
 
@@ -56,7 +74,7 @@ class ShadowTracker:
         # dev_shadow flag alongside the score.
         self.active: bool = False
 
-    def record_cross(self, score, age_ms, now: float | None = None) -> bool:
+    def record_cross(self, score, age_ms, at_now: float | None = None) -> bool:
         """
         Note a crossing reported by the device. Returns whether it was accepted.
 
@@ -73,7 +91,7 @@ class ShadowTracker:
         # evidence, but one claiming to be a minute old would otherwise be
         # projected onto a wake it has nothing to do with.
         age_s = max(0.0, min(age_s, MAX_AGE_S))
-        at = (now if now is not None else time.monotonic()) - age_s
+        at = (at_now if at_now is not None else now()) - age_s
         self._crossings.append((at, score))
         return True
 

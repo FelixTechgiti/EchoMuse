@@ -23,6 +23,44 @@ jobs:
         working-directory: controller
         run: python -m pytest tests/ -v
 
+  controller-lint:
+    name: Controller lint (undefined names)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pyflakes
+        run: pip install pyflakes
+      # Why this job exists, in one sentence: `time.monotonic()` was added to
+      # em_controller.py, which does not import time, and the resulting
+      # NameError killed the wake word listener on the first detection --
+      # fleet-wide, in production, on a line no test could reach because the
+      # wake loop needs openwakeword and a real utterance to execute.
+      #
+      # pyflakes finds that class of bug in milliseconds without importing
+      # anything, which is what makes it worth a job: the controller's heavy
+      # modules (em_controller, em_api, em_esphome) are deliberately NOT
+      # imported by the test suite, so every rarely-taken branch in them is
+      # untested by construction. Undefined names are the failure mode that
+      # punishes hardest -- silent until executed, then fatal.
+      #
+      # Scoped to undefined names ONLY, on purpose. The codebase has pre-existing
+      # unused-variable and f-string warnings that are not worth a churn commit,
+      # and a lint job that fails for style would get ignored or removed.
+      - name: Check for undefined names
+        working-directory: controller
+        run: |
+          out=$(python -m pyflakes em_*.py tools/*.py tests/*.py esphome/*.py 2>&1 \
+                | grep -i "undefined name" || true)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "::error::pyflakes found undefined name(s) -- see above"
+            exit 1
+          fi
+          echo "No undefined names."
+
   device-tests:
     name: Device Go tests
     runs-on: ubuntu-latest

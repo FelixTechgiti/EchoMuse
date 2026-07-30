@@ -1517,7 +1517,13 @@ async def wake_word_listener(device: Device):
                         # JSON serialisation of the row (2026-07-14).
                         # Monotonic instant of THIS detection, for correlating
                         # the device's shadow crossing at turn-persist time.
-                        device.last_wake_mono = time.monotonic()
+                        # em_shadow.now() rather than a clock of our own: both
+                        # sides of that subtraction must come from one place,
+                        # and this module does not import time (it uses the
+                        # event loop's clock) — reaching for time.monotonic()
+                        # here raised NameError on the first wake detection and
+                        # killed the listener for the rest of the process.
+                        device.last_wake_mono = em_shadow.now()
                         device.last_wake = {
                             "model":       model_key,
                             "score":       round(float(score), 4),
