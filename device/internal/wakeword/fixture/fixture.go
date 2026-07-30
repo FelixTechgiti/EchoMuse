@@ -165,24 +165,47 @@ func (f *ORT) Chunk(i int) []int16 {
 
 // Tolerance for comparing one inference engine against another.
 //
-// ARM and x86 were measured to agree to ~7 significant figures on these
-// models, which is float32 epsilon plus SIMD reassociation, so 1e-4 relative
-// is generous by two orders of magnitude — and still six orders below anything
-// that could move a wake decision against a 0.5 threshold. The absolute floor
-// keeps near-zero values (most of a melspectrogram) from failing on
-// meaningless relative error.
+// RelTol is relative to the SCALE OF THE TENSOR (its largest magnitude), not
+// to each element individually, and that distinction is the whole point.
+// Per-element relative error is meaningless for a tensor whose values straddle
+// zero: the same 2e-5 absolute error reads as 2e-4 on an element at 0.1 and as
+// 2000 on an element at 1e-8, so a per-element criterion fails on whichever
+// element happens to sit nearest zero while saying nothing about whether the
+// engines agree. Measured on an Echo Dot: ONNX Runtime 1.19.2 with XNNPACK
+// against 1.23.2 with the CPU provider agreed to 1.5e-6 of tensor scale, while
+// the worst single element differed by 1.7e-4 relatively. The first number is
+// the informative one, and it matches the ~7 significant figures measured
+// independently between ARM and x86.
+//
+// 1e-4 of scale is therefore generous by two orders of magnitude, and remains
+// far below anything that could move a wake decision — the classifier score,
+// the only value with a threshold attached, agreed to 8.9e-8 against a
+// threshold of 0.5 in the same run.
 const (
 	RelTol = 1e-4
 	AbsTol = 1e-5
 )
 
-// CloseEnough reports whether two values agree within tolerance.
-func CloseEnough(got, want float32) bool {
-	d := math.Abs(float64(got - want))
-	if d <= AbsTol {
-		return true
+// scaleOf returns a tensor's magnitude, the basis for its tolerance.
+func scaleOf(want []float32) float64 {
+	var s float64
+	for _, v := range want {
+		if a := math.Abs(float64(v)); a > s {
+			s = a
+		}
 	}
-	return d <= RelTol*math.Abs(float64(want))
+	return s
+}
+
+// tolerance is the absolute difference permitted in a tensor of this scale.
+// The AbsTol floor matters for tensors that are legitimately all near zero —
+// the classifier's score on non-speech audio is 0.0000, and scaling a
+// tolerance off that would demand bit-exactness.
+func tolerance(scale float64) float64 { return AbsTol + RelTol*scale }
+
+// CloseEnough compares two scalars, i.e. a tensor of one value.
+func CloseEnough(got, want float32) bool {
+	return math.Abs(float64(got-want)) <= tolerance(math.Abs(float64(want)))
 }
 
 // Diff describes how two tensors disagree. Zero value means they match.
@@ -192,6 +215,13 @@ type Diff struct {
 	// Worst is the largest absolute difference seen, and WorstAt where.
 	Worst   float64
 	WorstAt int
+	// Scale is the expected tensor's magnitude and Tol the difference that was
+	// permitted. Both are recorded so a caller can report how close the
+	// engines actually were, which is more useful than a pass/fail — a run
+	// that passes at 1.5e-6 of scale and one that passes at 9e-5 are telling
+	// you different things about the hardware.
+	Scale float64
+	Tol   float64
 	// Examples holds up to four human-readable mismatches, so a caller can
 	// report something useful without dumping thousands of lines.
 	Examples []string
@@ -200,10 +230,19 @@ type Diff struct {
 // Ok reports whether the tensors agreed.
 func (d Diff) Ok() bool { return d.N == 0 }
 
-// Compare checks got against want elementwise. A length mismatch is reported
-// as a single mismatch rather than a panic, because on a real device the
-// interesting version of that bug is a model whose output shape is not what
-// the pipeline assumed.
+// RelToScale is the worst difference as a fraction of the tensor's scale — the
+// figure to quote when describing how well two engines agree.
+func (d Diff) RelToScale() float64 {
+	if d.Scale == 0 {
+		return 0
+	}
+	return d.Worst / d.Scale
+}
+
+// Compare checks got against want elementwise, at a tolerance derived from
+// want's scale. A length mismatch is reported as a single mismatch rather than
+// a panic, because on a real device the interesting version of that bug is a
+// model whose output shape is not what the pipeline assumed.
 func Compare(got, want []float32) Diff {
 	var d Diff
 	if len(got) != len(want) {
@@ -211,16 +250,19 @@ func Compare(got, want []float32) Diff {
 		d.Examples = append(d.Examples, fmt.Sprintf("length %d, want %d", len(got), len(want)))
 		return d
 	}
+	d.Scale = scaleOf(want)
+	d.Tol = tolerance(d.Scale)
 	for i := range got {
 		delta := math.Abs(float64(got[i] - want[i]))
 		if delta > d.Worst {
 			d.Worst, d.WorstAt = delta, i
 		}
-		if !CloseEnough(got[i], want[i]) {
+		if delta > d.Tol {
 			d.N++
 			if len(d.Examples) < 4 {
-				d.Examples = append(d.Examples,
-					fmt.Sprintf("[%d] = %v, want %v", i, got[i], want[i]))
+				d.Examples = append(d.Examples, fmt.Sprintf(
+					"[%d] = %v, want %v (off by %.3g, tolerance %.3g)",
+					i, got[i], want[i], delta, d.Tol))
 			}
 		}
 	}
@@ -301,7 +343,7 @@ func (r Report) Summary() string {
 		return "FAIL: " + r.Err.Error()
 	}
 	stage := func(name string, set []Diff) string {
-		bad, worst := 0, 0.0
+		bad, worst, rel, scale, tol := 0, 0.0, 0.0, 0.0, 0.0
 		for _, d := range set {
 			if !d.Ok() {
 				bad++
@@ -309,12 +351,34 @@ func (r Report) Summary() string {
 			if d.Worst > worst {
 				worst = d.Worst
 			}
+			if r := d.RelToScale(); r > rel {
+				rel = r
+			}
+			if d.Scale > scale {
+				scale = d.Scale
+			}
+			if d.Tol > tol {
+				tol = d.Tol
+			}
 		}
 		verdict := "ok"
 		if bad > 0 {
 			verdict = fmt.Sprintf("FAIL (%d chunks differ)", bad)
 		}
-		return fmt.Sprintf("  %-10s %-24s max abs diff %.3g\n", name, verdict, worst)
+		// Report the agreement, not just the verdict: how closely two engines
+		// match is the interesting output even when they match well enough.
+		//
+		// The of-scale figure is only meaningful for a tensor with some
+		// magnitude to be relative TO. The classifier score on non-speech
+		// audio is ~1e-7, so quoting a ratio against it printed "0.75 of
+		// tensor scale" for a run that agreed to 9e-8 and passed on the
+		// absolute floor — a number that reads as alarming and means nothing.
+		if scale >= 1 {
+			return fmt.Sprintf("  %-10s %-24s worst %.3g abs, %.3g of tensor scale\n",
+				name, verdict, worst, rel)
+		}
+		return fmt.Sprintf("  %-10s %-24s worst %.3g abs (tolerance %.3g)\n",
+			name, verdict, worst, tol)
 	}
 	out := stage("melspec", r.Melspec) + stage("embedding", r.Embedding) +
 		stage("score", r.Score[r.ScoreFrom:])
