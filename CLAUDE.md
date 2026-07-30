@@ -153,6 +153,9 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
 | `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
 | `internal/wakeword/` | openWakeWord streaming feature pipeline (mel ring → 76-frame windows → embedding ring → classifier). Pure Go: inference sits behind the `Inferer` interface so the buffering is host-testable with no ONNX/cgo. Validated tensor-for-tensor against Python via a golden fixture (`testdata/`, regenerate with `gen_fixture.py`) |
+| `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
+| `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
+| `internal/wakeword/fixture/` | Shared golden-fixture parser, tolerance policy and `Verify`. Used by both the host test and `tools/oww_probe`, deliberately — the probe's answer is the trusted one because it runs on hardware, so it must be exactly as strict as the test by construction. Tolerances are relative to the **tensor's** scale, not per element: per-element relative error is meaningless for tensors straddling zero |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
@@ -165,6 +168,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS audio before playback |
+| `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
 | `em_arbiter.py` | Multi-device wake arbitration — pools same-utterance detections, best SNR answers |
@@ -173,6 +177,61 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
+
+## On-device wake word (shadow mode)
+
+The Echo can run the wake model itself. `owwOnDevice` = `off` (default) or
+`shadow`; a third mode letting the device *trigger* turns is deliberately not
+implemented, and an unknown value normalises to `off` rather than being guessed
+at — the two plausible guesses are "score silently" and "start triggering", and
+one of those is a live behaviour change on a device that cannot honour it.
+
+**Shadow mode scores and reports; it never acts.** It exists to answer whether
+on-device detection is good enough to trust, by comparing both detectors on the
+same audio. The tap sits where the ungated wake stream's frames are written to
+the wire, so the device scores byte-identical 80ms frames on identical
+boundaries — a score difference can then only be the engine, not the framing.
+
+Three things are load-bearing:
+
+- **Inference must never run on the mic goroutine.** It costs ~31ms per 80ms
+  frame, the mic loop reads 160ms ALSA batches, and the ring is only 160ms
+  deep — two frames inline would spend 62ms of that budget and risk the capture
+  stalls that lose whole batches. `shadow.Scorer.Push` hands off to a buffered
+  channel and returns; the scorer goroutine **drops frames and counts them**
+  when it falls behind. A shadow run that drops frames is informative; one that
+  stutters the microphone is not.
+- **Nothing is sent per frame.** Threshold crossings go immediately (they are
+  rare — a refractory period collapses each utterance to one — and their whole
+  value is the timing). Everything else is a window summary riding the existing
+  ~30s stats tick, so the DB cost is one extra upsert per 30s per device.
+- **The device never sends a timestamp.** An Echo's wall clock is bogus before
+  NTP, so it reports how long *ago* a crossing happened and the controller
+  converts against its own monotonic clock — same reasoning as the RTT
+  instrumentation.
+
+Correlation (`em_shadow.ShadowTracker`, schema v13) happens at turn-persist
+time, not at detection: the crossing report can land after the wake it belongs
+to, and by turn end it has had seconds to arrive. The nearest crossing within
+`MATCH_WINDOW_S` (2.0s) wins and is **consumed**, so two turns in quick
+succession cannot both be credited to one crossing. The window is loose on
+purpose — both detectors see the same frames but not in the same detector
+*state*, since the controller drops wake frames while a turn or TTS is in
+flight, and a false "miss" argues against a feature that is actually working.
+`turns.dev_shadow` records whether the device was scoring at all, which is what
+separates "the device missed this" from "the device was not looking";
+`wake_counters.dev_*` carries the hourly view, where crossings with no matching
+turn are the false-accept side that per-turn rows structurally cannot show.
+
+Requirements and cost: ONNX Runtime plus the three models must be installed at
+`shadow.DefaultDir` (`/data/local/share/echomuse/oww`, override `EM_OWW_DIR`)
+— they are **not** in the firmware, since 12.3MB would double the OTA payload
+and both A/B slots. Absence is an ordinary condition, logged once, and the
+device carries on with controller-side wake word. Install with
+`controller/tools/push_file.py`; `device/tools/oww_probe` verifies a device
+reproduces Python and reports the real CPU cost. It costs ~38% of one core
+permanently on top of the ~18-20% mic-pipeline baseline, so **enable it on one
+device at a time**.
 
 ## Persistent activity stats
 
@@ -198,7 +257,7 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs` and `saveUtterances` (both controller-consumed; the device ignores them).
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances` and `wakeArbitrationMs` are ignored by it).
 
 ### Fleet vs device scoping (schema v8)
 

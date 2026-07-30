@@ -3154,7 +3154,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
@@ -3503,6 +3503,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
               <Slider label="Barge threshold" sub="wake confidence needed during playback — speech-over-TTS scores low, ~0.10 is typical with AEC" value={config.bargeInThreshold ?? 0.10} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
+              {/* owwOnDevice is off|shadow, so a toggle is the honest control
+                  today. A third mode (letting the device trigger turns itself)
+                  would need a select instead — and a rename of this label. */}
+              <Toggle label="Score on device (shadow)" sub="the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~38% of a core" value={(config.owwOnDevice ?? 'off') === 'shadow'} onChange={v => set('owwOnDevice', v ? 'shadow' : 'off')}/>
             </div>
           </div>
         </div>

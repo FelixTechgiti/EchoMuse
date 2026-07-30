@@ -545,11 +545,50 @@ async def _get_device_activity(request: web.Request) -> web.Response:
         for name, m in models.items()
     }
 
+    # On-device shadow comparison (schema v13) — the verdict, computed here so
+    # a reader is not left to derive it from raw columns.
+    #
+    # Denominator is turns where the device was KNOWN to be scoring
+    # (dev_shadow=1); a NULL score on those is a genuine miss, whereas a NULL
+    # anywhere else is absence of data and must not be counted either way.
+    compared   = [t for t in turns if (t["dev_shadow"] or 0) == 1]
+    agreed     = [t for t in compared if t["dev_wake_score"] is not None]
+    deltas     = sorted(t["dev_wake_delta_ms"] for t in agreed
+                        if t["dev_wake_delta_ms"] is not None)
+    dev_scores = [t["dev_wake_score"] for t in agreed]
+    crossings  = sum(r["dev_crossings"] or 0 for r in counters)
+    shadow_out = {
+        "turns_compared": len(compared),
+        "agreed":         len(agreed),
+        "missed":         len(compared) - len(agreed),
+        "agreement_pct":  round(100.0 * len(agreed) / len(compared), 1) if compared else None,
+        # Signed: negative means the device crossed FIRST, which is the
+        # expected direction — it scores the frame it just captured while the
+        # controller scores the same frame after a network hop.
+        "delta_ms_p50":   pct(deltas, 0.50),
+        "delta_ms_p95":   pct(deltas, 0.95),
+        "dev_score_avg":  round(sum(dev_scores) / len(dev_scores), 3) if dev_scores else None,
+        "dev_score_min":  round(min(dev_scores), 3) if dev_scores else None,
+        "crossings":      crossings,
+        # Crossings that never matched a turn. This is the false-accept side of
+        # the comparison, which per-turn rows structurally cannot show — but it
+        # is an ESTIMATE, not a count: the hourly counters and the turn rows are
+        # pruned on different schedules (WAKE_COUNTER_RETENTION_DAYS vs
+        # TURN_RETENTION rows), so over a long window this drifts. Treat a
+        # small number as noise and a large one as worth investigating.
+        "unmatched_crossings": max(0, crossings - len(agreed)),
+        "frames":         sum(r["dev_frames"] or 0 for r in counters),
+        # Nonzero drops mean the device could not keep up, so every figure
+        # above is describing a subset of the audio.
+        "drops":          sum(r["dev_drops"] or 0 for r in counters),
+    }
+
     return _ok({
         "days":          days_out,
         "wake_models":   models_out,
         "wake_counters": [dict(r) for r in counters],
         "metrics":       metrics,
+        "shadow":        shadow_out,
     })
 
 

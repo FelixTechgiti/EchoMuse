@@ -282,3 +282,71 @@ def test_excursion_rates_are_none_without_samples_in_that_state(fresh_db):
     m = db.get_device_metrics("dev1", 0)[-1]
     assert m["rtt_excursion_pct_idle"] == 10.0
     assert m["rtt_excursion_pct_busy"] is None
+
+
+# ── v13 — on-device wake word shadow mode ────────────────────────────────────
+
+def test_migrates_to_v13(fresh_db):
+    assert int(db.get_config("schema_version")) >= 13
+
+
+def test_turns_has_shadow_columns(fresh_db):
+    cols = _cols("turns")
+    for c in ("dev_wake_score", "dev_wake_delta_ms", "dev_shadow"):
+        assert c in cols, f"turns.{c} missing"
+
+
+def test_wake_counters_has_shadow_columns(fresh_db):
+    cols = _cols("wake_counters")
+    for c in ("dev_frames", "dev_drops", "dev_crossings", "dev_max_score"):
+        assert c in cols, f"wake_counters.{c} missing"
+
+
+def test_shadow_turn_fields_round_trip(fresh_db):
+    """The v13 columns must survive insert_turn's dict→column mapping. A field
+    present in the record but absent from _TURN_COLUMNS is silently discarded,
+    which is exactly how a comparison feature ends up reporting nothing."""
+    turn_id = db.insert_turn("dev1", {
+        "ts": 1_800_000_000,
+        "trigger": "wakeword(0.71)",
+        "wake_score": 0.71,
+        "outcome": "ok",
+        "dev_wake_score": 0.63,
+        "dev_wake_delta_ms": -140,
+        "dev_shadow": 1,
+    })
+    row = db._q("SELECT * FROM turns WHERE id = ?", (turn_id,))[0]
+    assert row["dev_wake_score"] == 0.63
+    assert row["dev_wake_delta_ms"] == -140
+    assert row["dev_shadow"] == 1
+
+
+def test_shadow_counters_accumulate_and_max(fresh_db):
+    """Counters sum; the max score takes the maximum. Getting the second one
+    wrong (summing scores) produces a number that looks like a score and is
+    not — the same class of bug as the near-miss max."""
+    db.bump_wake_counters("dev2", dev_frames=100, dev_drops=2,
+                          dev_crossings=1, dev_max_score=0.4)
+    db.bump_wake_counters("dev2", dev_frames=50, dev_drops=1,
+                          dev_crossings=2, dev_max_score=0.9)
+    db.bump_wake_counters("dev2", dev_frames=25, dev_max_score=0.6)
+
+    rows = db.get_wake_counters("dev2", 0)
+    assert len(rows) == 1, "all three bumps belong to the same hour bucket"
+    r = rows[0]
+    assert r["dev_frames"] == 175
+    assert r["dev_drops"] == 3
+    assert r["dev_crossings"] == 3
+    assert r["dev_max_score"] == 0.9
+
+
+def test_shadow_counters_do_not_disturb_near_miss_columns(fresh_db):
+    """The dev_* arguments were added to an existing upsert that the wake loop
+    calls every 2s. A mistake in the ON CONFLICT list would corrupt near-miss
+    accounting, which has nothing to do with this feature."""
+    db.bump_wake_counters("dev3", near_misses=3, near_miss_max=0.44)
+    db.bump_wake_counters("dev3", dev_frames=10, dev_max_score=0.2)
+    r = db.get_wake_counters("dev3", 0)[0]
+    assert r["near_misses"] == 3
+    assert r["near_miss_max"] == 0.44
+    assert r["dev_frames"] == 10

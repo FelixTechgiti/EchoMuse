@@ -37,6 +37,14 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
+    # owwOnDevice: on-device wake word scoring. "off" or "shadow".
+    # Shadow scores the wake stream on the device and reports what it WOULD
+    # have detected, without acting on it, so the two can be compared on the
+    # same audio. Default off and it should stay that way: it costs ~38% of one
+    # core permanently on top of the ~18-20% mic-pipeline baseline, and it
+    # needs ONNX Runtime plus the models installed on the device out of band
+    # (they are not in the firmware). Enable on ONE device at a time.
+    "owwOnDevice":      "off",
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -524,6 +532,38 @@ MIGRATIONS: list[str] = [
     ALTER TABLE turns ADD COLUMN audio_file TEXT;
 
     UPDATE system_config SET value = '12' WHERE key = 'schema_version';
+    """,
+
+    # ── v13 — on-device wake word shadow mode ───────────────────────────────
+    #
+    # Two levels, because they answer different questions.
+    #
+    # Per turn (dev_wake_*): when the CONTROLLER woke, did the device agree,
+    # and how far apart were they? This is the comparison that decides whether
+    # on-device detection is good enough to trust. NULL means one of three
+    # things and they are not the same: shadow mode was off, the device's
+    # firmware predates it, or the device genuinely did not cross the threshold
+    # for this utterance. The third is a finding; the first two are absence of
+    # data. dev_shadow distinguishes them — 1 when the device was known to be
+    # scoring at the time, so a NULL score alongside it is a real miss.
+    #
+    # Per hour (wake_counters.dev_*): what did the device see when the
+    # controller did NOT wake? Crossings with no corresponding turn are the
+    # false-accept side of the comparison, which per-turn rows structurally
+    # cannot show. dev_frames is the denominator that makes the rest legible,
+    # and dev_drops says whether the device kept up at all — a shadow run that
+    # dropped half its frames is not evidence about detection quality.
+    """
+    ALTER TABLE turns ADD COLUMN dev_wake_score REAL;
+    ALTER TABLE turns ADD COLUMN dev_wake_delta_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN dev_shadow INTEGER;
+
+    ALTER TABLE wake_counters ADD COLUMN dev_frames    INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_drops     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_crossings INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_max_score REAL    NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '13' WHERE key = 'schema_version';
     """,
 ]
 
@@ -1326,6 +1366,12 @@ _TURN_COLUMNS = {
     "send_ms":          "send_ms",
     "delivery_ms":      "delivery_ms",
     "eq_ms":            "eq_ms",
+    # v13 — on-device shadow comparison. dev_shadow is the "was the device
+    # scoring at all" flag that stops a NULL dev_wake_score from being read as
+    # a miss when it is really absence of data.
+    "dev_wake_score":    "dev_wake_score",
+    "dev_wake_delta_ms": "dev_wake_delta_ms",
+    "dev_shadow":        "dev_shadow",
     # v12 — filename of the saved utterance WAV, written by set_turn_audio
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.
@@ -1469,20 +1515,37 @@ def bump_wake_counters(
     near_misses: int = 0,
     near_miss_max: float = 0.0,
     underruns: int = 0,
+    dev_frames: int = 0,
+    dev_drops: int = 0,
+    dev_crossings: int = 0,
+    dev_max_score: float = 0.0,
 ) -> None:
-    """Accumulate into the current hour's wake_counters row (upsert)."""
+    """
+    Accumulate into the current hour's wake_counters row (upsert).
+
+    The dev_* arguments are the on-device shadow window summary (schema v13),
+    which rides the device's existing ~30s stats report — so on-device scoring
+    adds one upsert per 30s per device and nothing per audio frame.
+    """
     hour_ts = int(time.time()) // 3600 * 3600
     with _tx() as conn:
         conn.execute(
             """
-            INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max, underruns)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max,
+                                       underruns, dev_frames, dev_drops, dev_crossings,
+                                       dev_max_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 near_misses   = near_misses + excluded.near_misses,
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
-                underruns     = underruns + excluded.underruns
+                underruns     = underruns + excluded.underruns,
+                dev_frames    = dev_frames + excluded.dev_frames,
+                dev_drops     = dev_drops + excluded.dev_drops,
+                dev_crossings = dev_crossings + excluded.dev_crossings,
+                dev_max_score = MAX(dev_max_score, excluded.dev_max_score)
             """,
-            (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns)),
+            (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns),
+             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",

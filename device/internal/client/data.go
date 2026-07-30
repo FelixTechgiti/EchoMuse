@@ -15,6 +15,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/processor"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -161,6 +162,13 @@ type DataClient struct {
 	onDirectionChange func(angle float64)
 	directionMu       sync.Mutex
 
+	// shadowScorer scores the always-on wake stream on the device without
+	// acting on it (internal/wakeword/shadow), nil when off. Guarded because
+	// a config push swaps it from the control goroutine while the mic
+	// goroutine is pushing frames into it.
+	shadowMu     sync.Mutex
+	shadowScorer *shadow.Scorer
+
 	// pipeMu serialises access to beam and proc, which hold unsynchronised
 	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
 	// Both are normally touched by a single streamMic goroutine, but a
@@ -191,6 +199,31 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 
 // OnDirectionChanged registers a callback invoked when the estimated dominant
 // source direction changes. Called from the mic streaming goroutine — keep it fast.
+// SetShadowScorer installs (or removes, with nil) the on-device wake word
+// scorer. Any previous scorer is closed, which releases its ONNX Runtime
+// sessions — a config push that changes the wake model rebuilds it, and
+// leaking a set of sessions per change would be a slow death on a device with
+// 1GB of storage and less RAM.
+//
+// Returns the scorer it replaced, already closed, purely so callers can log the
+// transition.
+func (d *DataClient) SetShadowScorer(s *shadow.Scorer) {
+	d.shadowMu.Lock()
+	old := d.shadowScorer
+	d.shadowScorer = s
+	d.shadowMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+// ShadowScorer returns the active scorer, or nil.
+func (d *DataClient) ShadowScorer() *shadow.Scorer {
+	d.shadowMu.Lock()
+	defer d.shadowMu.Unlock()
+	return d.shadowScorer
+}
+
 func (d *DataClient) OnDirectionChanged(cb func(angle float64)) {
 	d.directionMu.Lock()
 	d.onDirectionChange = cb
@@ -518,6 +551,17 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	gainDb := -1
 	gainLin := 1.0
 
+	// On-device shadow scoring, read once per stream rather than per period:
+	// the pointer only changes on a config push, which also restarts nothing,
+	// so a stream that began before the change keeps using the scorer it
+	// started with until the next StartMic. Reset because a StopMic/StartMic
+	// pair happens after every voice turn and the detector must not splice
+	// across the gap.
+	shadowScorer := d.ShadowScorer()
+	if shadowScorer != nil {
+		shadowScorer.Reset()
+	}
+
 	sendFrame := func(payload []byte) {
 		frame := make([]byte, 3+len(payload))
 		frame[0] = frameTypeMic
@@ -731,6 +775,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if !lockMic {
 				buf = append(buf, mono...)
 				for len(buf) >= vadOwwChunkBytes {
+					// Score the SAME bytes on the SAME 80ms boundaries the
+					// controller receives, so a device/controller score
+					// difference can only be the engine and not the framing.
+					// PushBytes never blocks: it drops when the scorer is
+					// behind rather than delaying this loop, which reads
+					// 160ms ALSA batches out of a 160ms-deep ring.
+					if shadowScorer != nil {
+						shadowScorer.PushBytes(buf[:vadOwwChunkBytes])
+					}
 					sendFrame(buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
 				}

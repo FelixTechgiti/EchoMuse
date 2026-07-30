@@ -1627,6 +1627,31 @@ async def _persist_turn(device, turn_record: dict) -> None:
             turn_record["send_ms"] = device.playback_send_ms
             turn_record["eq_ms"]   = device.playback_eq_ms
         pending = None
+    # On-device shadow comparison (schema v13): when THIS controller woke, did
+    # the device's own scoring agree, and how far apart were they? Correlated
+    # here rather than at detection time on purpose — the device's crossing
+    # report travels over the control plane and can land after the wake it
+    # belongs to, and by turn end it has had seconds to arrive.
+    #
+    # dev_shadow records whether the device was scoring at all, so a NULL score
+    # beside a 1 is a genuine miss while a NULL beside a NULL is just absence of
+    # data. Only for wake-triggered turns: a button press has no wake instant to
+    # compare against, and writing 0 there would invent a miss.
+    wake_mono = device.last_wake_mono
+    device.last_wake_mono = None
+    if wake_mono is not None and str(turn_record.get("trigger", "")).startswith("wakeword"):
+        dev_score, dev_delta = device.shadow.match(wake_mono)
+        turn_record["dev_shadow"]        = 1 if device.shadow.active else None
+        turn_record["dev_wake_score"]    = dev_score
+        turn_record["dev_wake_delta_ms"] = dev_delta
+        if device.shadow.active:
+            log.info(
+                f"[{device.device_id}] shadow comparison: controller "
+                f"{turn_record.get('wake_score')} vs device "
+                f"{dev_score if dev_score is not None else 'MISS'}"
+                + (f" ({dev_delta:+d}ms)" if dev_delta is not None else "")
+            )
+
     # Surface the outcome to the turn loop's ring cleanup. Without this
     # every ending looks identical to the user — "I didn't hear you",
     # "HA errored" and "done, nothing to say" all just turn the ring off.

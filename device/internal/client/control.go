@@ -764,6 +764,27 @@ func (c *ControlClient) SendPlaybackStats(periods, underruns uint64, stats inter
 	})
 }
 
+// SendOwwShadowCross reports that on-device shadow scoring reached the wake
+// threshold. It is a report, not a request: the controller correlates it
+// against its own detection for the same audio and stores the comparison, and
+// nothing on either side triggers a turn from it.
+//
+// Sent immediately rather than batched onto the 30s stats tick because the
+// whole value is in the TIMING — the controller matches it against its own wake
+// within a window, and a report that arrives up to 30s late cannot be matched
+// to anything. Crossings are rare (a refractory period collapses each utterance
+// to one), so this stays far inside the project's per-event cost class.
+// ageMs is how long ago the crossing happened, measured on the device's
+// monotonic clock: an Echo's wall clock is unreliable before NTP, so an
+// absolute device timestamp would be worse than useless.
+func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":  "oww_shadow_cross",
+		"score": score,
+		"ageMs": ageMs,
+	})
+}
+
 // SendBleAdverts forwards a batch of BLE advertisements to the controller
 // (bluetooth_proxy path). adverts is marshalled as-is — []bluetooth.Advert,
 // whose Data field JSON-encodes as base64. Safe for concurrent use —

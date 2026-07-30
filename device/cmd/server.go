@@ -26,6 +26,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
@@ -221,6 +222,7 @@ func main() {
 		go func() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.OwwShadow = shadowStats(dataClient)
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -247,6 +249,7 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
+		applyShadowConfig(dataClient, controlClient)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -399,6 +402,7 @@ func main() {
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.OwwShadow = shadowStats(dataClient)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -438,6 +442,28 @@ func main() {
 }
 
 // ─── Hardware stats collection ────────────────────────────────────────────────
+
+// shadowStats drains the on-device wake word counters for this reporting
+// window, or nil when shadow mode is off — nil marshals the field away, so the
+// controller can tell "off" from "on and saw nothing", which are very different
+// answers to "why were there no detections".
+func shadowStats(dc *client.DataClient) interface{} {
+	sc := dc.ShadowScorer()
+	if sc == nil {
+		return nil
+	}
+	st := sc.Drain()
+	return map[string]interface{}{
+		"frames":    st.Frames,
+		"drops":     st.Drops,
+		"notReady":  st.NotReady,
+		"crossings": st.Crossings,
+		"maxScore":  st.MaxScore,
+		"errors":    st.Errors,
+		"lastErr":   st.LastErr,
+		"ready":     sc.Ready(),
+	}
+}
 
 func collectStats() client.DeviceStats {
 	cpuPct := cpuPercent()
@@ -759,6 +785,64 @@ func applyAecConfig(canceller *aec.Canceller) {
 // applyBleConfig starts/stops the BLE proxy scanner from the current
 // effective config. SetEnabled is idempotent, so calling it on every config
 // push is free.
+// shadowState remembers what the live scorer was built for, so a config push
+// that changes neither the mode nor the model does not rebuild it. Rebuilding
+// means reloading a 12MB runtime and starting a fresh ~1.28s not-ready window,
+// and config pushes arrive on every reconnect — so "idempotent unless something
+// changed" is the difference between a stable shadow run and one that is
+// perpetually warming up.
+var shadowState struct {
+	mode    string
+	model   string
+	lastErr string
+}
+
+// applyShadowConfig starts, stops or re-points on-device wake word scoring from
+// the current effective config.
+//
+// Failure to load is an ordinary condition, not an error state: the runtime and
+// models are installed out of band, so "not installed" is what every device
+// reports until someone puts them there. It is logged once per distinct reason
+// rather than on every config push, and the device carries on with
+// controller-side wake word exactly as before.
+func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient) {
+	snap := config.Get().Snapshot()
+	mode, model := snap.OwwOnDevice, snap.OwwModel
+	threshold := float32(snap.OwwThreshold)
+
+	if mode != config.OnDeviceShadow {
+		if dc.ShadowScorer() != nil {
+			dc.SetShadowScorer(nil)
+			log.Printf("[shadow] on-device wake word disabled")
+		}
+		shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+		return
+	}
+
+	// Already running for this model: only the threshold can change live.
+	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
+		sc.SetThreshold(threshold)
+		return
+	}
+
+	sc, err := shadow.Open(model, threshold, func(score float32, at time.Time) {
+		cc.SendOwwShadowCross(score, time.Since(at).Milliseconds())
+	})
+	if err != nil {
+		if msg := err.Error(); msg != shadowState.lastErr {
+			shadowState.lastErr = msg
+			log.Printf("[shadow] not started: %v", err)
+		}
+		dc.SetShadowScorer(nil)
+		shadowState.mode, shadowState.model = mode, model
+		return
+	}
+	dc.SetShadowScorer(sc)
+	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — reporting only, not triggering",
+		sc.Info(), threshold)
+}
+
 func applyBleConfig(scanner *bluetooth.Scanner) {
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)

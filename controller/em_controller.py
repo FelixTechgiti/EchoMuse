@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_eq
 import em_scenes
+import em_shadow
 import em_arbiter
 import em_esphome as esphome
 import em_ble_proxy
@@ -157,6 +158,7 @@ PING_INTERVAL_SEC = 5.0
 # healthy hop (Office measures 264ms median for a whole audio round trip
 # including frame batching) while catching the ~1s tail under investigation.
 RTT_EXCURSION_MS = 200
+
 # Outstanding pings older than this are abandoned — a reply that late is not
 # a latency measurement, it is a lost packet, and keeping them would grow
 # ping_sent without bound across a long disconnect.
@@ -287,6 +289,22 @@ class Device:
         # independently, reset only on device reconnect (see Device.__init__
         # semantics generally — a fresh Device is created per connection).
         self.oww_near_misses: int = 0
+
+        # On-device wake word shadow mode (schema v13). The device scores the
+        # same wake stream locally and reports threshold crossings as they
+        # happen; these are correlated against THIS controller's own detections
+        # at turn-persist time. Monotonic timestamps throughout: an Echo's wall
+        # clock is unreliable before NTP, so the device reports the AGE of a
+        # crossing and the controller converts it against its own clock — the
+        # same reasoning as the control-plane RTT instrumentation.
+        #
+        # maxlen bounds this without a sweeper: crossings are rare (the device
+        # applies a refractory period, so one per utterance) and only the most
+        # recent few can ever be within a match window.
+        self.shadow: em_shadow.ShadowTracker = em_shadow.ShadowTracker()
+        # Monotonic instant of this controller's most recent wake detection,
+        # consumed once by the turn record it belongs to.
+        self.last_wake_mono = None  # float | None
 
         # Per-room noise floor estimate (normalized RMS, 0..1), tracked from
         # the continuous wake stream in wake_word_listener. Measurement only —
@@ -1497,6 +1515,9 @@ async def wake_word_listener(device: Device):
                         # float(): OWW scores are numpy float32 — sqlite3
                         # stores those as a 4-byte BLOB, which then breaks
                         # JSON serialisation of the row (2026-07-14).
+                        # Monotonic instant of THIS detection, for correlating
+                        # the device's shadow crossing at turn-persist time.
+                        device.last_wake_mono = time.monotonic()
                         device.last_wake = {
                             "model":       model_key,
                             "score":       round(float(score), 4),
@@ -1950,7 +1971,25 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         "txDropped":     msg.get("txDropped"),
                         "rxCrcErrors":   msg.get("rxCrcErrors"),
                         "ble":           msg.get("ble"),
+                        # v13 on-device shadow window summary, absent when the
+                        # device is not scoring (see the allowlist note above:
+                        # DeviceStats, here, and the consumer below).
+                        "owwShadow":     msg.get("owwShadow"),
                     }
+                    # Shadow summary → hourly rollup. Present only while the
+                    # device is scoring, so its presence is also the "was it
+                    # looking" flag that stops a missing per-turn score from
+                    # reading as a miss.
+                    _sh = msg.get("owwShadow") or {}
+                    device.shadow.active = bool(_sh)
+                    if _sh:
+                        if _sh.get("drops") or _sh.get("errors"):
+                            log.warning(
+                                f"[{device_id}] on-device wake word fell behind: "
+                                f"{_sh.get('drops')} frames dropped, "
+                                f"{_sh.get('errors')} errors ({_sh.get('lastErr') or '-'}) "
+                                f"— comparison is running on a subset of the audio"
+                            )
                     if msg.get("ble"):
                         em_ble_proxy.update_stats(device_id, msg["ble"])
                     # Fold into the persistent hourly rollup (CPU/RAM/storage/
@@ -1964,9 +2003,21 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     # and resets the window accumulated since the last
                     # report, so no sample is counted twice.
                     _metrics = {**device.stats, **device.drain_rtt()}
-                    def _persist_stats(_id=device_id, _s=_metrics):
+                    def _persist_stats(_id=device_id, _s=_metrics, _shadow=_sh):
                         db.record_device_stats(_id, _s)
                         db.touch_device_seen(_id)
+                        # Shadow counters ride the SAME executor hop rather
+                        # than adding one: the whole point of summarising on
+                        # the device is that on-device scoring costs the DB
+                        # one upsert per 30s, not one per frame.
+                        if _shadow:
+                            db.bump_wake_counters(
+                                _id,
+                                dev_frames=int(_shadow.get("frames") or 0),
+                                dev_drops=int(_shadow.get("drops") or 0),
+                                dev_crossings=int(_shadow.get("crossings") or 0),
+                                dev_max_score=float(_shadow.get("maxScore") or 0.0),
+                            )
                     await loop.run_in_executor(None, _persist_stats)
                     await api._push_event({
                         "type":      "device_update",
@@ -2083,6 +2134,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             f"in {periods} periods"
                             f"{f' (turn {turn_id})' if turn_id else ''}"
                         )
+
+                elif msg_type == "oww_shadow_cross":
+                    # On-device scoring reached the wake threshold. Recorded
+                    # for comparison ONLY — nothing here starts a turn, and
+                    # that is the entire point of shadow mode.
+                    device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
+                    log.info(
+                        f"[{device_id}] on-device wake crossing: "
+                        f"score={msg.get('score')} age={msg.get('ageMs')}ms "
+                        f"(shadow — not triggering)"
+                    )
 
                 elif msg_type == "ble_adverts":
                     # BLE proxy data path — batched adverts from the

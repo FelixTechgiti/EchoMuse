@@ -6,8 +6,10 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -28,6 +30,13 @@ type Device struct {
 	// Wake word
 	OwwThreshold float64
 	OwwModel     string
+	// OwwOnDevice selects on-device wake word scoring: "off" or "shadow".
+	// Shadow mode scores the wake stream locally and reports what it would
+	// have detected, without acting on it, so device and controller can be
+	// compared on the same audio. "on" — letting the device trigger turns
+	// itself — is deliberately not implemented yet and is rejected as
+	// unknown rather than silently treated as shadow.
+	OwwOnDevice string
 
 	// ADC gain — applied via tinymix when config is pushed
 	AdcDigitalGain int
@@ -100,6 +109,7 @@ func (d *Device) loadDefaults() {
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.3)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
+	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -141,6 +151,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwModel != "" {
 		d.OwwModel = msg.OwwModel
+	}
+	if msg.OwwOnDevice != "" {
+		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
 	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
@@ -208,6 +221,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		VadSilenceMs:       d.VadSilenceMs,
 		OwwThreshold:       d.OwwThreshold,
 		OwwModel:           d.OwwModel,
+		OwwOnDevice:        d.OwwOnDevice,
 		StartupVolume:      d.StartupVolume,
 		AdcDigitalGain:     d.AdcDigitalGain,
 		AdcMicpga:          d.AdcMicpga,
@@ -235,6 +249,7 @@ type ConfigMessage struct {
 	VadSilenceMs       int      `json:"vadSilenceMs,omitempty"`
 	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
 	OwwModel           string   `json:"owwModel,omitempty"`
+	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
@@ -257,6 +272,29 @@ func clampMicGainDb(db int) int {
 		return 42
 	}
 	return db
+}
+
+// On-device wake word modes.
+const (
+	OnDeviceOff    = "off"
+	OnDeviceShadow = "shadow"
+)
+
+// normaliseOnDevice maps a pushed value onto a known mode. Anything
+// unrecognised — including a future "on" that this firmware does not implement
+// — becomes "off": an older device receiving a mode it cannot honour must not
+// guess, because the two plausible guesses are "score but do nothing" and
+// "start triggering turns", and one of those is a live behaviour change.
+func normaliseOnDevice(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case OnDeviceShadow:
+		return OnDeviceShadow
+	case "", OnDeviceOff:
+		return OnDeviceOff
+	default:
+		log.Printf("[config] unknown owwOnDevice %q — treating as %q", v, OnDeviceOff)
+		return OnDeviceOff
+	}
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────
