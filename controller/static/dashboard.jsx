@@ -1348,21 +1348,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       const total = Object.keys(CONFIG_SECTIONS).length;
                       return n === 0 ? 'Fleet' : `Local override (${n} of ${total})`;
                     })())}
-                    {isAdmin && device.connected && (
-                      <div style={{ marginTop: 8, display:'flex', gap:8, flexWrap:'wrap' }}>
-                        {!device.linkTls && (
-                          <Pill small accent disabled={securing} onClick={doSecureLink}>
-                            {securing ? 'Securing…' : 'Secure link'}
-                          </Pill>
-                        )}
-                        {/* Payload re-apply. Unlike Secure link this is always
-                            offered: there is no device state that says whether
-                            the debloat list has moved on since provisioning, and
-                            the operation is idempotent, so offering it costs
-                            nothing and hiding it would leave a device with no
-                            way to catch up. */}
-                        <Pill small disabled={debloating} onClick={doDebloat}>
-                          {debloating ? 'Applying…' : 'Re-apply debloat'}
+                    {isAdmin && device.connected && !device.linkTls && (
+                      <div style={{ marginTop: 8 }}>
+                        <Pill small accent disabled={securing} onClick={doSecureLink}>
+                          {securing ? 'Securing…' : 'Secure link'}
                         </Pill>
                       </div>
                     )}
@@ -1507,6 +1496,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 onChange={(k, v) => setConf(k, v)}
                 disabled={!isAdmin}
                 sections={sections}
+                shadowCapable={!device.connected || !!device.owwShadowCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -1657,6 +1647,27 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   </div>
                 </Panel>
               </div>
+
+              {/* Maintenance — device-side payloads that are not the firmware
+                  binary. These used to sit on the Status tab beside Secure
+                  link, which was the wrong home: Status describes what a device
+                  IS, and re-applying a payload is something you DO. It belongs
+                  next to deploy and rollback. */}
+              {isAdmin && (
+                <Panel label="Maintenance">
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    Re-apply the debloat payloads: sync the boot script and hide any
+                    Amazon package added to the list since this device was provisioned.
+                    Runs automatically with every firmware update — this is for a device
+                    already on the current firmware, which the automatic path never
+                    reaches. Idempotent, and newly hidden packages stop at the next
+                    device restart.
+                  </div>
+                  <Pill small disabled={!device.connected || debloating} onClick={doDebloat}>
+                    {debloating ? 'Applying…' : 'Re-apply debloat'}
+                  </Pill>
+                </Panel>
+              )}
 
               {/* Activity console — always present so the layout never jumps
                   when a deploy starts */}
@@ -3443,7 +3454,12 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
   );
 }
 
-function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange }) {
+function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
+                            shadowCapable = true }) {
+  // shadowCapable defaults TRUE because this form is also the fleet-config
+  // view, where there is no single device whose capability could gate a
+  // control. Referencing a `device` here is what blank-screened the Config
+  // tab: the prop does not exist, so `device.connected` threw during render.
   // sections == null means the fleet-config view: nothing to inherit from, so
   // no per-section switches and every control is live.
   const scoped = Array.isArray(sections);
@@ -3684,13 +3700,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange 
                   older firmware reads as a broken feature. */}
               <Toggle
                 label="Score on device (shadow)"
-                sub={device.connected && !device.owwShadowCapable
-                  ? 'needs newer firmware on this Echo — it also runs the wake model locally and reports what it would have heard'
-                  : 'the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~0.5 of a core'}
+                sub={shadowCapable
+                  ? 'the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~0.5 of a core'
+                  : 'needs newer firmware on this Echo — it also runs the wake model locally and reports what it would have heard'}
                 value={(config.owwOnDevice ?? 'off') === 'shadow'}
-                onChange={device.connected && !device.owwShadowCapable
-                  ? undefined
-                  : (v => set('owwOnDevice', v ? 'shadow' : 'off'))}/>
+                onChange={shadowCapable
+                  ? (v => set('owwOnDevice', v ? 'shadow' : 'off'))
+                  : (() => {})}/>
             </div>
           </div>
         </div>

@@ -226,3 +226,40 @@ def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path, monkeypatch
     assert "micGainDb" not in stored
     # State keys are never section-scoped and must survive.
     assert stored["startupVolume"] == 42
+
+
+def test_config_form_does_not_reference_a_device_it_never_receives():
+    """
+    DeviceConfigForm takes config, not a device — and is also rendered for the
+    FLEET view, where no device exists at all. Referencing `device.something`
+    inside it throws during render, which blank-screens the whole Config tab
+    with no server-side symptom: the APIs all return 200 and the logs are clean.
+
+    That happened on 2026-07-30 (`device.owwShadowCapable` used to gate a
+    control). Anything a control needs about the device must arrive as an
+    explicit prop, so the fleet view can supply a sensible default.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+    lines = src.split("\n")
+    start = next(i for i, l in enumerate(lines) if l.startswith("function DeviceConfigForm("))
+    end = next(i for i, l in enumerate(lines[start + 1:], start + 1) if l.startswith("function "))
+
+    offenders = []
+    for i in range(start, end):
+        line = lines[i]
+        stripped = line.strip()
+        # Skip comments — the explanation of this very bug mentions `device.`.
+        if stripped.startswith("//") or stripped.startswith("*"):
+            continue
+        code = re.sub(r"//.*$", "", line)
+        if re.search(r"\bdevice\.[A-Za-z_]", code):
+            offenders.append(f"line {i + 1}: {stripped[:100]}")
+
+    assert not offenders, (
+        "DeviceConfigForm references `device`, which it does not receive as a prop "
+        "(and which does not exist in the fleet-config view). Pass what the control "
+        "needs explicitly.\n  " + "\n  ".join(offenders)
+    )
