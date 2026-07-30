@@ -1,16 +1,14 @@
 package ort_test
 
 import (
-	"encoding/binary"
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/wakeword"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/fixture"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 )
 
@@ -43,6 +41,15 @@ func models(t *testing.T) (lib string, m ort.Models) {
 	}
 }
 
+func loadFixture(t *testing.T) *fixture.ORT {
+	t.Helper()
+	fx, err := fixture.LoadORT("../testdata/ort_fixture.bin")
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	return fx
+}
+
 func newInferer(t *testing.T) *ort.Inferer {
 	t.Helper()
 	lib, m := models(t)
@@ -60,142 +67,6 @@ func newInferer(t *testing.T) *ort.Inferer {
 	return inf
 }
 
-// ortFixture mirrors testdata/ort_fixture.bin — see gen_ort_fixture.py. Unlike
-// the parent package's fixture it carries its own input audio, so there is no
-// second implementation of a random generator to drift out of step with
-// Python's.
-type ortFixture struct {
-	audio []int16
-	recs  []struct {
-		melInLen int
-		melOut   []float32
-		emb      []float32
-		score    float32
-	}
-	embProbeIn, embProbeOut []float32
-	clsProbeIn              []float32
-	clsProbeOut             float32
-}
-
-func loadORTFixture(t *testing.T) *ortFixture {
-	t.Helper()
-	raw, err := os.ReadFile("../testdata/ort_fixture.bin")
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	if string(raw[:8]) != "OWWORT02" {
-		t.Fatalf("bad fixture magic %q", raw[:8])
-	}
-	p := 8
-	u32 := func() int { v := binary.LittleEndian.Uint32(raw[p:]); p += 4; return int(v) }
-	f32n := func(n int) []float32 {
-		out := make([]float32, n)
-		for i := range out {
-			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[p:]))
-			p += 4
-		}
-		return out
-	}
-
-	f := &ortFixture{}
-	nSamples := u32()
-	f.audio = make([]int16, nSamples)
-	for i := range f.audio {
-		f.audio[i] = int16(binary.LittleEndian.Uint16(raw[p:]))
-		p += 2
-	}
-	f.recs = make([]struct {
-		melInLen int
-		melOut   []float32
-		emb      []float32
-		score    float32
-	}, u32())
-	for i := range f.recs {
-		f.recs[i].melInLen = u32()
-		frames := u32()
-		f.recs[i].melOut = f32n(frames * wakeword.MelBins)
-		f.recs[i].emb = f32n(wakeword.FeatDim)
-		f.recs[i].score = f32n(1)[0]
-	}
-	f.embProbeIn = f32n(wakeword.MelWindow * wakeword.MelBins)
-	f.embProbeOut = f32n(wakeword.FeatDim)
-	f.clsProbeIn = f32n(wakeword.FeatWindow * wakeword.FeatDim)
-	f.clsProbeOut = f32n(1)[0]
-	if p != len(raw) {
-		t.Fatalf("fixture not fully consumed: %d of %d bytes", p, len(raw))
-	}
-	return f
-}
-
-// Tolerance for cross-engine comparison. ARM and x86 were measured to agree to
-// ~7 significant figures on these models, which is float32 epsilon plus SIMD
-// reassociation, so 1e-4 relative is generous by two orders of magnitude — and
-// still six orders below anything that could move a wake decision against a
-// 0.5 threshold. The absolute floor keeps near-zero values (most of a
-// melspectrogram) from failing on meaningless relative error.
-const (
-	relTol = 1e-4
-	absTol = 1e-5
-)
-
-func closeEnough(got, want float32) bool {
-	d := math.Abs(float64(got - want))
-	if d <= absTol {
-		return true
-	}
-	return d <= relTol*math.Abs(float64(want))
-}
-
-func compare(t *testing.T, label string, got, want []float32) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Errorf("%s: %d values, want %d", label, len(got), len(want))
-		return
-	}
-	bad := 0
-	for i := range got {
-		if !closeEnough(got[i], want[i]) {
-			if bad < 4 {
-				t.Errorf("%s[%d] = %v, Python gave %v", label, i, got[i], want[i])
-			}
-			bad++
-		}
-	}
-	if bad > 4 {
-		t.Errorf("%s: %d of %d values differ beyond tolerance", label, bad, len(got))
-	}
-}
-
-// spyInferer wraps the real Inferer so the test can see the tensors flowing
-// between the models while the parent package drives them. The point is to
-// exercise the REAL composition — wakeword.Detector calling into ONNX Runtime —
-// rather than poking the three models by hand, because the interesting failure
-// is a mismatch between the two halves, not inside either.
-type spyInferer struct {
-	inner   *ort.Inferer
-	melOuts [][]float32
-	embs    [][]float32
-}
-
-func (s *spyInferer) Melspec(samples []float32) ([]float32, int, error) {
-	out, frames, err := s.inner.Melspec(samples)
-	if err == nil {
-		// The Inferer reuses its output buffer, so this has to be a copy.
-		s.melOuts = append(s.melOuts, append([]float32(nil), out...))
-	}
-	return out, frames, err
-}
-
-func (s *spyInferer) Embed(window []float32) ([]float32, error) {
-	out, err := s.inner.Embed(window)
-	if err == nil {
-		s.embs = append(s.embs, append([]float32(nil), out...))
-	}
-	return out, err
-}
-
-func (s *spyInferer) Classify(feats []float32) (float32, error) { return s.inner.Classify(feats) }
-
 // TestInfererMatchesPython is the end-to-end claim: the Go pipeline driving
 // real ONNX Runtime reproduces what openWakeWord's Python produced from the
 // same audio, at every stage.
@@ -205,57 +76,37 @@ func (s *spyInferer) Classify(feats []float32) (float32, error) { return s.inner
 // alone is sufficient — replayed models cannot catch a wrong tensor shape or a
 // misconfigured session, and hand-fed models cannot catch a misaligned window.
 func TestInfererMatchesPython(t *testing.T) {
-	fx := loadORTFixture(t)
-	spy := &spyInferer{inner: newInferer(t)}
-	d := wakeword.New(spy)
+	fx := loadFixture(t)
+	rep := fixture.Verify(newInferer(t), fx)
 
-	scores := make([]float32, 0, len(fx.recs))
-	for i := 0; i < len(fx.recs); i++ {
-		chunk := fx.audio[i*wakeword.ChunkSamples : (i+1)*wakeword.ChunkSamples]
-		n, err := d.Push(chunk)
-		if err != nil {
-			t.Fatalf("chunk %d: Push: %v", i, err)
-		}
-		if n != 1 {
-			t.Fatalf("chunk %d: produced %d embeddings, want 1", i, n)
-		}
-		if !d.Ready() {
-			scores = append(scores, math.MaxFloat32) // sentinel, not compared
-			continue
-		}
-		s, err := d.Score()
-		if err != nil {
-			t.Fatalf("chunk %d: Score: %v", i, err)
-		}
-		scores = append(scores, s)
+	if rep.Err != nil {
+		t.Fatalf("verify: %v", rep.Err)
 	}
-
-	// Melspectrogram output, per chunk. This is the stage most sensitive to a
-	// wrong input length: 1280 samples on the first chunk and 1760 after,
-	// yielding 5 then 8 frames.
-	if len(spy.melOuts) != len(fx.recs) {
-		t.Fatalf("melspec ran %d times, want %d", len(spy.melOuts), len(fx.recs))
+	for _, msg := range rep.Structural {
+		t.Error(msg)
 	}
-	for i, rec := range fx.recs {
-		if want := rec.melInLen; want != wakeword.ChunkSamples && want != wakeword.ChunkSamples+wakeword.MelContextSamples {
-			t.Fatalf("fixture chunk %d has an unexpected melspec input length %d", i, want)
+	// Melspectrogram output is the stage most sensitive to a wrong input
+	// length, and embeddings must agree from chunk 0 because the mel ring's
+	// 1.0 pre-fill is deterministic. Scores only from ScoreFrom: before that
+	// Python's feature ring still holds embeddings of its random warm-up audio
+	// while ours is clean.
+	for i := range fx.Records {
+		if d := rep.Melspec[i]; !d.Ok() {
+			t.Errorf("melspec chunk %d: %d values differ, worst %.3g at %d: %v",
+				i, d.N, d.Worst, d.WorstAt, d.Examples)
 		}
-		compare(t, "melspec chunk "+strconv.Itoa(i), spy.melOuts[i], rec.melOut)
-	}
-
-	// Embeddings, per chunk, from chunk 0: the mel ring's 1.0 pre-fill is
-	// deterministic, so these must agree immediately.
-	for i, rec := range fx.recs {
-		compare(t, "embedding chunk "+strconv.Itoa(i), spy.embs[i], rec.emb)
-	}
-
-	// Scores only once the feature ring holds real audio. Before that Python's
-	// ring still contains embeddings of its random warm-up audio while ours is
-	// clean — the deliberate divergence documented in the parent package.
-	for i := wakeword.FeatWindow; i < len(fx.recs); i++ {
-		if !closeEnough(scores[i], fx.recs[i].score) {
-			t.Errorf("score chunk %d = %v, Python gave %v", i, scores[i], fx.recs[i].score)
+		if d := rep.Embedding[i]; !d.Ok() {
+			t.Errorf("embedding chunk %d: %d values differ, worst %.3g: %v",
+				i, d.N, d.Worst, d.Examples)
 		}
+		if i >= rep.ScoreFrom {
+			if d := rep.Score[i]; !d.Ok() {
+				t.Errorf("score chunk %d: %v", i, d.Examples)
+			}
+		}
+	}
+	if !rep.Ok() {
+		t.Logf("report:\n%s", rep.Summary())
 	}
 }
 
@@ -264,24 +115,26 @@ func TestInfererMatchesPython(t *testing.T) {
 // wired to return a constant zero would pass the test above; the probe feeds a
 // wide-range tensor that produces a small but distinctly non-zero score.
 func TestProbeTensorsMatchPython(t *testing.T) {
-	fx := loadORTFixture(t)
+	fx := loadFixture(t)
 	inf := newInferer(t)
 
-	emb, err := inf.Embed(fx.embProbeIn)
+	emb, err := inf.Embed(fx.EmbProbeIn)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	compare(t, "embedding probe", emb, fx.embProbeOut)
+	if d := fixture.Compare(emb, fx.EmbProbeOut); !d.Ok() {
+		t.Errorf("embedding probe: %d values differ, worst %.3g: %v", d.N, d.Worst, d.Examples)
+	}
 
-	score, err := inf.Classify(fx.clsProbeIn)
+	score, err := inf.Classify(fx.ClsProbeIn)
 	if err != nil {
 		t.Fatalf("Classify: %v", err)
 	}
-	if fx.clsProbeOut == 0 {
+	if fx.ClsProbeOut == 0 {
 		t.Fatal("fixture probe score is zero, which would make this test vacuous")
 	}
-	if !closeEnough(score, fx.clsProbeOut) {
-		t.Errorf("classifier probe = %v, Python gave %v", score, fx.clsProbeOut)
+	if !fixture.CloseEnough(score, fx.ClsProbeOut) {
+		t.Errorf("classifier probe = %v, Python gave %v", score, fx.ClsProbeOut)
 	}
 }
 
@@ -356,4 +209,3 @@ func TestThreadsMustBePositive(t *testing.T) {
 		t.Error("NewInferer accepted Threads=0")
 	}
 }
-
