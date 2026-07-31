@@ -613,6 +613,31 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '15' WHERE key = 'schema_version';
     """,
+
+    # ── v16 — what the shadow scorer's stalls actually were ─────────────────
+    #
+    # dev_drops says the scorer's 8-frame (640ms) queue overflowed. It does
+    # not say WHY, and three explanations have already been falsified by
+    # measurement (turn bursts, core hotplug, controller redeploys), so the
+    # counter on its own has stopped being able to answer the question.
+    #
+    # A drop has exactly two causes and they call for opposite fixes:
+    # dev_max_infer_ms is the slowest single inference in the window (the
+    # CONSUMER stalling), dev_max_gap_ms the longest gap between frames
+    # arriving (the PRODUCER bursting — the mic pipeline handing over its
+    # 160ms batches late and in clumps).
+    #
+    # Maxima rather than averages, because a stall IS the tail: a 700ms event
+    # averaged over a 30s window of 375 normal frames disappears entirely.
+    # Default 0 reads as "not reported" for firmware predating this, which is
+    # honest here — unlike a measurement, an absent maximum cannot be mistaken
+    # for a good one, since 0 is also what a perfectly healthy window reports.
+    """
+    ALTER TABLE wake_counters ADD COLUMN dev_max_infer_ms INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_max_gap_ms   INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '16' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1570,6 +1595,8 @@ def bump_wake_counters(
     dev_drops: int = 0,
     dev_crossings: int = 0,
     dev_max_score: float = 0.0,
+    dev_max_infer_ms: int = 0,
+    dev_max_gap_ms: int = 0,
 ) -> None:
     """
     Accumulate into the current hour's wake_counters row (upsert).
@@ -1584,8 +1611,8 @@ def bump_wake_counters(
             """
             INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max,
                                        underruns, dev_frames, dev_drops, dev_crossings,
-                                       dev_max_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       dev_max_score, dev_max_infer_ms, dev_max_gap_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 near_misses   = near_misses + excluded.near_misses,
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
@@ -1593,10 +1620,13 @@ def bump_wake_counters(
                 dev_frames    = dev_frames + excluded.dev_frames,
                 dev_drops     = dev_drops + excluded.dev_drops,
                 dev_crossings = dev_crossings + excluded.dev_crossings,
-                dev_max_score = MAX(dev_max_score, excluded.dev_max_score)
+                dev_max_score = MAX(dev_max_score, excluded.dev_max_score),
+                dev_max_infer_ms = MAX(dev_max_infer_ms, excluded.dev_max_infer_ms),
+                dev_max_gap_ms   = MAX(dev_max_gap_ms, excluded.dev_max_gap_ms)
             """,
             (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns),
-             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score)),
+             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score),
+             _py(dev_max_infer_ms), _py(dev_max_gap_ms)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",

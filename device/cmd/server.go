@@ -4,28 +4,28 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"sync"
-	"sync/atomic"
+	"fmt"
 	"log"
 	"math"
-	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
-	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
+	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -471,6 +471,12 @@ func shadowStats(dc *client.DataClient) interface{} {
 		"errors":    st.Errors,
 		"lastErr":   st.LastErr,
 		"ready":     sc.Ready(),
+		// Maxima that explain a drop: the slowest single inference (consumer
+		// stalling) against the longest gap between frames arriving (producer
+		// bursting). Cheap enough to send every window — two integers on a
+		// message that already exists.
+		"maxInferMs": st.MaxInferMs,
+		"maxGapMs":   st.MaxGapMs,
 	}
 }
 
@@ -488,21 +494,21 @@ func collectStats() client.DeviceStats {
 		CoresOnline:      coresOnline(),
 		CoresTotal:       coresTotal(),
 		ThermalCoreLimit: coreLimit,
-		CPUPct:         cpuPct,
-		MemUsedMb:      memUsed,
-		MemTotalMb:     memTotal,
-		StorageUsedMb:  stoUsed,
-		StorageTotalMb: stoTotal,
-		WifiRssi:       rssi,
-		WifiSsid:       wifi.CurrentSSID(),
-		LinkSpeedMbps:  speed,
-		WifiFreqMhz:    freq,
-		WifiBssid:      bssid,
-		TxBytes:        tx,
-		RxBytes:        rx,
-		TxErrors:       txErr,
-		TxDropped:      txDrop,
-		RxCrcErrors:    rxCrc,
+		CPUPct:           cpuPct,
+		MemUsedMb:        memUsed,
+		MemTotalMb:       memTotal,
+		StorageUsedMb:    stoUsed,
+		StorageTotalMb:   stoTotal,
+		WifiRssi:         rssi,
+		WifiSsid:         wifi.CurrentSSID(),
+		LinkSpeedMbps:    speed,
+		WifiFreqMhz:      freq,
+		WifiBssid:        bssid,
+		TxBytes:          tx,
+		RxBytes:          rx,
+		TxErrors:         txErr,
+		TxDropped:        txDrop,
+		RxCrcErrors:      rxCrc,
 	}
 }
 
@@ -970,7 +976,7 @@ func pulseWhite(ctx context.Context, s *server.Server) {
 // the names are stable for the life of the boot, and rescanning 11 sysfs
 // directories every 30s to learn nothing would be silly.
 var (
-	thermalOnce  sync.Once
+	thermalOnce   sync.Once
 	thermalByType map[string]string
 )
 

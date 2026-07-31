@@ -2306,6 +2306,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 dev_drops=int(_shadow.get("drops") or 0),
                                 dev_crossings=int(_shadow.get("crossings") or 0),
                                 dev_max_score=float(_shadow.get("maxScore") or 0.0),
+                                # v16: what a drop actually was — slowest
+                                # inference vs longest frame gap.
+                                dev_max_infer_ms=int(_shadow.get("maxInferMs") or 0),
+                                dev_max_gap_ms=int(_shadow.get("maxGapMs") or 0),
                             )
                     await loop.run_in_executor(None, _persist_stats)
                     await api._push_event({

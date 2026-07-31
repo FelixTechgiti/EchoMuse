@@ -51,6 +51,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_oww_assets
 import em_oww_models
 import em_pki
 import em_recordings
@@ -245,6 +246,8 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/oww_models/upload",     _post_oww_model_upload)
     app.router.add_delete("/api/oww_models/{file}",   _delete_oww_model)
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
+    app.router.add_get("/api/devices/{id}/oww_assets",    _get_oww_assets)
+    app.router.add_post("/api/devices/{id}/oww_assets",   _post_oww_assets)
 
     # Releases
     app.router.add_get("/api/releases/latest",   _get_latest_release)
@@ -2949,6 +2952,187 @@ async def _get_controller_release(request: web.Request) -> web.Response:
             **_compare_versions(CONTROLLER_VERSION, version),
         }
     return _ok(data)
+
+
+
+# ─── On-device wake word assets ───────────────────────────────────────────────
+#
+# The runtime and models are not in the firmware (see em_oww_assets), so they
+# have to be installed. This is the field transport; the provisioning wizard
+# pushes the same bytes over ADB from the browser, which is far better suited
+# to 15MB than the shell plane, and both drive the same idempotent plan.
+
+
+async def _oww_device_state(live) -> dict:
+    """
+    What is actually installed on a device, and how much room it has.
+
+    One shell round trip. `md5sum` is asked for per file rather than with a
+    glob so a missing directory yields an empty inventory rather than an
+    error line that could be mistaken for one.
+    """
+    d = em_oww_assets.DEVICE_DIR
+    out = await _shell_run(live, (
+        f'for f in {d}/*.so {d}/*.onnx; do '
+        f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
+        f'$(busybox stat -c %Y "$f") $f"; done; '
+        f'echo "FREE $(busybox df -m /data | busybox tail -1 | busybox awk \'{{print $4}}\')"'
+    ), timeout=120.0)
+
+    free_mb = None
+    lines = []
+    for line in out.splitlines():
+        if line.startswith("FREE "):
+            tail = line.split(None, 1)[1].strip()
+            if tail.isdigit():
+                free_mb = int(tail)
+        else:
+            lines.append(line)
+    return {
+        "installed": em_oww_assets.parse_device_listing("\n".join(lines)),
+        "free_mb": free_mb,
+    }
+
+
+def _oww_wanted_models(device_id: str) -> list[str]:
+    """
+    The models a device should carry, most important first.
+
+    The configured one is pinned and therefore first. Nothing else is added:
+    extra slots exist so that models a user has already installed survive a
+    switch, not so the controller can push models nobody asked for.
+    """
+    cfg = db.get_effective_device_config(device_id) or {}
+    model = (cfg.get("owwModel") or "").strip()
+    return [model] if model else []
+
+
+async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
+    """
+    Make a device's asset directory match what it needs. Idempotent.
+
+    Push to `.part` then rename only once md5 matches, so an interrupted
+    transfer can never leave a file the device would try to dlopen. md5 is
+    the ONLY definition of success — the shell transport has produced files
+    of the right length and the wrong content, and a corrupt
+    libonnxruntime.so fails at dlopen with an error that names nothing.
+    """
+    async def say(level: str, msg: str):
+        log.info(f"[api] [{device_id}] oww assets: {msg}")
+        await _push_log_event(device_id, level, "controller", f"Wake word assets: {msg}")
+        if progress:
+            await progress(level, msg)
+
+    desired, problems = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
+    for p in problems:
+        await say("warn", p)
+    if not desired:
+        return {"ok": False, "error": "; ".join(problems) or "nothing to install"}
+
+    state = await _oww_device_state(live)
+    plan = em_oww_assets.plan_sync(desired, state["installed"], state["free_mb"])
+
+    if plan.blocked:
+        await say("error", plan.blocked)
+        return {"ok": False, "error": plan.blocked}
+
+    if plan.is_noop:
+        await say("info", "already up to date")
+        return {"ok": True, "pushed": [], "pruned": [], "problems": problems}
+
+    d = em_oww_assets.DEVICE_DIR
+    await _shell_run(live, f"mkdir -p {d}")
+
+    pushed = []
+    for asset in plan.push:
+        mb = asset.size / (1024 * 1024)
+        await say("info", f"sending {asset.name} ({mb:.1f}MB)…")
+        try:
+            data = asset.source.read_bytes()
+        except OSError as e:
+            await say("error", f"{asset.name} unreadable on the controller: {e}")
+            return {"ok": False, "error": f"{asset.name}: {e}"}
+
+        dest = em_oww_assets.device_path(asset.name)
+        part = f"{dest}.part"
+        if not await _stream_file_to_device(live, data, part, mode="644"):
+            await say("error", f"{asset.name} transfer failed")
+            return {"ok": False, "error": f"{asset.name}: transfer failed"}
+
+        res = await _shell_run(live, (
+            f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
+            f'if [ "$GOT" = "{asset.md5}" ]; then mv {part} {dest} && '
+            f'chmod 644 {dest} && echo OK; else rm -f {part}; echo "BAD:$GOT"; fi'
+        ), timeout=120.0)
+        if "OK" not in res:
+            await say("error", f"{asset.name} verify failed ({res.strip() or 'no output'})")
+            return {"ok": False, "error": f"{asset.name}: md5 mismatch"}
+        pushed.append(asset.name)
+
+    for name in plan.prune:
+        await _shell_run(live, f"rm -f {em_oww_assets.device_path(name)}")
+    if plan.prune:
+        await say("info", f"removed unused: {', '.join(plan.prune)}")
+
+    # Touch the selected classifier so LRU eviction sees it as most recent
+    # even on a sync that did not need to re-push it.
+    sel = next((a for a in desired if a.kind == "classifier"), None)
+    if sel:
+        await _shell_run(live, f"touch {em_oww_assets.device_path(sel.name)}")
+
+    await say("info", f"installed {len(pushed)} file(s) — "
+                      f"restart the device to start scoring")
+    return {"ok": True, "pushed": pushed, "pruned": plan.prune, "problems": problems}
+
+
+async def _get_oww_assets(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/oww_assets — what is installed, and what is needed."""
+    device_id = request.match_info["id"]
+    live = _devices.get(device_id)
+
+    desired, problems = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
+    payload = {
+        "device_dir": em_oww_assets.DEVICE_DIR,
+        "problems": problems,
+        "required": [
+            {"name": a.name, "kind": a.kind, "size": a.size, "md5": a.md5}
+            for a in desired
+        ],
+        "connected": live is not None,
+    }
+    if live is None:
+        # Not an error: the state is simply unknowable, and saying "not
+        # installed" for an offline device would be a guess that reads as fact.
+        payload.update({"status": "unknown", "installed": None, "free_mb": None})
+        return _ok(payload)
+
+    state = await _oww_device_state(live)
+    plan = em_oww_assets.plan_sync(desired, state["installed"], state["free_mb"])
+    payload.update({
+        "installed": {k: v[0] for k, v in state["installed"].items()},
+        "free_mb": state["free_mb"],
+        "missing": [a.name for a in plan.push],
+        "prunable": plan.prune,
+        "blocked": plan.blocked,
+        "status": ("blocked" if plan.blocked
+                   else "installed" if plan.is_noop
+                   else "outdated" if plan.keep
+                   else "absent"),
+    })
+    return _ok(payload)
+
+
+@auth.require_admin
+async def _post_oww_assets(request: web.Request) -> web.Response:
+    """POST /api/devices/{id}/oww_assets — install or update them."""
+    device_id = request.match_info["id"]
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", "Device is not connected", 409)
+    result = await _sync_oww_assets(live, device_id)
+    if not result.get("ok"):
+        return _error("sync_failed", result.get("error", "sync failed"), 500)
+    return _ok(result)
 
 
 async def _fetch_binary(download_url: str) -> Optional[bytes]:

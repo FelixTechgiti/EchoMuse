@@ -59,6 +59,7 @@ COPY em_ns.py .
 COPY em_pki.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
+COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
 COPY em_arbiter.py .
 COPY em_player.py .
@@ -77,6 +78,24 @@ RUN mkdir -p /app/models/dtln && \
       https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_1.onnx && \
     curl -sfL -o /app/models/dtln/model_2.onnx \
       https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_2.onnx
+
+# ONNX Runtime for the DEVICE (armeabi-v7a) — on-device wake word assets.
+#
+# NOT a controller dependency: it is a 12.3MB ARM shared library the
+# controller only ever *distributes*, because it is deliberately absent from
+# the firmware (12.3MB would double the OTA payload and both A/B slots).
+# Vendored so devices never need internet, and pinned by AAR sha256 so a
+# rebuild cannot silently change what gets installed on a device — a
+# byte-for-byte match against what is already fielded is how the provenance
+# of the hand-installed copy was confirmed. MIT licensed.
+#
+# Extracted with Python's zipfile because unzip is not in the slim base.
+RUN mkdir -p /app/models/oww_runtime && \
+    curl -sfL -o /tmp/ort.aar \
+      https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.19.2/onnxruntime-android-1.19.2.aar && \
+    echo "84737dd1fdb715f0ee695c0a9864f6949b66ecb4c46ca733bc9211bf0c2a7b5f  /tmp/ort.aar" | sha256sum -c - && \
+    python -c "import zipfile, shutil; z = zipfile.ZipFile('/tmp/ort.aar'); shutil.copyfileobj(z.open('jni/armeabi-v7a/libonnxruntime.so'), open('/app/models/oww_runtime/libonnxruntime.so', 'wb'))" && \
+    rm /tmp/ort.aar
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
