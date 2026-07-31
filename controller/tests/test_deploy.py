@@ -282,3 +282,52 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
         "the generator must fire on exhaustion for sub-prime-length responses"
     assert "SPEAKER_PRIME_SECONDS" in fn, \
         "the threshold must track the device's actual prime window"
+
+
+def test_controller_update_is_advisory_only():
+    """
+    The dashboard may TELL you a newer controller exists; it must never offer
+    to apply it.
+
+    The controller is a container the user owns and updates with their own
+    docker tooling. An in-app update would have to restart the process serving
+    the page, mid-request, with no way to report the outcome — and it is an
+    explicit product decision (Wil, 2026-07-31) that this stays out of the
+    interface. The notice is information for a decision the user takes
+    elsewhere.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+    start = jsx.index("{/* Controller update notice.")
+    banner = jsx[start:jsx.index("{/* Summary */}", start)]
+    for forbidden in ("API.post", "API.put", "API.delete", "onClick={doUpdate"):
+        assert forbidden not in banner, (
+            f"the controller update notice must not perform actions, found "
+            f"{forbidden!r} — updating is the user's docker command to run"
+        )
+
+    api = (root / "em_api.py").read_text()
+    assert 'add_get("/api/releases/controller"' in api, \
+        "the controller release endpoint must be read-only (GET)"
+    for verb in ("add_post", "add_put", "add_delete"):
+        assert f'{verb}("/api/releases/controller' not in api, \
+            f"{verb} on /api/releases/controller would make the update actionable"
+
+
+def test_controller_notes_come_from_the_tag_annotation():
+    """
+    controller-v* tags ship a GHCR image and no GitHub Release (CLAUDE.md,
+    "Versioning / releases"), so the notes must be read from the annotated
+    tag object. Reading them from the releases list would return the newest
+    DEVICE firmware release instead — right shape, wrong product.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    fn = api[api.index("async def _fetch_controller_release"):]
+    fn = fn[:fn.index("\nasync def ", 1)]
+    assert "GITHUB_TAGS_URL" in fn and "GITHUB_TAG_OBJECT_URL" in fn, \
+        "controller notes must come from the tag annotation, not /releases"
+    assert "GITHUB_API_URL" not in fn, \
+        "that is the device firmware release feed, not the controller's"
