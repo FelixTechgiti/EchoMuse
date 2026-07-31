@@ -190,3 +190,46 @@ def test_release_change_is_pushed_to_open_dashboards():
     upd = jsx[jsx.index("if (tab !== 'updates') return;"):]
     assert "setInterval" in upd[:600], \
         "the Updates tab must refresh while open, not fetch once on entry"
+
+
+def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
+    """
+    Turn playback must end when the DEVICE says its buffer drained, never on an
+    `audio_duration - elapsed` estimate.
+
+    That estimate was removed on 2026-07-24: it has no visibility of the
+    device's own buffer and cleared the ring 6.1s early on Retreat, 3.2s on
+    Lounge. The streaming path reintroduced it (PR #47) where it is worse still
+    — streaming already consumes most of the audio duration, so the remainder
+    computes to ~0 and the wait disappears while up to ~5.5s is queued in
+    audioChanDepth.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def _run_streaming_post_turn_playback"):]
+    fn = fn[:fn.index("\nasync def ", 1)]
+
+    assert "playback_done" in fn, \
+        "streamed playback must await the device's playback_stats"
+    assert "asyncio.sleep(remaining)" not in fn, \
+        "the computed drain estimate was removed on 2026-07-24 — do not restore it"
+
+
+def test_send_ms_stays_socket_write_time():
+    """
+    send_ms is documented as socket-write time that completes near-instantly
+    however slow the link is — "never read it as delivery; that mistake cost a
+    whole investigation on 2026-07-20". Timing the whole streaming loop instead
+    folds HA's synthesis time in and makes it read exactly like delivery.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def stream_speaker_chunks"):]
+    fn = fn[:fn.index("\n    async def ", 1) if "\n    async def " in fn[1:] else len(fn)]
+    assert "send_seconds" in fn, \
+        "socket-write time must be accumulated around the send calls"
+
+    caller = src[src.index("async def _run_streaming_post_turn_playback"):]
+    caller = caller[:caller.index("\nasync def ", 1)]
+    assert "device.playback_send_ms = send_ms" in caller, \
+        "send_ms must come from accumulated write time, not the loop duration"

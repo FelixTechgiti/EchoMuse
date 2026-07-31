@@ -573,6 +573,13 @@ class Device:
         pending = bytearray()
         total_pcm = 0
         eq_seconds = 0.0
+        # Accumulated time spent WRITING to the socket, excluding time waiting
+        # for the source to produce audio. send_ms is documented as socket-write
+        # time that "completes near-instantly however slow the link is" — timing
+        # the whole streaming loop instead would fold HA's synthesis time into
+        # it and make it read like delivery, which is the misreading that cost
+        # an investigation on 2026-07-20.
+        send_seconds = 0.0
         first_send_time = None
         try:
             async for pcm in pcm_chunks:
@@ -595,7 +602,9 @@ class Device:
                             f"[{self.device_id}] First streamed PCM period "
                             "sent to device"
                         )
+                    _t_send = asyncio.get_event_loop().time()
                     await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+                    send_seconds += asyncio.get_event_loop().time() - _t_send
 
             if pending and not self.cancel_event.is_set():
                 chunk = bytes(pending)
@@ -607,7 +616,9 @@ class Device:
                         f"[{self.device_id}] First streamed PCM period "
                         "sent to device"
                     )
+                _t_send = asyncio.get_event_loop().time()
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+                send_seconds += asyncio.get_event_loop().time() - _t_send
         finally:
             self.speaking = False
             # One EOS terminates the complete response. Sending EOS per HTTP
@@ -617,7 +628,7 @@ class Device:
             except BaseException:
                 pass
 
-        return total_pcm, int(eq_seconds * 1000), first_send_time
+        return total_pcm, int(eq_seconds * 1000), first_send_time, int(send_seconds * 1000)
 
 
 # The live device registry — keyed by device_id (ro.serialno).
@@ -1049,7 +1060,12 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         device.eq_bands,
         device.eq_loudness,
     )
+    # Cleared BEFORE streaming starts: the device sets it when its audio
+    # channel drains after EOS, and a stale set from the previous response
+    # would end this turn the moment we started waiting.
+    device.playback_done.clear()
     cancel_task = asyncio.create_task(device.cancel_event.wait())
+    done_task   = asyncio.create_task(device.playback_done.wait())
     stream_task = asyncio.create_task(
         device.stream_speaker_chunks(pcm_chunks, stream_eq)
     )
@@ -1064,46 +1080,73 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             log.info(f"[{device.device_id}] Cancelled during streamed playback")
             return 0
 
-        total_pcm, eq_ms, first_send_time = stream_task.result()
+        total_pcm, eq_ms, first_send_time, send_ms = stream_task.result()
         device.playback_eq_ms = eq_ms
-        elapsed = asyncio.get_event_loop().time() - t_stream_start
-        device.playback_send_ms = int(elapsed * 1000)
+        device.playback_send_ms = send_ms
+        stream_elapsed = asyncio.get_event_loop().time() - t_stream_start
         audio_duration = total_pcm / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
-        playback_elapsed = (
-            asyncio.get_event_loop().time() - first_send_time
-            if first_send_time is not None
-            else 0.0
-        )
-        remaining = (
-            max(0.0, audio_duration - playback_elapsed)
-            if total_pcm
-            else 0.0
-        )
+
+        if not total_pcm:
+            log.info(f"[{device.device_id}] Streamed response contained no audio")
+            return 0
+
+        # Wait for the DEVICE to say it finished, exactly as the buffered path
+        # does — do NOT sleep a computed `audio_duration - elapsed`.
+        #
+        # That estimate was removed on 2026-07-24 because it has no visibility
+        # of the device's own buffer and cleared the ring 6.1s early on Retreat
+        # and 3.2s on Lounge. Streaming makes it worse, not better: the time
+        # spent streaming already covers most of the audio duration, so the
+        # remainder computes to ~0 and the wait vanishes entirely while up to
+        # ~5.5s is still queued in audioChanDepth. playback_stats is emitted
+        # once that channel drains after EOS, so it is the real end of audio.
+        # The timeout is only a backstop for the report never arriving (device
+        # drop, pre-v2.9 firmware). cancel_event is still raced so a barge-in
+        # or mute lands promptly.
+        timeout = audio_duration * 2 + 10.0
         log.info(
             f"[{device.device_id}] Streamed {total_pcm} bytes "
-            f"({total_pcm//SPEAKER_BYTES} periods) while HA generated audio in "
-            f"{elapsed:.1f}s; sleeping {remaining:.1f}s for buffer drain "
-            f"(total={audio_duration:.1f}s)"
+            f"({total_pcm//SPEAKER_BYTES} periods) in {stream_elapsed:.1f}s "
+            f"while HA generated audio (socket writes {send_ms}ms — NOT "
+            f"delivery, see delivery_ms); awaiting device playback_stats "
+            f"(est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
         )
-
-        if remaining > 0:
-            sleep_task = asyncio.create_task(asyncio.sleep(remaining))
+        timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+        try:
             await asyncio.wait(
-                [sleep_task, cancel_task],
+                [done_task, cancel_task, timeout_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            sleep_task.cancel()
+        finally:
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
 
         if device.cancel_event.is_set():
             log.info(f"[{device.device_id}] Cancelled during streamed buffer drain")
+        elif done_task.done():
+            log.info(f"[{device.device_id}] Streamed playback complete (device reported)")
         else:
-            log.info(f"[{device.device_id}] Streamed playback complete")
+            log.warning(
+                f"[{device.device_id}] No playback_stats after {timeout:.1f}s — "
+                f"continuing (device drop or pre-v2.9 firmware)"
+            )
         return total_pcm
     finally:
-        cancel_task.cancel()
+        for t in (cancel_task, done_task):
+            t.cancel()
         if not stream_task.done():
             stream_task.cancel()
-        await asyncio.gather(cancel_task, stream_task, return_exceptions=True)
+        await asyncio.gather(cancel_task, done_task, stream_task, return_exceptions=True)
+        # Close the async generator explicitly rather than leaving it to the
+        # event loop's asyncgen hooks: its finally is what kills ffmpeg, and on
+        # a barge-in (a routine path here) deferring that to GC leaves a decoder
+        # running for an indeterminate window.
+        aclose = getattr(pcm_chunks, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception as e:
+                log.debug(f"[{device.device_id}] TTS stream close: {e}")
 
 
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):

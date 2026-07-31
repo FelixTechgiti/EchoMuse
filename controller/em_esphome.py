@@ -808,11 +808,27 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # postpones all playback until the final sentence and erases
                 # the latency benefit of Assist's streaming contract.
                 log.info(f"[{self._log_name}] Streaming TTS audio from {self._tts_audio_url}")
+                # t_tts_fetched_ms stamps the FIRST decoded audio, not the end
+                # of playback. fetch_ms is derived from it, and stamping it after
+                # post_turn_play returns would fold the entire playback and
+                # buffer drain into a column that has meant fetch+decode since
+                # it was added — the metric that diagnosed #28 in the first
+                # place. For a streaming design "time to first audio" is both
+                # truthful and the more useful number.
+                async def _stamp_first_audio(chunks):
+                    stamped = False
+                    async for chunk in chunks:
+                        if not stamped:
+                            stamped = True
+                            if trace:
+                                trace.t_tts_fetched_ms = trace.elapsed_ms()
+                        yield chunk
+
                 try:
                     if trace:
                         trace.t_playback_ms = trace.elapsed_ms()
                     pcm_bytes = await post_turn_play(
-                        _stream_tts_audio(self._tts_audio_url)
+                        _stamp_first_audio(_stream_tts_audio(self._tts_audio_url))
                     )
                 except Exception as e:
                     log.error(f"[{self._log_name}] TTS audio stream failed: {e}")
@@ -820,7 +836,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     return
 
                 if trace:
-                    trace.t_tts_fetched_ms = trace.elapsed_ms()
                     trace.tts_bytes = pcm_bytes or 0
 
                 if pcm_bytes and not self._turn_cancelled:
@@ -1242,6 +1257,7 @@ async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
 
     proc: asyncio.subprocess.Process | None = None
     feeder: asyncio.Task | None = None
+    stderr_task: asyncio.Task | None = None
     try:
         timeout = aiohttp.ClientTimeout(
             total=None,
@@ -1274,22 +1290,35 @@ async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
                             await proc.stdin.wait_closed()
 
                 feeder = asyncio.create_task(_feed_encoded_audio())
+
+                # stderr is drained CONCURRENTLY, not after stdout EOF. A pipe
+                # holds ~64KB; if ffmpeg fills it, it blocks writing stderr,
+                # stops producing stdout, and the reader below waits forever.
+                # -loglevel error keeps that rare, but the case that produces
+                # lots of stderr is a malformed or truncated response — exactly
+                # the degraded case this path has to survive.
+                assert proc.stderr is not None
+                stderr_task = asyncio.create_task(proc.stderr.read())
+
                 assert proc.stdout is not None
                 while pcm := await proc.stdout.read(16 * 1024):
                     yield pcm
 
                 await feeder
-                assert proc.stderr is not None
-                err = await proc.stderr.read()
+                err = await stderr_task
                 return_code = await asyncio.wait_for(proc.wait(), timeout=15.0)
                 if return_code != 0:
                     raise RuntimeError(
                         f"ffmpeg streaming decode failed: {err.decode()[:200]}"
                     )
     finally:
-        if feeder is not None and not feeder.done():
-            feeder.cancel()
-            await asyncio.gather(feeder, return_exceptions=True)
+        for t in (feeder, stderr_task):
+            if t is not None and not t.done():
+                t.cancel()
+        await asyncio.gather(
+            *[t for t in (feeder, stderr_task) if t is not None],
+            return_exceptions=True,
+        )
         if proc is not None and proc.returncode is None:
             proc.kill()
             await proc.wait()
