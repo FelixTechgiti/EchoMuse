@@ -202,6 +202,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS audio before playback |
+| `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
@@ -239,6 +240,20 @@ Three things are load-bearing:
   rare — a refractory period collapses each utterance to one — and their whole
   value is the timing). Everything else is a window summary riding the existing
   ~30s stats tick, so the DB cost is one extra upsert per 30s per device.
+
+  The window summary carries `maxInferMs` and `maxGapMs` (schema v16) because
+  `dev_drops` alone had stopped being able to answer its own question — turn
+  bursts, core hotplug and controller redeploys were each falsified by
+  measurement. A drop means the 8-frame (640ms) queue overflowed, which has two
+  causes needing opposite fixes: the slowest single inference is the CONSUMER
+  stalling, the longest gap between frames arriving is the PRODUCER bursting.
+  **Maxima, not averages** — a stall IS the tail, and a 700ms event averaged
+  over 375 normal frames disappears. They are `atomic.Int64`, not mutex state,
+  because `Push` runs on the mic goroutine; and the gap is measured in
+  `enqueue` so one site covers `Push` and `PushBytes` alike, the same reason
+  drops are counted in exactly one place. Note the first frame must record NO
+  gap: a zero-valued `lastPush` would report a gap of however long the process
+  had been running and point at a producer stall that never happened.
 - **The device never sends a timestamp.** An Echo's wall clock is bogus before
   NTP, so it reports how long *ago* a crossing happened and the controller
   converts against its own monotonic clock — same reasoning as the RTT
