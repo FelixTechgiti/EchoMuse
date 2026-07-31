@@ -270,6 +270,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/debloat_packages", _get_provision_debloat_packages)
     app.router.add_get("/api/provision/magisk_db",    _get_provision_magisk_db)
     app.router.add_get("/api/provision/latest_binary", _get_provision_latest_binary)
+    app.router.add_get("/api/provision/oww_assets",    _get_provision_oww_manifest)
+    app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
@@ -3135,6 +3137,54 @@ async def _post_oww_assets(request: web.Request) -> web.Response:
     if not result.get("ok"):
         return _error("sync_failed", result.get("error", "sync failed"), 500)
     return _ok(result)
+
+
+
+@auth.require_auth
+async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/oww_assets — what the wizard should push, and where.
+
+    The wizard pushes over ADB from the browser rather than through the shell
+    plane: a freshly-flashed device is not in _devices yet, and USB is far
+    better suited to 15MB than a base64 heredoc. Same bytes, same md5s, same
+    destination as the field path — only the transport differs.
+    """
+    fleet = db.get_global_device_config() or {}
+    models = [m for m in [fleet.get("owwModel") or ""] if m]
+    desired, problems = em_oww_assets.desired_assets(models)
+    return _ok({
+        "dir": em_oww_assets.DEVICE_DIR,
+        "problems": problems,
+        "assets": [{"name": a.name, "size": a.size, "md5": a.md5} for a in desired],
+    })
+
+
+@auth.require_auth
+async def _get_provision_oww_asset(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/oww_asset/{name} — the bytes of one asset.
+
+    Serves only names the manifest just listed, resolved from the manifest
+    rather than from the request: the filename is user-supplied, and joining
+    it onto a directory is how a path traversal gets written by accident.
+    """
+    name = request.match_info["name"]
+    fleet = db.get_global_device_config() or {}
+    desired, _ = em_oww_assets.desired_assets(
+        [m for m in [fleet.get("owwModel") or ""] if m])
+    asset = next((a for a in desired if a.name == name), None)
+    if asset is None:
+        return _error("not_found", f"{name} is not a current asset", 404)
+    try:
+        data = asset.source.read_bytes()
+    except OSError as e:
+        return _error("unreadable", str(e), 500)
+    return web.Response(
+        body=data,
+        content_type="application/octet-stream",
+        headers={"X-Asset-MD5": asset.md5},
+    )
 
 
 async def _fetch_binary(download_url: str) -> Optional[bytes]:

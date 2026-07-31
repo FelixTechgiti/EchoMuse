@@ -331,3 +331,66 @@ def test_controller_notes_come_from_the_tag_annotation():
         "controller notes must come from the tag annotation, not /releases"
     assert "GITHUB_API_URL" not in fn, \
         "that is the device firmware release feed, not the controller's"
+
+
+def test_every_db_call_in_em_api_exists():
+    """
+    A typo'd db.<name> is invisible to pyflakes (it is a valid attribute
+    expression) and raises AttributeError only on the request that uses it.
+    That is the same shape as the NameError which stopped wake word
+    fleet-wide on 2026-07-30: green CI, clean logs, broken at runtime.
+
+    Written after db.get_global_config() — a function that has never existed —
+    reached a live endpoint.
+    """
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    tree = ast.parse((root / "em_api.py").read_text())
+    used = {
+        n.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name) and n.value.id == "db"
+    }
+    db_tree = ast.parse((root / "em_db.py").read_text())
+    defined = {
+        n.name for n in db_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    } | {
+        t.id for n in db_tree.body if isinstance(n, ast.Assign)
+        for t in n.targets if isinstance(t, ast.Name)
+    }
+    missing = sorted(used - defined)
+    assert not missing, f"em_api.py calls db.{{{', '.join(missing)}}} which em_db.py does not define"
+
+
+def test_the_wake_word_asset_wizard_step_is_mandatory():
+    """
+    Wil's call, overriding my "make it skippable": every provisioned device
+    carries the runtime.
+
+    The assets are not in the firmware, so a device without them advertises
+    the oww_shadow capability while being unable to use it — the exact "I
+    enabled it and nothing happened" this feature exists to remove. It also
+    auto-runs: a button someone can leave unpressed is not mandatory.
+    """
+    from pathlib import Path
+    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+
+    steps = jsx[jsx.index("const _WIZARD_STEPS = ["):]
+    steps = steps[:steps.index("\n];")]
+    assert "'install_oww'" in steps, "the wake word asset step is missing from the wizard"
+
+    idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
+    auto = jsx[jsx.index("const autoSteps = new Set(["):]
+    auto = auto[:auto.index(")")]
+    assert str(idx) in auto, (
+        f"step {idx} (install_oww) must auto-run — a step that needs a click "
+        f"is one a user can skip"
+    )
+
+    runner = jsx[jsx.index("async function runInstallOwwAssets"):]
+    runner = runner[:runner.index("\n  async function ", 1)]
+    assert "a.md5" in runner and "throw new Error" in runner, \
+        "the push must verify md5 and fail loudly — a truncated file fails later at dlopen"

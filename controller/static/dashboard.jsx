@@ -2099,6 +2099,12 @@ const _WIZARD_STEPS = [
   { id: 'debloat',         label: 'Debloat',           desc: 'Hide non-essential Amazon packages and stop background daemons (~130MB RAM freed).' },
   { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
+  // Mandatory, not skippable. Every provisioned device carries the runtime,
+  // which removes a whole class of "I enabled on-device wake word and nothing
+  // happened" — the assets are not in the firmware, so without this step the
+  // capability is advertised by a device that cannot actually use it. USB is
+  // also much better suited to 15MB than the shell plane.
+  { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
 
 // ── WifiPanel ──
@@ -2965,6 +2971,47 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   // ── Step executor ──
+  async function runInstallOwwAssets(c) {
+    // Pushed over USB rather than through the shell plane: a freshly-flashed
+    // device is not connected to the controller yet, and 15MB of base64
+    // heredoc would be slow. Same bytes and same destination as the field
+    // path — only the transport differs.
+    addLog('Fetching wake word assets from controller…');
+    const manifest = await API.get('/api/provision/oww_assets');
+    (manifest.problems || []).forEach(p => addLog(`  ⚠ ${p}`, 'error'));
+    if (!manifest.assets || manifest.assets.length === 0) {
+      throw new Error('Controller has no wake word assets to install. '
+        + 'Its image may predate them — rebuild or update the controller.');
+    }
+
+    await c.shell(`su -c "mkdir -p ${manifest.dir}"`);
+    for (const a of manifest.assets) {
+      addLog(`Pushing ${a.name} (${(a.size/1024/1024).toFixed(1)} MB)…`);
+      const resp = await fetch(`/api/provision/oww_asset/${encodeURIComponent(a.name)}`,
+                               { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching ${a.name}.`);
+      const buf = await resp.arrayBuffer();
+      // Staged in /sdcard because adb cannot write under /data directly, then
+      // moved with su — the same two-step the binary install uses.
+      await c.push('/sdcard/em_oww_asset', new Uint8Array(buf),
+        pct => setProgress({ label: `Uploading ${a.name}`, pct }));
+      setProgress(null);
+
+      // md5 is the only definition of success: a truncated push produces a
+      // file of plausible size that fails later at dlopen, with an error that
+      // names nothing useful.
+      const got = (await c.shell('su -c "busybox md5sum /sdcard/em_oww_asset" 2>/dev/null')).trim().split(/\s+/)[0];
+      if (got !== a.md5) {
+        await c.shell('su -c "rm -f /sdcard/em_oww_asset"');
+        throw new Error(`${a.name} arrived corrupted (md5 ${got || 'unreadable'}, expected ${a.md5}).`);
+      }
+      await c.shell(`su -c "mv /sdcard/em_oww_asset ${manifest.dir}/${a.name} && chmod 644 ${manifest.dir}/${a.name}"`);
+      addLog(`  ✓ ${a.name}`);
+    }
+    addLog('Wake word assets installed. On-device scoring is off by default — '
+         + 'enable it per device under Config → Wake word.');
+  }
+
   async function runStep(stepIdx, useLatest) {
     setRunning(true);
     markStep(stepIdx, 'running');
@@ -2983,6 +3030,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case  9: await runDebloat(c); break;
         case 10: await runConfigWifi(c, wifiSsid, wifiPsk); break;
         case 11: await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 12: await runInstallOwwAssets(c); break;
       }
       markStep(stepIdx, 'done');
       if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
@@ -3003,7 +3051,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // Step 8 (disable_alexa) is now before WiFi so Alexa can't phone home.
   // Step 9 (debloat) rides the same connected-and-rooted state.
   useEffect(() => {
-    const autoSteps = new Set([2, 4, 7, 8, 9]);
+    // Step 12 (wake word assets) auto-runs: it needs no input, and making it
+    // a button people can leave unpressed defeats the point of it being
+    // mandatory.
+    const autoSteps = new Set([2, 4, 7, 8, 9, 12]);
     if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
       runStep(step);
     }

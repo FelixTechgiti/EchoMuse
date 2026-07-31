@@ -247,11 +247,41 @@ Requirements and cost: ONNX Runtime plus the three models must be installed at
 `shadow.DefaultDir` (`/data/local/share/echomuse/oww`, override `EM_OWW_DIR`)
 — they are **not** in the firmware, since 12.3MB would double the OTA payload
 and both A/B slots. Absence is an ordinary condition, logged once, and the
-device carries on with controller-side wake word. Install with
-`controller/tools/push_file.py`; `device/tools/oww_probe` verifies a device
-reproduces Python and reports the real CPU cost. It costs ~38% of one core
-permanently on top of the ~18-20% mic-pipeline baseline, so **enable it on one
-device at a time**.
+device carries on with controller-side wake word. `device/tools/oww_probe`
+verifies a device reproduces Python and reports the real CPU cost. It costs
+~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
+**enable it on one device at a time**.
+
+### Asset distribution (`em_oww_assets.py`)
+
+Installing those files is automatic. `em_oww_assets` plans (pure, unit-tested);
+`em_api` carries it out. Two transports, one plan: the **provisioning wizard**
+pushes over USB/ADB (a fresh device is not connected to the controller yet, and
+USB suits 15MB far better than a base64 heredoc), and **fielded devices** use
+the shell plane from the device's Updates tab. The wizard step is **mandatory**
+— a device advertising `oww_shadow` without the assets is exactly the "I
+enabled it and nothing happened" this removes.
+
+- The ARM runtime is **vendored into the controller image**, pinned by AAR
+  sha256 (`onnxruntime-android` 1.19.2), so devices never need internet. The
+  models come from the installed openwakeword package or `oww_models/` — no
+  second copy to keep in step.
+- **md5 is the only definition of success**, both transports. Push to `.part`,
+  rename only on match: a truncated file is the right size and fails later at
+  `dlopen` with an error naming nothing.
+- **Four classifier slots, LRU by device mtime** — no controller-side
+  bookkeeping to lose across a restart. The selected model is **pinned**;
+  evicting it is the one outcome that breaks a device rather than costing a
+  re-push. Only files positively recognised as evictable classifiers are ever
+  deleted.
+- Free space is checked against **what actually needs sending**, so a device
+  that already has everything is never blocked. Read it with
+  `parse_free_mb`, never an awk field index — busybox wraps a long filesystem
+  name onto its own line, so `$4` is the *percentage* on these devices, which
+  parsed as "unknown" and silently disabled the check.
+- `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
+  against the firmware constants **by test**. Drift installs assets the device
+  never looks for, and the only symptom is shadow mode silently never starting.
 
 ## CPU topology, thermals and why `cpuPct` lies
 
