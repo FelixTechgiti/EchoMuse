@@ -737,6 +737,52 @@ def _q1(sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
 
 # ─── Migrations ───────────────────────────────────────────────────────────────
 
+def _backup_before_migrating(conn: sqlite3.Connection, current: int) -> None:
+    """
+    Copy the database before any migration touches it.
+
+    Migrations run in place and every one so far is additive, which is about
+    as safe as schema change gets — but a controller can be several versions
+    behind (the version is just an index into an append-only list, so a v11
+    database migrates to v16 in one startup), and the first migration that
+    rewrites or drops data has no undo without this.
+
+    Uses sqlite3's own backup API rather than copying the file: it is
+    consistent against an open connection and correct under WAL, where the
+    .db file alone is not the whole database.
+
+    Named for the version being LEFT, not the time — a retry after a failed
+    migration starts from the same state, so it should overwrite rather than
+    accumulate a backup per attempt. One file per starting version is enough
+    to get back to where you were, and cannot fill a disk on its own.
+
+    A backup that cannot be written is a refusal to migrate, not a warning.
+    Disk-full is precisely when you want the schema left alone, and a warning
+    logged at startup is a warning nobody reads until afterwards. Set
+    EM_SKIP_DB_BACKUP=1 to proceed anyway.
+    """
+    if current == 0:
+        return  # fresh database — nothing to preserve
+
+    if os.environ.get("EM_SKIP_DB_BACKUP") == "1":
+        log.warning("[db] EM_SKIP_DB_BACKUP=1 — migrating without a backup")
+        return
+
+    dest = f"{_db_path}.pre-v{current}.bak"
+    try:
+        with sqlite3.connect(dest) as bck:
+            conn.backup(bck)
+        size = os.path.getsize(dest)
+        log.info(f"[db] Backed up v{current} schema to {dest} ({size/1024:.0f}KB)")
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not back up the database before migrating from v{current} "
+            f"({e}). Refusing to migrate: free some space or fix permissions "
+            f"on {os.path.dirname(_db_path) or '.'}, or set EM_SKIP_DB_BACKUP=1 "
+            f"to proceed without one."
+        ) from e
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Run any pending migrations in order."""
     # Determine current schema version. On a brand-new database the
@@ -749,10 +795,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         current = 0  # fresh database — system_config doesn't exist yet
 
+    # ── Downgrade guard ──────────────────────────────────────────────────────
+    #
+    # A database from a NEWER controller. MIGRATIONS[current:] is empty here,
+    # so without this the old build starts silently and runs against a schema
+    # it does not know. That mostly works — the newer schema is a superset —
+    # but "mostly" is the problem: the failure surfaces as odd behaviour
+    # somewhere else rather than as an error here, and it happens exactly when
+    # someone has rolled an image back and is already troubleshooting.
+    #
+    # Refusing costs a clear message; proceeding costs an afternoon.
+    if current > len(MIGRATIONS):
+        raise RuntimeError(
+            f"Database is at schema v{current} but this controller only knows "
+            f"v{len(MIGRATIONS)} — it was created by a newer version. Use a "
+            f"controller at least that new, or restore a backup taken before "
+            f"the upgrade (see {os.path.basename(_db_path)}.pre-v*.bak beside "
+            f"the database)."
+        )
+
     pending = MIGRATIONS[current:]
     if not pending:
         log.debug(f"Schema is current at v{current}")
         return
+
+    _backup_before_migrating(conn, current)
 
     log.info(f"Running {len(pending)} migration(s) from v{current}")
     for i, sql in enumerate(pending):

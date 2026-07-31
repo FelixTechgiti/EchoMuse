@@ -57,6 +57,34 @@ Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_ow
 - **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
 - **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns", and a device that cannot score wake words locally must not read as "scored and missed" (hence `turns.dev_shadow` alongside `dev_wake_score`).
 
+### Schema migrations
+
+`em_db.MIGRATIONS` is **append-only** — the stored `schema_version` is an
+index into it, so appending to a deployed entry corrupts every database that
+already ran it. (Doing exactly that once broke every stats write and
+disconnect-looped the fleet.)
+
+A controller applies everything it is missing in one startup, so **a user
+several releases behind jumping straight to latest is the normal case**, not
+an exotic one — verified end to end from v11 to v16 with data intact. Each
+migration is its own transaction including its Python fixup, and a failure
+refuses startup rather than running on a half-migrated schema; re-running
+resumes from the last committed version.
+
+Two guards sit in front of that, both tested by reintroducing the bug:
+- **A backup is taken before migrating** (`<db>.pre-v<N>.bak`, via sqlite3's
+  backup API so it is consistent and WAL-correct). Named for the version
+  being left, so a retry overwrites rather than accumulating; skipped for a
+  fresh database and for an ordinary restart. A backup that cannot be written
+  **refuses to migrate** — disk-full is precisely when the schema should be
+  left alone — with `EM_SKIP_DB_BACKUP=1` as the escape hatch.
+- **A newer database refuses to start.** `MIGRATIONS[current:]` is empty when
+  the DB is ahead, so an older controller used to start silently against a
+  schema it did not know. It mostly works, since the newer schema is a
+  superset — and "mostly" is the problem, because the failure then surfaces
+  as odd behaviour elsewhere, exactly when someone has rolled an image back
+  and is already troubleshooting.
+
 ## Versioning / releases
 
 Device firmware and controller are versioned independently from the same repo:
