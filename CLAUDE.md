@@ -57,6 +57,34 @@ Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_ow
 - **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
 - **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns", and a device that cannot score wake words locally must not read as "scored and missed" (hence `turns.dev_shadow` alongside `dev_wake_score`).
 
+### Schema migrations
+
+`em_db.MIGRATIONS` is **append-only** — the stored `schema_version` is an
+index into it, so appending to a deployed entry corrupts every database that
+already ran it. (Doing exactly that once broke every stats write and
+disconnect-looped the fleet.)
+
+A controller applies everything it is missing in one startup, so **a user
+several releases behind jumping straight to latest is the normal case**, not
+an exotic one — verified end to end from v11 to v16 with data intact. Each
+migration is its own transaction including its Python fixup, and a failure
+refuses startup rather than running on a half-migrated schema; re-running
+resumes from the last committed version.
+
+Two guards sit in front of that, both tested by reintroducing the bug:
+- **A backup is taken before migrating** (`<db>.pre-v<N>.bak`, via sqlite3's
+  backup API so it is consistent and WAL-correct). Named for the version
+  being left, so a retry overwrites rather than accumulating; skipped for a
+  fresh database and for an ordinary restart. A backup that cannot be written
+  **refuses to migrate** — disk-full is precisely when the schema should be
+  left alone — with `EM_SKIP_DB_BACKUP=1` as the escape hatch.
+- **A newer database refuses to start.** `MIGRATIONS[current:]` is empty when
+  the DB is ahead, so an older controller used to start silently against a
+  schema it did not know. It mostly works, since the newer schema is a
+  superset — and "mostly" is the problem, because the failure then surfaces
+  as odd behaviour elsewhere, exactly when someone has rolled an image back
+  and is already troubleshooting.
+
 ## Versioning / releases
 
 Device firmware and controller are versioned independently from the same repo:
@@ -174,6 +202,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS audio before playback |
+| `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
@@ -211,6 +240,20 @@ Three things are load-bearing:
   rare — a refractory period collapses each utterance to one — and their whole
   value is the timing). Everything else is a window summary riding the existing
   ~30s stats tick, so the DB cost is one extra upsert per 30s per device.
+
+  The window summary carries `maxInferMs` and `maxGapMs` (schema v16) because
+  `dev_drops` alone had stopped being able to answer its own question — turn
+  bursts, core hotplug and controller redeploys were each falsified by
+  measurement. A drop means the 8-frame (640ms) queue overflowed, which has two
+  causes needing opposite fixes: the slowest single inference is the CONSUMER
+  stalling, the longest gap between frames arriving is the PRODUCER bursting.
+  **Maxima, not averages** — a stall IS the tail, and a 700ms event averaged
+  over 375 normal frames disappears. They are `atomic.Int64`, not mutex state,
+  because `Push` runs on the mic goroutine; and the gap is measured in
+  `enqueue` so one site covers `Push` and `PushBytes` alike, the same reason
+  drops are counted in exactly one place. Note the first frame must record NO
+  gap: a zero-valued `lastPush` would report a gap of however long the process
+  had been running and point at a producer stall that never happened.
 - **The device never sends a timestamp.** An Echo's wall clock is bogus before
   NTP, so it reports how long *ago* a crossing happened and the controller
   converts against its own monotonic clock — same reasoning as the RTT
@@ -247,11 +290,41 @@ Requirements and cost: ONNX Runtime plus the three models must be installed at
 `shadow.DefaultDir` (`/data/local/share/echomuse/oww`, override `EM_OWW_DIR`)
 — they are **not** in the firmware, since 12.3MB would double the OTA payload
 and both A/B slots. Absence is an ordinary condition, logged once, and the
-device carries on with controller-side wake word. Install with
-`controller/tools/push_file.py`; `device/tools/oww_probe` verifies a device
-reproduces Python and reports the real CPU cost. It costs ~38% of one core
-permanently on top of the ~18-20% mic-pipeline baseline, so **enable it on one
-device at a time**.
+device carries on with controller-side wake word. `device/tools/oww_probe`
+verifies a device reproduces Python and reports the real CPU cost. It costs
+~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
+**enable it on one device at a time**.
+
+### Asset distribution (`em_oww_assets.py`)
+
+Installing those files is automatic. `em_oww_assets` plans (pure, unit-tested);
+`em_api` carries it out. Two transports, one plan: the **provisioning wizard**
+pushes over USB/ADB (a fresh device is not connected to the controller yet, and
+USB suits 15MB far better than a base64 heredoc), and **fielded devices** use
+the shell plane from the device's Updates tab. The wizard step is **mandatory**
+— a device advertising `oww_shadow` without the assets is exactly the "I
+enabled it and nothing happened" this removes.
+
+- The ARM runtime is **vendored into the controller image**, pinned by AAR
+  sha256 (`onnxruntime-android` 1.19.2), so devices never need internet. The
+  models come from the installed openwakeword package or `oww_models/` — no
+  second copy to keep in step.
+- **md5 is the only definition of success**, both transports. Push to `.part`,
+  rename only on match: a truncated file is the right size and fails later at
+  `dlopen` with an error naming nothing.
+- **Four classifier slots, LRU by device mtime** — no controller-side
+  bookkeeping to lose across a restart. The selected model is **pinned**;
+  evicting it is the one outcome that breaks a device rather than costing a
+  re-push. Only files positively recognised as evictable classifiers are ever
+  deleted.
+- Free space is checked against **what actually needs sending**, so a device
+  that already has everything is never blocked. Read it with
+  `parse_free_mb`, never an awk field index — busybox wraps a long filesystem
+  name onto its own line, so `$4` is the *percentage* on these devices, which
+  parsed as "unknown" and silently disabled the check.
+- `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
+  against the firmware constants **by test**. Drift installs assets the device
+  never looks for, and the only symptom is shadow mode silently never starting.
 
 ## CPU topology, thermals and why `cpuPct` lies
 

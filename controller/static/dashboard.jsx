@@ -965,6 +965,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [deleting, setDeleting] = useState(false);
   const [securing, setSecuring] = useState(false);
   const [debloating, setDebloating] = useState(false);
+  const [assets, setAssets] = useState(null);
+  const [installing, setInstalling] = useState(false);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -983,6 +985,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
+      // Asset state costs a device shell round trip, so it is fetched on tab
+      // entry rather than polled — unlike a release, it only changes when
+      // someone acts on it here.
+      API.get(`/api/devices/${device.device_id}/oww_assets`)
+        .then(setAssets).catch(() => setAssets(null));
     }
   }, [tab, device.device_id]);
 
@@ -1083,6 +1090,22 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             + 'watch the device log for details.');
     } catch(e) { alert(e.error || 'Debloat failed'); }
     setTimeout(() => setDebloating(false), 8000);
+  }
+
+  async function doInstallAssets() {
+    // The install is one shell-plane transfer of up to ~15MB, so it is slow
+    // enough to need its own progress feedback; the device log carries the
+    // per-file detail via the same push events the OTA uses.
+    setInstalling(true);
+    try {
+      const res = await API.post(`/api/devices/${device.device_id}/oww_assets`, {});
+      const n = (res.pushed || []).length;
+      alert(n === 0
+        ? 'Already up to date — nothing needed installing.'
+        : `Installed ${n} file(s). Restart the device to start scoring on-device.`);
+      setAssets(await API.get(`/api/devices/${device.device_id}/oww_assets`));
+    } catch(e) { alert(e.error || 'Install failed'); }
+    setInstalling(false);
   }
 
   async function doUpdate() {
@@ -1680,6 +1703,69 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 </Panel>
               )}
 
+
+              {/* On-device wake word assets.
+
+                  Separate from firmware on purpose: the runtime is 12.3MB and
+                  changes far less often than the binary, so it is not in the
+                  OTA payload. That makes it invisible unless something says
+                  so — a device can be configured for on-device scoring and
+                  silently not be doing it, which is the failure this panel
+                  exists to make legible. */}
+              {isAdmin && device.owwShadowCapable && (
+                <Panel label="On-device wake word">
+                  <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', marginBottom:12 }}>
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11,
+                      color: !assets ? 'var(--muted)'
+                           : assets.status === 'installed' ? '#286040'
+                           : assets.status === 'blocked' ? '#9a3020'
+                           : assets.status === 'unknown' ? 'var(--muted)'
+                           : '#806010' }}>
+                      {!assets ? 'checking…'
+                        : assets.status === 'installed' ? 'Installed'
+                        : assets.status === 'outdated' ? 'Out of date'
+                        : assets.status === 'blocked' ? 'Not enough space'
+                        : assets.status === 'unknown' ? 'Device offline — state unknown'
+                        : 'Not installed'}
+                    </span>
+                    {assets?.free_mb != null && (
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                        {assets.free_mb}MB free
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    The ONNX runtime and wake models the device needs to score
+                    locally (~15MB). They are not part of the firmware, so they
+                    install separately and survive updates. Scoring only starts
+                    after a device restart.
+                  </div>
+                  {assets?.blocked && (
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#c04040', marginBottom:12 }}>
+                      {assets.blocked}
+                    </div>
+                  )}
+                  {(assets?.problems || []).map((p, i) => (
+                    <div key={i} style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#c09040', marginBottom:8 }}>
+                      {p}
+                    </div>
+                  ))}
+                  <Pill small
+                        disabled={!device.connected || installing || assets?.status === 'installed'}
+                        onClick={doInstallAssets}>
+                    {installing ? 'Installing…'
+                      : assets?.status === 'installed' ? 'Installed'
+                      : assets?.status === 'outdated' ? 'Update assets'
+                      : 'Install assets'}
+                  </Pill>
+                  {assets?.missing?.length > 0 && (
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginLeft:10 }}>
+                      {assets.missing.length} file(s) to send
+                    </span>
+                  )}
+                </Panel>
+              )}
+
               {/* Activity console — always present so the layout never jumps
                   when a deploy starts */}
               <div style={{ background:'linear-gradient(160deg,#252820,#1e2219)', border:'1px solid #1a1c18', borderRadius:8, padding:14, fontFamily:"'DM Mono',monospace", fontSize:12, boxShadow:'inset 0 2px 6px rgba(0,0,0,0.5)', minHeight:96, flex:1 }}>
@@ -2013,6 +2099,12 @@ const _WIZARD_STEPS = [
   { id: 'debloat',         label: 'Debloat',           desc: 'Hide non-essential Amazon packages and stop background daemons (~130MB RAM freed).' },
   { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
+  // Mandatory, not skippable. Every provisioned device carries the runtime,
+  // which removes a whole class of "I enabled on-device wake word and nothing
+  // happened" — the assets are not in the firmware, so without this step the
+  // capability is advertised by a device that cannot actually use it. USB is
+  // also much better suited to 15MB than the shell plane.
+  { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
 
 // ── WifiPanel ──
@@ -2879,6 +2971,47 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   // ── Step executor ──
+  async function runInstallOwwAssets(c) {
+    // Pushed over USB rather than through the shell plane: a freshly-flashed
+    // device is not connected to the controller yet, and 15MB of base64
+    // heredoc would be slow. Same bytes and same destination as the field
+    // path — only the transport differs.
+    addLog('Fetching wake word assets from controller…');
+    const manifest = await API.get('/api/provision/oww_assets');
+    (manifest.problems || []).forEach(p => addLog(`  ⚠ ${p}`, 'error'));
+    if (!manifest.assets || manifest.assets.length === 0) {
+      throw new Error('Controller has no wake word assets to install. '
+        + 'Its image may predate them — rebuild or update the controller.');
+    }
+
+    await c.shell(`su -c "mkdir -p ${manifest.dir}"`);
+    for (const a of manifest.assets) {
+      addLog(`Pushing ${a.name} (${(a.size/1024/1024).toFixed(1)} MB)…`);
+      const resp = await fetch(`/api/provision/oww_asset/${encodeURIComponent(a.name)}`,
+                               { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching ${a.name}.`);
+      const buf = await resp.arrayBuffer();
+      // Staged in /sdcard because adb cannot write under /data directly, then
+      // moved with su — the same two-step the binary install uses.
+      await c.push('/sdcard/em_oww_asset', new Uint8Array(buf),
+        pct => setProgress({ label: `Uploading ${a.name}`, pct }));
+      setProgress(null);
+
+      // md5 is the only definition of success: a truncated push produces a
+      // file of plausible size that fails later at dlopen, with an error that
+      // names nothing useful.
+      const got = (await c.shell('su -c "busybox md5sum /sdcard/em_oww_asset" 2>/dev/null')).trim().split(/\s+/)[0];
+      if (got !== a.md5) {
+        await c.shell('su -c "rm -f /sdcard/em_oww_asset"');
+        throw new Error(`${a.name} arrived corrupted (md5 ${got || 'unreadable'}, expected ${a.md5}).`);
+      }
+      await c.shell(`su -c "mv /sdcard/em_oww_asset ${manifest.dir}/${a.name} && chmod 644 ${manifest.dir}/${a.name}"`);
+      addLog(`  ✓ ${a.name}`);
+    }
+    addLog('Wake word assets installed. On-device scoring is off by default — '
+         + 'enable it per device under Config → Wake word.');
+  }
+
   async function runStep(stepIdx, useLatest) {
     setRunning(true);
     markStep(stepIdx, 'running');
@@ -2897,6 +3030,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case  9: await runDebloat(c); break;
         case 10: await runConfigWifi(c, wifiSsid, wifiPsk); break;
         case 11: await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 12: await runInstallOwwAssets(c); break;
       }
       markStep(stepIdx, 'done');
       if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
@@ -2917,7 +3051,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // Step 8 (disable_alexa) is now before WiFi so Alexa can't phone home.
   // Step 9 (debloat) rides the same connected-and-rooted state.
   useEffect(() => {
-    const autoSteps = new Set([2, 4, 7, 8, 9]);
+    // Step 12 (wake word assets) auto-runs: it needs no input, and making it
+    // a button people can leave unpressed defeats the point of it being
+    // mandatory.
+    const autoSteps = new Set([2, 4, 7, 8, 9, 12]);
     if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
       runStep(step);
     }

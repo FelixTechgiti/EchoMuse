@@ -613,6 +613,31 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '15' WHERE key = 'schema_version';
     """,
+
+    # ── v16 — what the shadow scorer's stalls actually were ─────────────────
+    #
+    # dev_drops says the scorer's 8-frame (640ms) queue overflowed. It does
+    # not say WHY, and three explanations have already been falsified by
+    # measurement (turn bursts, core hotplug, controller redeploys), so the
+    # counter on its own has stopped being able to answer the question.
+    #
+    # A drop has exactly two causes and they call for opposite fixes:
+    # dev_max_infer_ms is the slowest single inference in the window (the
+    # CONSUMER stalling), dev_max_gap_ms the longest gap between frames
+    # arriving (the PRODUCER bursting — the mic pipeline handing over its
+    # 160ms batches late and in clumps).
+    #
+    # Maxima rather than averages, because a stall IS the tail: a 700ms event
+    # averaged over a 30s window of 375 normal frames disappears entirely.
+    # Default 0 reads as "not reported" for firmware predating this, which is
+    # honest here — unlike a measurement, an absent maximum cannot be mistaken
+    # for a good one, since 0 is also what a perfectly healthy window reports.
+    """
+    ALTER TABLE wake_counters ADD COLUMN dev_max_infer_ms INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN dev_max_gap_ms   INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '16' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -712,6 +737,52 @@ def _q1(sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
 
 # ─── Migrations ───────────────────────────────────────────────────────────────
 
+def _backup_before_migrating(conn: sqlite3.Connection, current: int) -> None:
+    """
+    Copy the database before any migration touches it.
+
+    Migrations run in place and every one so far is additive, which is about
+    as safe as schema change gets — but a controller can be several versions
+    behind (the version is just an index into an append-only list, so a v11
+    database migrates to v16 in one startup), and the first migration that
+    rewrites or drops data has no undo without this.
+
+    Uses sqlite3's own backup API rather than copying the file: it is
+    consistent against an open connection and correct under WAL, where the
+    .db file alone is not the whole database.
+
+    Named for the version being LEFT, not the time — a retry after a failed
+    migration starts from the same state, so it should overwrite rather than
+    accumulate a backup per attempt. One file per starting version is enough
+    to get back to where you were, and cannot fill a disk on its own.
+
+    A backup that cannot be written is a refusal to migrate, not a warning.
+    Disk-full is precisely when you want the schema left alone, and a warning
+    logged at startup is a warning nobody reads until afterwards. Set
+    EM_SKIP_DB_BACKUP=1 to proceed anyway.
+    """
+    if current == 0:
+        return  # fresh database — nothing to preserve
+
+    if os.environ.get("EM_SKIP_DB_BACKUP") == "1":
+        log.warning("[db] EM_SKIP_DB_BACKUP=1 — migrating without a backup")
+        return
+
+    dest = f"{_db_path}.pre-v{current}.bak"
+    try:
+        with sqlite3.connect(dest) as bck:
+            conn.backup(bck)
+        size = os.path.getsize(dest)
+        log.info(f"[db] Backed up v{current} schema to {dest} ({size/1024:.0f}KB)")
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not back up the database before migrating from v{current} "
+            f"({e}). Refusing to migrate: free some space or fix permissions "
+            f"on {os.path.dirname(_db_path) or '.'}, or set EM_SKIP_DB_BACKUP=1 "
+            f"to proceed without one."
+        ) from e
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Run any pending migrations in order."""
     # Determine current schema version. On a brand-new database the
@@ -724,10 +795,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         current = 0  # fresh database — system_config doesn't exist yet
 
+    # ── Downgrade guard ──────────────────────────────────────────────────────
+    #
+    # A database from a NEWER controller. MIGRATIONS[current:] is empty here,
+    # so without this the old build starts silently and runs against a schema
+    # it does not know. That mostly works — the newer schema is a superset —
+    # but "mostly" is the problem: the failure surfaces as odd behaviour
+    # somewhere else rather than as an error here, and it happens exactly when
+    # someone has rolled an image back and is already troubleshooting.
+    #
+    # Refusing costs a clear message; proceeding costs an afternoon.
+    if current > len(MIGRATIONS):
+        raise RuntimeError(
+            f"Database is at schema v{current} but this controller only knows "
+            f"v{len(MIGRATIONS)} — it was created by a newer version. Use a "
+            f"controller at least that new, or restore a backup taken before "
+            f"the upgrade (see {os.path.basename(_db_path)}.pre-v*.bak beside "
+            f"the database)."
+        )
+
     pending = MIGRATIONS[current:]
     if not pending:
         log.debug(f"Schema is current at v{current}")
         return
+
+    _backup_before_migrating(conn, current)
 
     log.info(f"Running {len(pending)} migration(s) from v{current}")
     for i, sql in enumerate(pending):
@@ -1570,6 +1662,8 @@ def bump_wake_counters(
     dev_drops: int = 0,
     dev_crossings: int = 0,
     dev_max_score: float = 0.0,
+    dev_max_infer_ms: int = 0,
+    dev_max_gap_ms: int = 0,
 ) -> None:
     """
     Accumulate into the current hour's wake_counters row (upsert).
@@ -1584,8 +1678,8 @@ def bump_wake_counters(
             """
             INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max,
                                        underruns, dev_frames, dev_drops, dev_crossings,
-                                       dev_max_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       dev_max_score, dev_max_infer_ms, dev_max_gap_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 near_misses   = near_misses + excluded.near_misses,
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
@@ -1593,10 +1687,13 @@ def bump_wake_counters(
                 dev_frames    = dev_frames + excluded.dev_frames,
                 dev_drops     = dev_drops + excluded.dev_drops,
                 dev_crossings = dev_crossings + excluded.dev_crossings,
-                dev_max_score = MAX(dev_max_score, excluded.dev_max_score)
+                dev_max_score = MAX(dev_max_score, excluded.dev_max_score),
+                dev_max_infer_ms = MAX(dev_max_infer_ms, excluded.dev_max_infer_ms),
+                dev_max_gap_ms   = MAX(dev_max_gap_ms, excluded.dev_max_gap_ms)
             """,
             (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns),
-             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score)),
+             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score),
+             _py(dev_max_infer_ms), _py(dev_max_gap_ms)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",

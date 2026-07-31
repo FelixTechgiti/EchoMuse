@@ -410,3 +410,56 @@ func TestBargeThresholdNeverRaisesTheBar(t *testing.T) {
 		return fired >= 1
 	})
 }
+
+func TestDrainReportsAndResetsTheTimingMaxima(t *testing.T) {
+	// These exist to explain drops, which is a question about the TAIL — so
+	// they must be maxima that survive being surrounded by fast frames, and
+	// must reset per window, or one early stall would haunt every later report.
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+
+	s.maxInferMs.Store(37)
+	s.maxGapMs.Store(812)
+
+	got := s.Drain()
+	if got.MaxInferMs != 37 {
+		t.Fatalf("MaxInferMs = %d, want 37", got.MaxInferMs)
+	}
+	if got.MaxGapMs != 812 {
+		t.Fatalf("MaxGapMs = %d, want 812", got.MaxGapMs)
+	}
+
+	again := s.Drain()
+	if again.MaxInferMs != 0 || again.MaxGapMs != 0 {
+		t.Fatalf("maxima must reset per window, got infer=%d gap=%d",
+			again.MaxInferMs, again.MaxGapMs)
+	}
+}
+
+func TestTheFirstFrameRecordsNoProducerGap(t *testing.T) {
+	// A zero-valued lastPush would make the first frame look like a gap of
+	// however long the process had been running — an enormous MaxGapMs on
+	// every startup, pointing at a producer stall that never happened.
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+
+	s.Push(make([]int16, 1280))
+	if got := s.maxGapMs.Load(); got != 0 {
+		t.Fatalf("first frame must not record a gap, got %dms", got)
+	}
+}
+
+func TestTheProducerGapIsMeasuredForBothEntryPoints(t *testing.T) {
+	// Measured in enqueue rather than in Push/PushBytes so one site covers
+	// both — the same reason drops are counted in exactly one place.
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+
+	s.Push(make([]int16, 1280))
+	time.Sleep(25 * time.Millisecond)
+	s.PushBytes(make([]byte, 2560))
+
+	if got := s.maxGapMs.Load(); got < 20 {
+		t.Fatalf("gap across Push -> PushBytes should be ~25ms, got %dms", got)
+	}
+}

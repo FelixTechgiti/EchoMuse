@@ -20,6 +20,7 @@ package shadow
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/wakeword"
@@ -67,6 +68,22 @@ type Stats struct {
 	// losing shadow data is always preferable to losing the audio path.
 	Errors  uint64
 	LastErr string
+	// MaxInferMs and MaxGapMs exist to explain DROPS, which is the one number
+	// here nobody has been able to account for: 58 in 925k frames, in discrete
+	// steps, on an idle device, with turn bursts / core hotplug / controller
+	// redeploys all ruled out by measurement.
+	//
+	// A drop means the 8-frame (640ms) queue was full, which has exactly two
+	// causes and they call for opposite fixes. MaxInferMs is the slowest single
+	// score in the window — the CONSUMER stalling. MaxGapMs is the longest gap
+	// between frames arriving — the PRODUCER bursting, i.e. the mic pipeline
+	// handing over 160ms batches late and in clumps. Without separating them,
+	// "the scorer fell behind" is a description rather than a diagnosis.
+	//
+	// Both are maxima, not averages: a stall is by definition the tail, and an
+	// average over a 30s window buries a 700ms event under 375 normal frames.
+	MaxInferMs uint32
+	MaxGapMs   uint32
 }
 
 // Scorer runs a Detector over pushed audio on its own goroutine.
@@ -92,6 +109,18 @@ type Scorer struct {
 	// info describes the loaded engine for logging: runtime version, model,
 	// whether XNNPACK attached. Set once at construction, never mutated.
 	info string
+
+	// Maxima are atomics rather than mutex-guarded state because they are
+	// written on the two hot paths: the mic goroutine (gap) and the scorer
+	// goroutine (inference). Push must stay lock-free — it runs on the mic
+	// path, which has a hard 160ms deadline and a ring only 160ms deep.
+	maxInferMs atomic.Int64
+	maxGapMs   atomic.Int64
+	// lastPush is touched ONLY by the producer. Push is called from the mic
+	// goroutine alone, so this needs no synchronisation of its own; putting it
+	// under the mutex would add contention to the path this design exists to
+	// keep clear.
+	lastPush time.Time
 
 	mu        sync.Mutex
 	stats     Stats
@@ -184,6 +213,18 @@ func (s *Scorer) PushBytes(b []byte) {
 // happen — deliberately one place, so "never block the audio path" is a
 // property of one function rather than a convention.
 func (s *Scorer) enqueue(cp []int16) {
+	// Producer cadence, measured here rather than in Push/PushBytes so both
+	// entry points are covered by one site — the same reason drops are counted
+	// in exactly one place.
+	if now := time.Now(); !s.lastPush.IsZero() {
+		if ms := now.Sub(s.lastPush).Milliseconds(); ms > s.maxGapMs.Load() {
+			s.maxGapMs.Store(ms)
+		}
+		s.lastPush = now
+	} else {
+		s.lastPush = now
+	}
+
 	select {
 	case s.ch <- cp:
 	default:
@@ -222,6 +263,8 @@ func (s *Scorer) Drain() Stats {
 	defer s.mu.Unlock()
 	out := s.stats
 	s.stats = Stats{}
+	out.MaxInferMs = uint32(s.maxInferMs.Swap(0))
+	out.MaxGapMs = uint32(s.maxGapMs.Swap(0))
 	return out
 }
 
@@ -259,6 +302,7 @@ func (s *Scorer) run() {
 			s.mu.Unlock()
 		}
 
+		t0 := time.Now()
 		if _, err := s.det.Push(pcm); err != nil {
 			s.recordErr(err)
 			continue
@@ -280,6 +324,11 @@ func (s *Scorer) run() {
 		}
 
 		now := time.Now()
+		// Feature extraction plus classification: the whole cost of one frame,
+		// which is what has to fit inside the queue's 640ms of slack.
+		if ms := now.Sub(t0).Milliseconds(); ms > s.maxInferMs.Load() {
+			s.maxInferMs.Store(ms)
+		}
 		s.mu.Lock()
 		s.stats.Frames++
 		if score > s.stats.MaxScore {
