@@ -101,6 +101,17 @@ function relTime(ts) {
   return `${Math.floor(d / 86400000)}d ago`;
 }
 
+// Controller-generated device log lines (`device_log` on the shared events
+// socket) are the only progress channel a long shell-plane operation has —
+// the POST that starts it does not return until it is finished. Components
+// that need to watch them live subscribe here instead of having the whole
+// stream drilled down through props.
+const _logSubs = new Set();
+function subscribeDeviceLog(fn) { _logSubs.add(fn); return () => _logSubs.delete(fn); }
+function _emitDeviceLog(deviceId, entry) {
+  _logSubs.forEach(fn => { try { fn(deviceId, entry); } catch (e) { console.error(e); } });
+}
+
 function deviceState(d) {
   if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: '#6080a8', dot: '#8ab0d0' };
   if (!d.connected) return { key: 'offline',   label: 'Offline',   color: '#c0601a', dot: '#d4703a' };
@@ -126,7 +137,7 @@ function Lcd({ label, value, color, size = 16 }) {
   );
 }
 
-function Pill({ children, accent, danger, disabled, onClick, small }) {
+function Pill({ children, accent, danger, disabled, onClick, small, big }) {
   const bg = disabled ? 'linear-gradient(180deg,#d0ccc4,#bab6ae)'
            : danger   ? 'linear-gradient(180deg,#a83030,#782020)'
            : accent   ? 'linear-gradient(180deg,#6080a8,#405878)'
@@ -136,8 +147,8 @@ function Pill({ children, accent, danger, disabled, onClick, small }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
       background: bg, color, border, borderRadius: 20,
-      fontFamily: "'DM Sans',sans-serif", fontSize: small ? 11 : 12, fontWeight: 500,
-      padding: small ? '5px 14px' : '7px 20px',
+      fontFamily: "'DM Sans',sans-serif", fontSize: small ? 11 : big ? 14 : 12, fontWeight: big ? 600 : 500,
+      padding: small ? '5px 14px' : big ? '11px 28px' : '7px 20px',
       cursor: disabled ? 'not-allowed' : 'pointer',
       boxShadow: disabled ? 'none' : '0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2)',
       transition: 'all 0.1s', whiteSpace: 'nowrap',
@@ -967,6 +978,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
   const [installing, setInstalling] = useState(false);
+  // Wake word asset install progress: bytes confirmed sent, the file in
+  // flight, the controller's own narration, and the final outcome.
+  const [assetSent, setAssetSent]     = useState(0);
+  const [assetNow, setAssetNow]       = useState(null);
+  const [assetLog, setAssetLog]       = useState([]);
+  const [assetResult, setAssetResult] = useState(null);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -1093,19 +1110,62 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   }
 
   async function doInstallAssets() {
-    // The install is one shell-plane transfer of up to ~15MB, so it is slow
-    // enough to need its own progress feedback; the device log carries the
-    // per-file detail via the same push events the OTA uses.
+    // Up to ~15MB over the shell plane, which is minutes on a marginal link —
+    // far too long to sit behind a spinner and then a browser alert().
+    //
+    // The POST does not return until the whole sync is done, so its own
+    // response cannot drive a bar. The controller narrates each file to the
+    // device log as it goes (`_sync_oww_assets.say`), and those lines arrive
+    // on the events socket — so progress is derived by watching for its
+    // "sending <name> (<n>MB)…" line and charging that file's bytes to the
+    // total as it completes. Byte-weighted, not file-count: the runtime is
+    // 12.3MB of a ~15MB job, so counting files would jump 0→50% for the
+    // trivial half and then appear frozen for the long one.
+    const sizes = Object.fromEntries((assets?.required || []).map(a => [a.name, a.size]));
+    const queue = (assets?.missing || []).slice();
+    const total = queue.reduce((n, name) => n + (sizes[name] || 0), 0);
+
     setInstalling(true);
+    setAssetResult(null);
+    setAssetLog([]);
+    setAssetSent(0);
+    setAssetNow(queue.length ? null : 'Checking what the device needs…');
+
+    let sent = 0, current = null;
+    const unsub = subscribeDeviceLog((id, entry) => {
+      if (id !== device.device_id) return;
+      const m = /^Wake word assets: (.*)$/.exec(entry.message || '');
+      if (!m) return;
+      const text = m[1];
+      setAssetLog(l => [...l.slice(-40), { level: entry.level, text }]);
+      const sending = /^sending (\S+)/.exec(text);
+      if (sending) {
+        // The previously-announced file is done once the next one starts.
+        if (current) { sent += sizes[current] || 0; setAssetSent(sent); }
+        current = sending[1];
+        setAssetNow(current);
+      }
+    });
+
     try {
       const res = await API.post(`/api/devices/${device.device_id}/oww_assets`, {});
       const n = (res.pushed || []).length;
-      alert(n === 0
+      setAssetSent(total);
+      setAssetNow(null);
+      setAssetResult({ ok: true, text: n === 0
         ? 'Already up to date — nothing needed installing.'
-        : `Installed ${n} file(s). Restart the device to start scoring on-device.`);
+        : `Installed ${n} file${n === 1 ? '' : 's'}. Restart the device to start scoring on-device.` });
       setAssets(await API.get(`/api/devices/${device.device_id}/oww_assets`));
-    } catch(e) { alert(e.error || 'Install failed'); }
-    setInstalling(false);
+    } catch(e) {
+      setAssetNow(null);
+      // Partial progress is left on screen deliberately: which file it died on
+      // is the useful part, and md5-then-rename means nothing half-written was
+      // left behind to worry about.
+      setAssetResult({ ok: false, text: e.error || 'Install failed.' });
+    } finally {
+      unsub();
+      setInstalling(false);
+    }
   }
 
   async function doUpdate() {
@@ -1317,9 +1377,30 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <div style={{ marginTop: 24, marginBottom: 8 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Label</div>
                 <input type="text" value={approveLabel} onChange={e => setApproveLabel(e.target.value)} placeholder="e.g. Kitchen" onKeyDown={e => e.key === 'Enter' && doApprove()}/>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+                  Names the device everywhere — the dashboard, and “{approveLabel.trim() || '…'} Voice Assistant” in Home Assistant.
+                </div>
               </div>
-              <div style={{ marginTop: 20 }}>
-                <Pill accent disabled={approving} onClick={doApprove}>{approving ? 'Approving…' : 'Approve Device'}</Pill>
+              {/* Approval is the consequential act on this screen, not a
+                  formality: it admits the device to the fleet, opens a voice
+                  satellite for it and starts accepting its microphone. The
+                  button used to be a default-weight pill reading "Approve
+                  Device", which read as an acknowledgement rather than a
+                  decision — say what it does, then size it like it matters. */}
+              <div style={{ marginTop: 24, background: 'linear-gradient(160deg,#dcd8d0,#ccc8c0)', border: '1px solid #b8b4ac', borderRadius: 8, padding: '14px 16px' }}>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, color: 'var(--text2)', lineHeight: 1.5, marginBottom: 14 }}>
+                  Approving adds this device to your fleet: it receives the fleet
+                  configuration, gets a voice satellite Home Assistant can drive,
+                  and its microphone starts streaming to the controller when woken.
+                </div>
+                <Pill big accent disabled={approving || !approveLabel.trim()} onClick={doApprove}>
+                  {approving ? 'Approving…' : 'Approve & Add to Fleet'}
+                </Pill>
+                {!approveLabel.trim() && (
+                  <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>
+                    Enter a label above to continue.
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1758,10 +1839,70 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       : assets?.status === 'outdated' ? 'Update assets'
                       : 'Install assets'}
                   </Pill>
-                  {assets?.missing?.length > 0 && (
+                  {!installing && assets?.missing?.length > 0 && (
                     <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginLeft:10 }}>
                       {assets.missing.length} file(s) to send
                     </span>
+                  )}
+
+                  {/* Progress. Determinate whenever the GET told us what is
+                      missing; indeterminate only in the brief window before
+                      the first file is announced. */}
+                  {installing && (() => {
+                    const sizes = Object.fromEntries((assets?.required || []).map(a => [a.name, a.size]));
+                    const total = (assets?.missing || []).reduce((n, nm) => n + (sizes[nm] || 0), 0);
+                    const pct   = total > 0 ? Math.min(100, Math.round(assetSent / total * 100)) : 0;
+                    return (
+                      <div style={{ marginTop: 14 }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:6 }}>
+                          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>
+                            {assetNow ? `Sending ${assetNow}…` : 'Working…'}
+                          </span>
+                          {total > 0 && (
+                            <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
+                              {(assetSent/1024/1024).toFixed(1)} / {(total/1024/1024).toFixed(1)} MB
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ height:6, borderRadius:3, background:'#1e2219', border:'1px solid #1a1c18', overflow:'hidden', boxShadow:'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
+                          {/* No size known yet — fill it dimly rather than
+                              animate, which would need a keyframe this
+                              stylesheet does not have and would overstate
+                              how much the bar knows. */}
+                          <div style={{ height:'100%', width:`${total > 0 ? pct : 100}%`,
+                                        background: total > 0 ? 'linear-gradient(90deg,#6080a8,#8ab0d0)' : '#3a4a52',
+                                        transition:'width 0.3s ease' }}/>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* The controller's own narration, in place of an alert().
+                      Kept after the run so a failure can be read, not just
+                      acknowledged and lost. */}
+                  {assetLog.length > 0 && (
+                    <div style={{ marginTop:12, maxHeight:120, overflowY:'auto', background:'#1e2219', border:'1px solid #1a1c18', borderRadius:6, padding:'8px 10px', boxShadow:'inset 0 2px 4px rgba(0,0,0,0.5)' }}>
+                      {assetLog.map((l, i) => (
+                        <div key={i} style={{ fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.6,
+                          color: l.level === 'error' ? '#c08080' : l.level === 'warn' ? '#c0a060' : '#a8c8a0' }}>
+                          {l.text}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {assetResult && (
+                    <div style={{ marginTop:12, display:'flex', gap:8, alignItems:'flex-start',
+                                  border:`1px solid ${assetResult.ok ? '#7a9a7a' : '#b08080'}`,
+                                  background: assetResult.ok ? 'rgba(40,96,64,0.10)' : 'rgba(154,48,32,0.10)',
+                                  borderRadius:6, padding:'10px 12px' }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12, color: assetResult.ok ? '#286040' : '#9a3020' }}>
+                        {assetResult.ok ? '●' : '✕'}
+                      </span>
+                      <span style={{ fontFamily:"'DM Sans',sans-serif", fontSize:12, color:'var(--text2)', lineHeight:1.5 }}>
+                        {assetResult.text}
+                      </span>
+                    </div>
                   )}
                 </Panel>
               )}
@@ -1827,7 +1968,13 @@ function Card({ device, onClick }) {
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {isPending && (
-            <div style={{ background: 'linear-gradient(160deg,#2a2e28,#1c1f18)', border: '1px solid #1a1c16', borderRadius: 3, padding: '1px 6px', fontFamily: "'DM Mono',monospace", fontSize: 8, color: '#8ab0d0', letterSpacing: '0.1em' }}>PENDING</div>
+            // Chrome sized this box off the DM Mono line box rather than the
+            // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
+            // next to the 14px label. inline-flex + lineHeight:1 makes the
+            // height the text's own; the trimmed paddingRight cancels the
+            // trailing letter-space Chrome leaves after the final N, which is
+            // what made the word look shunted left inside its own badge.
+            <div style={{ display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(160deg,#2a2e28,#1c1f18)', border: '1px solid #1a1c16', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: '#8ab0d0', letterSpacing: '0.1em' }}>PENDING</div>
           )}
           {!isPending && device.firmware_ver && (
             <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>{device.firmware_ver}</div>
@@ -1922,19 +2069,25 @@ const _ADB = (() => {
     // stdin is a WritableStream<Uint8Array>; we write in 64 KB chunks.
     async push(remotePath, data, onProgress) {
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-      this._log(`push: opening cat > '${remotePath}' (${(bytes.length/1024/1024).toFixed(1)} MB)`);
+      // The per-phase lines exist to localise a stall — which phase it hung in
+      // is the whole diagnostic — but they are four lines per push, and a
+      // provision makes eight sub-megabyte pushes that complete instantly.
+      // Narrate the transfers that can actually stall; one line for the rest.
+      const chatty = bytes.length >= 1024 * 1024;
+      if (chatty) this._log(`push: opening cat > '${remotePath}' (${(bytes.length/1024/1024).toFixed(1)} MB)`);
       const proc  = await this._adb.subprocess.noneProtocol.spawn(`cat > '${remotePath}'`);
-      this._log('push: stream open, writing chunks…');
+      if (chatty) this._log('push: stream open, writing chunks…');
       const writer = proc.stdin.getWriter();
       const SZ = 64 * 1024;
       for (let i = 0; i < bytes.length; i += SZ) {
         await writer.write(bytes.subarray(i, Math.min(i + SZ, bytes.length)));
         onProgress?.((i + SZ) / bytes.length);
       }
-      this._log('push: all chunks written, closing stdin…');
+      if (chatty) this._log('push: all chunks written, closing stdin…');
       await writer.close();
       onProgress?.(1);
-      this._log('push: done.');
+      this._log(chatty ? 'push: done.'
+                       : `push: '${remotePath}' (${(bytes.length/1024).toFixed(0)} KB) done.`);
       // No drain — busybox cat on TWRP does not close stdout when stdin closes,
       // so _readAll would hang forever. The next shell command provides sequencing.
     }
@@ -2082,7 +2235,7 @@ async function _sha256Hex(buf) {
 //  5  reboot           — reboot device to Android                          [button]
 //  6  reconnect        — reconnect ADB after Android boots                 [button]
 //  7  verify_root      — confirm su works                                  [auto]
-//  8  disable_alexa    — pm disable x9 BEFORE wifi — stops phoning home    [auto]
+//  8  disable_alexa    — silence OOBE + pm disable BEFORE wifi            [auto]
 //  9  debloat          — pm hide bloat pkgs + service.d daemon-stop script [auto]
 // 10  wifi             — configure WiFi network                            [inputs]
 // 11  install_em       — push binary + startup script                      [file]
@@ -2093,9 +2246,9 @@ const _WIZARD_STEPS = [
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
   { id: 'preseed_db',      label: 'Pre-seed Root DB',  desc: 'Grant root to ADB shell without a screen prompt.' },
   { id: 'reboot',          label: 'Reboot to Android', desc: 'Reboot device to Android.' },
-  { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB after Android finishes booting. Appears as "AEOBC" in the USB picker.' },
+  { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB as soon as the device appears as "AEOBC" in the USB picker — no need to wait for it to finish booting, the next step does that.' },
   { id: 'verify_root',     label: 'Verify Root',       desc: 'Confirm Magisk root is working.' },
-  { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Disable all 9 Alexa voice pipeline packages before connecting to WiFi.' },
+  { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Silence the Amazon setup assistant and disable the Alexa voice pipeline, before the device ever reaches WiFi.' },
   { id: 'debloat',         label: 'Debloat',           desc: 'Hide non-essential Amazon packages and stop background daemons (~130MB RAM freed).' },
   { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
@@ -2214,7 +2367,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const logRef = useRef(null);
 
   function addLog(msg, type = 'info') {
-    setLog(l => [...l, { msg, type }].slice(-200));
+    // 200 lines truncated a normal successful run — the transcript above the
+    // fold is exactly the part you need when a late step fails for an early
+    // reason, and it was being thrown away. A whole provision is ~300 lines,
+    // so this holds several runs' worth; it is text in memory, not a cost
+    // worth optimising.
+    setLog(l => [...l, { msg, type }].slice(-5000));
     setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
@@ -2458,7 +2616,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     try { await c.shell('reboot'); } catch {}
     await c.close();
     setAdb(null);
-    addLog('Device rebooting to Android. Wait ~60s, then click Reconnect.', 'warn');
+    // The old copy ("wait ~60s") made the operator responsible for guessing
+    // when Android was ready, and a wrong guess used to sail straight past a
+    // framework that wasn't. waitForFramework owns that question now, so the
+    // only thing worth waiting for here is the device appearing over USB.
+    addLog('Device rebooting to Android. Click Reconnect as soon as it appears in the USB picker — '
+         + 'the wizard waits for Android to finish booting by itself.', 'warn');
     return null;
   }
 
@@ -2468,6 +2631,93 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setAdb(c);
     addLog('ADB connected.', 'ok');
     return c;
+  }
+
+  // The two distinct ways a too-early `pm` call fails on FireOS 5. The
+  // friendly one is what you get before PMS is published; the NullPointer
+  // is what you get once it IS published but has not finished initialising,
+  // and it comes back as a raw stack trace out of the binder call rather
+  // than anything resembling an error message. Matching only the first
+  // string is why the retry path never fired on 2026-07-31.
+  const _pmNotReady = (out) =>
+    out.includes('Could not access the Package Manager')
+    || out.includes('java.lang.NullPointerException');
+
+  // Wait for the Android framework to be genuinely usable, and REFUSE to
+  // continue if it isn't.
+  //
+  // The contract this owes the operator: Reconnect may be clicked the moment
+  // the device shows up in the USB picker, and the wizard works out for
+  // itself when Android is ready. No step downstream of here may require the
+  // human to have guessed a long enough wait.
+  //
+  // Three lessons, the first two learned the expensive way on 2026-07-31:
+  //
+  //  1. `sys.boot_completed` can take far longer than 30s. The first boot
+  //     after flashing a patched boot image and installing Magisk has to
+  //     re-do work a normal boot doesn't, and adbd/magiskd both come up
+  //     long before the system server does — so "adb connected" and even
+  //     "su -c id works in 0.4s" say nothing about the framework. Poll for
+  //     minutes, not seconds; the budget below assumes Reconnect was
+  //     clicked at t=0 of the boot, because it is allowed to be.
+  //  2. Timing out must be an ERROR, not a warning. The previous version
+  //     logged "proceeding anyway" and carried on, which is how a run
+  //     ended with all 11 `pm disable` and all 32 `pm hide` calls failing
+  //     and both steps still reporting success. A step that cannot do its
+  //     work must fail so the wizard shows Retry.
+  //  3. A long wait must narrate itself. A silent poll is indistinguishable
+  //     from a hung wizard, and the operator's reasonable response to a
+  //     hung wizard — pull the cable, start over — is the worst available
+  //     move mid-provision.
+  //
+  // boot_completed alone is also not sufficient evidence that the package
+  // manager will answer, so probe it directly. A PMS that is published but
+  // not yet initialised does not return the friendly "Could not access the
+  // Package Manager" — it throws
+  // `NullPointerException: ... ArrayList.size() on a null object reference`
+  // out of the binder call, which no amount of retry-on-that-one-string
+  // was catching.
+  async function waitForFramework(c, what) {
+    const TIMEOUT_MS = 600000;
+    const started = Date.now();
+    let boot = false, lastNote = -1, lastProbe = '', announced = false;
+    while (Date.now() - started < TIMEOUT_MS) {
+      if (!boot) boot = (await c.shell('getprop sys.boot_completed')).trim() === '1';
+      if (boot) {
+        // The package manager is the thing we actually need; ask it. It comes
+        // up meaningfully after boot_completed on this hardware, so the flag
+        // is a necessary condition, not the answer.
+        // Deliberately NOT via su: this is a read, it works as the shell
+        // user, and verify_root calls this before root is confirmed.
+        lastProbe = (await c.shell('pm path android 2>&1')).trim();
+        if (lastProbe.startsWith('package:')) {
+          // Only worth a line if there was actually a wait. Every step after
+          // the first re-gates (steps are individually retryable), and three
+          // "Framework ready after 0s" banners per run is noise that trains
+          // people to skim past the one time it matters.
+          if (announced) addLog(`Framework ready after ${Math.round((Date.now() - started) / 1000)}s.`, 'ok');
+          return;
+        }
+      }
+      if (!announced) {
+        announced = true;
+        addLog('Waiting for Android to finish booting — safe to have clicked Reconnect early, this waits as long as it takes…');
+      }
+      // Heartbeat every 15s so a multi-minute wait reads as progress rather
+      // than as a hang (lesson 3 above).
+      const elapsed = Math.floor((Date.now() - started) / 1000);
+      if (elapsed - lastNote >= 15) {
+        lastNote = elapsed;
+        addLog(`  [${elapsed}s] boot_completed=${boot ? '1' : '0'}`
+             + (boot ? `, package manager not answering yet${lastProbe ? ` (${lastProbe.split('\n')[0]})` : ''}` : ', still booting'));
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    throw new Error(
+      `Android has not finished booting after 10 minutes, so ${what} cannot run. `
+      + `Every pm command would fail and the step would silently do nothing. `
+      + `This is long past a slow boot — suspect a bootloop rather than patience: `
+      + `check the device's light ring, and click Retry once it settles.`);
   }
 
   async function runVerifyRoot(c) {
@@ -2480,14 +2730,33 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // to corrupt the grant state from the preseeded magisk.db, leaving
     // root broken even on later, correctly-timed retries. Wait for both
     // gates explicitly rather than relying on a single timed attempt.
-    addLog('Waiting for Android framework to finish booting…');
-    let bootReady = false;
-    for (let i = 0; i < 30; i++) {
-      const boot = (await c.shell('getprop sys.boot_completed')).trim();
-      if (boot === '1') { bootReady = true; break; }
-      await new Promise(r => setTimeout(r, 1000));
+    await waitForFramework(c, 'root verification');
+
+    // Mute the speaker before the su wait, not after.
+    //
+    // Amazon's OOBE announces "Hello, I'm Alexa, connect to me using the Alexa
+    // app" as soon as the framework is up, and the earliest we can stop the
+    // app itself is the Disable Alexa step — which is on the far side of
+    // magiskd attaching, measured at 74s on a cold device. So the app cannot
+    // be silenced in time, but the speaker can: `input` needs only the shell
+    // user, and this runs the moment the framework answers.
+    //
+    // Safe to leave muted. This moves Android's stream volume; EchoMuse drives
+    // the codec itself and seeds its own level from `startupVolume` (85) on
+    // the first config push after the reboot that ends provisioning, so the
+    // device comes up audible without anything having to restore this.
+    //
+    // Volume-down keyevents rather than a volume API: `service call audio`
+    // needs a transaction number that differs per Android release, and
+    // `settings put system volume_music` is not read live by AudioService.
+    // This is what pressing the button does, and it works on any release.
+    addLog('Muting the speaker — Amazon\'s setup assistant starts talking here, and cannot be stopped until root lands…');
+    try {
+      await c.shell('i=0; while [ $i -lt 15 ]; do input keyevent 25; i=$((i+1)); done');
+      addLog('  → speaker muted for the rest of provisioning (EchoMuse restores volume after the final reboot).', 'ok');
+    } catch (e) {
+      addLog(`  → could not mute (${e.message}) — the setup prompt may talk over the wizard.`, 'warn');
     }
-    addLog(bootReady ? 'Framework ready.' : 'Timed out waiting for boot_completed — proceeding anyway.', bootReady ? 'ok' : 'warn');
 
     addLog('Testing su -c id… (magiskd can take a while to attach after boot — retrying if needed)');
     let out = '';
@@ -2495,7 +2764,19 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const attemptStart = Date.now();
     for (let i = 0; i < 15; i++) {
       const callStart = Date.now();
-      out = await c.shell('su -c id 2>&1');
+      // The line below reports the call's duration, but only once it returns —
+      // and a single su call has been observed blocking for 72s against a
+      // magiskd that isn't listening yet. That was 72 seconds of a completely
+      // silent wizard, which is indistinguishable from a hang. Tick while the
+      // call is still in flight, so the wait is visibly a wait.
+      const ticker = setInterval(
+        () => addLog(`    still waiting on su (${Math.round((Date.now() - callStart) / 1000)}s) — magiskd has not answered yet`),
+        15000);
+      try {
+        out = await c.shell('su -c id 2>&1');
+      } finally {
+        clearInterval(ticker);
+      }
       const callMs = Date.now() - callStart;
       // Log every attempt with timing — the previous version of this loop
       // was silent inside the loop body, so a single su -c id call that's
@@ -2650,11 +2931,54 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Config written and verified on device.', 'ok');
 
     addLog('Reloading WiFi via the Android framework…');
-    // Diagnostic: confirm the known interferers are actually gone right
-    // before we touch wpa_supplicant — if either shows up here despite
-    // runDisableAlexa having run, that's the smoking gun for the clobber.
-    const interferers = await c.shell("su -c 'ps' | grep -iE 'wifiprofilemanager|SmartHomeWifid'");
-    addLog(`Interferer check: ${interferers.trim() || '(none running — clean)'}`);
+    // These two rewrite wpa_supplicant.conf out from under us. runDisableAlexa
+    // neutralises both, but SmartHomeWifid has been seen running again by the
+    // time we get here (a later boot trigger, or init restarting it before the
+    // persist property took) — and this used to just dump the raw `ps` row and
+    // carry on, which reads as a diagnostic nobody has to act on. It isn't: the
+    // run where it was present spent 9s cycling DISCONNECTED/SCANNING before
+    // associating, against 1s on a clean one. Kill what's there, then say so in
+    // words rather than in ps columns.
+    const psOut = await c.shell("su -c 'ps' | grep -iE 'wifiprofilemanager|SmartHomeWifid'");
+    const found = psOut.split('\n')
+      .map(l => l.trim()).filter(Boolean)
+      .map(l => { const f = l.split(/\s+/); return { pid: f[1], name: (f[f.length - 1] || '').split('/').pop() }; })
+      .filter(p => /^\d+$/.test(p.pid || ''));
+    if (found.length === 0) {
+      addLog('No WiFi config interferers running — clean.', 'ok');
+    } else {
+      addLog(`${found.map(p => `${p.name} (pid ${p.pid})`).join(', ')} running — `
+           + `rewrites wpa_supplicant.conf, stopping…`, 'warn');
+      // `kill -9` alone is not enough and was observed not holding: these are
+      // init services, so init restarts them within moments and the re-check
+      // finds a fresh pid. init has to be told to stop the SERVICE. The
+      // service name is not guessed — it is read out of init.svc.* at
+      // runtime, which is init's own record of what it is running, so this
+      // survives a name differing across SKUs.
+      const svcProps = await c.shell("su -c 'getprop' | grep -iE 'init\\.svc\\.(.*smarthome.*|.*wifiprofile.*)'");
+      // getprop prints `[init.svc.SmartHomeWifid]: [running]`.
+      const svcNames = svcProps.split('\n').map(l => {
+        const m = /^\[init\.svc\.([^\]]+)\]:\s*\[(\w+)\]/.exec(l.trim());
+        return m && m[2] === 'running' ? m[1] : null;
+      }).filter(Boolean);
+      for (const svc of svcNames) {
+        await c.shell(`su -c "stop ${svc}"`);
+        addLog(`  stopped init service "${svc}"`);
+      }
+      // Then kill whatever is still up — a service init has been told to stop
+      // does not die on its own.
+      for (const p of found) await c.shell(`su -c "kill -9 ${p.pid}"`);
+
+      const still = (await c.shell("su -c 'ps' | grep -iE 'wifiprofilemanager|SmartHomeWifid'")).trim();
+      if (!still) {
+        addLog('Interferers stopped.', 'ok');
+      } else if (svcNames.length === 0) {
+        addLog('Still running, and no matching init service was found to stop — '
+             + 'it will respawn. Association may be slow or the config may be overwritten.', 'warn');
+      } else {
+        addLog('Still running after stop+kill — association may be slow or the config overwritten.', 'warn');
+      }
+    }
 
     // IMPORTANT — found the hard way on real hardware: this device runs
     // TWO independent things that can each launch /system/bin/wpa_supplicant:
@@ -2724,28 +3048,70 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // "Could not access the Package Manager. Is the system running?" for
     // the first several packages, then start succeeding once the system
     // server catches up mid-loop. sys.boot_completed=1 is the actual
-    // readiness signal for the package manager being available — poll for
-    // it explicitly rather than guessing a fixed delay.
-    addLog('Waiting for Android framework to finish booting…');
-    let bootReady = false;
-    for (let i = 0; i < 30; i++) {
-      const boot = (await c.shell('getprop sys.boot_completed')).trim();
-      if (boot === '1') { bootReady = true; break; }
-      await new Promise(r => setTimeout(r, 1000));
-    }
-    addLog(bootReady ? 'Framework ready.' : 'Timed out waiting for boot_completed — proceeding anyway, some pm disable calls may fail.', bootReady ? 'ok' : 'warn');
+    // readiness signal for the package manager being available — but it is
+    // necessary, not sufficient, so waitForFramework also probes pm itself.
+    await waitForFramework(c, 'disabling the Alexa stack');
 
+    // Silence the out-of-box setup assistant FIRST, before the main loop.
+    //
+    // A fresh device boots straight into Amazon's OOBE: it announces "Hello,
+    // I'm Alexa, connect to me using the Alexa app" out loud and spins an
+    // amber ring, and it keeps doing both for the whole provisioning session.
+    // It is loud, it is confusing next to a wizard that is clearly already
+    // talking to the device, and it invites someone to go and complete Amazon
+    // setup on a device being taken off Amazon.
+    //
+    // It was previously only `pm hide`d in the debloat step — which is both
+    // later and insufficient, since hiding does not stop a running instance.
+    // Killing it needs all three of these: stop it now, stop it being
+    // relaunched by the framework, and stop it being re-triggered by the
+    // "device not provisioned" flags it keys off.
+    const OOBE = 'com.amazon.echo.csm.oobe';
+    addLog('Silencing the Amazon setup assistant (the amber ring and the "connect using the Alexa app" prompt)…');
+    // Order matters: mark setup done first, so nothing relaunches it in the
+    // gap between force-stop and disable.
+    for (const s of ['put global device_provisioned 1', 'put secure user_setup_complete 1']) {
+      await c.shell(`su -c 'settings ${s}' 2>&1`);
+    }
+    await c.shell(`su -c 'am force-stop ${OOBE}' 2>&1`);
+    const oobeDisable = (await c.shell(`su -c 'pm disable ${OOBE}' 2>&1`)).trim();
+    // force-stop is a no-op against a PERSISTENT app (the same lesson whad
+    // taught in the debloat list), so check and kill directly rather than
+    // assuming it worked.
+    const oobePids = (await c.shell(`su -c 'ps' | grep -F ${OOBE} | grep -v grep`))
+      .split('\n').map(l => l.trim().split(/\s+/)[1]).filter(p => /^\d+$/.test(p || ''));
+    for (const pid of oobePids) await c.shell(`su -c "kill -9 ${pid}"`);
+    const oobeLeft = (await c.shell(`su -c 'ps' | grep -F ${OOBE} | grep -v grep`)).trim();
+    addLog(`  → ${oobeDisable.includes('new state: disabled') ? 'disabled' : oobeDisable || 'no output'}`
+         + `, ${oobePids.length} running process(es) killed`
+         + (oobeLeft ? ' — still running, it will stop at the reboot that ends provisioning' : ''),
+           oobeLeft ? 'warn' : 'ok');
+
+    let disabled = 0;
     for (const pkg of _ALEXA_PKGS) {
       addLog(`Disabling ${pkg}…`);
-      const out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
-      addLog(`  → ${out || 'ok'}`);
-      if (out.includes('Could not access the Package Manager')) {
-        // Still not ready despite boot_completed — give it a moment and retry once.
+      let out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
+      if (_pmNotReady(out)) {
+        // Still not ready despite the gate above — give it a moment and retry once.
         addLog('  Package Manager not ready yet, waiting 3s and retrying…', 'warn');
         await new Promise(r => setTimeout(r, 3000));
-        const retry = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
-        addLog(`  → retry: ${retry || 'ok'}`);
+        out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
       }
+      // pm prints "Package <pkg> new state: disabled" on success. A package
+      // absent from this SKU is a normal, expected miss; anything else is not.
+      const ok = out.includes('new state: disabled');
+      if (ok) disabled++;
+      addLog(`  → ${out.trim() || 'ok'}`, ok ? undefined : 'warn');
+    }
+    // Zero successes means the framework lied about being ready or root is
+    // not what we think it is — either way the Alexa stack is still live and
+    // the device must not be put on WiFi. Fail loudly instead of ticking the
+    // step green, which is what happened on 2026-07-31.
+    if (disabled === 0) {
+      throw new Error(
+        `None of the ${_ALEXA_PKGS.length} Alexa packages could be disabled — the package manager rejected every call. `
+        + `Do NOT continue to WiFi: the Alexa stack is still running and will phone home. `
+        + `Give the device longer to boot and click Retry.`);
     }
 
     // pm disable on com.amazon.device.smarthome.adapters.wifi does NOT stop
@@ -2790,15 +3156,33 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (!pkgResp.ok) throw new Error(`Controller returned ${pkgResp.status} fetching debloat package list.`);
     const { packages } = await pkgResp.json();
 
+    // Re-gate rather than trusting the previous step: steps are individually
+    // retryable, so this one can be entered on its own after a reconnect.
+    await waitForFramework(c, 'debloat');
+
     addLog(`Hiding ${packages.length} packages…`);
+    let hidden = 0;
     for (const pkg of packages) {
-      const out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
+      let out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
+      if (_pmNotReady(out)) {
+        await new Promise(r => setTimeout(r, 3000));
+        out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
+      }
       // pm hide prints "Package <pkg> new hidden state: true" on success;
       // a package absent from this SKU errors — log it and move on, the
       // list spans SKU variants by design.
       const ok = out.includes('hidden state: true');
+      if (ok) hidden++;
       addLog(`  ${pkg} → ${ok ? 'hidden' : (out || 'no output')}`, ok ? undefined : 'warn');
     }
+    // Some of the list is expected to miss on any given SKU, but none of it
+    // landing means pm was not working, not that the SKU is unusual.
+    if (hidden === 0) {
+      throw new Error(
+        `None of the ${packages.length} packages could be hidden — the package manager rejected every call. `
+        + `Give the device longer to boot and click Retry.`);
+    }
+    addLog(`${hidden}/${packages.length} packages hidden.`, 'ok');
 
     addLog('Installing boot-time daemon-stop script (Magisk service.d)…');
     const scrResp = await fetch('/api/provision/debloat_script', { headers: { Authorization: `Bearer ${token}` } });
@@ -2963,11 +3347,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         addLog('TLS credentials installed — device will connect over wss.', 'ok');
       }
     }
-    addLog('Rebooting device to finish provisioning…');
-    try { await c.shell('su -c reboot'); } catch {}
-    await c.close();
-    setAdb(null);
-    addLog('Device rebooting. It will appear in the controller dashboard within ~30s via mDNS.', 'ok');
+    // NO reboot here. This step used to end the wizard, so it rebooted, closed
+    // the connection and cleared `adb` — and when the wake word asset step was
+    // appended after it, that step's auto-run gate (`&& adb`) was false, so it
+    // silently never fired and the wizard just sat on it. The finishing reboot
+    // belongs to whichever step is genuinely last; it now lives in
+    // runInstallOwwAssets. Anything added after that must move it again.
+    addLog('Staying connected — the wake word assets install next, then the device reboots.');
   }
 
   // ── Step executor ──
@@ -3009,12 +3395,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog(`  ✓ ${a.name}`);
     }
     addLog('Wake word assets installed. On-device scoring is off by default — '
-         + 'enable it per device under Config → Wake word.');
+         + 'enable it per device under Config → Wake word.', 'ok');
+
+    // The finishing reboot lives in the LAST step, deliberately — it closes
+    // the ADB connection, so any step after it can never run. Keeping it on
+    // the success path (not in a finally) means a failure above leaves the
+    // connection alive and the Retry button usable.
+    addLog('Rebooting device to finish provisioning…');
+    try { await c.shell('su -c reboot'); } catch {}
+    await c.close();
+    setAdb(null);
+    addLog('Device rebooting. It will appear in the controller dashboard within ~30s via mDNS.', 'ok');
   }
 
   async function runStep(stepIdx, useLatest) {
     setRunning(true);
     markStep(stepIdx, 'running');
+    // One banner per step. The transcript is the only record of a provision
+    // and people paste it when something goes wrong — without these it is a
+    // single 200-line stream with no way to tell which step a message
+    // belongs to, or which one a failure happened in.
+    addLog(`── ${stepIdx + 1}/${_WIZARD_STEPS.length}  ${_WIZARD_STEPS[stepIdx].label.toUpperCase()} ──`, 'head');
     let c = adb;
     try {
       switch (stepIdx) {
@@ -3055,10 +3456,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // a button people can leave unpressed defeats the point of it being
     // mandatory.
     const autoSteps = new Set([2, 4, 7, 8, 9, 12]);
-    if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
-      runStep(step);
-    }
-  }, [step, running]);
+    if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
+    if (adb) { runStep(step); return; }
+    // An auto step with no connection used to be a no-op, so the wizard sat on
+    // it looking busy forever — which is exactly how the wake word asset step
+    // failed on 2026-07-31, reached only after the previous step had rebooted
+    // the device out from under it. A step that cannot start must SAY so.
+    addLog(`"${_WIZARD_STEPS[step].label}" needs an ADB connection and there isn't one — `
+         + `the previous step disconnected the device. Reconnect and click Retry.`, 'error');
+    markStep(step, 'error');
+  }, [step, running, adb]);
 
   const cur    = _WIZARD_STEPS[step];
   const isDone = step === _WIZARD_STEPS.length - 1 && stepState[step] === 'done';
@@ -3250,7 +3657,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Log output — same console treatment as the Updates tab */}
+            {/* Log output — same console treatment as the Updates tab.
+                The copy action matters more than it looks: this transcript is
+                the entire record of a provision, and it is what gets pasted
+                when something needs diagnosing. Selecting it by hand out of a
+                scrolling box loses the top of it. */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 10 }}>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em' }}>
+                Output{log.length > 0 ? ` — ${log.length} lines` : ''}
+              </span>
+              {log.length > 0 && (
+                <Pill small onClick={() => {
+                  const text = log.map(e => e.msg).join('\n');
+                  navigator.clipboard.writeText(text)
+                    .then(() => addLog('(transcript copied to clipboard)'))
+                    .catch(() => addLog('Clipboard blocked by the browser — select the text manually.', 'warn'));
+                }}>Copy log</Pill>
+              )}
+            </div>
             <div
               ref={logRef}
               style={{
@@ -3266,7 +3690,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               {log.length === 0
                 ? <span style={{ color: '#3a4a30' }}>— no output yet —</span>
                 : log.map((e, i) => (
-                  <div key={i} style={{ color: e.type === 'error' ? '#c08080' : e.type === 'ok' ? '#7ab87a' : e.type === 'warn' ? '#c0a060' : '#a8c8a0' }}>
+                  // 'head' is a step banner, not output — it is what turns 200
+                  // undifferentiated lines into something you can scan for the
+                  // step that went wrong.
+                  <div key={i} style={e.type === 'head'
+                    ? { color: '#8ab0d0', letterSpacing: '0.12em', marginTop: i === 0 ? 0 : 10, paddingTop: 6, borderTop: i === 0 ? 'none' : '1px solid #2a3428' }
+                    : { color: e.type === 'error' ? '#c08080' : e.type === 'ok' ? '#7ab87a' : e.type === 'warn' ? '#c0a060' : '#a8c8a0' }}>
                     {e.msg}
                   </div>
                 ))
@@ -4363,6 +4792,9 @@ function App() {
               d.device_id === msg.device_id ? { ...d, ...msg.state } : d
             ));
           }
+          break;
+        case 'device_log':
+          _emitDeviceLog(msg.device_id, msg.entry);
           break;
         case 'device_connected':
           setDevices(prev => prev.map(d =>
