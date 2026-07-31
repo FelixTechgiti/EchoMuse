@@ -1042,6 +1042,36 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     cancel_task.cancel()
     done_task.cancel()
 
+async def _meter_at_playback_start(pcm_chunks, on_start):
+    """
+    Pass PCM through untouched, firing `on_start` when the device will have
+    begun playing it.
+
+    The device holds audio until roughly SPEAKER_PRIME_SECONDS is queued, or
+    until EOS for a response shorter than that (primePeriods, pcm_speaker.go).
+    Counting bytes handed to the streamer tracks that closely enough — the
+    socket write completes near-instantly however slow the link is, which is
+    the same property that makes send_ms useless as a delivery measure.
+
+    Exhaustion fires it too, so a two-word answer still gets a meter. If the
+    stream is cancelled or yields nothing, it never fires and the spinner
+    simply stays up until the turn's ring cleanup — the failure direction
+    that looks like "still working" rather than "dead".
+    """
+    prime_bytes = int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2)
+    sent = 0
+    fired = False
+    async for chunk in pcm_chunks:
+        yield chunk
+        if not fired:
+            sent += len(chunk)
+            if sent >= prime_bytes:
+                fired = True
+                await on_start()
+    if not fired:
+        await on_start()
+
+
 async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
@@ -1256,13 +1286,24 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     # the device; spin_task keeps waiting on stop_event
                     # and its finally still clears the ring at turn end.
                     #
+                    # RAISED WHEN AUDIO STARTS, NOT WHEN PLAYBACK IS SET UP.
+                    # The meter renders the live speaker RMS, so before the
+                    # device's ALSA write begins it draws an unlit ring. On
+                    # the buffered path that was invisible (the fetch had
+                    # already completed, so frames flushed at socket speed),
+                    # but streaming moves the fetch+decode INSIDE playback:
+                    # sending it here left the ring dark from the end of the
+                    # spinner until HA returned audio — seconds on a slow
+                    # response, and indistinguishable from a failed turn
+                    # (user report 2026-07-31). The spinner keeps running
+                    # until _meter_on fires, so the handover is continuous.
+                    #
                     # A streamed response has no known duration up front.
                     # Refresh the same bounded dead-man TTL while PCM arrives:
                     # long speech cannot outlive its meter, but a controller
                     # crash still lets the device clear the ring on its own.
                     meter = dict(device.led_scene["meter_anim"])
                     meter["ttlSec"] = em_scenes.meter_ttl(0.0)
-                    await device.send_led_anim(meter)
 
                     async def _refresh_meter_dead_man() -> None:
                         refresh_seconds = max(1.0, meter["ttlSec"] / 2)
@@ -1270,9 +1311,16 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                             await asyncio.sleep(refresh_seconds)
                             await device.send_led_anim(meter)
 
-                    meter_refresh_task = asyncio.create_task(
-                        _refresh_meter_dead_man()
-                    )
+                    async def _meter_on() -> None:
+                        nonlocal meter_refresh_task
+                        if meter_refresh_task is not None:
+                            return
+                        await device.send_led_anim(meter)
+                        meter_refresh_task = asyncio.create_task(
+                            _refresh_meter_dead_man()
+                        )
+
+                    pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
 
                 if device.barge_in_enabled:
                     # Barge-in (§3.2): keep the mic running through
