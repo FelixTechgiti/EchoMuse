@@ -478,6 +478,59 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 
+## Dashboard styling and theming
+
+`dashboard.jsx` is inline-styled, which for a long time meant its colours
+could not be restyled from a stylesheet at all — 126 distinct hexes typed at
+389 call sites, with four different reds doing the same job. That is a
+correctness problem before a taste one: **a light/dark toggle is impossible
+while a value lives at the call site.**
+
+- **Every chrome colour is a token** in `dashboard.html`'s `:root` block, and
+  both themes must define the same set. `tests/test_design_tokens.py` enforces
+  three things and has *no opinion about how anything looks*: every `var()` is
+  defined, the two themes define identical token sets, and literal colours
+  cannot increase (a ratchet, so remaining call sites get cleaned a pane at a
+  time). The first matters most — **an undefined `var()` renders as nothing**,
+  transparent text and invisible borders, and reports no error.
+- **Three groups keep literal colours on purpose.** `LedRing` /
+  `DeviceDiagram` render the physical Dot and its real LED colours (a device
+  drawn in "dark mode" would be a different device); the LED scene swatches in
+  `DeviceConfigForm` are values sent to the hardware, not styling; `Shell`'s
+  xterm theme is a 16-colour contract programs address by index. `deviceState`
+  is the subtle one: `dot` is the simulated LED and stays literal, `color`
+  beside it is chrome and is tokenised.
+- **Never concatenate hex alpha onto a colour.** `` `${color}88` `` worked
+  only while every value was a literal; the moment call sites became
+  `var(--lcd-green)` it produced `var(--lcd-green)88`, invalid CSS that drops
+  the whole declaration — the LCD glow silently vanished for a release. Use
+  `color-mix(in srgb, X 53%, transparent)`, which takes a `var()`.
+- **The theme is applied by an inline script in `<head>`**, before first
+  paint, not in React — the bundle is ~220KB and loads at the end of `<body>`,
+  so a dark-mode user would get a full flash of the light dashboard on every
+  navigation. It defaults to the OS preference until the user picks; the pick
+  then wins permanently and is stored in `localStorage` under `em-theme`.
+- **Dark is not an inversion.** The warm grey is the product's identity, so
+  dark is the same hue family taken down past the LCD rather than a neutral
+  charcoal. Semantic colours are lifted (`#286040` on a dark ground is
+  unreadable), and the inset dark regions — LCD readouts, console, wizard
+  transcript — stay dark in *both* themes because they are meant to read as a
+  lit panel set into the surface; in dark they go slightly darker still and
+  lean on their own border to stay distinguishable from the ground.
+- **Sheens and hairlines are tokenised too**, and that is the half that would
+  otherwise look broken rather than merely wrong: `rgba(255,255,255,0.7)
+  inset` is a highlight on a light card and fog on a dark one. Black drop
+  shadows are correct on both grounds and are deliberately left alone.
+- **Repeated chrome lives in CSS classes** (`.em-pill` with additive
+  `--small/--big/--accent/--danger` variants and `:disabled` handled in CSS so
+  it beats every variant; `.em-panel`, `.em-label`, `.em-lcd`, `.em-inset`,
+  `.em-console`, `.em-iconbtn`). One-off layout stays inline, next to the
+  markup it positions — moving that into CSS trades an inline object for a
+  class name plus a rule in another file, which is not an improvement. Note
+  inline styles cannot express `:hover` or `:focus-visible` at all, so until
+  the class layer existed the dashboard had **no keyboard focus ring
+  anywhere**.
+
 ## cgo dependency
 
 SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.

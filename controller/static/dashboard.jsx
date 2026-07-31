@@ -130,30 +130,29 @@ function eventAccent(level) {
 
 function Lcd({ label, value, color, size = 16 }) {
   return (
-    <div style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))', border: '1px solid var(--lcd-line)', borderRadius: 5, padding: '5px 10px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)', minWidth: 54 }}>
-      {label && <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 3 }}>{label}</div>}
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: size, color: color || 'var(--lcd-green)', lineHeight: 1, textShadow: `0 0 8px ${color || 'var(--lcd-green)'}88` }}>{value}</div>
+    <div className="em-lcd">
+      {label && <div className="em-lcd__label">{label}</div>}
+      {/* The glow is mixed, not hex-concatenated. It used to be `${color}88`,
+          which worked only while every colour was a literal — the moment the
+          call sites became var(--lcd-green) it produced `var(--lcd-green)88`,
+          invalid CSS that drops the whole declaration. The glow silently
+          disappeared. color-mix takes a var(); 0x88 is 53%. */}
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: size, color: color || 'var(--lcd-green)', lineHeight: 1,
+                    textShadow: `0 0 8px color-mix(in srgb, ${color || 'var(--lcd-green)'} 53%, transparent)` }}>{value}</div>
     </div>
   );
 }
 
 function Pill({ children, accent, danger, disabled, onClick, small, big }) {
-  const bg = disabled ? 'linear-gradient(180deg,var(--sunken),var(--border))'
-           : danger   ? 'linear-gradient(180deg,var(--error),var(--error-deep))'
-           : accent   ? 'linear-gradient(180deg,var(--accent-hi),var(--accent))'
-           :            'linear-gradient(180deg,var(--surface),var(--border-soft))';
-  const color = disabled ? 'var(--muted)' : danger ? 'var(--on-error)' : accent ? 'var(--accent-tint)' : 'var(--text)';
-  const border = disabled ? '1px solid var(--border-hard)' : danger ? '1px solid var(--error-deep)' : accent ? '1px solid var(--accent-deep)' : '1px solid var(--faint)';
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      background: bg, color, border, borderRadius: 20,
-      fontFamily: "'DM Sans',sans-serif", fontSize: small ? 11 : big ? 14 : 12, fontWeight: big ? 600 : 500,
-      padding: small ? '5px 14px' : big ? '11px 28px' : '7px 20px',
-      cursor: disabled ? 'not-allowed' : 'pointer',
-      boxShadow: disabled ? 'none' : '0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2)',
-      transition: 'all 0.1s', whiteSpace: 'nowrap',
-    }}>{children}</button>
-  );
+  // Variants as classes, not a ternary chain per property. :disabled is
+  // handled in CSS, so it beats every variant without this having to know
+  // the precedence.
+  const cls = ['em-pill',
+    small  && 'em-pill--small',
+    big    && 'em-pill--big',
+    accent && 'em-pill--accent',
+    danger && 'em-pill--danger'].filter(Boolean).join(' ');
+  return <button className={cls} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
 // ThemeToggle — light/dark, remembered per browser.
@@ -178,19 +177,71 @@ function ThemeToggle() {
   }
 
   return (
-    <button
-      onClick={flip}
-      title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
-      aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      style={{
-        background: 'var(--surface)', border: '1px solid var(--border)',
-        borderRadius: 20, padding: '5px 12px', cursor: 'pointer',
-        fontFamily: "'DM Mono',monospace", fontSize: 11, lineHeight: 1,
-        color: 'var(--text2)', letterSpacing: '0.08em',
-        boxShadow: '0 1px 0 var(--sheen) inset',
-      }}>
+    <IconButton onClick={flip}
+      label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
       {theme === 'dark' ? '☾' : '☀'}
+    </IconButton>
+  );
+}
+
+// IconButton — the round icon control in the header. One shell so the theme
+// toggle, settings and sign-out are the same object at three sizes of glyph
+// rather than three near-identical buttons.
+//
+// `label` is required and does double duty: the tooltip and the accessible
+// name. An icon-only control has no visible text, so without it the button is
+// a mystery to a screen reader and a guess to everyone else.
+function IconButton({ onClick, label, danger, accent, busy, disabled, children }) {
+  const cls = ['em-iconbtn', accent && 'em-iconbtn--accent', busy && 'em-iconbtn--busy']
+    .filter(Boolean).join(' ');
+  return (
+    <button className={cls} onClick={onClick} title={label} aria-label={label}
+            aria-busy={busy || undefined} disabled={disabled || busy}
+            style={danger ? { color: 'var(--error)' } : undefined}>
+      {children}
     </button>
+  );
+}
+
+// Check-for-updates: a refresh arc. Spins while the check is in flight, which
+// is the only progress this action can show — it is a single request whose
+// answer is "yes" or "no".
+function RefreshIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"
+         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/>
+      <path d="M13.7 2.4v3.2h-3.2"/>
+    </svg>
+  );
+}
+
+// Deploy-to-fleet: an arrow rising out of a tray. Up rather than down because
+// this pushes firmware out to the devices; a download arrow would say the
+// opposite of what the button does.
+function DeployIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"
+         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 10.5V2.5"/>
+      <path d="M5 5.5 8 2.5l3 3"/>
+      <path d="M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/>
+    </svg>
+  );
+}
+
+// Sign-out mark: a door with an arrow leaving it. Drawn rather than set in
+// type because Unicode has no unambiguous glyph for it — the near misses are
+// power (⏻), which reads as "shut the device down", and escape (⎋), which
+// almost nobody recognises.
+function SignOutIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"
+         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2.5H3.5A1.5 1.5 0 0 0 2 4v8a1.5 1.5 0 0 0 1.5 1.5H6"/>
+      <path d="M10.5 11 14 8l-3.5-3"/>
+      <path d="M14 8H6"/>
+    </svg>
   );
 }
 
@@ -198,7 +249,7 @@ function ThemeToggle() {
 // definition instead of the same inline style repeated per call site.
 function SectionLabel({ children, style }) {
   return (
-    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 12, ...style }}>
+    <div className="em-label" style={style}>
       {children}
     </div>
   );
@@ -208,7 +259,7 @@ function SectionLabel({ children, style }) {
 // consistent visual structure instead of floating elements.
 function Panel({ label, children, style }) {
   return (
-    <div style={{ background: 'linear-gradient(170deg,var(--raised),var(--card))', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 16px 16px', boxShadow: '0 1px 0 var(--sheen) inset', ...style }}>
+    <div className="em-panel" style={style}>
       {label && <SectionLabel>{label}</SectionLabel>}
       {children}
     </div>
@@ -1947,7 +1998,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
 
               {/* Activity console — always present so the layout never jumps
                   when a deploy starts */}
-              <div style={{ background:'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))', border:'1px solid var(--lcd-line)', borderRadius:8, padding:14, fontFamily:"'DM Mono',monospace", fontSize:12, boxShadow:'inset 0 2px 6px rgba(0,0,0,0.5)', minHeight:96, flex:1 }}>
+              <div className="em-inset" style={{ '--em-inset-pad':'14px', fontFamily:"'DM Mono',monospace", fontSize:12, minHeight:96, flex:1 }}>
                 {pushLog.length === 0 && !pushing && (
                   <span style={{ color:'var(--lcd-faint)' }}>— no deploy activity this session —</span>
                 )}
@@ -2023,7 +2074,7 @@ function Card({ device, onClick }) {
         <LedRing state={state} size={120}/>
       </div>
       <div style={{ padding: '0 16px 16px' }}>
-        <div style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))', border: '1px solid var(--lcd-line)', borderRadius: 6, padding: '7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.5)' }}>
+        <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88` }}>{state.label.toUpperCase()}</span>
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em' }}>{(() => {
             const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
@@ -2205,7 +2256,9 @@ function AddDeviceTile({ onClick }) {
       onMouseLeave={() => setHover(false)}
       style={{
         border: `2px dashed ${hover ? 'var(--text2)' : 'var(--border-hard)'}`,
-        borderRadius: 12, minHeight: 160, display: 'flex', flexDirection: 'column',
+        // 12 -> 14 to match Card's corner. minHeight is only the floor for an
+        // empty fleet; with any device present the grid row sets the height.
+        borderRadius: 14, minHeight: 244, display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer',
         transition: 'border-color 0.15s, opacity 0.15s', opacity: hover ? 1 : 0.6,
         userSelect: 'none',
@@ -4915,10 +4968,8 @@ function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
           <ThemeToggle/>
-          <Pill small onClick={() => setShowSettings(true)}>
-            <span style={{ fontSize: 14, verticalAlign: '-1px', marginRight: 6 }}>⚙</span>Settings
-          </Pill>
-          <Pill small onClick={handleLogout}>Sign out</Pill>
+          <IconButton onClick={() => setShowSettings(true)} label="Settings">⚙</IconButton>
+          <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
         </div>
       </div>
 
@@ -4997,19 +5048,28 @@ function App() {
           ['Updates', updates, updates > 0 ? 'var(--warn)' : 'var(--muted)'],
           ['Pending', pending.length, pending.length > 0 ? 'var(--accent-hi)' : 'var(--muted)'],
         ].map(([label, val, c]) => (
-          <div key={label} style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))', border: '1px solid var(--lcd-line)', borderRadius: 8, padding: '12px 18px', flex: 1, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)' }}>
+          <div key={label} className="em-inset" style={{ flex: 1 }}>
             <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>{label}</div>
             <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 24, color: c, lineHeight: 1, textShadow: `0 0 12px ${c}66` }}>{val}</div>
           </div>
         ))}
         {release && (
-          <div className="em-summary-release" style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))', border: '1px solid var(--lcd-line)', borderRadius: 8, padding: '12px 18px', flex: 2, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="em-summary-release em-inset" style={{ flex: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>Latest Release</div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>
             </div>
+            {/* Actions as ONE flex child, not three.
+                space-between distributes across every child it has, so with
+                the version block, the check button and the deploy button all
+                as siblings it spread them evenly over a double-width panel —
+                the buttons ended up marooned in the middle. Grouping them
+                leaves two children: version left, actions right. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
             {isAdmin && (
-              <Pill small accent={!checkingRelease} disabled={checkingRelease} onClick={async () => {
+              <IconButton accent busy={checkingRelease}
+                label={checkingRelease ? 'Checking for updates…' : 'Check for updates'}
+                onClick={async () => {
                 setCheckingRelease(true);
                 try {
                   // Same force-check route used by the Updates tab and
@@ -5022,9 +5082,7 @@ function App() {
                   alert(e.error || 'Release check failed');
                 }
                 setCheckingRelease(false);
-              }}>
-                {checkingRelease ? 'Checking…' : 'Check for updates'}
-              </Pill>
+              }}><RefreshIcon/></IconButton>
             )}
             {isAdmin && (() => {
               const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
@@ -5048,7 +5106,8 @@ function App() {
               const inFlight = deployState && !complete;
               return (<>
                 {release && !inFlight && (
-                  <Pill small accent onClick={() => setShowDeployAll(true)}>Deploy all</Pill>
+                  <IconButton accent onClick={() => setShowDeployAll(true)}
+                              label="Deploy latest firmware to all devices"><DeployIcon/></IconButton>
                 )}
                 {deployState && (
                   <Pill small onClick={() => setShowDeployAll(true)}>
@@ -5061,6 +5120,7 @@ function App() {
                 )}
               </>);
             })()}
+            </div>
           </div>
         )}
       </div>
@@ -5085,7 +5145,12 @@ function App() {
               Devices · {approved.length}
             </div>
           )}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 12, marginBottom: 48 }}>
+          {/* gridAutoRows:1fr equalises every row to the tallest item, so the
+              provisioning tile is the same size as a device card instead of
+              collapsing to its own content when it wraps onto a row alone.
+              A matching height rather than a matching magic number — the card
+              can gain a row without this drifting. */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gridAutoRows: '1fr', gap: 12, marginBottom: 48 }}>
             {approved.map(d => <Card key={d.device_id} device={d} onClick={() => setSelected(d.device_id)}/>)}
             {isAdmin && <AddDeviceTile onClick={() => setShowWizard(true)}/>}
           </div>
