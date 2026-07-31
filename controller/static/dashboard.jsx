@@ -357,13 +357,24 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
     <div style={{ flex:'1 1 0', minWidth:0 }}>
       <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
                     textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{label}</div>
-      <div style={{ display:'flex', alignItems:'baseline', gap:4, marginTop:3, minHeight:16 }}>
+      {/* FIXED height, and the glyph is centre-aligned rather than
+          baseline-aligned.
+
+          A flex item with no text baseline of its own — Link's SignalBars is
+          a 16px SVG — has its BOTTOM EDGE aligned to the row's baseline, so
+          it sits taller than the text and grew the whole row. That pushed the
+          Link tile's meter several pixels below Latency's and Temp's, whose
+          glyphs are ordinary text. Pinning the height decouples the meters'
+          vertical position from whatever a tile puts in this row, so the row
+          of meters lines up by construction rather than by coincidence. */}
+      <div style={{ display:'flex', alignItems:'baseline', gap:4, marginTop:3, height:18 }}>
         <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12,
                        color: dim ? 'var(--muted)' : SEV[sev] ?? 'var(--text2)' }}>
           {dim ? '—' : value}
         </span>
         {!dim && unit && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{unit}</span>}
-        {glyph && <span style={{ marginLeft:'auto', display:'flex', alignItems:'center' }}>{glyph}</span>}
+        {glyph && <span style={{ marginLeft:'auto', display:'flex', alignItems:'center',
+                                 alignSelf:'center', flexShrink:0 }}>{glyph}</span>}
       </div>
       <MicroMeter pct={dim ? null : pct} sev={sev}/>
       {note && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:SEV.bad, marginTop:3 }}>{note}</div>}
