@@ -46,7 +46,18 @@ jobs:
         run: |
           file device/build/server
           ls -lh device/build/server
-          strings device/build/server | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          # Assert the binary carries THIS tag. The previous check grepped for
+          # any version-shaped line (^v1.2.3$), which was wrong twice over: it
+          # never confirmed the version was the one being released, and it
+          # depended on string LAYOUT — Go concatenates string constants into
+          # one blob, so the version reads as "@v2.9.11" with no line break
+          # around it. Adding two unrelated constants shifted the blob and
+          # broke the release of v2.9.11 with a perfectly good binary.
+          if ! strings device/build/server | grep -qF "$GITHUB_REF_NAME"; then
+            echo "::error::binary does not contain $GITHUB_REF_NAME — ldflags did not take"
+            exit 1
+          fi
+          echo "binary carries $GITHUB_REF_NAME"
 
       # Release notes come from the ANNOTATED TAG MESSAGE.
       #
