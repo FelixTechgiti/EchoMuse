@@ -4143,6 +4143,8 @@ function App() {
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
+  const [ctrlRelease, setCtrlRelease] = useState(null);
+  const [ctrlNotesOpen, setCtrlNotesOpen] = useState(false);
   const [checkingRelease, setCheckingRelease] = useState(false);
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -4180,10 +4182,12 @@ function App() {
       API.get('/api/system/status'),
       API.get('/api/releases/latest').catch(() => null),
       API.get('/api/global/config').catch(() => null),
-    ]).then(([devs, stat, rel, gcfg]) => {
+      API.get('/api/releases/controller').catch(() => null),
+    ]).then(([devs, stat, rel, gcfg, ctrl]) => {
       setDevices(devs);
       setStatus(stat);
       setRelease(rel);
+      setCtrlRelease(ctrl);
       if (gcfg) setGlobalConfig(gcfg);
     }).catch(e => {
       if (e.code === 'not_authenticated') { handleLogout(); }
@@ -4231,6 +4235,11 @@ function App() {
         case 'device_approved':
           // Full refresh for structural changes
           API.get('/api/devices').then(setDevices).catch(() => {});
+          break;
+        case 'controller_update':
+          // The controller polls GitHub hourly; a dashboard left open should
+          // learn about a new controller without a reload.
+          setCtrlRelease(msg);
           break;
         case 'device_pending':
           API.get('/api/devices').then(setDevices).catch(() => {});
@@ -4293,6 +4302,73 @@ function App() {
           <Pill small onClick={handleLogout}>Sign out</Pill>
         </div>
       </div>
+
+
+      {/* Controller update notice.
+          Rendered ONLY when a newer controller-v* tag exists, so it is an
+          alert rather than permanent chrome — a panel that is always present
+          stops being read.
+
+          There is deliberately no update button. The controller is a
+          container the user owns and updates with their own docker tooling;
+          an in-app "update" would have to restart the process serving the
+          page, mid-request, with no way to report the outcome. So this shows
+          the version, what changed, and the exact command — everything needed
+          to decide — and leaves the doing to them. */}
+      {ctrlRelease?.available && ctrlRelease?.version && (
+        <div className="em-ctrl-update" style={{
+          background: 'linear-gradient(160deg,#2e2a1e,#221e14)',
+          border: '1px solid #3a3220', borderRadius: 8,
+          padding: '14px 18px', marginBottom: 24,
+        }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
+            <span style={{ fontFamily:"'DM Mono',monospace", fontSize:8, color:'#a08840',
+                           textTransform:'uppercase', letterSpacing:'0.15em' }}>
+              Controller update
+            </span>
+            <span style={{ fontFamily:"'DM Mono',monospace", fontSize:14, color:'#d8b860' }}>
+              {ctrlRelease.version}
+            </span>
+            <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
+              running {ctrlRelease.current || status?.controller_version || '—'}
+            </span>
+            {ctrlRelease.notes && (
+              <span onClick={() => setCtrlNotesOpen(o => !o)} style={{
+                fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                cursor:'pointer', userSelect:'none', marginLeft:'auto',
+                textTransform:'uppercase', letterSpacing:'0.15em',
+              }}>
+                {ctrlNotesOpen ? '▾' : '▸'} What&apos;s in it
+              </span>
+            )}
+          </div>
+          {ctrlNotesOpen && (
+            <div style={{ marginTop:12, borderTop:'1px solid rgba(255,255,255,0.06)', paddingTop:12 }}>
+              <pre style={{
+                fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.65,
+                color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
+                margin:0, maxHeight:320, overflowY:'auto',
+              }}>{ctrlRelease.notes}</pre>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                            marginTop:14, lineHeight:1.6 }}>
+                Update it yourself, from wherever your compose file lives:
+              </div>
+              <pre style={{
+                fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--lcd-green)',
+                background:'rgba(0,0,0,0.35)', border:'1px solid rgba(0,0,0,0.5)',
+                borderRadius:6, padding:'10px 12px', margin:'8px 0 0', overflowX:'auto',
+              }}>docker compose pull &amp;&amp; docker compose up -d</pre>
+              {ctrlRelease.release_url && (
+                <a href={ctrlRelease.release_url} target="_blank" rel="noreferrer"
+                   style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
+                            display:'inline-block', marginTop:10 }}>
+                  View tag on GitHub →
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Summary */}
       <div className="em-summary" style={{ display: 'flex', gap: 10, marginBottom: 36 }}>

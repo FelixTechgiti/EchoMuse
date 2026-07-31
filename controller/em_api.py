@@ -56,6 +56,8 @@ import em_pki
 import em_recordings
 import em_scenes
 from version import VERSION as CONTROLLER_VERSION
+from version import compare as _compare_versions
+from version import parse as _parse_version
 
 log = logging.getLogger("echomuse.api")
 
@@ -75,6 +77,25 @@ GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases?per_page=10"
 _release_cache: dict = {}
 _release_cache_ts: float = 0.0
 RELEASE_CACHE_TTL = 60  # seconds
+
+# Controller releases are `controller-v*` TAGS with no GitHub Release behind
+# them — controller-release.yml publishes a GHCR image and nothing else (see
+# "Versioning / releases" in CLAUDE.md). So the notes come from the tag's own
+# annotation: matching-refs lists the tags, and an annotated tag's object
+# carries the message.
+#
+# Deliberately NOT solved by publishing GitHub Releases for controller tags.
+# The releases list is the DEVICE firmware's update feed and
+# _fetch_latest_release scans it for the newest v* tag carrying a `server`
+# asset; adding controller rows puts non-firmware entries in front of that
+# scan for no gain, when the annotation we already write says the same thing.
+GITHUB_TAGS_URL = (
+    "https://api.github.com/repos/{repo}/git/matching-refs/tags/controller-v"
+)
+GITHUB_TAG_OBJECT_URL = "https://api.github.com/repos/{repo}/git/tags/{sha}"
+
+_controller_cache: dict = {}
+_controller_cache_ts: float = 0.0
 
 # Reference to the live devices dict from em_controller — set by init().
 _devices: dict = {}
@@ -227,6 +248,7 @@ async def create_app() -> web.Application:
 
     # Releases
     app.router.add_get("/api/releases/latest",   _get_latest_release)
+    app.router.add_get("/api/releases/controller", _get_controller_release)
     app.router.add_post("/api/releases/check",   _post_check_release)
     app.router.add_post("/api/releases/deploy",  _post_deploy_all)
 
@@ -2387,6 +2409,13 @@ async def _get_system_status(request: web.Request) -> web.Response:
         "pending":        sum(1 for r in all_rows if not r["approved"]),
         "approval_mode":  db.get_config("device_approval", "strict"),
         "latest_release": release["version"] if release else None,
+        # Controller update, surfaced alongside the firmware one so the header
+        # can badge it without a second round trip. Read-only by design: the
+        # controller runs as a container the user owns, and updating it is a
+        # `docker compose pull` they perform — there is deliberately no action
+        # here, only the information needed to decide to take it.
+        "controller_update": _controller_cache.get("version")
+            if _controller_cache.get("available") else None,
         "updates_available": sum(
             1 for r in all_rows
             if r["firmware_ver"] and release
@@ -2806,6 +2835,122 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         return None
 
 
+async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
+    """
+    Find the newest controller-v* tag and its annotation.
+
+    Two requests, not one per tag: matching-refs returns every controller-v*
+    ref, the newest is picked by parsed version (NOT by list order — the API
+    sorts refs lexically, which puts v2.9.0 after v2.10.0), and only that one
+    tag's object is dereferenced for its message.
+
+    A lightweight tag has no annotation and no message; that is a degraded
+    release, not a broken one, so it still reports the version with empty
+    notes.
+    """
+    global _controller_cache, _controller_cache_ts
+
+    if (not force and _controller_cache
+            and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
+        return _controller_cache
+
+    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    headers = {"Accept": "application/vnd.github+json"}
+    timeout = aiohttp.ClientTimeout(total=10)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                GITHUB_TAGS_URL.format(repo=repo), headers=headers, timeout=timeout
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[api] Controller tag list returned {resp.status}")
+                    return _controller_cache or None
+                refs = await resp.json()
+
+            newest = None
+            for ref in refs or []:
+                tag = (ref.get("ref") or "").removeprefix("refs/tags/")
+                parsed = _parse_version(tag)
+                if parsed is None:
+                    continue
+                if newest is None or parsed > newest[0]:
+                    newest = (parsed, tag, ref.get("object") or {})
+
+            if newest is None:
+                log.info("[api] No controller-v* tags published yet")
+                return None
+
+            _, tag, obj = newest
+            notes = ""
+            published_at = ""
+            if obj.get("type") == "tag" and obj.get("sha"):
+                async with session.get(
+                    GITHUB_TAG_OBJECT_URL.format(repo=repo, sha=obj["sha"]),
+                    headers=headers, timeout=timeout,
+                ) as resp:
+                    if resp.status == 200:
+                        tag_obj = await resp.json()
+                        notes = (tag_obj.get("message") or "").strip()
+                        published_at = (tag_obj.get("tagger") or {}).get("date", "")
+
+        version = tag.removeprefix("controller-")
+        previous = db.get_config("latest_controller_version")
+
+        db.set_config("latest_controller_version", version)
+        db.set_config("latest_controller_notes", notes)
+        db.set_config("latest_controller_published_at", published_at)
+
+        _controller_cache = {
+            "version":      version,
+            "current":      CONTROLLER_VERSION,
+            "notes":        notes,
+            "published_at": published_at,
+            "release_url":  f"https://github.com/{repo}/releases/tag/{tag}",
+            **_compare_versions(CONTROLLER_VERSION, version),
+        }
+        _controller_cache_ts = time.monotonic()
+
+        log.info(f"[api] Latest controller release: {version} "
+                 f"(running {CONTROLLER_VERSION}, {_controller_cache['status']})")
+        if version != previous:
+            # Same live-push as device releases: a dashboard left open should
+            # not sit on stale information until someone reloads.
+            await _push_event({
+                "type":         "controller_update",
+                "version":      version,
+                "notes":        notes,
+                "published_at": published_at,
+                **_compare_versions(CONTROLLER_VERSION, version),
+            })
+        return _controller_cache
+
+    except Exception as e:
+        log.error(f"[api] Controller release fetch failed: {e}")
+        return _controller_cache or None
+
+
+async def _get_controller_release(request: web.Request) -> web.Response:
+    """GET /api/releases/controller"""
+    data = await _fetch_controller_release()
+    if data is None:
+        # Fall back to the DB cache so a GitHub outage does not blank the
+        # panel — offline is not the same as "no update exists".
+        version = db.get_config("latest_controller_version", "") or ""
+        if not version:
+            return _ok({"version": None, "current": CONTROLLER_VERSION,
+                        "status": "unknown", "available": False})
+        data = {
+            "version":      version,
+            "current":      CONTROLLER_VERSION,
+            "notes":        db.get_config("latest_controller_notes", "") or "",
+            "published_at": db.get_config("latest_controller_published_at", "") or "",
+            "release_url":  "",
+            **_compare_versions(CONTROLLER_VERSION, version),
+        }
+    return _ok(data)
+
+
 async def _fetch_binary(download_url: str) -> Optional[bytes]:
     """Download the binary from a GitHub release asset URL."""
     log.info(f"[api] Fetching binary: {download_url}")
@@ -2842,6 +2987,13 @@ async def release_poll_loop() -> None:
             await _fetch_latest_release()
         except Exception as e:
             log.error(f"[api] Release poll loop error: {e}")
+
+        # Same cadence, separate failure domain: a GitHub hiccup on one must
+        # not cost the other its poll.
+        try:
+            await _fetch_controller_release(force=True)
+        except Exception as e:
+            log.error(f"[api] Controller release poll error: {e}")
 
         interval = int(db.get_config("update_check_interval", "3600") or 3600)
         await asyncio.sleep(interval)
