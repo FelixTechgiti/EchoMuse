@@ -965,6 +965,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [deleting, setDeleting] = useState(false);
   const [securing, setSecuring] = useState(false);
   const [debloating, setDebloating] = useState(false);
+  const [assets, setAssets] = useState(null);
+  const [installing, setInstalling] = useState(false);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -983,6 +985,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
+      // Asset state costs a device shell round trip, so it is fetched on tab
+      // entry rather than polled — unlike a release, it only changes when
+      // someone acts on it here.
+      API.get(`/api/devices/${device.device_id}/oww_assets`)
+        .then(setAssets).catch(() => setAssets(null));
     }
   }, [tab, device.device_id]);
 
@@ -1083,6 +1090,22 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             + 'watch the device log for details.');
     } catch(e) { alert(e.error || 'Debloat failed'); }
     setTimeout(() => setDebloating(false), 8000);
+  }
+
+  async function doInstallAssets() {
+    // The install is one shell-plane transfer of up to ~15MB, so it is slow
+    // enough to need its own progress feedback; the device log carries the
+    // per-file detail via the same push events the OTA uses.
+    setInstalling(true);
+    try {
+      const res = await API.post(`/api/devices/${device.device_id}/oww_assets`, {});
+      const n = (res.pushed || []).length;
+      alert(n === 0
+        ? 'Already up to date — nothing needed installing.'
+        : `Installed ${n} file(s). Restart the device to start scoring on-device.`);
+      setAssets(await API.get(`/api/devices/${device.device_id}/oww_assets`));
+    } catch(e) { alert(e.error || 'Install failed'); }
+    setInstalling(false);
   }
 
   async function doUpdate() {
@@ -1677,6 +1700,69 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   <Pill small disabled={!device.connected || debloating} onClick={doDebloat}>
                     {debloating ? 'Applying…' : 'Re-apply debloat'}
                   </Pill>
+                </Panel>
+              )}
+
+
+              {/* On-device wake word assets.
+
+                  Separate from firmware on purpose: the runtime is 12.3MB and
+                  changes far less often than the binary, so it is not in the
+                  OTA payload. That makes it invisible unless something says
+                  so — a device can be configured for on-device scoring and
+                  silently not be doing it, which is the failure this panel
+                  exists to make legible. */}
+              {isAdmin && device.owwShadowCapable && (
+                <Panel label="On-device wake word">
+                  <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', marginBottom:12 }}>
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11,
+                      color: !assets ? 'var(--muted)'
+                           : assets.status === 'installed' ? '#286040'
+                           : assets.status === 'blocked' ? '#9a3020'
+                           : assets.status === 'unknown' ? 'var(--muted)'
+                           : '#806010' }}>
+                      {!assets ? 'checking…'
+                        : assets.status === 'installed' ? 'Installed'
+                        : assets.status === 'outdated' ? 'Out of date'
+                        : assets.status === 'blocked' ? 'Not enough space'
+                        : assets.status === 'unknown' ? 'Device offline — state unknown'
+                        : 'Not installed'}
+                    </span>
+                    {assets?.free_mb != null && (
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                        {assets.free_mb}MB free
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    The ONNX runtime and wake models the device needs to score
+                    locally (~15MB). They are not part of the firmware, so they
+                    install separately and survive updates. Scoring only starts
+                    after a device restart.
+                  </div>
+                  {assets?.blocked && (
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#c04040', marginBottom:12 }}>
+                      {assets.blocked}
+                    </div>
+                  )}
+                  {(assets?.problems || []).map((p, i) => (
+                    <div key={i} style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#c09040', marginBottom:8 }}>
+                      {p}
+                    </div>
+                  ))}
+                  <Pill small
+                        disabled={!device.connected || installing || assets?.status === 'installed'}
+                        onClick={doInstallAssets}>
+                    {installing ? 'Installing…'
+                      : assets?.status === 'installed' ? 'Installed'
+                      : assets?.status === 'outdated' ? 'Update assets'
+                      : 'Install assets'}
+                  </Pill>
+                  {assets?.missing?.length > 0 && (
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginLeft:10 }}>
+                      {assets.missing.length} file(s) to send
+                    </span>
+                  )}
                 </Panel>
               )}
 

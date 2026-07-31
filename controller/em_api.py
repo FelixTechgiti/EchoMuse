@@ -2976,16 +2976,18 @@ async def _oww_device_state(live) -> dict:
         f'for f in {d}/*.so {d}/*.onnx; do '
         f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
         f'$(busybox stat -c %Y "$f") $f"; done; '
-        f'echo "FREE $(busybox df -m /data | busybox tail -1 | busybox awk \'{{print $4}}\')"'
+        f'echo "FREE $(busybox df -m /data | busybox tail -1)"'
     ), timeout=120.0)
 
     free_mb = None
     lines = []
     for line in out.splitlines():
         if line.startswith("FREE "):
-            tail = line.split(None, 1)[1].strip()
-            if tail.isdigit():
-                free_mb = int(tail)
+            # The whole df row, parsed in Python: the available column's INDEX
+            # is not stable (busybox wraps a long filesystem name onto its own
+            # line) and an awk field number silently yielded "65%" here, which
+            # read as no measurement and quietly disabled the space check.
+            free_mb = em_oww_assets.parse_free_mb(line[5:])
         else:
             lines.append(line)
     return {
