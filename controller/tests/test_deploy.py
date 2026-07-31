@@ -190,3 +190,95 @@ def test_release_change_is_pushed_to_open_dashboards():
     upd = jsx[jsx.index("if (tab !== 'updates') return;"):]
     assert "setInterval" in upd[:600], \
         "the Updates tab must refresh while open, not fetch once on entry"
+
+
+def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
+    """
+    Turn playback must end when the DEVICE says its buffer drained, never on an
+    `audio_duration - elapsed` estimate.
+
+    That estimate was removed on 2026-07-24: it has no visibility of the
+    device's own buffer and cleared the ring 6.1s early on Retreat, 3.2s on
+    Lounge. The streaming path reintroduced it (PR #47) where it is worse still
+    — streaming already consumes most of the audio duration, so the remainder
+    computes to ~0 and the wait disappears while up to ~5.5s is queued in
+    audioChanDepth.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def _run_streaming_post_turn_playback"):]
+    fn = fn[:fn.index("\nasync def ", 1)]
+
+    assert "playback_done" in fn, \
+        "streamed playback must await the device's playback_stats"
+    assert "asyncio.sleep(remaining)" not in fn, \
+        "the computed drain estimate was removed on 2026-07-24 — do not restore it"
+
+
+def test_send_ms_stays_socket_write_time():
+    """
+    send_ms is documented as socket-write time that completes near-instantly
+    however slow the link is — "never read it as delivery; that mistake cost a
+    whole investigation on 2026-07-20". Timing the whole streaming loop instead
+    folds HA's synthesis time in and makes it read exactly like delivery.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def stream_speaker_chunks"):]
+    fn = fn[:fn.index("\n    async def ", 1) if "\n    async def " in fn[1:] else len(fn)]
+    assert "send_seconds" in fn, \
+        "socket-write time must be accumulated around the send calls"
+
+    caller = src[src.index("async def _run_streaming_post_turn_playback"):]
+    caller = caller[:caller.index("\nasync def ", 1)]
+    assert "device.playback_send_ms = send_ms" in caller, \
+        "send_ms must come from accumulated write time, not the loop duration"
+
+
+def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
+    """
+    The meter pattern renders the live speaker RMS, so it draws an UNLIT ring
+    until the device's ALSA write actually begins.
+
+    On the buffered path that was invisible: the TTS fetch had already
+    completed, so frames flushed at socket speed and audio began almost at
+    once. Streaming moves fetch+decode inside playback, so raising the meter at
+    setup time leaves the ring dark from the end of the spinner until HA
+    returns audio — seconds on a slow response, and indistinguishable from a
+    failed turn (user report 2026-07-31).
+
+    The spinner must therefore stay up until the meter has something to show.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def post_turn_play_esphome"):]
+    fn = fn[:fn.index("\n            # P0-1")]
+
+    assert "_meter_at_playback_start(pcm_chunks" in fn, \
+        "the meter must be gated on the first audio reaching the device"
+
+    # A meter send is legitimate inside the nested helpers (_meter_on, and the
+    # dead-man refresher). What must not exist is one in the function's OWN
+    # body — that runs at setup, before any audio. Nested bodies are indented
+    # deeper, so indentation is the discriminator.
+    assert "\n" + " " * 20 + "await device.send_led_anim(meter)" not in fn, \
+        ("the meter is being raised at playback setup — on the streaming path "
+         "that is before HA has returned any audio, leaving the ring dark")
+
+
+def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
+    """
+    A response shorter than SPEAKER_PRIME_SECONDS never reaches the byte
+    threshold — the device starts playing it at EOS instead. Exhaustion must
+    fire the callback too, or short answers play with no ring at all.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    fn = src[src.index("async def _meter_at_playback_start"):]
+    fn = fn[:fn.index("\nasync def ", 1)]
+
+    body = fn.split("async for")[1]
+    assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
+        "the generator must fire on exhaustion for sub-prime-length responses"
+    assert "SPEAKER_PRIME_SECONDS" in fn, \
+        "the threshold must track the device's actual prime window"

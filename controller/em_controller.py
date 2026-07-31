@@ -560,6 +560,76 @@ class Device:
             except BaseException:
                 pass  # WS gone / re-cancelled — device flush self-heals on reconnect
 
+    async def stream_speaker_chunks(self, pcm_chunks, stream_eq):
+        """
+        Stream an asynchronous PCM source as one device speaker session.
+
+        StreamingEQ stays alive for the complete response so its biquad state
+        crosses HTTP chunk boundaries without clicks. Partial device periods
+        are retained until more PCM arrives and padded only once, at the true
+        end of the response.
+        """
+        self.speaking = True
+        pending = bytearray()
+        total_pcm = 0
+        eq_seconds = 0.0
+        # Accumulated time spent WRITING to the socket, excluding time waiting
+        # for the source to produce audio. send_ms is documented as socket-write
+        # time that "completes near-instantly however slow the link is" — timing
+        # the whole streaming loop instead would fold HA's synthesis time into
+        # it and make it read like delivery, which is the misreading that cost
+        # an investigation on 2026-07-20.
+        send_seconds = 0.0
+        first_send_time = None
+        try:
+            async for pcm in pcm_chunks:
+                if self.cancel_event.is_set():
+                    break
+                total_pcm += len(pcm)
+                eq_started = asyncio.get_event_loop().time()
+                pending.extend(stream_eq.process(pcm))
+                eq_seconds += asyncio.get_event_loop().time() - eq_started
+
+                while len(pending) >= SPEAKER_BYTES:
+                    if self.cancel_event.is_set():
+                        break
+                    chunk = bytes(pending[:SPEAKER_BYTES])
+                    del pending[:SPEAKER_BYTES]
+                    if first_send_time is None:
+                        first_send_time = asyncio.get_event_loop().time()
+                        self.playback_send_t0 = first_send_time
+                        log.info(
+                            f"[{self.device_id}] First streamed PCM period "
+                            "sent to device"
+                        )
+                    _t_send = asyncio.get_event_loop().time()
+                    await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+                    send_seconds += asyncio.get_event_loop().time() - _t_send
+
+            if pending and not self.cancel_event.is_set():
+                chunk = bytes(pending)
+                chunk += bytes(SPEAKER_BYTES - len(chunk))
+                if first_send_time is None:
+                    first_send_time = asyncio.get_event_loop().time()
+                    self.playback_send_t0 = first_send_time
+                    log.info(
+                        f"[{self.device_id}] First streamed PCM period "
+                        "sent to device"
+                    )
+                _t_send = asyncio.get_event_loop().time()
+                await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+                send_seconds += asyncio.get_event_loop().time() - _t_send
+        finally:
+            self.speaking = False
+            # One EOS terminates the complete response. Sending EOS per HTTP
+            # chunk would make the device repeatedly prime and flush.
+            try:
+                await asyncio.shield(self.send_data(bytes([SPEAKER_EOS_TYPE])))
+            except BaseException:
+                pass
+
+        return total_pcm, int(eq_seconds * 1000), first_send_time, int(send_seconds * 1000)
+
 
 # The live device registry — keyed by device_id (ro.serialno).
 # em_api receives a reference to this dict at startup.
@@ -972,6 +1042,142 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     cancel_task.cancel()
     done_task.cancel()
 
+async def _meter_at_playback_start(pcm_chunks, on_start):
+    """
+    Pass PCM through untouched, firing `on_start` when the device will have
+    begun playing it.
+
+    The device holds audio until roughly SPEAKER_PRIME_SECONDS is queued, or
+    until EOS for a response shorter than that (primePeriods, pcm_speaker.go).
+    Counting bytes handed to the streamer tracks that closely enough — the
+    socket write completes near-instantly however slow the link is, which is
+    the same property that makes send_ms useless as a delivery measure.
+
+    Exhaustion fires it too, so a two-word answer still gets a meter. If the
+    stream is cancelled or yields nothing, it never fires and the spinner
+    simply stays up until the turn's ring cleanup — the failure direction
+    that looks like "still working" rather than "dead".
+    """
+    prime_bytes = int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2)
+    sent = 0
+    fired = False
+    async for chunk in pcm_chunks:
+        yield chunk
+        if not fired:
+            sent += len(chunk)
+            if sent >= prime_bytes:
+                fired = True
+                await on_start()
+    if not fired:
+        await on_start()
+
+
+async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
+    """
+    Play decoded HA TTS while the HTTP response is still arriving.
+
+    The voice-turn path keeps one ffmpeg decoder, one stateful EQ chain, and
+    one device 0x02...0x03 stream alive across all synthesized utterances.
+    Closing any layer at an arbitrary network boundary would corrupt decoding,
+    reset the EQ filters, or turn each chunk into a separate announcement.
+    """
+    log.info(
+        f"[{device.device_id}] Streaming EQ: bands={device.eq_bands} "
+        f"loudness={device.eq_loudness}"
+    )
+    stream_eq = em_eq.StreamingEQ(
+        SPEAKER_RATE,
+        device.eq_bands,
+        device.eq_loudness,
+    )
+    # Cleared BEFORE streaming starts: the device sets it when its audio
+    # channel drains after EOS, and a stale set from the previous response
+    # would end this turn the moment we started waiting.
+    device.playback_done.clear()
+    cancel_task = asyncio.create_task(device.cancel_event.wait())
+    done_task   = asyncio.create_task(device.playback_done.wait())
+    stream_task = asyncio.create_task(
+        device.stream_speaker_chunks(pcm_chunks, stream_eq)
+    )
+    t_stream_start = asyncio.get_event_loop().time()
+
+    try:
+        done, _ = await asyncio.wait(
+            [stream_task, cancel_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_task in done:
+            log.info(f"[{device.device_id}] Cancelled during streamed playback")
+            return 0
+
+        total_pcm, eq_ms, first_send_time, send_ms = stream_task.result()
+        device.playback_eq_ms = eq_ms
+        device.playback_send_ms = send_ms
+        stream_elapsed = asyncio.get_event_loop().time() - t_stream_start
+        audio_duration = total_pcm / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+
+        if not total_pcm:
+            log.info(f"[{device.device_id}] Streamed response contained no audio")
+            return 0
+
+        # Wait for the DEVICE to say it finished, exactly as the buffered path
+        # does — do NOT sleep a computed `audio_duration - elapsed`.
+        #
+        # That estimate was removed on 2026-07-24 because it has no visibility
+        # of the device's own buffer and cleared the ring 6.1s early on Retreat
+        # and 3.2s on Lounge. Streaming makes it worse, not better: the time
+        # spent streaming already covers most of the audio duration, so the
+        # remainder computes to ~0 and the wait vanishes entirely while up to
+        # ~5.5s is still queued in audioChanDepth. playback_stats is emitted
+        # once that channel drains after EOS, so it is the real end of audio.
+        # The timeout is only a backstop for the report never arriving (device
+        # drop, pre-v2.9 firmware). cancel_event is still raced so a barge-in
+        # or mute lands promptly.
+        timeout = audio_duration * 2 + 10.0
+        log.info(
+            f"[{device.device_id}] Streamed {total_pcm} bytes "
+            f"({total_pcm//SPEAKER_BYTES} periods) in {stream_elapsed:.1f}s "
+            f"while HA generated audio (socket writes {send_ms}ms — NOT "
+            f"delivery, see delivery_ms); awaiting device playback_stats "
+            f"(est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
+        )
+        timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+        try:
+            await asyncio.wait(
+                [done_task, cancel_task, timeout_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
+
+        if device.cancel_event.is_set():
+            log.info(f"[{device.device_id}] Cancelled during streamed buffer drain")
+        elif done_task.done():
+            log.info(f"[{device.device_id}] Streamed playback complete (device reported)")
+        else:
+            log.warning(
+                f"[{device.device_id}] No playback_stats after {timeout:.1f}s — "
+                f"continuing (device drop or pre-v2.9 firmware)"
+            )
+        return total_pcm
+    finally:
+        for t in (cancel_task, done_task):
+            t.cancel()
+        if not stream_task.done():
+            stream_task.cancel()
+        await asyncio.gather(cancel_task, done_task, stream_task, return_exceptions=True)
+        # Close the async generator explicitly rather than leaving it to the
+        # event loop's asyncgen hooks: its finally is what kills ffmpeg, and on
+        # a barge-in (a routine path here) deferring that to GC leaves a decoder
+        # running for an indeterminate window.
+        aclose = getattr(pcm_chunks, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception as e:
+                log.debug(f"[{device.device_id}] TTS stream close: {e}")
+
 
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):
     """
@@ -1066,12 +1272,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         _barge_watcher(device, playback_started)
                     )
 
-            async def post_turn_play_esphome(voice_response: bytes):
+            async def post_turn_play_esphome(pcm_chunks):
                 nonlocal spin_task, watcher
                 if spin_task is None or spin_task.done():
                     spin_task = asyncio.create_task(
                         leds_spin_green(device, stop_spin)
                     )
+                meter_refresh_task = None
                 if device.led_anim_capable:
                     # Playback ring: throb with the response's live audio
                     # level (device-side "meter" pattern, RMS measured at
@@ -1079,15 +1286,42 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     # the device; spin_task keeps waiting on stop_event
                     # and its finally still clears the ring at turn end.
                     #
-                    # TTL is sized to THIS response — a fixed dead-man would
-                    # eventually clear the ring part-way through a long
-                    # answer, which is the very bug being fixed elsewhere in
-                    # this turn path.
+                    # RAISED WHEN AUDIO STARTS, NOT WHEN PLAYBACK IS SET UP.
+                    # The meter renders the live speaker RMS, so before the
+                    # device's ALSA write begins it draws an unlit ring. On
+                    # the buffered path that was invisible (the fetch had
+                    # already completed, so frames flushed at socket speed),
+                    # but streaming moves the fetch+decode INSIDE playback:
+                    # sending it here left the ring dark from the end of the
+                    # spinner until HA returned audio — seconds on a slow
+                    # response, and indistinguishable from a failed turn
+                    # (user report 2026-07-31). The spinner keeps running
+                    # until _meter_on fires, so the handover is continuous.
+                    #
+                    # A streamed response has no known duration up front.
+                    # Refresh the same bounded dead-man TTL while PCM arrives:
+                    # long speech cannot outlive its meter, but a controller
+                    # crash still lets the device clear the ring on its own.
                     meter = dict(device.led_scene["meter_anim"])
-                    meter["ttlSec"] = em_scenes.meter_ttl(
-                        len(voice_response) / (SPEAKER_RATE * 2)
-                    )
-                    await device.send_led_anim(meter)
+                    meter["ttlSec"] = em_scenes.meter_ttl(0.0)
+
+                    async def _refresh_meter_dead_man() -> None:
+                        refresh_seconds = max(1.0, meter["ttlSec"] / 2)
+                        while True:
+                            await asyncio.sleep(refresh_seconds)
+                            await device.send_led_anim(meter)
+
+                    async def _meter_on() -> None:
+                        nonlocal meter_refresh_task
+                        if meter_refresh_task is not None:
+                            return
+                        await device.send_led_anim(meter)
+                        meter_refresh_task = asyncio.create_task(
+                            _refresh_meter_dead_man()
+                        )
+
+                    pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
+
                 if device.barge_in_enabled:
                     # Barge-in (§3.2): keep the mic running through
                     # playback — the device's AEC subtracts the speaker
@@ -1108,20 +1342,29 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         watcher = asyncio.create_task(
                             _barge_watcher(device, playback_started)
                         )
-                    await _run_post_turn_playback(device, voice_response)
-                    return
-                # Acoustic-feedback guard (barge-in off): stop the mic
-                # BEFORE playback, not just in the post-turn finally.
-                # With the mic running through TTS pre-AEC, the device
-                # processed its own speaker echo (63-65 junk frames per
-                # turn measured 2026-07-06) and sent it upstream on the
-                # same Wi-Fi radio receiving the TTS frames (speaker
-                # underruns → audible stutter). The finally's mic_stop
-                # stays as a safety net (StopMic no-ops when already
-                # stopped); restart is owned by the continuation branch /
-                # wake listener / button handler as before.
-                await device.mic_stop()
-                await _run_post_turn_playback(device, voice_response)
+                else:
+                    # Acoustic-feedback guard (barge-in off): stop the mic
+                    # BEFORE playback, not just in the post-turn finally.
+                    # With the mic running through TTS pre-AEC, the device
+                    # processed its own speaker echo (63-65 junk frames per
+                    # turn measured 2026-07-06) and sent it upstream on the
+                    # same Wi-Fi radio receiving the TTS frames (speaker
+                    # underruns → audible stutter). The finally's mic_stop
+                    # stays as a safety net (StopMic no-ops when already
+                    # stopped); restart is owned by the continuation branch /
+                    # wake listener / button handler as before.
+                    await device.mic_stop()
+
+                try:
+                    return await _run_streaming_post_turn_playback(
+                        device, pcm_chunks
+                    )
+                finally:
+                    if meter_refresh_task is not None:
+                        meter_refresh_task.cancel()
+                        await asyncio.gather(
+                            meter_refresh_task, return_exceptions=True
+                        )
 
             # P0-1: no mic_start_turn() here on the initial (wake/button)
             # entry — for a wake turn the stream is already running on
@@ -1135,7 +1378,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             # than returning to OWW idle. The reference implementation
             # (linux-voice-assistant) uses a 0.5s settle delay after TTS
             # before opening the mic — that's already covered by
-            # _run_post_turn_playback's buffer drain sleep, so no
+            # the streaming playback path's buffer drain sleep, so no
             # additional delay is needed here.
             #
             # C2 fix (2026-07-05 review): the `finally` below runs
