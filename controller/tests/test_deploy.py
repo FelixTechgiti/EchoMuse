@@ -577,3 +577,39 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     connect = connect[:connect.index("\nasync def ", 1)]
     assert "_collect_supervisor_log" in connect, \
         "nothing collects the supervisor log when the device comes back"
+
+
+def test_data_reconnect_grace_is_per_stream_not_per_frame():
+    """
+    A dropped data connection mid-stream should cost a pause, not the rest of
+    the audio (#28, @kopiro — long read-aloud responses truncated by a brief
+    Wi-Fi blip).
+
+    The budget must be spent DOWN across the stream, never a fresh wait on
+    each call. send_data runs once per audio period, so a per-frame wait means
+    a device that is genuinely gone stalls every remaining frame in turn — a
+    stream that should abort in seconds instead drains for hours holding the
+    voice lock. That failure is worse than the truncation it replaces, which
+    is why the shape is pinned rather than the constant.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+
+    fn = src[src.index("    async def send_data(self, data: bytes):"):]
+    fn = fn[:fn.index("\n    async def ", 1)]
+
+    assert "_data_grace_left -=" in fn, (
+        "the reconnect grace must be spent down across the stream; a wait that "
+        "does not decrement is a per-frame stall"
+    )
+    assert "_data_grace_left > 0" in fn, \
+        "send_data must stop waiting once the stream's budget is exhausted"
+
+    # Every path that streams audio has to arm it, or the budget is stale from
+    # whatever ran last.
+    for stream_fn in ("async def stream_speaker(self",
+                      "async def stream_speaker_chunks(self"):
+        body = src[src.index(stream_fn):]
+        body = body[:body.index("\n    async def ", 1)]
+        assert "begin_data_stream()" in body, \
+            f"{stream_fn} does not arm the reconnect grace"

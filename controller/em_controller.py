@@ -204,6 +204,27 @@ def _ha_volume_to_device(volume: float) -> int:
 
 # ─── Device registry ──────────────────────────────────────────────────────────
 
+# How long a speaker stream will wait, IN TOTAL, for a dropped data connection
+# to come back before giving up on the rest of it.
+#
+# A brief Wi-Fi blip mid-stream used to truncate the audio outright: send_data
+# saw data_ws was None, logged, and dropped every remaining frame, so a
+# reconnect a second later arrived to find the audio already thrown away
+# (reported by @kopiro in #28, on long read-aloud responses).
+#
+# The budget is per STREAM, not per frame, and that distinction is the whole
+# design. send_data is called once per audio period; a per-frame wait means a
+# device that is genuinely gone stalls every remaining frame in turn, so a
+# stream that should abort in seconds instead drains for hours holding the
+# voice lock. Spending one shared budget across the stream rides out a blip
+# and still fails fast on a real disconnect.
+#
+# 3s because it is covering a reconnect, not an outage: measured RTT
+# excursions on this fleet peak around 1.7s, and the device's own buffer holds
+# ~5.5s, so a blip inside this window is inaudible.
+DATA_RECONNECT_GRACE_S = 3.0
+
+
 class Device:
     def __init__(
         self,
@@ -218,6 +239,10 @@ class Device:
         self.control_ws   = control_ws
 
         self.data_ws: WebSocketServerProtocol | None = None
+        # Remaining reconnect grace for the speaker stream in flight. Armed by
+        # begin_data_stream(); spent down by send_data so the whole stream
+        # shares one budget rather than each frame having its own.
+        self._data_grace_left: float = 0.0
         self.voice_lock   = asyncio.Lock()
         self.cancel_event = asyncio.Event()
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
@@ -454,7 +479,35 @@ class Device:
         except Exception as e:
             log.warning(f"[{self.device_id}] Control send failed: {e}")
 
+    def begin_data_stream(self) -> None:
+        """
+        Arm the reconnect grace for one speaker stream.
+
+        Called at the start of each stream so the budget is fresh, and so a
+        stream that already spent it cannot borrow from the next one.
+        """
+        self._data_grace_left = DATA_RECONNECT_GRACE_S
+
+    async def _await_data_reconnect(self, budget: float) -> float:
+        """Wait up to `budget` seconds for the data plane. Returns time spent."""
+        step = 0.1
+        waited = 0.0
+        while waited < budget:
+            await asyncio.sleep(step)
+            waited += step
+            if self.data_ws is not None:
+                log.info(f"[{self.device_id}] Data connection back after "
+                         f"{waited:.1f}s — resuming stream")
+                break
+        return waited
+
     async def send_data(self, data: bytes):
+        if self.data_ws is None and self._data_grace_left > 0:
+            # Ride out a blip rather than discarding the rest of the audio.
+            # The budget is spent down, so a device that never returns costs
+            # the stream DATA_RECONNECT_GRACE_S once, not once per frame.
+            self._data_grace_left -= await self._await_data_reconnect(
+                self._data_grace_left)
         if self.data_ws is None:
             log.warning(f"[{self.device_id}] No data connection")
             return
@@ -532,6 +585,7 @@ class Device:
 
     async def stream_speaker(self, pcm: bytes):
         """Stream resampled mono 48kHz PCM as 0x02 frames, then 0x03 EOS."""
+        self.begin_data_stream()
         self.speaking = True
         try:
             offset = 0
@@ -569,6 +623,7 @@ class Device:
         are retained until more PCM arrives and padded only once, at the true
         end of the response.
         """
+        self.begin_data_stream()
         self.speaking = True
         pending = bytearray()
         total_pcm = 0
