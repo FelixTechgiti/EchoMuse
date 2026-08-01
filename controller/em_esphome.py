@@ -351,6 +351,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
     # ── Message handling ─────────────────────────────────────────────────
 
+    def _device_has(self, cap: str) -> bool:
+        srv = self._owning_server
+        return bool(srv is not None and cap in (srv.capabilities or []))
+
+    @property
+    def _button_hold_capable(self) -> bool:
+        return self._device_has("button_hold")
+
+    @property
+    def _ambient_lux_capable(self) -> bool:
+        return self._device_has("ambient_light")
+
     @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
@@ -1482,6 +1494,15 @@ class DeviceESPhomeServer:
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
         self._send_volume_set = None
+        # What the DEVICE says it implements, from its register message.
+        # Drives which HA entities are advertised — negotiate by capability,
+        # never by version (CLAUDE.md). Empty until the device connects, so a
+        # satellite that attaches first simply advertises fewer entities and
+        # picks them up on the next HA reconnect.
+        self.capabilities: list[str] = []
+
+    def set_capabilities(self, caps: list[str]) -> None:
+        self.capabilities = list(caps or [])
 
     def get_satellite(self) -> Optional[EchoMuseSatellite]:
         """Return the active HA connection's satellite instance, or None."""
@@ -2047,6 +2068,54 @@ async def device_disconnected(device_id: str) -> None:
     server._send_volume_set = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
+
+
+def set_device_capabilities(device_id: str, caps: list[str]) -> None:
+    """Called by em_controller when a device registers."""
+    server = _servers.get(device_id)
+    if server is not None:
+        server.set_capabilities(caps)
+
+
+def send_button_event(device_id: str, event_type: str) -> None:
+    """
+    Fire the action-button event entity in HA.
+
+    Fire-and-forget: a button press whose event cannot be delivered is not
+    worth failing a turn over, and HA reconnects on its own.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    log.info(f"[esphome.{device_id[-8:]}] action button {event_type} → HA")
+    satellite._send_one(api_pb2.EventResponse(
+        key=EVENT_KEY,
+        event_type=event_type,
+    ))
+
+
+def update_ambient_lux(device_id: str, lux) -> None:
+    """
+    Push the ambient light reading to HA.
+
+    lux is None on a device with no sensor, which is sent as missing_state
+    rather than 0 — a covered sensor reads a genuine 0 lux, so the two must
+    stay distinguishable.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite._send_one(api_pb2.SensorStateResponse(
+        key=AMBIENT_LUX_KEY,
+        state=float(lux) if lux is not None else 0.0,
+        missing_state=lux is None,
+    ))
 
 
 def update_device_volume(device_id: str, volume: float) -> None:
