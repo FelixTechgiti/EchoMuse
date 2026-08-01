@@ -3,6 +3,7 @@ package buttons
 import (
 	"context"
 	"errors"
+	"time"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	evdev "github.com/gvalkov/golang-evdev"
 	"os/exec"
@@ -65,6 +66,11 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 
 		beforeClickType := buttons.ClickType(0)
 		beforeDown := false
+		// When each click type was pressed, so a release can report how long
+		// it was held. Keyed by click type because the dot device carries the
+		// mute button too, and interleaving the two must not attribute one
+		// button's hold to the other.
+		downAt := map[buttons.ClickType]time.Time{}
 
 		for {
 			if ctx.Err() != nil {
@@ -112,10 +118,19 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 				continue
 			}
 
+			var heldMs int64
+			if down {
+				downAt[clickType] = time.Now()
+			} else if t, ok := downAt[clickType]; ok {
+				heldMs = time.Since(t).Milliseconds()
+				delete(downAt, clickType)
+			}
+
 			callback(buttons.ButtonClickEvent{
 				Button:    btn,
 				ClickType: clickType,
 				Down:      down,
+				HeldMs:    heldMs,
 			})
 		}
 	}

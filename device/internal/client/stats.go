@@ -38,6 +38,10 @@ type DeviceStats struct {
 	// changed. ThermalCoreLimit is the sharpest throttling signal this SoC
 	// offers: below 4 means the thermal governor is capping capacity, which
 	// bites long before a temperature reading looks alarming.
+	// AmbientLux is the room light level from the TSL2540 on i2c, or nil on
+	// a device with no sensor. Pointer, not int: a covered sensor reads a
+	// genuine 0 lux, so 0 must not also mean "no hardware".
+	AmbientLux       *int     `json:"ambientLux"`
 	CPUTempC         *float64 `json:"cpuTempC"`
 	MaxTempC         *float64 `json:"maxTempC"`
 	CoresOnline      int      `json:"coresOnline,omitempty"`
@@ -73,6 +77,7 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"rxCrcErrors":    s.RxCrcErrors,
 		"ble":              s.Ble,
 		"owwShadow":        s.OwwShadow,
+		"ambientLux":       s.AmbientLux,
 		"cpuTempC":         s.CPUTempC,
 		"maxTempC":         s.MaxTempC,
 		"coresOnline":      s.CoresOnline,

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
@@ -489,6 +490,7 @@ func collectStats() client.DeviceStats {
 	speed, freq, bssid := linkInfo()
 	cpuC, maxC, coreLimit := thermals()
 	return client.DeviceStats{
+		AmbientLux:       als.Lux(),
 		CPUTempC:         cpuC,
 		MaxTempC:         maxC,
 		CoresOnline:      coresOnline(),

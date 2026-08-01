@@ -207,6 +207,24 @@ ESPHOME_PROJECT_VERSION = os.environ.get(
 # Required: HA's ESPHome integration silently ignores devices with zero
 # entities (confirmed empirically, see session handoff finding #2).
 MEDIA_PLAYER_KEY = 1
+# Entity keys are per-device and must be stable across reconnects — HA keys
+# its entity registry on them, so renumbering renames everyone's entities.
+# Append only.
+EVENT_KEY        = 2   # action-button hold, as an HA event entity
+AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
+
+# Press types the event entity advertises. Only "long" is emitted today:
+# double/triple were deliberately parked, because detecting them means
+# delaying the single press by the multi-tap window to know it was single —
+# a latency cost on the primary action for a feature most people will not
+# bind. Adding one later is additive; HA tolerates new event types.
+BUTTON_EVENT_TYPES = ["long"]
+
+# How long the action button must be held to count as a hold rather than a
+# tap. Measured ON THE DEVICE (heldMs) rather than by timing the down/up
+# messages here: RTT excursions past 1600ms have been measured on this fleet,
+# which would turn a 750ms gesture into noise.
+BUTTON_HOLD_MS = 750
 
 MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PAUSE
@@ -391,6 +409,33 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         **_fmt),
                 ],
             )
+            # Action button holds, as an event entity — it shows up in HA's
+            # automation editor with the press type as a dropdown, rather
+            # than needing a hand-written trigger on a raw esphome.* event.
+            #
+            # Advertised only when the firmware can measure a hold. An entity
+            # whose events can never fire is worse than no entity: someone
+            # writes an automation against it and it silently never runs.
+            if self._button_hold_capable:
+                yield api_pb2.ListEntitiesEventResponse(
+                    object_id="action_button",
+                    key=EVENT_KEY,
+                    name=f"{self.label} Action Button",
+                    device_class="button",
+                    event_types=BUTTON_EVENT_TYPES,
+                )
+            # Ambient light. Amazon's Android layer reports no sensors at all
+            # on this hardware; the TSL2540 is only visible on raw i2c.
+            if self._ambient_lux_capable:
+                yield api_pb2.ListEntitiesSensorResponse(
+                    object_id="ambient_light",
+                    key=AMBIENT_LUX_KEY,
+                    name=f"{self.label} Ambient Light",
+                    unit_of_measurement="lx",
+                    accuracy_decimals=0,
+                    device_class="illuminance",
+                    state_class=1,   # STATE_CLASS_MEASUREMENT
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 

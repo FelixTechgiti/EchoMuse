@@ -260,7 +260,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// uses it to decide whether owwOnDevice is even offerable, so an older
 		// device shows "needs newer firmware" rather than a toggle that
 		// silently does nothing.
-		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons", "oww_shadow"},
+		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons", "oww_shadow", "button_hold"},
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -699,6 +699,11 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		"type":      "button",
 		"clickType": int(event.ClickType),
 		"down":      event.Down,
+		// Absent on a press and on firmware predating this, which the
+		// controller must read as "a tap" — an unknown hold time becoming a
+		// long press would silently stop the action button starting voice
+		// turns on older devices.
+		"heldMs": event.HeldMs,
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},
