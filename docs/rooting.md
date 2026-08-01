@@ -3,9 +3,9 @@
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
-EchoMuse needs a rooted Echo Dot Gen 2 running FireOS 5. Getting there is two
-jobs with very different risk profiles, and it is worth being clear which is
-which before you start.
+EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
+FireOS 5. Two separate jobs get you there, and they carry very different
+risk.
 
 ## Hardware
 
@@ -16,7 +16,9 @@ which before you start.
 - OS: FireOS 5 (Android 5.1, API 22) or FireOS 6 (Android 7.2)
 - MicroUSB cable required
 
-## Prerequisites
+## What you need
+
+For the unlock itself (R0rt1z2's thread has the authoritative list):
 
 - Linux or macOS machine with ADB and fastboot installed
 - Python 3 (for boot image patching and Magisk DB creation)
@@ -31,28 +33,30 @@ which before you start.
 
 > **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`. macOS doesn't have this problem.
 
+For the EchoMuse half, the provisioning wizard needs only a **Chromium-based
+browser** (Chrome or Edge — it talks to the device over WebUSB) and a running
+controller. It fetches the firmware itself, so the `server` binary above is
+only needed if you are provisioning by hand.
+
 ---
 
-## The exploit is not ours — R0rt1z2's thread is canon
+## Unlocking the device — R0rt1z2's amonet-biscuit
 
-The persistent unlock, the kamakiri bootrom exploit and TWRP for this device
-are **R0rt1z2's** work:
+The persistent unlock, the bootrom exploit and TWRP for this device are
+**R0rt1z2's** work, documented and maintained here:
 
 - [amonet-biscuit — unlock, root, TWRP, unbrick](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
   on XDA Forums
 
-**That thread is the authority, not this page.** Two reasons we point at it
-rather than restating it. First, it is R0rt1z2's work and it is maintained
-there. Second, and more practically: a parallel copy of somebody else's
-procedure goes stale silently, and **stale rooting instructions are the
-dangerous kind**. Where the thread and this page disagree, the thread is
-right.
+Follow that thread, not this page. We link to it rather than copying it
+because a copy goes out of date without anyone noticing. If the two ever
+disagree, the thread is correct.
 
-**This is also the part that can genuinely ruin a device.** It runs a bootrom
-exploit, modifies your partition table and wipes userdata. A failure here can
-soft-brick a Dot badly enough that recovery means opening the case and
-shorting contacts on the board. Read the thread properly first, and do not
-start on a device you cannot afford to lose.
+**This is the part that can ruin a device.** It runs a bootrom exploit,
+modifies the partition table and wipes userdata. A failure here can leave a
+Dot soft-bricked badly enough that recovery means opening the case and
+shorting contacts on the board. Read the thread first, and do not start on a
+device you cannot afford to lose.
 
 ## Where EchoMuse picks up
 
@@ -62,34 +66,31 @@ Everything below assumes you already have:
 - **TWRP** installed and bootable
 - **FireOS 5** (Android 5.1) sideloaded
 
-Meet those three and the rest is EchoMuse's job. The provisioning wizard in
-the dashboard does it for you — see the [Quickstart](quickstart.md) — and it
-begins from a device already in that state. It does not run the exploit and
-will not offer to.
+Once those are done, EchoMuse takes over. The provisioning wizard in the
+dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
+from a device already in that state; it does not run the exploit.
 
-**This half is recoverable.** The SELinux patch, Magisk and the root-grant
-database all happen with TWRP already on the device, so a bad flash is a
-re-flash rather than a screwdriver. That asymmetry is exactly why the wizard
-automates this part and not the part above it.
+The steps the wizard performs — the SELinux patch, Magisk, and the root-grant
+database — happen with TWRP already installed, so a failure can usually be
+re-flashed from recovery.
 
-## Track record, honestly
+## How well tested is this?
 
-Eight devices have been through this process without a failure. That is worth
-knowing, and so is its limit: all eight were done by the person who wrote the
-tooling, on hardware he knew, by someone who can tell when a flash has gone
-wrong. **You are the variable that has not been tested.**
+Eight devices have been through the wizard's steps without a failure. That is
+a small sample, all of it on the same model by the same person, so treat it
+as encouraging rather than conclusive.
 
 ## Recovery
 
-If a step below fails you still have TWRP — reboot to recovery and re-flash
-the affected component. Nothing in this half is one-way. If the device will
-not reach TWRP at all, you are back in the exploit's territory and R0rt1z2's
-thread is where to look.
+If one of the wizard's steps fails, the device should still boot to TWRP —
+reboot to recovery and re-flash the affected component. If it will not reach
+TWRP at all, that is the unlock's territory and R0rt1z2's thread covers
+recovery and unbricking.
 
 ## Credits
 
 - **R0rt1z2** — [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/):
-  persistent unlock and TWRP, without which none of this exists
+  persistent unlock, TWRP and unbrick for this device
 - **Dragon863** — [EchoCLI](https://github.com/Dragon863/EchoCLI): tethered root research
 - **Binozo** — [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) and the original EchoGo SDK
 
