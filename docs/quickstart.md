@@ -94,8 +94,8 @@ normal login.
 
 When a rooted Dot powers up, it finds the controller by itself and asks to
 join. New devices appear in the dashboard as **pending** — nothing works
-until you click **Approve**. (This is deliberate: nothing joins your voice
-network without you saying so.)
+until you give it a name and click **Approve & Add to Fleet**. (This is
+deliberate: nothing joins your voice network without you saying so.)
 
 Once approved, the Dot connects fully: you'll see it as **online**, with its
 volume, settings, and a live status.

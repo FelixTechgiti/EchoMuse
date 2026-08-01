@@ -388,6 +388,60 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 
 `com.amazon.whad` is `PERSISTENT`: `pm disable` is ignored, **`am force-stop` is a no-op**, and `pm hide` does not stop a running instance — it stays until the next reboot, which is why the log line says so. Note RSS overstates the win ~6x (shared zygote pages): the measured recovery is ~20-35MB per device by `memUsedMb`, not the 62MB RSS suggests.
 
+## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
+
+The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,
+each of which has already been broken once and each of which fails *silently*
+when broken — the wizard drives hardware nobody is watching a log of.
+
+- **The finishing reboot belongs to the LAST step, and moving the last step
+  means moving the reboot.** Install EchoMuse used to be last, so it ended by
+  rebooting and clearing `adb`. When the wake word asset step was appended
+  after it, that step's auto-run gate (`&& adb`) was false, so it never fired
+  once: no error, no log line, no button, just a wizard sitting on a step
+  against a device that had already rebooted away. An auto step reached with
+  no connection now marks itself failed and says why.
+- **A step must never report success having achieved nothing.** A run once
+  reached Configure WiFi having disabled 0 of 11 Alexa packages and hidden 0
+  of 32, both steps green. Zero successes is a package manager that was not
+  working, not an unusual SKU — and continuing to WiFi with the Alexa stack
+  live is the outcome most worth failing loudly to prevent.
+- **`pm` not being ready has TWO error shapes.** Before PackageManagerService
+  is published you get the friendly `Could not access the Package Manager`;
+  once it IS published but not yet initialised you get
+  `NullPointerException: ... ArrayList.size() on a null object reference`
+  straight out of the binder call. Matching only the first is why the retry
+  path never fired. `_pmNotReady` matches both.
+- **The operator may click Reconnect the instant the device appears in the
+  USB picker; working out when Android is ready is the wizard's job.** adbd
+  and magiskd both come up long before the framework — `su -c id` returning
+  root in 0.4s says nothing about `pm`. `waitForFramework` polls
+  `sys.boot_completed` *and* probes `pm path android` (the flag is necessary,
+  not sufficient), budgets 10 minutes, and **throws** on timeout. Measured
+  boots take ~86s, so the 30s poll it replaced was never enough. No step may
+  require the operator to have guessed a long enough wait.
+
+Two device behaviours the wizard works around rather than fixes:
+
+- **Amazon's OOBE cannot be stopped in time.** It announces itself and spins
+  an amber ring the moment the framework is up (~86s), and the earliest root
+  lands is magiskd attaching (~74s later, measured) — so Disable Alexa is
+  structurally too late, and `pm hide` in Debloat is later still and does not
+  stop a running instance. The speaker is muted instead, right after the
+  framework answers, with `input keyevent 25` — shell user only, no root.
+  Keyevents rather than a volume API: `service call audio` needs a
+  transaction number that differs per release, and
+  `settings put system volume_music` is not read live by AudioService. Safe
+  to leave muted — EchoMuse drives the codec and seeds `startupVolume` after
+  the final reboot.
+- **`SmartHomeWifid` cannot be killed, only stopped.** It rewrites
+  `wpa_supplicant.conf`, and `kill -9` does not hold because it is an init
+  service — init restarts it and the re-check finds a fresh pid. Read the
+  service name out of `init.svc.*` at runtime (init's own record, so it
+  survives the name differing across SKUs), `stop` it, then kill. Its
+  presence is not cosmetic: a run with it running spent 9s cycling
+  DISCONNECTED/SCANNING before associating, against 1s on a clean one.
+
 ## Device config push
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
@@ -423,6 +477,59 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
+
+## Dashboard styling and theming
+
+`dashboard.jsx` is inline-styled, which for a long time meant its colours
+could not be restyled from a stylesheet at all — 126 distinct hexes typed at
+389 call sites, with four different reds doing the same job. That is a
+correctness problem before a taste one: **a light/dark toggle is impossible
+while a value lives at the call site.**
+
+- **Every chrome colour is a token** in `dashboard.html`'s `:root` block, and
+  both themes must define the same set. `tests/test_design_tokens.py` enforces
+  three things and has *no opinion about how anything looks*: every `var()` is
+  defined, the two themes define identical token sets, and literal colours
+  cannot increase (a ratchet, so remaining call sites get cleaned a pane at a
+  time). The first matters most — **an undefined `var()` renders as nothing**,
+  transparent text and invisible borders, and reports no error.
+- **Three groups keep literal colours on purpose.** `LedRing` /
+  `DeviceDiagram` render the physical Dot and its real LED colours (a device
+  drawn in "dark mode" would be a different device); the LED scene swatches in
+  `DeviceConfigForm` are values sent to the hardware, not styling; `Shell`'s
+  xterm theme is a 16-colour contract programs address by index. `deviceState`
+  is the subtle one: `dot` is the simulated LED and stays literal, `color`
+  beside it is chrome and is tokenised.
+- **Never concatenate hex alpha onto a colour.** `` `${color}88` `` worked
+  only while every value was a literal; the moment call sites became
+  `var(--lcd-green)` it produced `var(--lcd-green)88`, invalid CSS that drops
+  the whole declaration — the LCD glow silently vanished for a release. Use
+  `color-mix(in srgb, X 53%, transparent)`, which takes a `var()`.
+- **The theme is applied by an inline script in `<head>`**, before first
+  paint, not in React — the bundle is ~220KB and loads at the end of `<body>`,
+  so a dark-mode user would get a full flash of the light dashboard on every
+  navigation. It defaults to the OS preference until the user picks; the pick
+  then wins permanently and is stored in `localStorage` under `em-theme`.
+- **Dark is not an inversion.** The warm grey is the product's identity, so
+  dark is the same hue family taken down past the LCD rather than a neutral
+  charcoal. Semantic colours are lifted (`#286040` on a dark ground is
+  unreadable), and the inset dark regions — LCD readouts, console, wizard
+  transcript — stay dark in *both* themes because they are meant to read as a
+  lit panel set into the surface; in dark they go slightly darker still and
+  lean on their own border to stay distinguishable from the ground.
+- **Sheens and hairlines are tokenised too**, and that is the half that would
+  otherwise look broken rather than merely wrong: `rgba(255,255,255,0.7)
+  inset` is a highlight on a light card and fog on a dark one. Black drop
+  shadows are correct on both grounds and are deliberately left alone.
+- **Repeated chrome lives in CSS classes** (`.em-pill` with additive
+  `--small/--big/--accent/--danger` variants and `:disabled` handled in CSS so
+  it beats every variant; `.em-panel`, `.em-label`, `.em-lcd`, `.em-inset`,
+  `.em-console`, `.em-iconbtn`). One-off layout stays inline, next to the
+  markup it positions — moving that into CSS trades an inline object for a
+  class name plus a rule in another file, which is not an improvement. Note
+  inline styles cannot express `:hover` or `:focus-visible` at all, so until
+  the class layer existed the dashboard had **no keyboard focus ring
+  anywhere**.
 
 ## cgo dependency
 

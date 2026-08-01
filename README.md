@@ -104,9 +104,11 @@ docker compose -f docker-compose.deploy.yml up -d
 ```
 
 Dashboard at `http://<SERVER_IP>:8768`. From there the **provisioning
-wizard** takes a rooted Dot the rest of the way: firmware install, TLS
-credentials, debloat, and approval into the fleet. Home Assistant then
-discovers each device automatically via its built-in ESPHome integration.
+wizard** takes a stock Dot the rest of the way over USB: root, debloat,
+WiFi, firmware, TLS credentials and the on-device wake word assets. It ends
+by rebooting the Dot, which then finds the controller itself and appears as
+pending for you to approve. Home Assistant discovers each approved device
+automatically via its built-in ESPHome integration.
 
 See the [quickstart](docs/quickstart.md) for the full walkthrough and
 [configuration](docs/configuration.md) for every knob explained in plain
