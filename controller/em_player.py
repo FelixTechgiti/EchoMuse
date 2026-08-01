@@ -399,6 +399,11 @@ class MediaSession:
         src_max_ms = 0.0
         src_stalls = 0
 
+        # Arm the data-plane reconnect grace for this feed: a Wi-Fi blip
+        # mid-song should cost a pause, not the rest of the track.
+        if hasattr(device, "begin_data_stream"):
+            device.begin_data_stream()
+
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
