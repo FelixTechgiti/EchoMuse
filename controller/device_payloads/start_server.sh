@@ -106,7 +106,14 @@ sup_log() {
         tail -c $SUP_KEEP "$SUP_LOG" > "${SUP_LOG}.tmp" 2>/dev/null
         mv "${SUP_LOG}.tmp" "$SUP_LOG" 2>/dev/null
     fi
-    UP=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    # Shell built-ins only. `cut` is not on this device's PATH — the first
+    # version of this used it and logged an empty uptime, quietly losing the
+    # one timestamp that is trustworthy at boot.
+    UP=""
+    if [ -r /proc/uptime ]; then
+        read UP _REST < /proc/uptime 2>/dev/null
+        UP=${UP%.*}
+    fi
     echo "up=${UP}s wall=$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$SUP_LOG"
 }
 

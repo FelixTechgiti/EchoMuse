@@ -12,10 +12,13 @@ walkthroughs welcome.
 
 Deeper technical references live elsewhere:
 
-- [SETUP.md](../SETUP.md) — two things, neither of them an onboarding guide:
-  the full device rooting/provisioning reference (plus architecture
-  internals, protocol documentation and troubleshooting), and the project's
-  **engineering journal** in the changelog at the bottom — a long-form record
-  of what was built, what broke, and what we got wrong.
+- [rooting.md](rooting.md) — what a device needs before EchoMuse can use it.
+  The exploit itself is R0rt1z2's work on XDA Forums and that thread is canon;
+  this covers where EchoMuse picks up, and what the wizard does for you.
+- [SETUP.md](../SETUP.md) — architecture reference: how the mic array, the
+  audio pipeline and the device/controller protocol actually work, plus
+  troubleshooting. Not an onboarding guide.
+- [JOURNAL.md](../JOURNAL.md) — the engineering journal: a long-form,
+  chronological record of what was built, what broke, and what we got wrong.
 - [CLAUDE.md](../CLAUDE.md) — codebase orientation for developers (and AI
   assistants).
