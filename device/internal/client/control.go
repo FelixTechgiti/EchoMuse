@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
+	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -260,7 +261,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// uses it to decide whether owwOnDevice is even offerable, so an older
 		// device shows "needs newer firmware" rather than a toggle that
 		// silently does nothing.
-		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons", "oww_shadow", "button_hold"},
+		"capabilities": capabilities(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -691,6 +692,21 @@ func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty
 		master.Close()
 	}
 	log.Println("[shell] Session closed")
+}
+
+// capabilities is what this firmware implements, negotiated by capability
+// rather than by version so the controller needs no knowledge of our release
+// history (see CLAUDE.md). "ambient_light" is conditional on the hardware
+// actually having a readable sensor — the controller advertises an HA entity
+// off the back of it, and an entity that can never produce a reading is worse
+// than no entity at all.
+func capabilities() []string {
+	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
+		"oww_shadow", "button_hold"}
+	if als.Present() {
+		caps = append(caps, "ambient_light")
+	}
+	return caps
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
