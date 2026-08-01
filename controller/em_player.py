@@ -121,7 +121,30 @@ async def play(device_id: str, url: str) -> None:
 
 
 async def pause(device_id: str) -> None:
-    await _session(device_id).pause()
+    """
+    Pause from the USER (HA / Music Assistant / the media_player entity).
+
+    A pause arriving while WE hold the session paused for a voice turn is the
+    user taking ownership of the paused state, so the auto-resume has to go.
+
+    Without this, asking to pause during a barge-in cannot work, and fails in
+    about the most confusing way available (issue #53): MediaSession.pause()
+    returns early unless the state is PLAYING, so the command is silently
+    discarded and the user is told the music is already paused — then
+    resume_interrupted fires at the end of the turn and starts it playing
+    again. The one thing they asked for is the one thing that cannot happen.
+
+    stop() has always cleared this flag, which is why "stop the music" works
+    during a barge-in while "pause the music" did not. This makes pause agree
+    with stop rather than inventing a new rule.
+
+    Deliberately here and not in MediaSession.pause(): interrupt() calls that
+    method itself, immediately after setting the flag, so clearing it there
+    would disable the interruption it is part of.
+    """
+    s = _session(device_id)
+    s.interrupted = False
+    await s.pause()
 
 
 async def resume(device_id: str) -> None:

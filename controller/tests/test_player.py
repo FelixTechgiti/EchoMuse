@@ -237,3 +237,87 @@ async def _drive(session):
     await session.resume()
     if session._task is not None:
         await asyncio.wait_for(session._task, timeout=5)
+
+
+def test_pausing_during_a_barge_in_stays_paused():
+    """
+    Issue #53: "I can't actually get the music to stop and stay stopped via
+    voice alone."
+
+    The reported sequence, exactly. Music playing, wake word interrupts it,
+    the user asks to pause — and before the fix all three of these went
+    wrong at once: MediaSession.pause() returns early unless PLAYING so the
+    command was DISCARDED, the user was told the music was already paused,
+    and resume_interrupted then started it again at the end of the turn.
+
+    The user's pause must win over our auto-resume. It is their command; ours
+    is bookkeeping.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+
+        # Wake word during music: we pause it for the turn.
+        await em_player.interrupt("office")
+        assert s.state == PAUSED and s.interrupted
+
+        # "pause the music" — arrives through the module-level entry point,
+        # which is what HA / Music Assistant drive.
+        await em_player.pause("office")
+        assert not s.interrupted, (
+            "a user pause during an interruption must cancel the auto-resume"
+        )
+
+        # Turn ends. The music must STAY paused.
+        await em_player.resume_interrupted("office")
+        assert s.state == PAUSED, "the turn's end contradicted the user's pause"
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_stop_during_a_barge_in_stays_stopped():
+    """
+    The behaviour pause is being made consistent with. Worth pinning: it is
+    the reason the bug was pause-only, and a later refactor could easily
+    break it while "fixing" pause.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await em_player.interrupt("office")
+        await em_player.stop("office")
+        assert not s.interrupted
+
+        await em_player.resume_interrupted("office")
+        assert s.state == IDLE
+    asyncio.run(main())
+
+
+def test_an_ordinary_barge_in_still_resumes():
+    """
+    The fix must not cost the normal case: barge in, ask something unrelated,
+    music comes back on its own.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await em_player.interrupt("office")
+        await em_player.resume_interrupted("office")
+        assert s.state == PLAYING and not s.interrupted
+        await s.stop()
+    asyncio.run(main())
