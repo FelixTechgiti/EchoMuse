@@ -71,6 +71,47 @@ KEEP_LOG=524288    # 512KB carried into server.log.1
 ) &
 TRIM_PID=$!
 
+# ── Persistent supervisor log ────────────────────────────────────────────────
+# Everything above logs to /tmp, which is RAM-backed and therefore wiped by
+# the reboot you perform to recover from a device that will not come back.
+# The evidence needed to diagnose a failed restart is destroyed by the act of
+# recovering from it (learned the hard way 2026-08-01).
+#
+# So the SUPERVISOR's own decisions — and only those — also go to /data, which
+# survives reboots and OTA slot flips. Not the server's output: that is 45MB a
+# day and none of it is what you need. This is a handful of lines per boot.
+#
+# Timestamps are SECONDS SINCE BOOT, not wall clock. Echos boot with bogus
+# clocks before NTP — the same reason TLS verification clamps to the firmware
+# build time — and a boot-time log is precisely where the wall clock is least
+# trustworthy. The wall clock is recorded alongside as a hint only.
+SUP_LOG=/data/local/etc/echomuse/supervisor.log
+SUP_MAX=65536      # 64KB cap — this must never be able to fill /data
+SUP_KEEP=32768     # bytes retained when trimming
+
+mkdir -p /data/local/etc/echomuse 2>/dev/null
+
+sup_log() {
+    # Trim BEFORE appending, so a crash-loop writing every few seconds can
+    # never grow past the cap between checks.
+    # -f guard, not just 2>/dev/null: the redirect failure is reported by the
+    # shell before wc runs, so a missing file would print to stderr on the
+    # first write of every boot.
+    if [ -f "$SUP_LOG" ]; then
+        SIZE=$(wc -c < "$SUP_LOG" 2>/dev/null)
+    else
+        SIZE=0
+    fi
+    if [ "$SIZE" -gt $SUP_MAX ]; then
+        tail -c $SUP_KEEP "$SUP_LOG" > "${SUP_LOG}.tmp" 2>/dev/null
+        mv "${SUP_LOG}.tmp" "$SUP_LOG" 2>/dev/null
+    fi
+    UP=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    echo "up=${UP}s wall=$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$SUP_LOG"
+}
+
+sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
+
 # ── Amp safety ────────────────────────────────────────────────────────────────
 # Mute + amp off whenever the server is not running. The server does this
 # itself on SIGTERM (PcmSpeaker.Close), but SIGKILL/panic paths skip it —
@@ -88,7 +129,7 @@ amp_off() {
 # Wait for the server to finish its own graceful shutdown, then amp_off
 # as belt-and-braces. The log-trim loop dies with us too.
 SERVER_PID=0
-trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; amp_off; exit 0' TERM INT
+trap 'sup_log "term signalled — supervisor exiting"; kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; amp_off; exit 0' TERM INT
 
 # ── Retry loop with auto-rollback ─────────────────────────────────────────────
 attempt=0
@@ -98,6 +139,7 @@ while true; do
 
     /data/local/bin/server >> /tmp/server.log 2>&1 &
     SERVER_PID=$!
+    sup_log "start pid=$SERVER_PID slot=$(readlink /data/local/bin/server 2>/dev/null)"
     wait $SERVER_PID
     EXIT_CODE=$?
 
@@ -113,12 +155,14 @@ while true; do
         # Reset counter and restart (handles operational crashes).
         attempt=0
         echo "[start_server] Server ran ${RUNTIME}s before exit (code $EXIT_CODE) — restarting" >> /tmp/server.log
+        sup_log "exit pid=$SERVER_PID code=$EXIT_CODE ran=${RUNTIME}s — restarting"
         sleep 2
         continue
     fi
 
     attempt=$(( attempt + 1 ))
     echo "[start_server] Fast exit ${attempt}/${MAX_ATTEMPTS}: runtime=${RUNTIME}s exit=$EXIT_CODE" >> /tmp/server.log
+    sup_log "fast-exit ${attempt}/${MAX_ATTEMPTS} code=$EXIT_CODE ran=${RUNTIME}s"
 
     if [ $attempt -lt $MAX_ATTEMPTS ]; then
         sleep 3
@@ -132,6 +176,7 @@ while true; do
         server_b) FALLBACK=server_a ;;
         *)
             echo "[start_server] Unknown slot '$CURRENT' — cannot auto-rollback, giving up" >> /tmp/server.log
+            sup_log "giving up — unknown slot '$CURRENT', supervisor exiting"
             exit 1
             ;;
     esac
@@ -139,11 +184,13 @@ while true; do
     # Verify fallback slot exists and is executable before committing
     if [ ! -x "/data/local/bin/$FALLBACK" ]; then
         echo "[start_server] Fallback slot $FALLBACK missing or not executable — cannot auto-rollback" >> /tmp/server.log
+        sup_log "giving up — fallback $FALLBACK missing, supervisor exiting"
         exit 1
     fi
 
     echo "[start_server] Auto-rollback: $CURRENT → $FALLBACK after $MAX_ATTEMPTS failed starts" >> /tmp/server.log
     ln -sf "$FALLBACK" /data/local/bin/server
+    sup_log "rollback $CURRENT -> $FALLBACK after $MAX_ATTEMPTS fast exits, supervisor exiting for init to restart it"
 
     # Exit cleanly — Android init will restart the service, now using $FALLBACK
     exit 0

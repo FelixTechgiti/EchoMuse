@@ -499,3 +499,81 @@ def test_every_deliberate_cancel_also_flushes_the_speaker():
             f"{marker}: cancels the turn but never flushes the device speaker — "
             f"the response will keep playing after the turn is cancelled"
         )
+
+
+def test_supervisor_log_path_matches_between_script_and_controller():
+    """
+    The supervisor writes its decisions to a persistent path and the
+    controller reads them back from it. Two languages, one path — if they
+    drift, the fetch silently returns nothing and a failed update stays
+    unexplained, which is the exact failure this feature exists to remove.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    script = (root / "device_payloads" / "start_server.sh").read_text()
+    api = (root / "em_api.py").read_text()
+
+    import re
+    m = re.search(r"^SUP_LOG=(\S+)", script, re.M)
+    assert m, "start_server.sh no longer defines SUP_LOG"
+    script_path = m.group(1)
+
+    m = re.search(r'^SUPERVISOR_LOG = "([^"]+)"', api, re.M)
+    assert m, "em_api.py no longer defines SUPERVISOR_LOG"
+    assert m.group(1) == script_path, (
+        f"supervisor log path drifted: script writes {script_path}, "
+        f"controller reads {m.group(1)}"
+    )
+
+
+def test_supervisor_log_is_persistent_and_bounded():
+    """
+    Two properties it cannot lose.
+
+    PERSISTENT: under /data. /tmp is RAM-backed, so a log there is wiped by
+    the reboot used to recover from the very failure it would explain.
+
+    BOUNDED: these devices have ~350MB free and no operator. A crash-loop
+    writing every few seconds must never be able to fill /data — so the trim
+    happens BEFORE the append, not after.
+    """
+    from pathlib import Path
+    import re
+    script = (Path(__file__).resolve().parent.parent
+              / "device_payloads" / "start_server.sh").read_text()
+
+    m = re.search(r"^SUP_LOG=(\S+)", script, re.M)
+    assert m.group(1).startswith("/data/"), \
+        "the supervisor log must live on persistent storage, not /tmp"
+
+    fn = script[script.index("sup_log() {"):]
+    fn = fn[:fn.index("\n}")]
+    trim = fn.index("SUP_MAX")
+    append = fn.index('>> "$SUP_LOG"')
+    assert trim < append, \
+        "the size check must run before the append, or a crash-loop outruns it"
+
+
+def test_a_failed_update_asks_for_the_supervisor_log():
+    """
+    The fetch cannot happen at failure time — the device is gone, which IS the
+    problem. So every failure path must record that an explanation is owed,
+    and the connect path must collect it.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    # The failure paths live in _run_update, which is what awaits
+    # _monitor_reconnect and decides what its result means.
+    monitor = api[api.index("async def _run_update"):]
+    monitor = monitor[:monitor.index("\nasync def ", 1)]
+    assert monitor.count("_supervisor_log_wanted.add") >= 2, (
+        "both update-failure paths (auto-rollback and timeout) must request "
+        "the supervisor log"
+    )
+
+    connect = api[api.index("async def notify_device_connected"):]
+    connect = connect[:connect.index("\nasync def ", 1)]
+    assert "_collect_supervisor_log" in connect, \
+        "nothing collects the supervisor log when the device comes back"

@@ -1410,6 +1410,7 @@ async def _run_update(device_id: str, release: dict,
                 _update_errors[device_id] = (
                     f"auto-rolled back to {running} — new binary failed to start"
                 )
+                _supervisor_log_wanted.add(device_id)
                 await _push_log_event(device_id, "warn", "controller",
                     f"Device auto-rolled back to {running} "
                     f"— new binary failed {3} start attempts")
@@ -1422,6 +1423,7 @@ async def _run_update(device_id: str, release: dict,
                 _update_errors[device_id] = (
                     f"timed out — device running {running}"
                 )
+                _supervisor_log_wanted.add(device_id)
                 await _push_log_event(device_id, "warn", "controller",
                     f"Update timed out — device running: {running}")
                 await _push_event({
@@ -3248,6 +3250,46 @@ async def session_prune_loop() -> None:
 
 # ─── Helpers shared across em_controller ─────────────────────────────────────
 
+# Devices whose last update failed and whose supervisor log has not yet been
+# collected. The fetch cannot happen at failure time — the device is gone,
+# which is the whole problem — so it waits for the next connect.
+_supervisor_log_wanted: set[str] = set()
+
+# Supervisor decisions kept on the device, surviving the reboot that /tmp does
+# not. Must match SUP_LOG in device_payloads/start_server.sh.
+SUPERVISOR_LOG = "/data/local/etc/echomuse/supervisor.log"
+
+
+async def _collect_supervisor_log(device_id: str) -> None:
+    """
+    Pull the device's supervisor log after a failed update, on reconnect.
+
+    A failed update destroys its own evidence: everything start_server.sh
+    logs goes to /tmp, which is RAM-backed, so the power cycle used to
+    recover wipes exactly the lines that would explain it (2026-08-01, a
+    device that never came back and could not be diagnosed afterwards).
+
+    The persistent log fixes the storage half. This is the other half: the
+    controller notices it is owed an explanation and fetches it the moment
+    the device is reachable again, pushing it into that device's log events —
+    so the evidence arrives where someone would look, instead of sitting in a
+    file nobody knows to read.
+    """
+    live = _devices.get(device_id)
+    if live is None:
+        return
+    out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
+    text = (out or "").strip()
+    if not text:
+        await _push_log_event(device_id, "warn", "controller",
+            "Update failed, and the device has no supervisor log — firmware "
+            "predating it, or start_server.sh has not been synced yet "
+            "(it takes effect on the next device reboot).")
+        return
+    await _push_log_event(device_id, "warn", "controller",
+        "Supervisor log from the failed update:\n" + text)
+
+
 async def notify_device_connected(device_id: str, version: str | None = None) -> None:
     """
     Called by em_controller when a device successfully registers.
@@ -3270,6 +3312,24 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
         if row:
             event["firmware_ver"] = row["firmware_ver"]
     await _push_event(event)
+
+    # Owed an explanation from a failed update? Collect it now the device is
+    # reachable again. Removed from the set on the way in, so a flapping
+    # device cannot queue repeated fetches, and scheduled rather than awaited
+    # so a slow shell never delays the connect path.
+    if device_id in _supervisor_log_wanted:
+        _supervisor_log_wanted.discard(device_id)
+
+        async def _collect_soon(_id=device_id):
+            # The device has just registered; give its shell plane a moment
+            # before demanding a session on it.
+            await asyncio.sleep(3.0)
+            try:
+                await _collect_supervisor_log(_id)
+            except Exception as e:
+                log.warning(f"[api] supervisor log fetch failed for {_id}: {e}")
+
+        asyncio.create_task(_collect_soon())
 
 
 async def notify_device_disconnected(device_id: str) -> None:
