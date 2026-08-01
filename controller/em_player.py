@@ -379,6 +379,7 @@ class MediaSession:
         seg_start = loop.time()
         sent = 0
         eos_sent = False
+
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc

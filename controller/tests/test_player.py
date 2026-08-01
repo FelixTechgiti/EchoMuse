@@ -453,3 +453,84 @@ def test_home_assistant_is_told_the_intent_not_left_stale():
         await asyncio.sleep(0.05)
         await s.stop()
     asyncio.run(main())
+
+
+def _recording_wire(device):
+    """Wire em_player with a notify_state that records what HA is told."""
+    pushed: list[str] = []
+
+    async def notify(did, state):
+        pushed.append(state)
+    em_player.init(get_device=lambda did: device if did == device.device_id else None,
+                   notify_state=notify)
+    em_player._notify_state = notify
+    return pushed
+
+
+def test_resume_tells_home_assistant_it_is_playing_again():
+    """
+    Issue #53: "the media player reports that it is idle even though the music
+    continues to play on the echo."
+
+    The feed announces PLAYING exactly ONCE, when the decoder starts producing
+    audio — so whatever is sent to HA after that is the last word. The turn-end
+    message was a hardcoded IDLE, which silently became that last word.
+
+    This pins the announcement itself: without it there is nothing for the
+    turn-end fix to be correct about.
+    """
+    async def main():
+        device = FakeDevice()
+        pushed = _recording_wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await s.pause()
+        pushed.clear()
+
+        await s.resume()
+        await asyncio.sleep(0.05)
+        assert PLAYING in pushed, "HA was never told playback resumed"
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_play_tells_home_assistant_it_is_playing():
+    """
+    play() begins with stop(), which pushes IDLE. The PLAYING that follows
+    comes from the feed, not from play() itself — worth pinning, because the
+    obvious "fix" of pushing in play()/resume() duplicates it.
+    """
+    async def main():
+        device = FakeDevice()
+        pushed = _recording_wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        assert pushed[-1] == PLAYING, f"last state HA saw was {pushed[-1]!r}"
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_playback_state_is_pushed_once_per_start_not_per_chunk():
+    """
+    It rides the start of the feed, not the send loop — a push per audio period
+    would be a message storm on the plane carrying the audio.
+
+    Once-only is also exactly why the turn-end IDLE was able to win: there is
+    no later push to correct it.
+    """
+    async def main():
+        device = FakeDevice()
+        pushed = _recording_wire(device)
+        s = StubSession("office", periods=6)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.2)
+        assert pushed.count(PLAYING) == 1, f"pushed PLAYING {pushed.count(PLAYING)} times"
+    asyncio.run(main())

@@ -854,12 +854,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # the satellite may still be fetching and playing audio at that point.
             if self._transport and not self._transport.is_closing():
                 self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=True))
-                self._send_one(api_pb2.MediaPlayerStateResponse(
-                    key=MEDIA_PLAYER_KEY,
-                    state=MediaPlayerState.IDLE,
-                    volume=self._current_volume,
-                    muted=False,
-                ))
+                # The MEDIA state, not a hardcoded IDLE.
+                #
+                # This used to assert IDLE at the end of every turn regardless
+                # of what the media player was doing, so a turn during music —
+                # or one that started music — left HA showing a play arrow
+                # while audio was audibly playing (issue #53). _media_state_msg
+                # exists for exactly this and was being bypassed.
+                #
+                # Music paused for the turn correctly reports PAUSED here;
+                # resume_interrupted runs just after and pushes PLAYING once
+                # the feed is actually up.
+                self._send_one(self._media_state_msg())
             self._turn_active    = False
             self._on_thinking    = None
             self._on_announce    = None
