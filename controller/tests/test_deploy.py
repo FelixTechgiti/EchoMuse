@@ -422,3 +422,44 @@ def test_turn_end_reports_real_media_state_not_a_hardcoded_idle():
         "a hardcoded IDLE at turn end overwrites the feed's PLAYING and "
         "leaves HA showing idle over audible music"
     )
+
+
+def test_no_unjustified_hardcoded_media_state():
+    """
+    Forbid the SHAPE, not just the instances.
+
+    A hardcoded MediaPlayerState sent to HA asserts what the player is doing
+    without asking em_player, so it is wrong whenever the guess is wrong — and
+    it wins, because the feed announces PLAYING exactly once, at the start.
+
+    This has now been the same bug twice: the turn-end IDLE (#53, "reports
+    idle even though the music continues to play"), and then IDLE on every
+    device volume report, which told Music Assistant the music had stopped
+    while it was audibly playing. Fixing instances one at a time is how the
+    second one survived the first fix, so this pins the rule.
+
+    Two remain legitimate and are named explicitly:
+      - PLAYING for play_media, documented as optimistic — the feed pushes
+        the authoritative state moments later.
+      - ANNOUNCING, a genuine transition with no em_player equivalent.
+
+    Anything else must go through _media_state_msg(), which reads em_player
+    truth.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
+
+    allowed = {"MediaPlayerState.PLAYING", "MediaPlayerState.ANNOUNCING"}
+    found = [
+        line.strip()
+        for line in src.splitlines()
+        if "state=MediaPlayerState." in line
+    ]
+    offenders = [
+        ln for ln in found
+        if not any(a in ln for a in allowed)
+    ]
+    assert not offenders, (
+        f"hardcoded media state(s) {offenders} — use _media_state_msg() so the "
+        f"entity reflects what em_player is actually doing"
+    )
