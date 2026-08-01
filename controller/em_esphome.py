@@ -518,12 +518,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 muted=False,
             )
             yield api_pb2.VoiceAssistantAnnounceFinished(success=True)
-            yield api_pb2.MediaPlayerStateResponse(
-                key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.IDLE,
-                volume=self._current_volume,
-                muted=False,
-            )
+            # Real state, not IDLE: an announcement over music pauses the
+            # session, so PAUSED is the truth here and resume_interrupted
+            # follows with PLAYING once the feed is back up. Asserting IDLE
+            # made the entity wrong for as long as it took the music to
+            # restart.
+            yield self._media_state_msg()
             return
 
         log.debug(
@@ -2020,12 +2020,18 @@ def update_device_volume(device_id: str, volume: float) -> None:
     log.debug(f"[esphome.{device_id[-8:]}] volume updated → {volume:.3f}")
     satellite = server.get_satellite()
     if satellite is not None:
-        satellite._send_one(api_pb2.MediaPlayerStateResponse(
-            key=MEDIA_PLAYER_KEY,
-            state=MediaPlayerState.IDLE,
-            volume=volume,
-            muted=False,
-        ))
+        # The MEDIA state, not a hardcoded IDLE.
+        #
+        # This asserted IDLE on EVERY device volume report — so turning the
+        # volume knob during music told HA the player had stopped, while it
+        # audibly had not (reported 2026-08-01, Music Assistant showing
+        # stopped over playing audio). _media_state_msg reads the volume back
+        # from the server, which set_volume above has already updated, so the
+        # new level still rides this message.
+        #
+        # Same fault as the turn-end IDLE fixed in #53, in a second place.
+        # Hence the test that now forbids the shape rather than the instance.
+        satellite._send_one(satellite._media_state_msg())
 
 
 # ─── mDNS helpers ────────────────────────────────────────────────────────────
