@@ -117,59 +117,103 @@ def is_playing(device_id: str) -> bool:
 
 
 async def play(device_id: str, url: str) -> None:
-    await _session(device_id).play(url)
+    s = _session(device_id)
+    if s.owned_by_turn:
+        # The common collision: "play some jazz" runs the intent BEFORE Home
+        # Assistant generates the spoken reply, so this can land while the TTS
+        # is still coming and put music on the same 0x02 plane as the response.
+        s.pending = ("play", url)
+        await s.push_intent(PLAYING)
+        return
+    await s.play(url)
 
 
 async def pause(device_id: str) -> None:
-    """
-    Pause from the USER (HA / Music Assistant / the media_player entity).
-
-    A pause arriving while WE hold the session paused for a voice turn is the
-    user taking ownership of the paused state, so the auto-resume has to go.
-
-    Without this, asking to pause during a barge-in cannot work, and fails in
-    about the most confusing way available (issue #53): MediaSession.pause()
-    returns early unless the state is PLAYING, so the command is silently
-    discarded and the user is told the music is already paused — then
-    resume_interrupted fires at the end of the turn and starts it playing
-    again. The one thing they asked for is the one thing that cannot happen.
-
-    stop() has always cleared this flag, which is why "stop the music" works
-    during a barge-in while "pause the music" did not. This makes pause agree
-    with stop rather than inventing a new rule.
-
-    Deliberately here and not in MediaSession.pause(): interrupt() calls that
-    method itself, immediately after setting the flag, so clearing it there
-    would disable the interruption it is part of.
-    """
+    """Pause from the USER (HA / Music Assistant / the media_player entity)."""
     s = _session(device_id)
-    s.interrupted = False
+    if s.owned_by_turn:
+        # Already paused on the wire by interrupt(); record that the user now
+        # OWNS the paused state so the turn's end does not undo it.
+        s.pending = ("pause", None)
+        return
     await s.pause()
 
 
 async def resume(device_id: str) -> None:
-    await _session(device_id).resume()
+    s = _session(device_id)
+    if s.owned_by_turn:
+        s.pending = ("resume", None)
+        await s.push_intent(PLAYING)
+        return
+    await s.resume()
 
 
 async def stop(device_id: str) -> None:
-    await _session(device_id).stop()
+    s = _session(device_id)
+    if s.owned_by_turn:
+        s.pending = ("stop", None)
+        await s.push_intent(IDLE)
+        return
+    await s.stop()
 
 
 async def interrupt(device_id: str) -> None:
-    """Voice turn / announcement starting — pause an active session."""
-    s = _sessions.get(device_id)
-    if s is not None and s.state == PLAYING:
-        s.interrupted = True
+    """
+    A voice turn or announcement is starting: it OWNS the speaker until it
+    ends.
+
+    Ownership is taken unconditionally, even with nothing playing. That is the
+    point: interrupt() used to only pause what was already playing, which did
+    nothing to stop something STARTING mid-turn — and "play some jazz" runs
+    the intent before Home Assistant generates the spoken reply, so play_media
+    can arrive while the TTS is still coming and put music on the same 0x02
+    plane as the response.
+
+    resume_after is separate from ownership on purpose: it records only that
+    WE paused something and should put it back. A user command during the
+    turn replaces that intent (see resume_interrupted).
+    """
+    s = _session(device_id)
+    s.owned_by_turn = True
+    s.pending = None
+    if s.state == PLAYING:
+        s.resume_after = True
         await s.pause()
 
 
 async def resume_interrupted(device_id: str) -> None:
-    """Voice turn / announcement over — resume iff *we* paused it."""
+    """
+    The turn is over: release the speaker and settle what should be playing.
+
+    A command issued during the turn wins over our auto-resume — it is the
+    user's instruction, ours is bookkeeping. Last write wins among several,
+    which is what "play jazz... actually, pause" means.
+
+    This is where the pause bug in #53 is really fixed: asking to pause during
+    a barge-in used to be discarded (MediaSession.pause() returns early unless
+    PLAYING) and then contradicted by the auto-resume.
+    """
     s = _sessions.get(device_id)
-    if s is not None and s.interrupted:
-        s.interrupted = False
-        if s.state == PAUSED:
+    if s is None:
+        return
+    s.owned_by_turn = False
+    pending, s.pending = s.pending, None
+    resume_after, s.resume_after = s.resume_after, False
+
+    if pending is not None:
+        kind, url = pending
+        if kind == "play":
+            await s.play(url)
+        elif kind == "resume":
             await s.resume()
+        elif kind == "stop":
+            await s.stop()
+        # "pause" needs no wire action: interrupt() already paused it, and
+        # dropping resume_after above is the whole of what the user asked for.
+        return
+
+    if resume_after and s.state == PAUSED:
+        await s.resume()
 
 
 def device_gone(device_id: str) -> None:
@@ -184,7 +228,15 @@ class MediaSession:
         self.device_id = device_id
         self.state = IDLE
         self.url: str | None = None
-        self.interrupted = False   # paused by voice, not by the user
+        # A voice turn or announcement owns the speaker right now, so
+        # playback commands are recorded rather than put on the wire.
+        self.owned_by_turn = False
+        # The user's last playback command during that ownership, applied when
+        # it is released. Last write wins.
+        self.pending: tuple[str, str | None] | None = None
+        # WE paused something and should put it back afterwards — distinct
+        # from ownership, and overridden by any pending user command.
+        self.resume_after = False
         self._pos = 0.0            # seconds into the media at last pause
         self._task: asyncio.Task | None = None
         self._proc = None
@@ -241,7 +293,7 @@ class MediaSession:
         self.state = IDLE
         self.url = None
         self._pos = 0.0
-        self.interrupted = False
+        self.resume_after = False
         if was_active:
             log.info(f"[{self.device_id}] Media stopped")
             await self._push_state()
@@ -287,6 +339,23 @@ class MediaSession:
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+    async def push_intent(self, state: str) -> None:
+        """
+        Tell Home Assistant what WILL be true once the turn releases the
+        speaker, without lying to our own state machine.
+
+        Deferring a command would otherwise leave the media_player entity
+        showing stale state for the length of a turn — and #53's other half is
+        already a complaint about that entity being wrong. The feed pushes the
+        authoritative state as soon as it actually starts, exactly as
+        play_media has always been optimistic.
+        """
+        if _notify_state is not None:
+            try:
+                await _notify_state(self.device_id, state)
+            except Exception as e:
+                log.warning(f"[{self.device_id}] media intent push failed: {e}")
 
     async def _push_state(self) -> None:
         if _notify_state is not None:

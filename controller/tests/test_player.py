@@ -150,18 +150,18 @@ def test_interrupt_resume_cycle_only_touches_playing_sessions():
 
         # Nothing playing: interrupt/resume are no-ops
         await em_player.interrupt("office")
-        assert s.state == IDLE and not s.interrupted
+        assert s.state == IDLE and not s.resume_after
 
         await s.play("http://radio/stream")
         await asyncio.sleep(0.05)
         await em_player.interrupt("office")
-        assert s.state == PAUSED and s.interrupted
+        assert s.state == PAUSED and s.resume_after
 
         await em_player.resume_interrupted("office")
-        assert s.state == PLAYING and not s.interrupted
+        assert s.state == PLAYING and not s.resume_after
         await s.stop()
 
-        # User-paused (not interrupted) sessions must NOT auto-resume
+        # User-paused (not turn-paused) sessions must NOT auto-resume
         await s.play("http://radio/stream")
         await asyncio.sleep(0.05)
         await s.pause()
@@ -264,13 +264,13 @@ def test_pausing_during_a_barge_in_stays_paused():
 
         # Wake word during music: we pause it for the turn.
         await em_player.interrupt("office")
-        assert s.state == PAUSED and s.interrupted
+        assert s.state == PAUSED and s.resume_after
 
         # "pause the music" — arrives through the module-level entry point,
         # which is what HA / Music Assistant drive.
         await em_player.pause("office")
-        assert not s.interrupted, (
-            "a user pause during an interruption must cancel the auto-resume"
+        assert s.pending == ("pause", None), (
+            "a user pause during a turn must be recorded as their intent"
         )
 
         # Turn ends. The music must STAY paused.
@@ -296,7 +296,7 @@ def test_stop_during_a_barge_in_stays_stopped():
         await asyncio.sleep(0.05)
         await em_player.interrupt("office")
         await em_player.stop("office")
-        assert not s.interrupted
+        assert s.pending == ("stop", None)
 
         await em_player.resume_interrupted("office")
         assert s.state == IDLE
@@ -318,6 +318,138 @@ def test_an_ordinary_barge_in_still_resumes():
         await asyncio.sleep(0.05)
         await em_player.interrupt("office")
         await em_player.resume_interrupted("office")
-        assert s.state == PLAYING and not s.interrupted
+        assert s.state == PLAYING and not s.resume_after
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_play_during_a_turn_waits_for_the_speaker():
+    """
+    The common collision, and the reason this is an ownership model rather
+    than a patch to resume(): "play some jazz" runs the intent BEFORE Home
+    Assistant generates the spoken reply, so play_media can arrive while the
+    TTS is still coming — putting music on the same 0x02 plane as the
+    response.
+
+    Nothing was playing when the turn began, which is exactly the case the
+    old interrupt() ignored: it only paused what was ALREADY playing and did
+    nothing to stop something starting.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")          # turn starts, nothing playing
+        await em_player.play("office", "http://radio/jazz")
+
+        assert s.state == IDLE, "music must not start while the turn owns the speaker"
+        assert not s.spawns, "no decoder should be spawned mid-turn"
+        assert s.pending == ("play", "http://radio/jazz")
+
+        await em_player.resume_interrupted("office")  # turn ends
+        await asyncio.sleep(0.05)
+        assert s.state == PLAYING
+        assert s.url == "http://radio/jazz"
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_resume_during_a_turn_waits_for_the_speaker():
+    """The narrow case that started this: resume() used to start the feed
+    immediately, mid-turn, straight into the TTS."""
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await s.pause()                               # user paused it earlier
+        await em_player.interrupt("office")           # then a turn starts
+
+        await em_player.resume("office")
+        assert s.state == PAUSED, "resume must not start the feed mid-turn"
+
+        await em_player.resume_interrupted("office")
+        await asyncio.sleep(0.05)
+        assert s.state == PLAYING
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_the_last_command_in_a_turn_wins():
+    """
+    "Play jazz... actually, pause" — the last instruction is what was meant.
+    Anything else would replay a command the user changed their mind about.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")
+        await em_player.play("office", "http://radio/jazz")
+        await em_player.pause("office")
+        assert s.pending == ("pause", None)
+
+        await em_player.resume_interrupted("office")
+        await asyncio.sleep(0.05)
+        assert s.state == IDLE, "the abandoned play must not start"
+        assert not s.spawns
+    asyncio.run(main())
+
+
+def test_a_user_command_overrides_our_auto_resume():
+    """
+    Ownership and resume_after are separate facts: we paused the music, but
+    the user then said something about it. Theirs is an instruction, ours is
+    bookkeeping.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await em_player.interrupt("office")
+        assert s.resume_after
+
+        await em_player.stop("office")
+        await em_player.resume_interrupted("office")
+        assert s.state == IDLE, "the user's stop lost to our auto-resume"
+        assert s.url is None
+    asyncio.run(main())
+
+
+def test_home_assistant_is_told_the_intent_not_left_stale():
+    """
+    Deferring must not leave the media_player entity showing the wrong thing
+    for the length of a turn — #53's other half is already a complaint about
+    that entity being wrong.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        pushed: list[tuple[str, str]] = []
+
+        async def notify(did, state):
+            pushed.append((did, state))
+        em_player._notify_state = notify
+
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")
+        await em_player.play("office", "http://radio/jazz")
+        assert ("office", PLAYING) in pushed, \
+            "HA was not told the deferred play would happen"
+        await em_player.resume_interrupted("office")
+        await asyncio.sleep(0.05)
         await s.stop()
     asyncio.run(main())
