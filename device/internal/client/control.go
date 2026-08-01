@@ -738,6 +738,23 @@ func (c *ControlClient) SendMuteState(muted bool) {
 	})
 }
 
+// SendAmbientLight reports a SIGNIFICANT change in room light level.
+//
+// Sent only on a real change (see als.Significant), not on a schedule: the
+// steady-state value already rides the ~30s stats report, and this exists for
+// the timing — a light switching on should reach Home Assistant now, not up
+// to 30 seconds later. Same split as shadow-mode threshold crossings.
+//
+// Silently dropped if not connected, like the other state reports: a light
+// change is not worth blocking on.
+func (c *ControlClient) SendAmbientLight(lux int) {
+	log.Printf("[als] ambient light changed: %d lux", lux)
+	_ = c.writeJSON(map[string]interface{}{
+		"type": "ambient_light",
+		"lux":  lux,
+	})
+}
+
 // SendVolumeState notifies the controller of the current volume level (0–175).
 // Called on connect (to sync controller state) and after every local change.
 // Safe for concurrent use — silently drops if not connected.

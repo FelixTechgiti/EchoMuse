@@ -2205,6 +2205,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 if msg_type == "button":
                     await handle_button_event(device, msg)
 
+                elif msg_type == "ambient_light":
+                    # A step change in room light, sent by the device the
+                    # moment it happens rather than waiting up to 30s for the
+                    # stats tick — the timing IS the signal ("someone turned
+                    # a light on"). The steady-state value still rides stats.
+                    _lux = msg.get("lux")
+                    if isinstance(_lux, int):
+                        device.stats["ambientLux"] = _lux
+                        esphome.update_ambient_lux(device_id, _lux)
+                        log.info(f"[{device_id}] Ambient light → {_lux} lux")
+
                 elif msg_type == "mute_state":
                     device.muted = msg.get("muted", False)
                     if device.muted and device.voice_lock.locked():

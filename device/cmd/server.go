@@ -176,6 +176,18 @@ func main() {
 
 	// Disconnected — orange pulse
 	var pulseCancel context.CancelFunc
+	// Watch the ambient light sensor for step changes (a lamp switching on)
+	// and report them immediately; the steady-state value rides the ~30s
+	// stats tick. No-ops on a device without the sensor.
+	//
+	// Started here rather than earlier because it captures controlClient,
+	// which does not exist until above — and the amd64 build cannot catch
+	// that, since this package is excluded from it by build constraints
+	// (mic/speaker are ARM-only). Only compile.sh compiles this file.
+	go als.Watch(ctx, func(lux int) {
+		controlClient.SendAmbientLight(lux)
+	})
+
 	controlClient.OnDisconnected(func() {
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker.
