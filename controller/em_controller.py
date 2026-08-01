@@ -1900,6 +1900,20 @@ async def handle_button_event(device: Device, event: dict):
         return
 
     if click_type == 138:   # DotClick
+        # A HOLD is a separate gesture, forwarded to HA rather than starting a
+        # turn. heldMs is measured on the device: timing the down/up messages
+        # here would be at the mercy of RTT excursions measured past 1600ms on
+        # this fleet, which would misread taps as holds.
+        #
+        # Absent heldMs (firmware predating this) reads as a tap, so the action
+        # button keeps working exactly as before on devices that have not
+        # updated — degrade to old behaviour, never to a wrong answer.
+        held_ms = event.get("heldMs") or 0
+        if held_ms >= esphome.BUTTON_HOLD_MS:
+            log.info(f"[{device.device_id}] Dot button held {held_ms}ms → HA event")
+            esphome.send_button_event(device.device_id, "long")
+            return
+
         if device.voice_lock.locked():
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
@@ -2123,6 +2137,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 await em_player.resume_interrupted(_d.device_id)
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
+        # Capabilities before the servers come up: they decide which HA
+        # entities are advertised, and advertising is a one-shot at
+        # ListEntities time.
+        esphome.set_device_capabilities(device_id, capabilities)
         await esphome.device_connected(
             device_id,
             SERVER_HOST,
@@ -2255,6 +2273,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         "coresOnline":      msg.get("coresOnline"),
                         "coresTotal":       msg.get("coresTotal"),
                         "thermalCoreLimit": msg.get("thermalCoreLimit"),
+                        # Ambient light (TSL2540). None on a device without
+                        # the sensor — 0 lux is a real reading (covered), so
+                        # the two must not collapse into each other.
+                        "ambientLux":       msg.get("ambientLux"),
                         # v13 on-device shadow window summary, absent when the
                         # device is not scoring (see the allowlist note above:
                         # DeviceStats, here, and the consumer below).
@@ -2281,6 +2303,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             )
                     if msg.get("ble"):
                         em_ble_proxy.update_stats(device_id, msg["ble"])
+                    # Ambient light straight through to HA's sensor entity.
+                    # Rides the existing ~30s stats tick — light does not
+                    # change fast enough to justify a channel of its own, and
+                    # nothing per-frame is the standing rule here.
+                    if "ambientLux" in msg:
+                        esphome.update_ambient_lux(device_id, msg.get("ambientLux"))
                     # Fold into the persistent hourly rollup (CPU/RAM/storage/
                     # RSSI trends) — one cheap upsert per ~30s report. The
                     # last_seen refresh rides the same executor hop: a stats
