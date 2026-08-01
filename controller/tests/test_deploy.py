@@ -463,3 +463,39 @@ def test_no_unjustified_hardcoded_media_state():
         f"hardcoded media state(s) {offenders} — use _media_state_msg() so the "
         f"entity reflects what em_player is actually doing"
     )
+
+
+def test_every_deliberate_cancel_also_flushes_the_speaker():
+    """
+    Cancelling a turn must stop the AUDIO, not just our end of it.
+
+    cancel_event aborts the controller's feed. It cannot touch what is already
+    on the device — up to ~5.5s sits in audioChanDepth — so without a
+    speaker_flush the ring clears and the device carries on talking after you
+    have visibly cancelled it. Reported 2026-08-01 for the action button,
+    which was the one deliberate cancel missing it while mute and barge-in
+    both had it.
+
+    Forbidding the shape rather than fixing the instance: this is the second
+    bug of exactly this kind today (the other was a hardcoded MediaPlayerState
+    in one of three places), and fixing them one at a time is how the second
+    one survived the first.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+
+    # Each deliberate cancel site, identified by its log line / guard, paired
+    # with how far to look for the flush that must accompany it.
+    sites = {
+        "Dot button — cancelling voice turn": 900,
+        "Muted during active turn": 900,
+    }
+    for marker, window in sites.items():
+        i = src.find(marker)
+        assert i != -1, f"cancel site {marker!r} not found — has it been renamed?"
+        block = src[i:i + window]
+        assert "cancel_event.set()" in block, f"{marker}: no cancel"
+        assert "speaker_flush" in block, (
+            f"{marker}: cancels the turn but never flushes the device speaker — "
+            f"the response will keep playing after the turn is cancelled"
+        )

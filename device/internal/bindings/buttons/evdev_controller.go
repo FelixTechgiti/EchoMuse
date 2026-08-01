@@ -82,6 +82,21 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 				return
 			}
 
+			// Only key events. Every key press is followed immediately by
+			// an EV_SYN separator whose Code and Value are both 0 — and
+			// without this filter that SYN fell through to the Code==0
+			// branch, took the previous click type, computed Value==1 as
+			// FALSE, and fired a "release" microseconds after the press.
+			//
+			// So the button has always acted on the SYN rather than on the
+			// real release, which is why it felt instant and why the actual
+			// release (a genuine transition to 0) was then swallowed as a
+			// no-change. Invisible until something needed to know how long
+			// the button was held: heldMs came out at ~0 every time.
+			if inputEvent.Type != evdev.EV_KEY {
+				continue
+			}
+
 			clickType := buttons.ClickType(inputEvent.Code)
 			if inputEvent.Code != 0 {
 				beforeClickType = clickType

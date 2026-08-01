@@ -1918,6 +1918,16 @@ async def handle_button_event(device: Device, event: dict):
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
             esphome.cancel_voice_turn(device.device_id)
+            # Flush the device's speaker too, or cancelling DURING the spoken
+            # response only stops the controller feeding it: the ring clears
+            # while up to ~5.5s already in audioChanDepth plays out, and the
+            # device carries on talking after you have visibly cancelled it.
+            #
+            # cancel_event alone cannot fix that — it aborts our end, not the
+            # audio already on the device. Mute and barge-in both send this
+            # for exactly the same reason; the button was the one deliberate
+            # cancel that did not.
+            await device.send_control({"type": "speaker_flush"})
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()

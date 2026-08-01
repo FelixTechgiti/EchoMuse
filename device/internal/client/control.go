@@ -710,7 +710,7 @@ func capabilities() []string {
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
-	log.Printf("[control] SendButton: clickType=%d down=%v", event.ClickType, event.Down)
+	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d", event.ClickType, event.Down, event.HeldMs)
 	msg := map[string]interface{}{
 		"type":      "button",
 		"clickType": int(event.ClickType),
