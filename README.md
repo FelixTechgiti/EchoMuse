@@ -32,6 +32,11 @@ hear the answer through the Dot's speaker. The hardware you already own
 - **Bluetooth proxy** — each Echo doubles as an HA Bluetooth advertisement
   proxy (great with [Bermuda](https://github.com/agittins/bermuda) for room
   presence).
+- **Sensors and buttons in HA** — the Dot has an ambient light sensor that
+  Amazon's software never exposed; it turns up as a lux sensor, reported
+  immediately when a light goes on rather than on a slow poll. Holding the
+  action button fires an event you can trigger automations from, while a
+  normal press still starts a voice turn.
 - **Fleet dashboard** — provisioning wizard, per-device or global config
   pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
   automatic fallback, root shell, logs, and per-turn activity analytics
