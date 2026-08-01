@@ -83,6 +83,23 @@ DRAIN_FUDGE_S   = 1.1   # device prime hold — same constant class as turns
 # slow-starting seekable source.
 SEEK_STALL_S    = 5.0
 
+# A single read from ffmpeg taking longer than this is a SOURCE stall: the
+# decoder had nothing for us, so nothing went to the device. Logged when it
+# happens rather than only summarised, because the timing is the value — the
+# same reasoning as shadow threshold crossings.
+#
+# This exists to answer a question the device cannot: the device reports a gap
+# between frame ARRIVING, which looks identical whether the controller had
+# nothing to send (source stall, e.g. a Music Assistant flow starving) or the
+# link swallowed it. send_ms cannot settle it either, since a socket write
+# completes near-instantly however slow the wire is. So: a device-side gap WITH
+# a source stall at the same moment is upstream; without one it is the link.
+#
+# 500ms is well inside the ~4s lead, so a stall this size is not yet audible —
+# which is the point of catching it here.
+SOURCE_STALL_MS = 500.0
+
+
 IDLE, PLAYING, PAUSED = "idle", "playing", "paused"
 
 # Injected by em_controller.init(): device_id -> Device | None
@@ -379,6 +396,8 @@ class MediaSession:
         seg_start = loop.time()
         sent = 0
         eos_sent = False
+        src_max_ms = 0.0
+        src_stalls = 0
 
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
@@ -418,7 +437,20 @@ class MediaSession:
                     if pending is not None:
                         chunk, pending = pending, None
                     else:
+                        # Only the READ is timed. The pacing sleep below is
+                        # deliberate and must not read as a stall.
+                        _t0 = loop.time()
                         chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
+                        _read_ms = (loop.time() - _t0) * 1000.0
+                        if _read_ms > src_max_ms:
+                            src_max_ms = _read_ms
+                        if _read_ms > SOURCE_STALL_MS:
+                            src_stalls += 1
+                            log.warning(
+                                f"[{self.device_id}] Media SOURCE stall: "
+                                f"{_read_ms:.0f}ms with no audio from the decoder "
+                                f"({sent / BYTES_PER_SEC:.1f}s sent) — upstream, "
+                                f"not the device link")
                 except asyncio.IncompleteReadError as e:
                     chunk = e.partial
                     if chunk:
@@ -462,6 +494,17 @@ class MediaSession:
             self.state = IDLE
             await self._push_state()
         finally:
+            # Summary on every path out, so a stream that was paused or
+            # stopped reports as readily as one that finished. Pair it with
+            # the device's own "[speaker] stream complete ... maxGap=" line:
+            # a device-side gap with no source stall here means the link,
+            # a device-side gap WITH one means upstream.
+            if sent:
+                log.info(
+                    f"[{self.device_id}] Media feed done: "
+                    f"{sent // SPEAKER_BYTES} periods, source max read "
+                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
+                    f"{SOURCE_STALL_MS:.0f}ms")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.

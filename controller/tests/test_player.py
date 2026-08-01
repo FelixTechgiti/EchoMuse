@@ -534,3 +534,68 @@ def test_playback_state_is_pushed_once_per_start_not_per_chunk():
         await asyncio.sleep(0.2)
         assert pushed.count(PLAYING) == 1, f"pushed PLAYING {pushed.count(PLAYING)} times"
     asyncio.run(main())
+
+
+def test_a_starved_decoder_is_reported_as_a_source_stall(caplog):
+    """
+    The measurement that separates the two causes of an audible dropout.
+
+    The device reports a gap between frames ARRIVING, which looks identical
+    whether the controller had nothing to send (source starving — a Music
+    Assistant flow stalling upstream) or the link swallowed it. send_ms cannot
+    settle it either: a socket write completes near-instantly however slow the
+    wire is.
+
+    So a device-side gap WITH one of these logged at the same moment is
+    upstream; a device-side gap WITHOUT one is the link. Observed 2026-08-01:
+    minDepth=0 underruns=1 on Lounge with RTT excursions to 1637ms, and no way
+    to tell which.
+    """
+    import logging
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+
+        class StallingSession(StubSession):
+            async def _spawn_decoder(self, url, position_s):
+                proc = await super()._spawn_decoder(url, position_s)
+                real_read = proc.stdout.readexactly
+                calls = {"n": 0}
+
+                async def slow(n):
+                    calls["n"] += 1
+                    if calls["n"] == 2:          # starve once, mid-stream
+                        await asyncio.sleep(0.6)
+                    return await real_read(n)
+                proc.stdout.readexactly = slow
+                return proc
+
+        s = StallingSession("office", periods=4)
+        em_player._sessions["office"] = s
+        em_player.SOURCE_STALL_MS = 200.0        # keep the test quick
+
+        with caplog.at_level(logging.WARNING, logger="player"):
+            await s.play("http://radio/stream")
+            await asyncio.sleep(1.2)
+
+        assert any("SOURCE stall" in r.message for r in caplog.records), \
+            "a starved decoder must be distinguishable from a link stall"
+    asyncio.run(main())
+    em_player.SOURCE_STALL_MS = 500.0
+
+
+def test_pacing_sleep_is_not_mistaken_for_a_source_stall():
+    """
+    The feed deliberately sleeps to hold the lead at LEAD_S. Timing the whole
+    loop iteration instead of just the read would report every healthy stream
+    as permanently stalled — which is the failure mode that makes an
+    instrument worse than none, because it is wrong in the reassuring
+    direction of looking like a real problem everywhere.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_player.py").read_text()
+    fn = src[src.index("    async def _feed(self)"):]
+    read = fn[fn.index("_t0 = loop.time()"):fn.index("_read_ms = ")]
+    assert "asyncio.sleep" not in read, \
+        "the pacing sleep must sit outside the timed read"
