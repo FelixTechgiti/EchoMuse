@@ -1918,6 +1918,16 @@ async def handle_button_event(device: Device, event: dict):
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
             esphome.cancel_voice_turn(device.device_id)
+            # Flush the device's speaker too, or cancelling DURING the spoken
+            # response only stops the controller feeding it: the ring clears
+            # while up to ~5.5s already in audioChanDepth plays out, and the
+            # device carries on talking after you have visibly cancelled it.
+            #
+            # cancel_event alone cannot fix that — it aborts our end, not the
+            # audio already on the device. Mute and barge-in both send this
+            # for exactly the same reason; the button was the one deliberate
+            # cancel that did not.
+            await device.send_control({"type": "speaker_flush"})
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
@@ -2194,6 +2204,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
                 if msg_type == "button":
                     await handle_button_event(device, msg)
+
+                elif msg_type == "ambient_light":
+                    # A step change in room light, sent by the device the
+                    # moment it happens rather than waiting up to 30s for the
+                    # stats tick — the timing IS the signal ("someone turned
+                    # a light on"). The steady-state value still rides stats.
+                    _lux = msg.get("lux")
+                    if isinstance(_lux, int):
+                        device.stats["ambientLux"] = _lux
+                        esphome.update_ambient_lux(device_id, _lux)
+                        log.info(f"[{device_id}] Ambient light → {_lux} lux")
 
                 elif msg_type == "mute_state":
                     device.muted = msg.get("muted", False)

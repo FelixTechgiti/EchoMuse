@@ -710,7 +710,7 @@ func capabilities() []string {
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
-	log.Printf("[control] SendButton: clickType=%d down=%v", event.ClickType, event.Down)
+	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d", event.ClickType, event.Down, event.HeldMs)
 	msg := map[string]interface{}{
 		"type":      "button",
 		"clickType": int(event.ClickType),
@@ -735,6 +735,23 @@ func (c *ControlClient) SendMuteState(muted bool) {
 	_ = c.writeJSON(map[string]interface{}{
 		"type":  "mute_state",
 		"muted": muted,
+	})
+}
+
+// SendAmbientLight reports a SIGNIFICANT change in room light level.
+//
+// Sent only on a real change (see als.Significant), not on a schedule: the
+// steady-state value already rides the ~30s stats report, and this exists for
+// the timing — a light switching on should reach Home Assistant now, not up
+// to 30 seconds later. Same split as shadow-mode threshold crossings.
+//
+// Silently dropped if not connected, like the other state reports: a light
+// change is not worth blocking on.
+func (c *ControlClient) SendAmbientLight(lux int) {
+	log.Printf("[als] ambient light changed: %d lux", lux)
+	_ = c.writeJSON(map[string]interface{}{
+		"type": "ambient_light",
+		"lux":  lux,
 	})
 }
 

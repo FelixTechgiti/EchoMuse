@@ -20,12 +20,14 @@
 package als
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // driverName is the sysfs `name` of the sensor that has a usable interface.
@@ -98,4 +100,94 @@ func Lux() *int {
 		return nil
 	}
 	return &n
+}
+
+// ── Change watching ──────────────────────────────────────────────────────────
+//
+// The stats tick reports lux every ~30s, which is fine for a baseline and
+// useless for "someone turned a light on": up to 30s late, and a brief change
+// can fall entirely between samples.
+//
+// So the same split shadow mode uses for wake-word crossings — a significant
+// change goes IMMEDIATELY because its whole value is the timing, and the
+// steady state rides the existing summary. Nothing per-frame either way.
+const (
+	// PollInterval bounds how fast a change can be noticed. Reading faster
+	// than the chip's 346ms integration time buys nothing but syscalls.
+	PollInterval = time.Second
+
+	// MinRatio is how much the level must change, RELATIVE to the level it
+	// changed from. An absolute threshold cannot work across the range: 50
+	// lux is a transformation in a dark room and invisible in daylight, and
+	// perceived brightness is roughly logarithmic anyway.
+	//
+	// Measured noise on a still room is about ±1.5% (309/311/313/308/312 on
+	// consecutive reads), so 25% is far clear of it while still catching a
+	// lamp being switched on.
+	MinRatio = 0.25
+
+	// MinAbsolute stops near-darkness generating infinite ratios — 0 -> 2 lux
+	// is a 2x change and not a room lighting up.
+	MinAbsolute = 10
+
+	// MinInterval keeps a flickering or dimming light from flooding the
+	// control plane. A real lighting change is a step, not a stream.
+	MinInterval = 2 * time.Second
+)
+
+// Significant reports whether `now` differs enough from `baseline` to be worth
+// telling anyone about. Pure, so the threshold policy is testable without a
+// sensor.
+func Significant(baseline, now int) bool {
+	d := now - baseline
+	if d < 0 {
+		d = -d
+	}
+	if d < MinAbsolute {
+		return false
+	}
+	ref := baseline
+	if ref < MinAbsolute {
+		ref = MinAbsolute // near zero, compare against the floor not against 0
+	}
+	return float64(d)/float64(ref) >= MinRatio
+}
+
+// Watch polls the sensor and calls onChange when the level moves significantly.
+//
+// onChange is called from this goroutine and must not block: it is a control
+// -plane send, and a stalled send must not wedge the watcher into reporting a
+// stale baseline forever.
+func Watch(ctx context.Context, onChange func(lux int)) {
+	if !Present() {
+		return
+	}
+	baseline := -1
+	last := time.Time{}
+	t := time.NewTicker(PollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p := Lux()
+			if p == nil {
+				continue
+			}
+			v := *p
+			if baseline < 0 {
+				baseline = v // first reading seeds, never reports
+				continue
+			}
+			if !Significant(baseline, v) {
+				continue
+			}
+			if time.Since(last) < MinInterval {
+				continue
+			}
+			baseline, last = v, time.Now()
+			onChange(v)
+		}
+	}
 }

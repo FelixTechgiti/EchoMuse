@@ -79,7 +79,9 @@ rooting guide at the right moment rather than opening with it.
 
 Your Echo Dot must be rooted with persistent root. That guide — along with a
 detailed engineering journal of how every subsystem was figured out — is in
-[`SETUP.md`](SETUP.md), which is a reference and a build log rather than a
+[`SETUP.md`](SETUP.md) for how the hardware works, [`JOURNAL.md`](JOURNAL.md)
+for the build log, and [rooting](docs/rooting.md) to prepare a device — none
+of which is a
 walkthrough.
 
 The short version:
