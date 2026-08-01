@@ -394,3 +394,31 @@ def test_the_wake_word_asset_wizard_step_is_mandatory():
     runner = runner[:runner.index("\n  async function ", 1)]
     assert "a.md5" in runner and "throw new Error" in runner, \
         "the push must verify md5 and fail loudly — a truncated file fails later at dlopen"
+
+
+def test_turn_end_reports_real_media_state_not_a_hardcoded_idle():
+    """
+    Issue #53: "the esphome media player reports that it is idle even though
+    the music continues to play on the echo."
+
+    Every voice turn ended by asserting MediaPlayerState.IDLE regardless of
+    what the media player was doing. The feed announces PLAYING exactly once,
+    when the decoder starts, so this IDLE arrived afterwards and became HA's
+    last word — the entity showed a play arrow over audible music, and nothing
+    ever corrected it.
+
+    _media_state_msg() exists for precisely this ("current media_player state
+    as HA should see it — em_player truth") and was being bypassed.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
+
+    fn = src[src.index("        finally:\n            # Signal HA that the satellite has finished"):]
+    fn = fn[:fn.index("self._turn_active    = False")]
+
+    assert "self._media_state_msg()" in fn, \
+        "the turn must report the real media state at the end"
+    assert "state=MediaPlayerState.IDLE" not in fn, (
+        "a hardcoded IDLE at turn end overwrites the feed's PLAYING and "
+        "leaves HA showing idle over audible music"
+    )

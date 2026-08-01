@@ -83,6 +83,23 @@ DRAIN_FUDGE_S   = 1.1   # device prime hold — same constant class as turns
 # slow-starting seekable source.
 SEEK_STALL_S    = 5.0
 
+# A single read from ffmpeg taking longer than this is a SOURCE stall: the
+# decoder had nothing for us, so nothing went to the device. Logged when it
+# happens rather than only summarised, because the timing is the value — the
+# same reasoning as shadow threshold crossings.
+#
+# This exists to answer a question the device cannot: the device reports a gap
+# between frame ARRIVING, which looks identical whether the controller had
+# nothing to send (source stall, e.g. a Music Assistant flow starving) or the
+# link swallowed it. send_ms cannot settle it either, since a socket write
+# completes near-instantly however slow the wire is. So: a device-side gap WITH
+# a source stall at the same moment is upstream; without one it is the link.
+#
+# 500ms is well inside the ~4s lead, so a stall this size is not yet audible —
+# which is the point of catching it here.
+SOURCE_STALL_MS = 500.0
+
+
 IDLE, PLAYING, PAUSED = "idle", "playing", "paused"
 
 # Injected by em_controller.init(): device_id -> Device | None
@@ -117,36 +134,103 @@ def is_playing(device_id: str) -> bool:
 
 
 async def play(device_id: str, url: str) -> None:
-    await _session(device_id).play(url)
+    s = _session(device_id)
+    if s.owned_by_turn:
+        # The common collision: "play some jazz" runs the intent BEFORE Home
+        # Assistant generates the spoken reply, so this can land while the TTS
+        # is still coming and put music on the same 0x02 plane as the response.
+        s.pending = ("play", url)
+        await s.push_intent(PLAYING)
+        return
+    await s.play(url)
 
 
 async def pause(device_id: str) -> None:
-    await _session(device_id).pause()
+    """Pause from the USER (HA / Music Assistant / the media_player entity)."""
+    s = _session(device_id)
+    if s.owned_by_turn:
+        # Already paused on the wire by interrupt(); record that the user now
+        # OWNS the paused state so the turn's end does not undo it.
+        s.pending = ("pause", None)
+        return
+    await s.pause()
 
 
 async def resume(device_id: str) -> None:
-    await _session(device_id).resume()
+    s = _session(device_id)
+    if s.owned_by_turn:
+        s.pending = ("resume", None)
+        await s.push_intent(PLAYING)
+        return
+    await s.resume()
 
 
 async def stop(device_id: str) -> None:
-    await _session(device_id).stop()
+    s = _session(device_id)
+    if s.owned_by_turn:
+        s.pending = ("stop", None)
+        await s.push_intent(IDLE)
+        return
+    await s.stop()
 
 
 async def interrupt(device_id: str) -> None:
-    """Voice turn / announcement starting — pause an active session."""
-    s = _sessions.get(device_id)
-    if s is not None and s.state == PLAYING:
-        s.interrupted = True
+    """
+    A voice turn or announcement is starting: it OWNS the speaker until it
+    ends.
+
+    Ownership is taken unconditionally, even with nothing playing. That is the
+    point: interrupt() used to only pause what was already playing, which did
+    nothing to stop something STARTING mid-turn — and "play some jazz" runs
+    the intent before Home Assistant generates the spoken reply, so play_media
+    can arrive while the TTS is still coming and put music on the same 0x02
+    plane as the response.
+
+    resume_after is separate from ownership on purpose: it records only that
+    WE paused something and should put it back. A user command during the
+    turn replaces that intent (see resume_interrupted).
+    """
+    s = _session(device_id)
+    s.owned_by_turn = True
+    s.pending = None
+    if s.state == PLAYING:
+        s.resume_after = True
         await s.pause()
 
 
 async def resume_interrupted(device_id: str) -> None:
-    """Voice turn / announcement over — resume iff *we* paused it."""
+    """
+    The turn is over: release the speaker and settle what should be playing.
+
+    A command issued during the turn wins over our auto-resume — it is the
+    user's instruction, ours is bookkeeping. Last write wins among several,
+    which is what "play jazz... actually, pause" means.
+
+    This is where the pause bug in #53 is really fixed: asking to pause during
+    a barge-in used to be discarded (MediaSession.pause() returns early unless
+    PLAYING) and then contradicted by the auto-resume.
+    """
     s = _sessions.get(device_id)
-    if s is not None and s.interrupted:
-        s.interrupted = False
-        if s.state == PAUSED:
+    if s is None:
+        return
+    s.owned_by_turn = False
+    pending, s.pending = s.pending, None
+    resume_after, s.resume_after = s.resume_after, False
+
+    if pending is not None:
+        kind, url = pending
+        if kind == "play":
+            await s.play(url)
+        elif kind == "resume":
             await s.resume()
+        elif kind == "stop":
+            await s.stop()
+        # "pause" needs no wire action: interrupt() already paused it, and
+        # dropping resume_after above is the whole of what the user asked for.
+        return
+
+    if resume_after and s.state == PAUSED:
+        await s.resume()
 
 
 def device_gone(device_id: str) -> None:
@@ -161,7 +245,15 @@ class MediaSession:
         self.device_id = device_id
         self.state = IDLE
         self.url: str | None = None
-        self.interrupted = False   # paused by voice, not by the user
+        # A voice turn or announcement owns the speaker right now, so
+        # playback commands are recorded rather than put on the wire.
+        self.owned_by_turn = False
+        # The user's last playback command during that ownership, applied when
+        # it is released. Last write wins.
+        self.pending: tuple[str, str | None] | None = None
+        # WE paused something and should put it back afterwards — distinct
+        # from ownership, and overridden by any pending user command.
+        self.resume_after = False
         self._pos = 0.0            # seconds into the media at last pause
         self._task: asyncio.Task | None = None
         self._proc = None
@@ -218,7 +310,7 @@ class MediaSession:
         self.state = IDLE
         self.url = None
         self._pos = 0.0
-        self.interrupted = False
+        self.resume_after = False
         if was_active:
             log.info(f"[{self.device_id}] Media stopped")
             await self._push_state()
@@ -265,6 +357,23 @@ class MediaSession:
         except (asyncio.CancelledError, Exception):
             pass
 
+    async def push_intent(self, state: str) -> None:
+        """
+        Tell Home Assistant what WILL be true once the turn releases the
+        speaker, without lying to our own state machine.
+
+        Deferring a command would otherwise leave the media_player entity
+        showing stale state for the length of a turn — and #53's other half is
+        already a complaint about that entity being wrong. The feed pushes the
+        authoritative state as soon as it actually starts, exactly as
+        play_media has always been optimistic.
+        """
+        if _notify_state is not None:
+            try:
+                await _notify_state(self.device_id, state)
+            except Exception as e:
+                log.warning(f"[{self.device_id}] media intent push failed: {e}")
+
     async def _push_state(self) -> None:
         if _notify_state is not None:
             try:
@@ -287,6 +396,9 @@ class MediaSession:
         seg_start = loop.time()
         sent = 0
         eos_sent = False
+        src_max_ms = 0.0
+        src_stalls = 0
+
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
@@ -325,7 +437,20 @@ class MediaSession:
                     if pending is not None:
                         chunk, pending = pending, None
                     else:
+                        # Only the READ is timed. The pacing sleep below is
+                        # deliberate and must not read as a stall.
+                        _t0 = loop.time()
                         chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
+                        _read_ms = (loop.time() - _t0) * 1000.0
+                        if _read_ms > src_max_ms:
+                            src_max_ms = _read_ms
+                        if _read_ms > SOURCE_STALL_MS:
+                            src_stalls += 1
+                            log.warning(
+                                f"[{self.device_id}] Media SOURCE stall: "
+                                f"{_read_ms:.0f}ms with no audio from the decoder "
+                                f"({sent / BYTES_PER_SEC:.1f}s sent) — upstream, "
+                                f"not the device link")
                 except asyncio.IncompleteReadError as e:
                     chunk = e.partial
                     if chunk:
@@ -369,6 +494,17 @@ class MediaSession:
             self.state = IDLE
             await self._push_state()
         finally:
+            # Summary on every path out, so a stream that was paused or
+            # stopped reports as readily as one that finished. Pair it with
+            # the device's own "[speaker] stream complete ... maxGap=" line:
+            # a device-side gap with no source stall here means the link,
+            # a device-side gap WITH one means upstream.
+            if sent:
+                log.info(
+                    f"[{self.device_id}] Media feed done: "
+                    f"{sent // SPEAKER_BYTES} periods, source max read "
+                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
+                    f"{SOURCE_STALL_MS:.0f}ms")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.
