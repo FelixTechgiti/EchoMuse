@@ -325,6 +325,9 @@ class MediaSession:
     # ── internals ─────────────────────────────────────────────────────────
 
     def _start_feed(self) -> None:
+        # t0 for the playback chain trace: the moment we were ASKED to play,
+        # so every later stage can be reported as a delta from the command.
+        self._t_play = asyncio.get_event_loop().time()
         self.state = PLAYING
         self._task = asyncio.create_task(self._feed())
         log.info(
@@ -404,9 +407,15 @@ class MediaSession:
         if hasattr(device, "begin_data_stream"):
             device.begin_data_stream()
 
+        t0 = getattr(self, "_t_play", None) or loop.time()
+        t_spawned = None
+        t_first_pcm = None
+        t_first_send = None
+
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
+            t_spawned = loop.time()
 
             # A seek we cannot actually perform produces no audio at all
             # rather than failing loudly (see SEEK_STALL_S). Give the first
@@ -447,6 +456,8 @@ class MediaSession:
                         _t0 = loop.time()
                         chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
                         _read_ms = (loop.time() - _t0) * 1000.0
+                        if t_first_pcm is None:
+                            t_first_pcm = loop.time()
                         if _read_ms > src_max_ms:
                             src_max_ms = _read_ms
                         if _read_ms > SOURCE_STALL_MS:
@@ -471,6 +482,20 @@ class MediaSession:
                     await asyncio.sleep(ahead - LEAD_S)
                 await device.send_data(
                     bytes([SPEAKER_FRAME_TYPE]) + eq.process(chunk))
+                if t_first_send is None:
+                    t_first_send = loop.time()
+                    # The chain, as deltas from the play command. Without this
+                    # a slow start was unattributable: "Media playing" is
+                    # logged the instant we are asked, and the next line is the
+                    # stream ENDING, so everything between was invisible.
+                    def _ms(t):
+                        return f"{(t - t0) * 1000:.0f}ms" if t else "n/a"
+                    log.info(
+                        f"[{self.device_id}] Playback chain: decoder spawned "
+                        f"{_ms(t_spawned)}, first audio out of ffmpeg "
+                        f"{_ms(t_first_pcm)}, first frame to device "
+                        f"{_ms(t_first_send)} — device then buffers to "
+                        f"primePeriods before its ALSA write begins")
                 sent += SPEAKER_BYTES
 
             # Natural end of media: close the stream and wait out the
