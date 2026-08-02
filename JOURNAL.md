@@ -679,3 +679,43 @@ are **append-only and in ascending date order** — new work goes at the end.
   fix. It was `"will be rejected"` — a substring search on a three-letter
   name. Word-boundary matching showed it absent. The wrong tool made me report
   a leak that was not there, one step after failing to report one that was.
+
+- **2026-08-02 — ducking had to happen on the device, and the reason is a number.**
+  Barge-in paused the music, answered, then resumed. Wil's framing was "no
+  bandaids — how would Alexa do it?", and the answer is that every assistant
+  people compare us to **ducks**. Pausing was not merely less familiar: it
+  needed a seek to resume, and a Music Assistant flow stream **cannot seek**,
+  so a 28-second turn cost 28 seconds of the song and a long one landed in the
+  next track. Behaviour differed by source with no way for the user to tell
+  which they had, and the `media_player` entity had to report `PLAYING` while
+  internally paused or HA would decline the user's own pause.
+
+  The obstacle was never the arithmetic — both streams are 48kHz mono s16, so
+  mixing is an add and a limiter. It is **`LEAD_S = 4.0`**: the next four
+  seconds of music are already in the device's buffer when a wake word fires,
+  and **audio that has left the controller cannot be ducked by the
+  controller**. Every controller-side option buys ducking by shortening that
+  lead — handing back the stall protection it exists for (raised from 1.5s
+  because measured 1.8–2.6s link stalls drained the shorter buffer), during
+  the seconds the user is listening hardest. So music got its own frame types
+  and its own buffer on the device, and the two planes mix at the ALSA write.
+
+  The mixer taught me something about ramps. My first gain ramp moved
+  `(target-gain)/n` per period, which is an *exponential* approach — "4
+  periods" was a time constant, not a duration, and a test measured it
+  settling in **31 periods (1.3s)** against the 170ms the comment claimed. A
+  constant slew, interpolated per sample so the change is a fade rather than a
+  click landing exactly when the user starts speaking.
+
+  Two traps on the controller side, both the same shape: an assumption that
+  quietly stopped being true. `speaker_flush` is the wrong flush for music —
+  it cuts the response and leaves the music playing. And the deferred "pause
+  the music" needed no wire action *because* `interrupt()` had already paused;
+  duck instead and nothing was ever paused, so the user's pause is silently
+  discarded and the music plays on. That is #53 again, arriving by a different
+  route, which is the second time this month a fix has had to be made twice
+  because the first one addressed the instance rather than the shape.
+
+  `reported_state` survives for firmware that cannot mix, and on the ducking
+  path is simply never triggered — the entity stops needing to lie because
+  nothing is paused behind HA's back.
