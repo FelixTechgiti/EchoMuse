@@ -667,3 +667,36 @@ def test_pacing_sleep_is_not_mistaken_for_a_source_stall():
     read = fn[fn.index("_t0 = loop.time()"):fn.index("_read_ms = ")]
     assert "asyncio.sleep" not in read, \
         "the pacing sleep must sit outside the timed read"
+
+
+def test_an_unseekable_stream_is_only_discovered_once():
+    """
+    Rediscovering unseekability costs SEEK_STALL_S of SILENCE every time.
+
+    A Music Assistant flow is not seekable, so the first resume spends 5s
+    waiting for audio that never comes before rejoining the live edge. Barge
+    in three times during a song and that is 15s of dead air for an answer we
+    already had after the first one.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://ma/flow/abc")
+        assert s._seekable, "a fresh URL must start out assumed seekable"
+
+        # First resume discovers it the expensive way.
+        s._seekable = False
+        s._pos = 12.6
+        await s.pause()
+        await s.resume()
+        await asyncio.sleep(0.05)
+        assert s._pos == 0.0, "an unseekable resume must go to the live edge"
+
+        # A new URL is a new question.
+        await s.play("http://ma/track/def")
+        assert s._seekable, "seekability must not leak across URLs"
+        await s.stop()
+    asyncio.run(main())

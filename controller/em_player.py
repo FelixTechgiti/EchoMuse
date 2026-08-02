@@ -291,6 +291,12 @@ class MediaSession:
         self._pos = 0.0            # seconds into the media at last pause
         self._task: asyncio.Task | None = None
         self._proc = None
+        # Whether this URL can be seeked. Learned, not guessed: the first
+        # failed resume costs SEEK_STALL_S of silence to discover, and every
+        # later resume on the same stream would pay it again for an answer we
+        # already have. A Music Assistant flow is the common case — barge in
+        # three times during a song and that is 15s of dead air.
+        self._seekable = True
 
     # ── decoder (stubbed in tests) ────────────────────────────────────────
 
@@ -323,6 +329,8 @@ class MediaSession:
         await self.stop()
         self.url = url
         self._pos = 0.0
+        # New URL, new answer — a track file after a flow stream is seekable.
+        self._seekable = True
         self._start_feed()
 
     async def pause(self) -> None:
@@ -440,6 +448,15 @@ class MediaSession:
         if hasattr(device, "begin_data_stream"):
             device.begin_data_stream()
 
+        # Already known to be unseekable: go straight to the live edge rather
+        # than spending SEEK_STALL_S of silence rediscovering it.
+        if start_pos > 0.5 and not self._seekable:
+            log.info(
+                f"[{self.device_id}] Stream is not seekable — resuming at the "
+                f"live edge instead of {start_pos:.1f}s"
+            )
+            start_pos = self._pos = 0.0
+
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
@@ -463,6 +480,7 @@ class MediaSession:
                         f"rejoining the live edge"
                     )
                     await self._kill_decoder(proc)
+                    self._seekable = False
                     start_pos = self._pos = 0.0
                     proc = await self._spawn_decoder(self.url, 0.0)
                     self._proc = proc
