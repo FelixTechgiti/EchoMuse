@@ -79,6 +79,17 @@ _METRIC_FIELDS = (
     "thermal_limit_min",
 )
 
+# Live device stats. Allowlisted like everything else — an earlier version
+# passed live.stats through as a whole dict and leaked wifiBssid/wifiSsid,
+# which is the exact mistake the allowlist exists to prevent. Passing a
+# nested structure through unfiltered defeats it just as surely as a denylist.
+_STATS_FIELDS = (
+    "cpuPct", "memUsedMb", "memTotalMb", "storageUsedMb", "storageTotalMb",
+    "wifiRssi", "linkSpeedMbps", "wifiFreqMhz", "txBytes", "rxBytes",
+    "cpuTempC", "maxTempC", "coresOnline", "coresTotal", "thermalCoreLimit",
+    "ambientLux", "owwShadow",
+)
+
 _COUNTER_FIELDS = (
     "device_id", "hour_ts", "near_misses", "near_miss_max", "underruns",
     "dev_frames", "dev_drops", "dev_crossings", "dev_max_score",
@@ -95,6 +106,13 @@ _LOG_DROP = ("STT result", "text=", "Utterance saved", "stt_text")
 # provider paths and session tokens.
 _QUOTED = re.compile(r"""(['"])(?:(?!\1).)*\1""")
 _URL = re.compile(r"""https?://[^\s'"]+""")
+
+# Bare network identifiers in log prose — "Device connected: ... at 10.10.1.60"
+# is not quoted and is not a URL, so neither of the rules above catches it.
+# Found by auditing a REAL bundle against the live database; the synthetic
+# fixture had no such line.
+_IPV4 = re.compile(r"""\b\d{1,3}(?:\.\d{1,3}){3}\b""")
+_MAC = re.compile(r"""\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b""")
 
 
 def sanitise_log(lines: list[str]) -> list[str]:
@@ -117,6 +135,8 @@ def sanitise_log(lines: list[str]) -> list[str]:
         # line malformed.
         ln = _QUOTED.sub("<redacted>", ln)
         ln = _URL.sub("<url>", ln)
+        ln = _IPV4.sub("<ip>", ln)
+        ln = _MAC.sub("<mac>", ln)
         out.append(ln)
     return out
 
@@ -125,6 +145,13 @@ def _pick(row: Any, fields: tuple[str, ...]) -> dict:
     """Project a sqlite3.Row onto an allowlist, skipping absent columns."""
     keys = set(row.keys())
     return {f: row[f] for f in fields if f in keys}
+
+
+def redact_stats(stats: Any) -> dict | None:
+    """Project a device's live stats onto the allowlist, dropping the rest."""
+    if not isinstance(stats, dict):
+        return None
+    return {k: stats[k] for k in _STATS_FIELDS if k in stats}
 
 
 def redact_config(config: dict) -> dict:

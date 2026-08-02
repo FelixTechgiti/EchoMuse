@@ -64,13 +64,27 @@ def _bundle():
         counters=[],
         device_configs={"G090LF1180130NJG": {"owwModel": "hey_mycroft_v0.1",
                                              "some_token": SECRETS["token"]}},
-        live_state={"G090LF1180130NJG": {"connected": True,
-                                         "capabilities": ["mic", "ambient_light"]}},
+        live_state={"G090LF1180130NJG": {
+            "connected": True,
+            "capabilities": ["mic", "ambient_light"],
+            # A whole stats dict — the path that actually leaked in a REAL
+            # bundle, because it was handed over unfiltered.
+            "stats": S.redact_stats({
+                "cpuPct": 27.5, "wifiRssi": -58, "ambientLux": 16,
+                "wifiBssid": SECRETS["bssid"], "wifiSsid": SECRETS["ssid"],
+            }),
+        }},
         log_tail=[
             f"[TURN] trigger=wakeword outcome=ok text='{SECRETS['speech']}'",
             "play_media: 'http://10.10.1.81:8097/flow/abc/media.flac'",
             "Playback chain: decoder spawned 3ms, first audio 194ms",
             "RTT excursion: 1450ms (idle)",
+            # Bare identifiers in prose: neither quoted nor a URL, so the
+            # quote and URL rules both miss them. Found by auditing a real
+            # bundle against the live database — the synthetic fixture had
+            # no such line, which is exactly why it passed.
+            f"Device connected: G090LF1180130NJG v=v2.9.13 at {SECRETS['ip']} caps=[mic]",
+            f"associated bssid {SECRETS['bssid']} freq 5805",
         ],
     )
 
@@ -139,6 +153,33 @@ def test_transcript_bearing_log_lines_are_dropped_whole():
     log = "\n".join(b["controller_log_tail"])
     assert "[TURN]" not in log, \
         "turn traces quote transcripts verbatim and must not be sanitised in place"
+
+
+def test_live_stats_are_allowlisted_not_passed_through():
+    """
+    Regression: live.stats was handed over as a whole dict and leaked
+    wifiBssid/wifiSsid into a real bundle. Passing a nested structure through
+    unfiltered defeats an allowlist just as surely as using a denylist.
+    """
+    out = S.redact_stats({"cpuPct": 27.5, "wifiRssi": -58,
+                          "wifiBssid": "aa:bb:cc:dd:ee:ff",
+                          "wifiSsid": "Some-Home-Network"})
+    assert out == {"cpuPct": 27.5, "wifiRssi": -58}, \
+        "stats must be projected onto the allowlist, not filtered"
+
+
+def test_bare_identifiers_in_log_prose_are_stripped():
+    """
+    "Device connected: ... at 10.10.1.60" is neither quoted nor a URL, so the
+    first two rules both miss it. Real logs are full of these.
+    """
+    out = "\n".join(S.sanitise_log([
+        "Device connected: ABC v=v2.9.13 at 10.10.1.60 caps=[mic]",
+        "associated bssid 24:5a:4c:83:7b:e5 freq 5805",
+    ]))
+    assert "10.10.1.60" not in out and "<ip>" in out
+    assert "24:5a:4c:83:7b:e5" not in out and "<mac>" in out
+    assert "v=v2.9.13" in out, "the diagnostic content must survive"
 
 
 def test_config_redaction_catches_credential_shaped_keys():

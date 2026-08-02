@@ -3224,7 +3224,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             "rtt_ms":       getattr(live, "rtt_last_ms", None) if live else None,
             "volume":       getattr(live, "volume", None) if live else None,
             "media_state":  em_player.state(did),
-            "stats":        (live.stats if live else None),
+            "stats":        em_support.redact_stats(live.stats if live else None),
         }
         turns += await loop.run_in_executor(None, db.get_turns, did, 50, since)
         metrics += [type("R", (dict,), {"keys": lambda self: list(dict.keys(self))})(m)
