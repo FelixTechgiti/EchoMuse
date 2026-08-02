@@ -640,3 +640,42 @@ are **append-only and in ascending date order** — new work goes at the end.
   attribute bound. Those need opposite fixes and were indistinguishable from
   the controller, which is exactly why the question could not be answered
   remotely.
+
+- **2026-08-02 — a diagnostic that could not diagnose the thing it was built for.**
+  The support bundle shipped, and Wil asked the question that mattered: would
+  it actually have answered the two open reports? Checking rather than
+  asserting said **no**, and the reason was structural. `controller_log_tail`
+  was not the controller's log at all — it was the relayed per-device table,
+  87% of which was `[mem]` heap dumps (294 lines of 339). Every line that
+  would have explained #62 — the media state pushed to HA, the ESPHome
+  command flow, the barge-in decisions — goes to stdout, and stdout was in
+  the bundle nowhere. **A bundle that cannot answer the issue it was built
+  for is a worse failure than a missing field**, because it looks full of
+  data. The controller's own log now rides in a bounded ring, sized against a
+  measured 38 lines/min of which 65% was `aiohttp.access` — the dashboard
+  polling itself. At the 600 lines it started with, that ring covered sixteen
+  minutes: it would have reliably contained everything except the event
+  someone opened a bundle to report.
+
+  Running one against the live fleet found what review had not. Wil spotted
+  his own username in it — `Shell session opened by wil`, ordinary prose with
+  no quotes, no URL and no identifier shape, so every sanitiser rule passed it
+  through, and my own audit missed it because I had checked password hashes
+  but never the name itself. It now becomes the account's **role**
+  (`<admin>`), because on a single-operator install any placeholder is
+  one-to-one with a real person — and the role is the part with diagnostic
+  value anyway.
+
+  The same pass found the quieter one. `_METRIC_FIELDS` allowlisted
+  `cpu_sum`/`mem_used_sum`, the *table's* column names, while
+  `db.get_device_metrics` resolves those sums into averages at read. The names
+  matched nothing, so every bundle had silently shipped without any device CPU
+  or memory figure — most of the reason to include metrics. **An allowlist
+  naming a key nothing produces fails silently and still looks careful.** A
+  test now diffs it against the reader's own source. The rows carried no
+  `device_id` either, so six devices' hours pooled into one anonymous list.
+
+  A correction worth recording: I reported `wil` as still leaking after the
+  fix. It was `"will be rejected"` — a substring search on a three-letter
+  name. Word-boundary matching showed it absent. The wrong tool made me report
+  a leak that was not there, one step after failing to report one that was.
