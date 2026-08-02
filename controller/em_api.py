@@ -71,6 +71,19 @@ log = logging.getLogger("echomuse.api")
 # and it needs no procfs.
 _PROCESS_START = time.time()
 
+# CPU over 1m/5m/1h, fed by the event-loop lag monitor (see sample_cpu). The
+# ring is bounded by its longest window; nothing here runs per request.
+_cpu_history = em_support.CpuHistory()
+CPU_SAMPLE_INTERVAL_S = em_support.CpuHistory.INTERVAL_S
+
+
+def sample_cpu() -> None:
+    """
+    Take one CPU sample. Called from em_controller's existing 1s ticker, not
+    on a task of its own — the cost is one os.times() every INTERVAL_S.
+    """
+    _cpu_history.add(time.monotonic(), sum(os.times()[:2]))
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -3292,8 +3305,13 @@ def _controller_stats() -> dict:
         # nothing — it reads as 1147% and looks like a controller on fire.
         # Omitted rather than reported wrong; a bundle taken in the first
         # seconds of a run has no CPU history worth having anyway.
+        # Percent of ONE core, as `top` reports it — over 100 means more than
+        # a core's worth. The windowed figures are what point anywhere: a
+        # lifetime average cannot tell a controller busy right now from one
+        # that was busy for an hour this morning.
+        stats.update(_cpu_history.windows(time.monotonic(), cpu_time))
         if uptime >= 5.0:
-            stats["cpu_pct"] = round(100.0 * cpu_time / uptime, 1)
+            stats["cpu_pct_life"] = round(100.0 * cpu_time / uptime, 1)
     except Exception:
         pass
 
@@ -3377,9 +3395,12 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         live_state=live_state,
         log_tail=logs,
         # From the user table, not guessed at: an account name in log prose
-        # has nothing to pattern-match on.
-        usernames=[u["username"] for u in
-                   await loop.run_in_executor(None, db.get_all_users)],
+        # has nothing to pattern-match on. Mapped to the ROLE it is replaced
+        # with — "an admin opened a shell" is the diagnostic content, and
+        # this is a single-operator system, so a positional alias would be a
+        # one-to-one stand-in for a real person.
+        accounts={u["username"]: u["role"] for u in
+                  await loop.run_in_executor(None, db.get_all_users)},
         controller_stats=await loop.run_in_executor(None, _controller_stats),
     )
     body = em_support.to_json(bundle)

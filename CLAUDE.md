@@ -435,9 +435,23 @@ appear **nowhere in the serialised output** rather than checking field-by-field
    has no identifier shape, so every other rule passed it through (found by
    Wil in a real bundle, 2026-08-02). The names come from the **user table**,
    never a pattern, and are replaced longest-first: with `wil` and
-   `wilbowes`, the short one first leaves `<user>bowes`. This is also why the
+   `wilbowes`, the short one first leaves `<admin>bowes`. A name becomes its
+   **role** (`<admin>`), not a positional alias — this is a single-operator
+   system, so `user-1` would be one-to-one with a real person, and the role
+   is the diagnostic content anyway. The role is validated before it is
+   published; it comes from a database column. This is also why the
    controller's own stats report **sizes and never paths** — a data directory
    is `/home/<name>/…` on a bare-metal install.
+
+**Controller CPU is reported over 1m/5m/1h, not just a lifetime average**
+(`em_support.CpuHistory`), because a lifetime figure cannot tell a controller
+busy *now* from one that was busy for an hour this morning, and those want
+opposite investigations. Percent of ONE core, as `top` reports it — over 100%
+is a real reading, not a bug. Sampled on the **existing** event-loop lag
+ticker (one `os.times()` per 30s, ring bounded to the longest window); do not
+give it a task of its own. A window with less than half its span of history
+is **omitted rather than extrapolated** — 40s of data reported as `cpu_pct_1h`
+is a wrong answer, a missing key is visibly missing.
 
 **An allowlist naming a key nothing produces fails silently and still looks
 careful.** `_METRIC_FIELDS` listed the `device_metrics` *column* names while

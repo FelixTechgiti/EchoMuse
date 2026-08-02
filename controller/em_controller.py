@@ -2882,12 +2882,19 @@ async def event_loop_lag_monitor(interval: float = 1.0,
     """
     global _loop_lag_peak_ms
     loop = asyncio.get_event_loop()
+    next_cpu = 0.0
     while True:
         t0 = loop.time()
         await asyncio.sleep(interval)
         lag_ms = (loop.time() - t0 - interval) * 1000
         if lag_ms > _loop_lag_peak_ms:
             _loop_lag_peak_ms = lag_ms
+        # Piggyback the controller's CPU sampling on this ticker rather than
+        # starting a second one: it is one os.times() every 30s, and the
+        # windowed CPU it feeds is only read when a support bundle is built.
+        if loop.time() >= next_cpu:
+            next_cpu = loop.time() + api.CPU_SAMPLE_INTERVAL_S
+            api.sample_cpu()
         if lag_ms >= warn_ms:
             log.warning(
                 f"[loop] event loop stalled {lag_ms:.0f}ms — "

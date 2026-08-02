@@ -650,7 +650,11 @@ def test_support_bundle_redacts_account_names():
     # "return web.Response", not "web.Response" — the latter is the handler's
     # own return annotation and slices the body away to nothing.
     body = src.split("_get_support_bundle")[-1].split("return web.Response")[0]
-    assert "usernames=" in body and "get_all_users" in body, (
-        "the support bundle must pass the real usernames to em_support — "
+    assert "accounts=" in body and "get_all_users" in body, (
+        "the support bundle must pass the real accounts to em_support — "
         "there is nothing in a log line to pattern-match them by"
+    )
+    assert '"role"' in body, (
+        "accounts must carry the role: a name is replaced by <admin>, and a "
+        "positional alias would be one-to-one with a real person"
     )

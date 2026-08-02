@@ -39,7 +39,7 @@ SECRETS = {
     "username": "wilbowes",
 }
 
-USERNAMES = [SECRETS["username"], "wil"]
+ACCOUNTS = {SECRETS["username"]: "admin", "wil": "admin", "sam": "readonly"}
 
 
 def _bundle():
@@ -96,8 +96,8 @@ def _bundle():
             f"Shell session opened by {SECRETS['username']}",
             "Shell session closed by wil",
         ],
-        usernames=USERNAMES,
-        controller_stats={"cpu_pct": 12.4, "rss_mb": 210.5, "db_mb": 38.2,
+        accounts=ACCOUNTS,
+        controller_stats={"cpu_pct_1m": 12.4, "rss_mb": 210.5, "db_mb": 38.2,
                           "data_free_mb": 51204.0, "uptime_s": 3600,
                           # Not allowlisted: a data directory carries the
                           # account name on a bare-metal install.
@@ -215,9 +215,9 @@ def test_account_names_are_stripped_from_log_prose():
     """
     out = "\n".join(S.sanitise_log(
         ["Shell session opened by wil", "Login failed for wilbowes"],
-        usernames=USERNAMES))
+        accounts=ACCOUNTS))
     assert "wil" not in out and "wilbowes" not in out
-    assert out.count("<user>") == 2
+    assert out.count("<admin>") == 2, "a name becomes its role, not an alias"
     assert "Shell session opened by" in out, "the event must survive the name"
 
 
@@ -226,8 +226,9 @@ def test_longer_usernames_are_replaced_before_their_prefixes():
     With users `wil` and `wilbowes`, replacing the short one first leaves
     `<user>bowes` — the leak, still legible, wearing a redaction marker.
     """
-    out = "\n".join(S.sanitise_log(["opened by wilbowes"], usernames=["wil", "wilbowes"]))
-    assert out == ["opened by <user>"][0]
+    out = "\n".join(S.sanitise_log(["opened by wilbowes"],
+                                   accounts={"wil": "admin", "wilbowes": "admin"}))
+    assert out == "opened by <admin>"
 
 
 def test_username_redaction_does_not_eat_substrings():
@@ -235,13 +236,13 @@ def test_username_redaction_does_not_eat_substrings():
     Word boundaries: a user called `sam` must not turn `samples=120` into
     `<user>ples=120` and destroy the diagnostic.
     """
-    out = "\n".join(S.sanitise_log(["stats samples=120 for sam"], usernames=["sam"]))
-    assert "samples=120" in out and out.endswith("<user>")
+    out = "\n".join(S.sanitise_log(["stats samples=120 for sam"], accounts={"sam": "readonly"}))
+    assert "samples=120" in out and out.endswith("<readonly>")
 
 
 def test_no_usernames_is_not_an_error():
     """A fresh install with no users must not blow up the bundle."""
-    assert S.sanitise_log(["nothing to redact"], usernames=[]) == ["nothing to redact"]
+    assert S.sanitise_log(["nothing to redact"], accounts={}) == ["nothing to redact"]
     assert S.sanitise_log(["nothing to redact"]) == ["nothing to redact"]
 
 
@@ -253,7 +254,7 @@ def test_controller_stats_are_allowlisted():
     """
     b = _bundle()
     stats = b["controller"]["stats"]
-    assert stats["cpu_pct"] == 12.4 and stats["rss_mb"] == 210.5
+    assert stats["cpu_pct_1m"] == 12.4 and stats["rss_mb"] == 210.5
     assert stats["db_mb"] == 38.2 and stats["uptime_s"] == 3600
     assert "data_dir" not in stats, "paths must never be reported"
 
@@ -296,3 +297,79 @@ def test_metrics_carry_the_device_they_belong_to():
     assert b["metrics"], "fixture should produce a metric row"
     for m in b["metrics"]:
         assert m.get("device_id"), "every metric row must name its device"
+
+
+def test_the_role_is_published_not_the_person():
+    """
+    A single-operator install has one account, so `user-1` would be a
+    one-to-one alias for a real person. `<admin>` says the thing worth
+    knowing — who had the authority to do it — and says nothing about who.
+    """
+    out = "\n".join(S.sanitise_log(
+        ["Shell session opened by wil", "config changed by sam"],
+        accounts={"wil": "admin", "sam": "readonly"}))
+    assert "<admin>" in out and "<readonly>" in out
+    assert "wil" not in out and "sam" not in out
+
+
+def test_a_junk_role_does_not_reach_the_published_file():
+    """The role is a database column, so it is checked, not trusted."""
+    out = "\n".join(S.sanitise_log(
+        ["opened by bob"], accounts={"bob": "admin<script>alert(1)</script>"}))
+    assert out == "opened by <user>"
+
+
+class TestCpuWindows:
+    """
+    CPU over 1m/5m/1h. Fed explicit samples so the maths is tested without
+    sleeping for an hour.
+    """
+
+    def _history(self, points):
+        h = S.CpuHistory()
+        for t, cpu in points:
+            h.add(t, cpu)
+        return h
+
+    def test_windows_report_percent_of_one_core(self):
+        # 30s of wall clock, 15s of CPU consumed = 50% of one core.
+        h = self._history([(0.0, 0.0), (30.0, 15.0), (60.0, 30.0)])
+        out = h.windows(60.0, 30.0)
+        assert out["cpu_pct_1m"] == 50.0
+
+    def test_over_one_hundred_percent_is_reported_not_clamped(self):
+        """More than a core's worth is exactly what a runaway looks like."""
+        h = self._history([(0.0, 0.0), (60.0, 150.0)])
+        out = h.windows(60.0, 150.0)
+        assert out["cpu_pct_1m"] == 250.0
+
+    def test_a_window_without_enough_history_is_omitted(self):
+        """
+        Reporting 40 seconds of data as `cpu_pct_1h` is a wrong answer; a
+        missing key is one the reader can see is missing.
+        """
+        h = self._history([(0.0, 0.0), (30.0, 5.0), (60.0, 10.0)])
+        out = h.windows(60.0, 10.0)
+        assert "cpu_pct_1m" in out
+        assert "cpu_pct_5m" not in out and "cpu_pct_1h" not in out
+
+    def test_recent_load_is_distinguishable_from_an_old_burst(self):
+        """
+        The whole reason for windows: an hour of idle after a busy hour must
+        not read the same as busy now.
+        """
+        pts = [(float(t), 0.0) for t in range(0, 1800, 30)]          # idle
+        pts += [(float(t), (t - 1800) * 0.9) for t in range(1800, 3660, 30)]  # busy
+        h = self._history(pts)
+        out = h.windows(3630.0, (3630 - 1800) * 0.9)
+        assert out["cpu_pct_1m"] == 90.0, "recent load must show at 1m"
+        assert out["cpu_pct_1h"] < out["cpu_pct_1m"], \
+            "the hour includes the idle half and must read lower"
+
+    def test_the_ring_stays_bounded(self):
+        """A day of sampling must not accumulate a day of samples."""
+        h = S.CpuHistory()
+        for i in range(0, 86400, 30):
+            h.add(float(i), i * 0.1)
+        expected = S.CpuHistory.WINDOWS[-1][0] / S.CpuHistory.INTERVAL_S
+        assert len(h._samples) <= expected + 3, "ring should hold ~1h of samples"
