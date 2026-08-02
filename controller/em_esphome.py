@@ -687,11 +687,19 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     # ── Announcement handling ────────────────────────────────────────────
 
     def _media_state_msg(self) -> "api_pb2.MediaPlayerStateResponse":
-        """Current media_player state as HA should see it (em_player truth)."""
+        """
+        Current media_player state as HA should see it.
+
+        reported_state, not state: while a voice turn owns the speaker our
+        internal state is PAUSED but HA must keep seeing PLAYING, or a spoken
+        "pause" is answered with "already paused" and never sent (#62). This
+        message goes out on volume reports and at turn end, so reading raw
+        state here would undo the fix from the other direction.
+        """
         device_id = (self._owning_server.device_id
                      if self._owning_server is not None else None)
         st = _MP_STATE.get(
-            em_player.state(device_id) if device_id else "idle",
+            em_player.reported_state(device_id) if device_id else "idle",
             MediaPlayerState.IDLE,
         )
         return api_pb2.MediaPlayerStateResponse(
