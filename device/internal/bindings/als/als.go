@@ -33,9 +33,17 @@ import (
 // driverName is the sysfs `name` of the sensor that has a usable interface.
 const driverName = "tsl2540"
 
+// RetryInterval bounds how often an unresolved sensor is looked for again.
+// The scan is a glob plus a handful of small sysfs reads, so this is about
+// not doing it every second for the life of a device that genuinely has no
+// sensor, not about the cost of any single scan.
+const RetryInterval = 30 * time.Second
+
 var (
-	once sync.Once
-	path string // absolute path to als_lux; empty when there is no sensor
+	mu       sync.Mutex
+	path     string    // absolute path to als_lux; empty when unresolved
+	lastScan time.Time // when we last looked, for the retry interval
+	reported bool      // absence logged once, not every retry
 )
 
 // resolve finds the sensor BY NAME, not by i2c address.
@@ -44,33 +52,70 @@ var (
 // enumeration accident: hardcoding it would work here and silently read
 // nothing on a device that enumerated differently. Same reasoning as
 // resolving thermal zones by type rather than by index.
+//
+// A NEGATIVE RESULT IS NOT CACHED. This used to be a sync.Once, which meant
+// one failed lookup disabled the sensor for the entire life of the process —
+// and the first lookup happens at registration, moments after a cold boot,
+// which is precisely when sysfs is least likely to be complete. The device
+// then reported no `ambient_light` capability until something restarted it,
+// with nothing in the log to say the answer had been frozen. Absence must
+// stay re-checkable; a device that gains the sensor picks it up on the next
+// scan and declares the capability at its next registration.
 func resolve() string {
-	once.Do(func() {
-		names, err := filepath.Glob("/sys/bus/i2c/devices/*/name")
+	mu.Lock()
+	defer mu.Unlock()
+	if path != "" {
+		return path
+	}
+	if !lastScan.IsZero() && time.Since(lastScan) < RetryInterval {
+		return ""
+	}
+	lastScan = time.Now()
+
+	names, err := filepath.Glob("/sys/bus/i2c/devices/*/name")
+	if err != nil {
+		return ""
+	}
+	// Record what IS on the bus, so an absence can be diagnosed remotely
+	// from a log line instead of a round trip asking someone to run i2c
+	// commands on a device they just flashed.
+	seen := make([]string, 0, len(names))
+	nameMatched := false
+	for _, n := range names {
+		b, err := os.ReadFile(n)
 		if err != nil {
-			return
+			continue
 		}
-		for _, n := range names {
-			b, err := os.ReadFile(n)
-			if err != nil {
-				continue
-			}
-			if strings.TrimSpace(string(b)) != driverName {
-				continue
-			}
-			p := filepath.Join(filepath.Dir(n), "als_lux")
-			// A matching name is not enough — the 2584 on this same bus has
-			// a name and no readable attributes at all.
-			if _, err := os.Stat(p); err != nil {
-				continue
-			}
-			path = p
-			log.Printf("[als] ambient light sensor at %s", path)
-			return
+		got := strings.TrimSpace(string(b))
+		seen = append(seen, got)
+		if got != driverName {
+			continue
 		}
-		log.Printf("[als] no ambient light sensor found")
-	})
-	return path
+		nameMatched = true
+		p := filepath.Join(filepath.Dir(n), "als_lux")
+		// A matching name is not enough — the 2584 on this same bus has
+		// a name and no readable attributes at all.
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		path = p
+		log.Printf("[als] ambient light sensor at %s", path)
+		return path
+	}
+	if !reported {
+		reported = true
+		// The two failures need opposite fixes and look identical from the
+		// controller, so name which one it is: no chip on the bus at all,
+		// versus the chip present with no driver attribute bound to it.
+		if nameMatched {
+			log.Printf("[als] %s found but no als_lux attribute — driver not bound; "+
+				"ambient light unavailable", driverName)
+		} else {
+			log.Printf("[als] no %s on i2c (saw: %s) — ambient light unavailable, "+
+				"rechecking every %s", driverName, strings.Join(seen, ","), RetryInterval)
+		}
+	}
+	return ""
 }
 
 // Present reports whether this device has a readable ambient light sensor.

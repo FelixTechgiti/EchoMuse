@@ -133,6 +133,36 @@ def is_playing(device_id: str) -> bool:
     return state(device_id) == PLAYING
 
 
+def reported_state(device_id: str) -> str:
+    """
+    What Home Assistant should believe, which is deliberately NOT always our
+    internal state.
+
+    While a voice turn owns the speaker we pause the wire, but that pause is
+    OURS and invisible to the user — from where they are standing the music is
+    playing and the assistant is talking over it. Home Assistant must keep
+    seeing PLAYING for the length of the turn.
+
+    This is #62. Reporting the internal PAUSED made Home Assistant answer
+    "it's already paused" to a spoken pause request and **never send the
+    command** — so `pause()` below was never called, no intent was recorded,
+    and `resume_interrupted` then put the music back. The user's pause was
+    silently dropped and then contradicted, which is exactly what was
+    reported. Note the entity was never *wrong* about our state machine; it
+    was wrong about what the user could see, and HA acts on the latter.
+
+    Once the user does issue a command during the turn, `pending` holds it and
+    the real state is reported again — by then the entity state agrees with
+    something the user actually asked for.
+    """
+    s = _sessions.get(device_id)
+    if s is None:
+        return IDLE
+    if s.owned_by_turn and s.resume_after and s.pending is None:
+        return PLAYING
+    return s.state
+
+
 async def play(device_id: str, url: str) -> None:
     s = _session(device_id)
     if s.owned_by_turn:
@@ -152,6 +182,10 @@ async def pause(device_id: str) -> None:
         # Already paused on the wire by interrupt(); record that the user now
         # OWNS the paused state so the turn's end does not undo it.
         s.pending = ("pause", None)
+        # Push it: until now HA was told PLAYING (see reported_state), because
+        # our own interrupt-pause must not read as the user's. Now that they
+        # have asked, the entity should say so without waiting for turn end.
+        await s.push_intent(PAUSED)
         return
     await s.pause()
 
@@ -375,9 +409,11 @@ class MediaSession:
                 log.warning(f"[{self.device_id}] media intent push failed: {e}")
 
     async def _push_state(self) -> None:
+        # reported_state, not self.state: an interrupt-pause during a turn
+        # must not reach HA as a real pause (#62).
         if _notify_state is not None:
             try:
-                await _notify_state(self.device_id, self.state)
+                await _notify_state(self.device_id, reported_state(self.device_id))
             except Exception as e:
                 log.warning(f"[{self.device_id}] media state push failed: {e}")
 

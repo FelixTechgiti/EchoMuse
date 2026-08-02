@@ -280,6 +280,74 @@ def test_pausing_during_a_barge_in_stays_paused():
     asyncio.run(main())
 
 
+def test_barge_in_does_not_tell_home_assistant_the_music_is_paused():
+    """
+    Issue #62, and the reason #53's fix did not settle it.
+
+    #53 assumed the user's pause REACHES em_player.pause(). It does not. Our
+    interrupt-pause pushed PAUSED to the media_player entity, so Home
+    Assistant answered a spoken "pause the music" with "it's already paused"
+    and never sent the command — no intent recorded, and the auto-resume then
+    put the music back. Reported as: "I get a response telling me that the
+    player is already paused, and then after the response the music un-pauses
+    and continues playing."
+
+    The entity was never wrong about our state machine; it was wrong about
+    what the user could see, and HA acts on the latter.
+    """
+    async def main():
+        device = FakeDevice()
+        pushed = _recording_wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        pushed.clear()
+
+        await em_player.interrupt("office")
+        assert s.state == PAUSED, "the wire must still be paused for the turn"
+        assert PAUSED not in pushed, (
+            "HA was told the music is paused; it will refuse to send the "
+            "user's pause command and the turn will resume over the top"
+        )
+        assert em_player.reported_state("office") == PLAYING
+
+        # Everything HA asks mid-turn — a volume report, turn end — must agree.
+        await em_player.resume_interrupted("office")
+        await asyncio.sleep(0.05)
+        assert s.state == PLAYING, "the ordinary barge-in must still resume"
+        await s.stop()
+    asyncio.run(main())
+
+
+def test_a_real_pause_during_a_turn_is_still_reported_to_home_assistant():
+    """
+    The other half: once the user HAS asked, the entity must say paused
+    without waiting for the turn to end — otherwise the fix above just moves
+    the staleness rather than removing it.
+    """
+    async def main():
+        device = FakeDevice()
+        pushed = _recording_wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0.05)
+        await em_player.interrupt("office")
+        pushed.clear()
+
+        await em_player.pause("office")
+        assert PAUSED in pushed, "HA was not told the user's pause took effect"
+        assert em_player.reported_state("office") == PAUSED
+
+        await em_player.resume_interrupted("office")
+        assert s.state == PAUSED, "the turn's end contradicted the user's pause"
+        await s.stop()
+    asyncio.run(main())
+
+
 def test_stop_during_a_barge_in_stays_stopped():
     """
     The behaviour pause is being made consistent with. Worth pinning: it is
