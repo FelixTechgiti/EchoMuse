@@ -605,3 +605,38 @@ are **append-only and in ascending date order** — new work goes at the end.
 
   Two things nearly shipped broken. `cut` is not on this device's PATH, so the uptime field logged empty — losing the one timestamp that is trustworthy at boot, in a file whose whole purpose is boot-time diagnosis. It looked fine: right location, plausible content, survived a reboot. It failed only on reading the values. And a watcher goroutine captured `controlClient` before it existed — which `go build ./...` on the host **cannot** catch, because `cmd/` is excluded from an amd64 build by the constraints on mic/speaker. My own check compounded it by piping the build through `head`, so the pipeline reported success regardless of the compiler. Only `compile.sh` compiles that file.
 
+
+- **2026-08-02 — the barge-in pause that Home Assistant was right to refuse.**
+  A user reported the #53 fix had not settled it: music playing, wake word
+  interrupts, "pause the music", and the music comes back at the end of the
+  turn — with the assistant first saying it was *already* paused.
+
+  Instrumenting the live fleet said Home Assistant never sent a pause command
+  at all, and I read that as exonerating the controller. It was the symptom.
+  `interrupt()` pauses the wire and pushed that `PAUSED` to the `media_player`
+  entity, so HA declined — correctly — to pause something it had been told was
+  already paused. No command meant no recorded intent, and `resume_after` then
+  put the music back. #53's fix makes a user pause win over the auto-resume,
+  and it does win; it just never arrives.
+
+  **The entity was never wrong about our state machine. It was wrong about
+  what the user could see, and Home Assistant acts on the latter.** So the
+  entity now keeps reporting `PLAYING` while a turn owns the speaker, and the
+  real state returns once the user has actually asked for something. The same
+  source has to feed `_media_state_msg()`, which rides volume reports and turn
+  end and would otherwise have undone the fix from the other side — the same
+  shape as #53 surviving its own first fix.
+
+  The other half of that report, a missing ambient light sensor, is still
+  unexplained, and the useful part was being made to stop guessing. I reached
+  for "different hardware", then for a cold-boot race, and hardware falsified
+  the second: the office device enumerates `tsl2540` at `0-0039` and resolves
+  it two seconds after a cold boot. What the code *did* have was a real defect
+  found on the way — `resolve()` cached a **negative** result in a `sync.Once`,
+  so one failed lookup disabled the sensor for the life of the process with
+  nothing in the log to say the answer had been frozen. Absence is now
+  re-checkable, and a failed lookup names which failure it is: no chip on the
+  bus (listing what was there) versus the chip present with no `als_lux`
+  attribute bound. Those need opposite fixes and were indistinguishable from
+  the controller, which is exactly why the question could not be answered
+  remotely.
