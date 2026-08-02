@@ -360,6 +360,12 @@ def test_every_db_call_in_em_api_exists():
     } | {
         t.id for n in db_tree.body if isinstance(n, ast.Assign)
         for t in n.targets if isinstance(t, ast.Name)
+    } | {
+        # Annotated module constants, e.g. `MIGRATIONS: list[str] = [...]`.
+        # Missing these produced a false positive on db.MIGRATIONS, which is
+        # the failure mode that gets a guard disabled rather than fixed.
+        n.target.id for n in db_tree.body
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
     }
     missing = sorted(used - defined)
     assert not missing, f"em_api.py calls db.{{{', '.join(missing)}}} which em_db.py does not define"

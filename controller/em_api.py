@@ -54,8 +54,10 @@ import em_config_sections as sections_mod
 import em_oww_assets
 import em_oww_models
 import em_pki
+import em_player
 import em_recordings
 import em_scenes
+import em_support
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
 from version import parse as _parse_version
@@ -260,6 +262,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/global/config",  _post_global_config)
 
     # System
+    app.router.add_get("/api/support/bundle",  _get_support_bundle)
     app.router.add_get("/api/system/status",    _get_system_status)
     app.router.add_get("/api/system/config",    _get_system_config)
     app.router.add_patch("/api/system/config",  _patch_system_config)
@@ -3186,6 +3189,69 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
         body=data,
         content_type="application/octet-stream",
         headers={"X-Asset-MD5": asset.md5},
+    )
+
+
+
+@auth.require_admin
+async def _get_support_bundle(request: web.Request) -> web.Response:
+    """
+    GET /api/support/bundle — one file to attach to an issue.
+
+    Admin-only, and deliberately a download rather than a display: it is
+    meant to be reviewed before it is shared. The privacy contract lives in
+    em_support (allowlist, no speech, no labels, no network identifiers) and
+    is enforced there, not here — this function only gathers.
+    """
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, db.get_all_devices)
+
+    since = time.time() - 24 * 3600
+    turns, metrics, counters = [], [], []
+    device_configs, live_state, logs = {}, {}, []
+
+    for row in rows:
+        did = row["device_id"]
+        device_configs[did] = await loop.run_in_executor(
+            None, db.get_effective_device_config, did)
+        live = _devices.get(did)
+        live_state[did] = {
+            "connected":    live is not None,
+            # Capabilities decide which HA entities are advertised at all,
+            # which is the first thing to check when one is "missing".
+            "capabilities": list(getattr(live, "capabilities", []) or []) if live else [],
+            "muted":        getattr(live, "muted", None) if live else None,
+            "rtt_ms":       getattr(live, "rtt_last_ms", None) if live else None,
+            "volume":       getattr(live, "volume", None) if live else None,
+            "media_state":  em_player.state(did),
+            "stats":        em_support.redact_stats(live.stats if live else None),
+        }
+        turns += await loop.run_in_executor(None, db.get_turns, did, 50, since)
+        metrics += [type("R", (dict,), {"keys": lambda self: list(dict.keys(self))})(m)
+                    for m in await loop.run_in_executor(None, db.get_device_metrics, did, since)]
+        counters += await loop.run_in_executor(None, db.get_wake_counters, did, since)
+        for lg in await loop.run_in_executor(None, db.get_device_logs, did, 100, None):
+            logs.append(f"{lg['ts']} [{lg['level']}] {lg['source']}: {lg['message']}")
+
+    bundle = em_support.build(
+        controller_version=CONTROLLER_VERSION,
+        devices=rows,
+        fleet_config=await loop.run_in_executor(None, db.get_global_device_config),
+        schema_version=len(db.MIGRATIONS),
+        turns=turns,
+        metrics=metrics,
+        counters=counters,
+        device_configs=device_configs,
+        live_state=live_state,
+        log_tail=logs,
+    )
+    body = em_support.to_json(bundle)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return web.Response(
+        body=body.encode(),
+        content_type="application/json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="echomuse-support-{stamp}.json"'},
     )
 
 

@@ -408,6 +408,39 @@ Every voice turn is persisted to SQLite at completion (`turns` table, `db.insert
 
 **Utterance recordings (schema v12).** Opt-in per device via `saveUtterances` (Config → Microphones): the mic audio streamed to HA for a turn is kept as a 16kHz mono WAV in `recordings/` beside the DB, playable and downloadable from each turn's row in the Activity tab (`GET /api/devices/{id}/turns/{turn}/audio`). Lets you hear what STT heard instead of inferring it from a bad transcript. Buffered in `_stream_mic_audio` **below the denoiser**, so the file is byte-for-byte the ESPHome wire payload — it first shipped tapped pre-NS, which answered "how good is the mic" but could not answer "why was the transcript wrong" on any device with `nsAsr` on, and that is the question people actually ask. **Keep the tap below NS**; if a raw comparison is ever wanted it belongs as a *second* file, not by moving this one. Capped at `MAX_UTTERANCE_BYTES` (30s), written in `_persist_turn` because the filename is keyed on the turn's rowid. Retention is a hard per-device **file count** (`em_recordings.KEEP_PER_DEVICE`=10) — much shorter than `TURN_RETENTION`, so **a non-NULL `audio_file` on an older row is a claim to check, not to trust**; every reader goes through `em_recordings.resolve`, which also re-checks that the file belongs to the device in the URL (the endpoint takes both from the path) and treats a missing file as an ordinary 404. Default OFF and it should stay that way: this is the only feature that writes recognisable speech to disk. `db.delete_device` unlinks a device's recordings explicitly — nothing cascades to the filesystem. Note the dashboard fetches the WAV via `API.blob` rather than an `<a href>`: sessions are Bearer-header-only, no cookie is ever set, so browser-initiated requests would 401.
 
+## Support bundles (`em_support.py`)
+
+`GET /api/support/bundle` (admin) produces one JSON file for attaching to a
+public issue — built because remote diagnosis was costing days per round trip
+(#62 could not be answered without knowing which entity a user's pause reached).
+
+**It is an ALLOWLIST and must stay one.** Fields are named individually, so a
+new database column is excluded until someone deliberately adds it: the
+failure mode is that support loses a field, never that user data reaches a
+public issue. A denylist gets this wrong once and it is unrecoverable.
+
+Three rules, enforced by `tests/test_support.py`, which asserts secret values
+appear **nowhere in the serialised output** rather than checking field-by-field
+— a leak through a log line or nested config is the one nobody predicts:
+
+1. **No speech, and no opt-in for it.** `stt_text` and recordings are out.
+   `build()` must not grow a `transcripts` parameter; a test asserts that,
+   because a flag is a thing people tick.
+2. **No user-authored free text.** Device labels routinely contain names
+   ("Bedroom - Sam"), so they are replaced with positional pseudonyms.
+3. **No network identifiers.** SSID, BSSID and IP are excluded — an SSID is
+   geolocatable from public wardriving databases.
+
+Log lines are **sanitised, never passed through**: quoted strings and URLs are
+replaced, and lines from transcript-bearing sources (`STT result`, `text=`,
+`Utterance saved`) are dropped whole rather than edited, since partially
+redacting a line that quotes a transcript is a bet on a regex. Order matters —
+quotes are substituted before URLs, or the URL pattern eats the closing quote
+and leaves the line malformed.
+
+Serials ARE included: nothing correlates without them, and they identify the
+user's own hardware to them. User-facing contract: `docs/support-bundle.md`.
+
 ## OTA update system
 
 **When an update fails, the device explains itself.** `start_server.sh` logs
