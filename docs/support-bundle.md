@@ -28,6 +28,8 @@ Excluded, with no option to include them:
 | **Device labels** | You wrote them, and they routinely contain names — "Bedroom - Sam" is a real example. Replaced with `device-1`, `device-2`… |
 | **Network identifiers** — WiFi SSID, BSSID, IP addresses | An SSID is geolocatable from public wardriving databases, so publishing one discloses roughly where you live. |
 | **Credentials** — device tokens, ESPHome PSKs, password hashes, login sessions | Obvious, but stated so it is checkable. |
+| **Dashboard account names** | They appear in log lines like "Shell session opened by …", which nothing else here would have caught. Replaced with `<user>`. |
+| **File paths** | A data directory is `/home/<your name>/…` on a bare-metal install, so the controller reports sizes only. |
 | **URLs and quoted strings in log lines** | Media URLs carry provider paths and session tokens; quoted strings in turn traces carry transcripts. |
 
 Log lines from sources known to carry speech are dropped **whole** rather than
@@ -44,7 +46,8 @@ on a regular expression.
 | **Capabilities** (`mic`, `oww_shadow`, `ambient_light`…) | Decides which Home Assistant entities exist at all. "The light sensor didn't appear" is answered here in one line. |
 | Configuration — thresholds, EQ, LED scenes, wake model | Behaviour, not identity. Keys whose *name* looks credential-shaped are redacted anyway. |
 | Turn metadata — outcome, wake score, stage latencies, underruns | What happened and how long each stage took. No words, just timings and outcomes. |
-| Hourly metrics — CPU, memory, temperature, RSSI, RTT | Trends. Signal strength is included; the network's name is not. |
+| Hourly metrics per device — CPU, memory, storage, temperature, RSSI, RTT | Trends. Signal strength is included; the network's name is not. |
+| The controller's own CPU, memory, storage and uptime | A device starving for audio can be the host running out of CPU, memory or disk. Without this half, the bundle shows the symptom and hides the cause. Sizes and counts only, never paths. |
 | Wake counters — near-misses, on-device drops, inference timings | Wake-word behaviour without any audio. |
 | Recent controller log lines, sanitised | Message types and timings, with quoted text and URLs removed. |
 

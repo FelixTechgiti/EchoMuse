@@ -30,6 +30,9 @@ Three rules, in order of how badly they would be missed:
 3. **No network identifiers.** SSID, BSSID and IP addresses are excluded.
    An SSID is geolocatable from public wardriving databases, which makes a
    bundle attached to an issue a location disclosure.
+4. **No account names.** Dashboard logins appear in ordinary log prose
+   ("Shell session opened by wil") with nothing to key on, so they are
+   replaced from the user table rather than pattern-matched.
 
 Log lines are sanitised rather than trusted: they are the richest diagnostic
 in the bundle AND the most likely to contain speech, since turn lines carry
@@ -68,15 +71,36 @@ _TURN_FIELDS = (
     "max_gap_ms", "bytes_recv",
 )
 
+# Hourly device metrics, named as `db.get_device_metrics` RETURNS them, not as
+# the table stores them. It resolves its sums into averages at read, so an
+# allowlist written against the column names (`cpu_sum`, `mem_used_sum`,
+# `rssi_sum`, `cpu_temp_sum`) silently matched nothing — every bundle shipped
+# without device CPU or memory usage at all, which is most of the reason to
+# look at metrics. `test_metric_fields_match_reader` fails if they drift again.
+# `wifi_bssid_last` is returned and deliberately NOT listed: it is a network
+# identifier.
 _METRIC_FIELDS = (
-    "device_id", "hour_ts", "samples", "cpu_sum", "cpu_max", "mem_used_sum",
-    "mem_total_mb", "storage_used_mb", "storage_total_mb", "rssi_sum",
-    "rssi_samples", "rssi_min", "link_speed_last", "link_speed_min",
-    "wifi_freq_last", "rtt_sum_ms", "rtt_samples", "rtt_min_ms", "rtt_max_ms",
+    "device_id", "hour_ts", "samples",
+    "cpu_avg", "cpu_max", "mem_used_avg", "mem_total_mb",
+    "storage_used_mb", "storage_total_mb",
+    "rssi_avg", "rssi_min", "link_speed_last", "link_speed_min",
+    "wifi_freq_last", "tx_bytes", "rx_bytes",
+    "rtt_avg_ms", "rtt_samples", "rtt_min_ms", "rtt_max_ms",
     "rtt_excursions", "rtt_excursions_idle", "rtt_samples_idle",
-    "cpu_temp_sum", "cpu_temp_samples", "cpu_temp_max", "max_temp_max",
+    "cpu_temp_avg", "cpu_temp_max", "max_temp_max",
     "cores_online_last", "cores_online_min", "cores_total",
     "thermal_limit_min",
+)
+
+# The controller's own resource use. Nothing here is private in itself, but it
+# is allowlisted like everything else because the tempting things to add — the
+# database path, the hostname, the working directory — carry a username on a
+# bare-metal install. Sizes and counts only, never paths.
+_CONTROLLER_STAT_FIELDS = (
+    "uptime_s", "cpu_pct", "rss_mb", "mem_total_mb", "mem_available_mb",
+    "mem_limit_mb", "load_1", "load_5", "load_15", "cpu_count",
+    "data_used_mb", "data_free_mb", "db_mb", "recordings_mb",
+    "loop_lag_peak_ms", "python", "platform", "container",
 )
 
 # Live device stats. Allowlisted like everything else — an earlier version
@@ -115,7 +139,22 @@ _IPV4 = re.compile(r"""\b\d{1,3}(?:\.\d{1,3}){3}\b""")
 _MAC = re.compile(r"""\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b""")
 
 
-def sanitise_log(lines: list[str]) -> list[str]:
+def _username_pattern(usernames: list[str]) -> re.Pattern | None:
+    """
+    Match the account names of this install, longest first.
+
+    Longest first matters: with users `wil` and `wilbowes`, alternation in the
+    wrong order rewrites the prefix and leaves `user-1bowes` behind.
+    """
+    names = sorted({u for u in (usernames or []) if u and len(u) >= 2},
+                   key=len, reverse=True)
+    if not names:
+        return None
+    return re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b",
+                      re.IGNORECASE)
+
+
+def sanitise_log(lines: list[str], usernames: list[str] | None = None) -> list[str]:
     """
     Make controller log lines safe to publish.
 
@@ -125,7 +164,14 @@ def sanitise_log(lines: list[str]) -> list[str]:
     entirely; everything else keeps its structure with quoted strings and
     URLs replaced, since the timings and message types are the diagnostic
     value, not the payload.
+
+    Account names are replaced too: `Shell session opened by wil` is ordinary
+    log prose with no quotes, no URL and no pattern to key on, so it survived
+    every other rule here. The names are passed in rather than guessed at,
+    because the only reliable definition of "a username on this install" is
+    the user table. Reported by Wil against a real bundle, 2026-08-02.
     """
+    users = _username_pattern(usernames or [])
     out = []
     for ln in lines:
         if any(marker in ln for marker in _LOG_DROP):
@@ -137,6 +183,8 @@ def sanitise_log(lines: list[str]) -> list[str]:
         ln = _URL.sub("<url>", ln)
         ln = _IPV4.sub("<ip>", ln)
         ln = _MAC.sub("<mac>", ln)
+        if users is not None:
+            ln = users.sub("<user>", ln)
         out.append(ln)
     return out
 
@@ -184,6 +232,8 @@ def build(
     device_configs: dict[str, dict],
     live_state: dict[str, dict],
     log_tail: list[str],
+    usernames: list[str] | None = None,
+    controller_stats: dict | None = None,
 ) -> dict:
     """
     Assemble the bundle. Pure — callers do the I/O, so this is testable
@@ -194,21 +244,27 @@ def build(
         "format": 1,
         "redaction": (
             "Allowlisted fields only. Contains no speech, no transcripts, no "
-            "audio, no device labels, and no network identifiers (SSID, "
-            "BSSID, IP). Credentials — device tokens, ESPHome PSKs, password "
-            "hashes, session tokens — are never included. Device serials ARE "
-            "included, so this identifies your own hardware to you."
+            "audio, no device labels, no account names, and no network "
+            "identifiers (SSID, BSSID, IP). Credentials — device tokens, "
+            "ESPHome PSKs, password hashes, session tokens — are never "
+            "included. Device serials ARE included, so this identifies your "
+            "own hardware to you."
         ),
         "controller": {
             "version": controller_version,
             "schema_version": schema_version,
+            # The controller's own resources. Without them a bundle can show
+            # a device starving for audio and give no way to tell whether the
+            # host it streams from was out of CPU, memory or disk at the time.
+            "stats": {k: controller_stats[k] for k in _CONTROLLER_STAT_FIELDS
+                      if k in (controller_stats or {})},
         },
         "fleet_config": redact_config(fleet_config),
         "devices": [],
         "turns": [_pick(t, _TURN_FIELDS) for t in turns],
         "metrics": [_pick(m, _METRIC_FIELDS) for m in metrics],
         "wake_counters": [_pick(c, _COUNTER_FIELDS) for c in counters],
-        "controller_log_tail": sanitise_log(log_tail),
+        "controller_log_tail": sanitise_log(log_tail, usernames),
     }
 
     for n, d in enumerate(devices, start=1):

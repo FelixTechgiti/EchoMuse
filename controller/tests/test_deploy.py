@@ -619,3 +619,38 @@ def test_data_reconnect_grace_is_per_stream_not_per_frame():
         body = body[:body.index("\n    async def ", 1)]
         assert "begin_data_stream()" in body, \
             f"{stream_fn} does not arm the reconnect grace"
+
+
+def test_support_bundle_attributes_metrics_to_a_device():
+    """
+    `db.get_device_metrics` builds its own result dicts and does NOT include
+    the device, so the support handler must attach it. Without that, every
+    device's hourly CPU, memory and RTT pool into one flat anonymous list —
+    present in the bundle, useless for diagnosis, and wrong in the quiet way
+    where the file still looks full of data. Shipped like that in #63.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    body = src.split("_get_support_bundle")[-1]
+    call = re.search(r"metrics \+= \[(.*?)\]\n", body, re.S)
+    assert call, "could not find where the support bundle collects metrics"
+    assert "device_id" in call.group(1), (
+        "support bundle metrics rows must carry device_id — "
+        "get_device_metrics does not return it"
+    )
+
+
+def test_support_bundle_redacts_account_names():
+    """
+    Account names reach the bundle through ordinary log prose ("Shell session
+    opened by wil"), which no quote, URL or identifier rule matches. The
+    handler must therefore pass the user table to em_support; the redaction
+    itself is tested in test_support.py.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    # "return web.Response", not "web.Response" — the latter is the handler's
+    # own return annotation and slices the body away to nothing.
+    body = src.split("_get_support_bundle")[-1].split("return web.Response")[0]
+    assert "usernames=" in body and "get_all_users" in body, (
+        "the support bundle must pass the real usernames to em_support — "
+        "there is nothing in a log line to pattern-match them by"
+    )

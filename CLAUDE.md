@@ -430,6 +430,24 @@ appear **nowhere in the serialised output** rather than checking field-by-field
    ("Bedroom - Sam"), so they are replaced with positional pseudonyms.
 3. **No network identifiers.** SSID, BSSID and IP are excluded — an SSID is
    geolocatable from public wardriving databases.
+4. **No account names.** Dashboard logins reach a bundle through ordinary log
+   prose — `Shell session opened by wil` — which is not quoted, not a URL and
+   has no identifier shape, so every other rule passed it through (found by
+   Wil in a real bundle, 2026-08-02). The names come from the **user table**,
+   never a pattern, and are replaced longest-first: with `wil` and
+   `wilbowes`, the short one first leaves `<user>bowes`. This is also why the
+   controller's own stats report **sizes and never paths** — a data directory
+   is `/home/<name>/…` on a bare-metal install.
+
+**An allowlist naming a key nothing produces fails silently and still looks
+careful.** `_METRIC_FIELDS` listed the `device_metrics` *column* names while
+`db.get_device_metrics` resolves its sums into averages at read, so every
+bundle shipped with no device CPU or memory figure at all — most of the
+reason to include metrics. Two guards now: `test_metric_fields_match_what_the
+_reader_returns` diffs the allowlist against the reader's own source, and a
+deploy-shape test pins that the handler attaches `device_id` to each metrics
+row (the reader does not, so the fleet's hours pooled into one anonymous
+list). Both were verified by reintroducing the bug.
 
 Log lines are **sanitised, never passed through**: quoted strings and URLs are
 replaced, and lines from transcript-bearing sources (`STT result`, `text=`,
