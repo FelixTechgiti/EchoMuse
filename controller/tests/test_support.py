@@ -82,7 +82,12 @@ def _bundle():
                 "wifiBssid": SECRETS["bssid"], "wifiSsid": SECRETS["ssid"],
             }),
         }},
-        log_tail=[
+        controller_log=[
+            "10:00:01 [INFO] echomuse — Barge-in: cancelling playback",
+            "10:00:02 [DEBUG] echomuse.esphome — MediaPlayerCommandRequest command=PAUSE",
+            f"10:00:03 [INFO] echomuse — Shell session opened by {SECRETS['username']}",
+        ],
+        device_log=[
             f"[TURN] trigger=wakeword outcome=ok text='{SECRETS['speech']}'",
             "play_media: 'http://10.10.1.81:8097/flow/abc/media.flac'",
             "Playback chain: decoder spawned 3ms, first audio 194ms",
@@ -158,7 +163,7 @@ def test_the_useful_diagnostics_survive():
     assert b["controller"]["version"] == "v2.12.1"
     assert b["controller"]["schema_version"] == 16
 
-    log = "\n".join(b["controller_log_tail"])
+    log = "\n".join(b["device_log_tail"])
     assert "Playback chain" in log and "194ms" in log, \
         "timings are the point of shipping logs at all"
     assert "RTT excursion: 1450ms" in log
@@ -166,7 +171,7 @@ def test_the_useful_diagnostics_survive():
 
 def test_transcript_bearing_log_lines_are_dropped_whole():
     b = _bundle()
-    log = "\n".join(b["controller_log_tail"])
+    log = "\n".join(b["device_log_tail"])
     assert "[TURN]" not in log, \
         "turn traces quote transcripts verbatim and must not be sanitised in place"
 
@@ -373,3 +378,90 @@ class TestCpuWindows:
             h.add(float(i), i * 0.1)
         expected = S.CpuHistory.WINDOWS[-1][0] / S.CpuHistory.INTERVAL_S
         assert len(h._samples) <= expected + 3, "ring should hold ~1h of samples"
+
+
+def test_the_controllers_own_log_is_in_the_bundle():
+    """
+    It was not, and that is why the bundle could not answer #62: the media
+    state pushed to HA and the ESPHome command flow both go to stdout, while
+    `controller_log_tail` in fact held the relayed per-device table.
+    """
+    b = _bundle()
+    ctrl = "\n".join(b["controller_log_tail"])
+    assert "Barge-in: cancelling playback" in ctrl
+    assert "MediaPlayerCommandRequest command=PAUSE" in ctrl, \
+        "the HA command flow is the evidence #62 turned on"
+    assert "device_log_tail" in b, "the per-device log keeps its own key"
+    assert b["format"] >= 2, "the shape changed; the format marker must say so"
+
+
+def test_the_controller_log_is_sanitised_like_any_other():
+    """A new log source is a new leak path unless it goes through the same rules."""
+    b = _bundle()
+    text = json.dumps(b["controller_log_tail"])
+    assert SECRETS["username"] not in text and "<admin>" in text
+
+
+class TestNoiseThinning:
+    def test_heap_dumps_are_thinned_not_dropped(self):
+        """
+        [mem] was 87% of a real bundle's log tail, for a number already in
+        metrics — but goroutine count is recorded nowhere else, so a few of
+        the newest must survive for a leak hunt.
+        """
+        lines = [f"[mem] goroutines=19 heap_alloc={i}KB" for i in range(50)]
+        out = S.thin_noise(lines, keep=3)
+        assert len(out) == 3
+        assert out[0].endswith("heap_alloc=0KB"), "newest first must be kept"
+
+    def test_evidence_is_never_thinned(self):
+        lines = ["Wake word detected (score=1.000)"] + \
+                [f"[mem] heap_alloc={i}KB" for i in range(20)] + \
+                ["Device connected: ABC"]
+        out = S.thin_noise(lines, keep=2)
+        assert "Wake word detected (score=1.000)" in out
+        assert "Device connected: ABC" in out
+        assert sum(1 for l in out if "[mem]" in l) == 2
+
+    def test_a_key_lets_the_caller_carry_a_timestamp(self):
+        """So the caller sorts by real time instead of parsing it back out."""
+        pairs = [(3, "[mem] a"), (2, "[mem] b"), (1, "Wake word detected")]
+        out = S.thin_noise(pairs, keep=1, key=lambda p: p[1])
+        assert out == [(3, "[mem] a"), (1, "Wake word detected")]
+
+
+class TestLogRing:
+    def test_it_holds_the_most_recent_lines_and_no_more(self):
+        import logging
+        ring = S.LogRing(capacity=5)
+        ring.setFormatter(logging.Formatter("%(message)s"))
+        for i in range(20):
+            ring.emit(logging.LogRecord("x", logging.INFO, "f", 1, f"line {i}", None, None))
+        assert ring.tail() == [f"line {i}" for i in range(15, 20)]
+
+    def test_a_broken_record_cannot_take_down_its_call_site(self):
+        """
+        A logging handler that raises breaks the code it was only meant to
+        observe — and it would do it inside the bundle's own logging.
+        """
+        import logging
+        ring = S.LogRing(capacity=5)
+        ring.setFormatter(logging.Formatter("%(message)s %(nonexistent)s"))
+        ring.emit(logging.LogRecord("x", logging.INFO, "f", 1, "boom", None, None))
+        assert ring.tail() == [], "the bad record is dropped, not raised"
+
+
+def test_the_ring_ignores_the_dashboards_own_http_chatter():
+    """
+    aiohttp.access was 65% of the measured log rate and says nothing about a
+    device — it is the dashboard polling itself. Keeping it meant the ring
+    covered sixteen minutes, so it reliably held everything except the event
+    someone opened a bundle to report.
+    """
+    import logging
+    ring = S.LogRing(capacity=10)
+    ring.setFormatter(logging.Formatter("%(message)s"))
+    for name, msg in (("aiohttp.access", "GET /api/devices 200"),
+                      ("echomuse", "Barge-in: cancelling playback")):
+        ring.emit(logging.LogRecord(name, logging.INFO, "f", 1, msg, None, None))
+    assert ring.tail() == ["Barge-in: cancelling playback"]

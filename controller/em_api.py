@@ -76,6 +76,22 @@ _PROCESS_START = time.time()
 _cpu_history = em_support.CpuHistory()
 CPU_SAMPLE_INTERVAL_S = em_support.CpuHistory.INTERVAL_S
 
+# The controller's own recent log, kept in memory for support bundles. Every
+# line that would have explained #62 goes to stdout, and stdout was not in
+# the bundle at all.
+_log_ring = em_support.LogRing()
+
+
+def install_log_ring(fmt: str) -> None:
+    """
+    Attach the in-memory log ring to the root logger.
+
+    Called from em_controller once logging is configured, with the same
+    format string, so a bundle reads exactly like the console does.
+    """
+    _log_ring.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(_log_ring)
+
 
 def sample_cpu() -> None:
     """
@@ -2292,6 +2308,11 @@ async def _get_provision_magisk_db(request: web.Request) -> web.Response:
 # without a firmware restart.
 DEVICE_TLS_DIR = "/data/local/etc/echomuse"
 
+# Per-device log lines in a support bundle, after thinning. Deep enough that
+# a startup line survives a day of chatter, small enough that six devices do
+# not bury the controller's own log.
+DEVICE_LOG_LINES = 120
+
 
 @auth.require_admin
 async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
@@ -3380,8 +3401,15 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         metrics += [dict(m, device_id=did)
                     for m in await loop.run_in_executor(None, db.get_device_metrics, did, since)]
         counters += await loop.run_in_executor(None, db.get_wake_counters, did, since)
-        for lg in await loop.run_in_executor(None, db.get_device_logs, did, 100, None):
-            logs.append(f"{lg['ts']} [{lg['level']}] {lg['source']}: {lg['message']}")
+        # Fetch deep and thin, rather than fetching 100 and shipping noise:
+        # 89% of this table is [mem] heap dumps, so a flat 100 was ~11 lines
+        # of evidence. Newest first, which is what thin_noise expects.
+        raw = await loop.run_in_executor(None, db.get_device_logs, did, 500, None)
+        pairs = [(lg["ts"], f"{lg['ts']} [{lg['level']}] {lg['source']}: {lg['message']}")
+                 for lg in raw]
+        # Sorted oldest-first at the end: a log someone reads should run
+        # forwards, and per-device blocks in reverse order do not.
+        logs += em_support.thin_noise(pairs, key=lambda p: p[1])[:DEVICE_LOG_LINES]
 
     bundle = em_support.build(
         controller_version=CONTROLLER_VERSION,
@@ -3393,7 +3421,8 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         counters=counters,
         device_configs=device_configs,
         live_state=live_state,
-        log_tail=logs,
+        controller_log=_log_ring.tail(),
+        device_log=[ln for _, ln in sorted(logs)],
         # From the user table, not guessed at: an account name in log prose
         # has nothing to pattern-match on. Mapped to the ROLE it is replaced
         # with — "an admin opened a shell" is the diagnostic content, and

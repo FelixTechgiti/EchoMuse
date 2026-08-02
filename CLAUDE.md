@@ -470,6 +470,30 @@ redacting a line that quotes a transcript is a bet on a regex. Order matters —
 quotes are substituted before URLs, or the URL pattern eats the closing quote
 and leaves the line malformed.
 
+**Two log sources, and the distinction is load-bearing** (bundle `format` 2).
+`controller_log_tail` is the controller's OWN log, held in a bounded
+in-memory ring (`em_support.LogRing`, installed by `em_controller` at
+`basicConfig` time); `device_log_tail` is the relayed per-device
+`device_logs` table. Until 2026-08-02 only the second existed and it was
+named as if it were the first — so every line that would have explained #62
+(media state pushed to HA, the ESPHome command flow, barge-in decisions) was
+in neither, because it goes to stdout. **A bundle that cannot answer the
+issue it was built for is the failure mode to watch for here**, not a
+missing field.
+
+Both are sized against measurement, not intuition:
+- The ring **drops `aiohttp.access`** (65% of a measured 38 lines/min — the
+  dashboard polling itself) and holds 2000 lines, covering a couple of
+  hours. At 600 lines including access logs it covered sixteen minutes: a
+  ring that reliably contains everything except the event someone opened a
+  bundle to report.
+- Device lines are **thinned, not truncated**: `[mem]` heap dumps were 89% of
+  that table and 87% of a real bundle's tail. `thin_noise` keeps the newest
+  three per device and drops the rest — kept rather than dropped outright
+  because goroutine count is recorded nowhere else, so a leak hunt would
+  lose its only source. Measured effect: 339 lines of which 35 were evidence
+  became 195 lines of which 179 are.
+
 Serials ARE included: nothing correlates without them, and they identify the
 user's own hardware to them. User-facing contract: `docs/support-bundle.md`.
 
