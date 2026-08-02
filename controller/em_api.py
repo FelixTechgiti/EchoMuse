@@ -36,12 +36,14 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
+import shutil
 import sqlite3 as _sqlite3
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from aiohttp import web
@@ -63,6 +65,24 @@ from version import compare as _compare_versions
 from version import parse as _parse_version
 
 log = logging.getLogger("echomuse.api")
+
+# Import time, which is startup: em_controller imports this module before it
+# serves anything. Close enough to process start for "how long has it been up",
+# and it needs no procfs.
+_PROCESS_START = time.time()
+
+# CPU over 1m/5m/1h, fed by the event-loop lag monitor (see sample_cpu). The
+# ring is bounded by its longest window; nothing here runs per request.
+_cpu_history = em_support.CpuHistory()
+CPU_SAMPLE_INTERVAL_S = em_support.CpuHistory.INTERVAL_S
+
+
+def sample_cpu() -> None:
+    """
+    Take one CPU sample. Called from em_controller's existing 1s ticker, not
+    on a task of its own — the cost is one os.times() every INTERVAL_S.
+    """
+    _cpu_history.add(time.monotonic(), sum(os.times()[:2]))
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -3193,6 +3213,132 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
 
 
 
+def _read_first_line(path: str) -> str:
+    with open(path) as fh:
+        return fh.readline().strip()
+
+
+def _proc_meminfo() -> dict[str, float]:
+    """/proc/meminfo in MB. Empty on anything without procfs."""
+    out: dict[str, float] = {}
+    try:
+        with open("/proc/meminfo") as fh:
+            for ln in fh:
+                parts = ln.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    out[parts[0].rstrip(":")] = int(parts[1]) / 1024.0
+    except OSError:
+        pass
+    return out
+
+
+def _controller_stats() -> dict:
+    """
+    The controller's own CPU, memory and storage.
+
+    Read from /proc and the filesystem rather than psutil, which is not a
+    dependency and is not worth becoming one for a handful of files. Every
+    lookup degrades to an absent key: a bundle missing a stat is a nuisance,
+    a bundle that 500s when the host is unusual is the failure that matters,
+    since the bundle is what someone reaches for when things are wrong.
+
+    Paths are deliberately never reported — on a bare-metal install the data
+    directory carries the account name, which is the leak this same change
+    fixes in the log tail.
+    """
+    stats: dict[str, Any] = {}
+    try:
+        import em_controller as _ctrl
+        stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
+    except Exception:
+        pass
+
+    stats["python"] = platform.python_version()
+    stats["platform"] = f"{platform.system()} {platform.machine()}"
+    stats["cpu_count"] = os.cpu_count()
+    stats["container"] = os.path.exists("/.dockerenv")
+
+    try:
+        load = os.getloadavg()
+        stats["load_1"], stats["load_5"], stats["load_15"] = [round(x, 2) for x in load]
+    except OSError:
+        pass
+
+    mem = _proc_meminfo()
+    if "MemTotal" in mem:
+        stats["mem_total_mb"] = round(mem["MemTotal"], 1)
+    if "MemAvailable" in mem:
+        stats["mem_available_mb"] = round(mem["MemAvailable"], 1)
+
+    # cgroup v2 then v1: in a container MemTotal is the HOST's memory, which
+    # reads as plenty of headroom while the container is being OOM-killed.
+    for limit_path in ("/sys/fs/cgroup/memory.max",
+                       "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = _read_first_line(limit_path)
+            if raw and raw != "max":
+                val = int(raw) / 1048576.0
+                # An unset v1 limit is a sentinel near 2^63, not a real cap.
+                if val < 1024 * 1024:
+                    stats["mem_limit_mb"] = round(val, 1)
+            break
+        except (OSError, ValueError):
+            continue
+
+    try:
+        with open("/proc/self/status") as fh:
+            for ln in fh:
+                if ln.startswith("VmRSS:"):
+                    stats["rss_mb"] = round(int(ln.split()[1]) / 1024.0, 1)
+                    break
+    except OSError:
+        pass
+
+    # Process CPU as a share of one core, averaged over the process lifetime.
+    # A lifetime average, not an instant sample: a support bundle is taken
+    # once, and a single 100ms sample of an asyncio process is noise.
+    try:
+        uptime = time.time() - _PROCESS_START
+        stats["uptime_s"] = int(uptime)
+        cpu_time = sum(os.times()[:2])
+        # Below a few seconds the ratio is startup cost divided by almost
+        # nothing — it reads as 1147% and looks like a controller on fire.
+        # Omitted rather than reported wrong; a bundle taken in the first
+        # seconds of a run has no CPU history worth having anyway.
+        # Percent of ONE core, as `top` reports it — over 100 means more than
+        # a core's worth. The windowed figures are what point anywhere: a
+        # lifetime average cannot tell a controller busy right now from one
+        # that was busy for an hour this morning.
+        stats.update(_cpu_history.windows(time.monotonic(), cpu_time))
+        if uptime >= 5.0:
+            stats["cpu_pct_life"] = round(100.0 * cpu_time / uptime, 1)
+    except Exception:
+        pass
+
+    # Same resolution as em_recordings, via its helper — the DB path lives in
+    # one place and this must not become a second definition of it.
+    db_path = Path(os.environ.get("DB_PATH", "echomuse.db")).resolve()
+    try:
+        usage = shutil.disk_usage(db_path.parent)
+        stats["data_used_mb"] = round(usage.used / 1048576.0, 1)
+        stats["data_free_mb"] = round(usage.free / 1048576.0, 1)
+    except OSError:
+        pass
+    try:
+        # The database is the thing that grows without anyone watching it.
+        stats["db_mb"] = round(db_path.stat().st_size / 1048576.0, 1)
+    except OSError:
+        pass
+    try:
+        rec_dir = em_recordings.recordings_dir()
+        total = sum(f.stat().st_size for f in rec_dir.iterdir() if f.is_file())
+        stats["recordings_mb"] = round(total / 1048576.0, 1)
+    except OSError:
+        pass
+
+    return stats
+
+
 @auth.require_admin
 async def _get_support_bundle(request: web.Request) -> web.Response:
     """
@@ -3227,7 +3373,11 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             "stats":        em_support.redact_stats(live.stats if live else None),
         }
         turns += await loop.run_in_executor(None, db.get_turns, did, 50, since)
-        metrics += [type("R", (dict,), {"keys": lambda self: list(dict.keys(self))})(m)
+        # get_device_metrics resolves its own rows and does NOT carry the
+        # device, so without this every device's hours pooled into one
+        # anonymous list — six devices' CPU and memory with no way to tell
+        # whose was whose. (`_pick` wants .keys(), which a dict already has.)
+        metrics += [dict(m, device_id=did)
                     for m in await loop.run_in_executor(None, db.get_device_metrics, did, since)]
         counters += await loop.run_in_executor(None, db.get_wake_counters, did, since)
         for lg in await loop.run_in_executor(None, db.get_device_logs, did, 100, None):
@@ -3244,6 +3394,14 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         device_configs=device_configs,
         live_state=live_state,
         log_tail=logs,
+        # From the user table, not guessed at: an account name in log prose
+        # has nothing to pattern-match on. Mapped to the ROLE it is replaced
+        # with — "an admin opened a shell" is the diagnostic content, and
+        # this is a single-operator system, so a positional alias would be a
+        # one-to-one stand-in for a real person.
+        accounts={u["username"]: u["role"] for u in
+                  await loop.run_in_executor(None, db.get_all_users)},
+        controller_stats=await loop.run_in_executor(None, _controller_stats),
     )
     body = em_support.to_json(bundle)
     stamp = time.strftime("%Y%m%d-%H%M%S")
