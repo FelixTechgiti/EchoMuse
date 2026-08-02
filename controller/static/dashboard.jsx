@@ -4675,7 +4675,7 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
-function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }) {
+function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, isAdmin }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
   const [dirty, setDirty]         = useState(false);
@@ -4686,6 +4686,33 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
   const [confirmPw, setConfirmPw] = useState('');
   const [pwSaving, setPwSaving]   = useState(false);
   const [pwMsg, setPwMsg]         = useState(null); // {ok, text}
+
+  const [bundling, setBundling]   = useState(false);
+  const [bundle, setBundle]       = useState(null);  // {url, name, bytes}
+  const [bundleErr, setBundleErr] = useState(null);
+
+  // Object URLs pin their blob in memory until revoked; the panel closing is
+  // the last moment we can still reach this one.
+  useEffect(() => () => { if (bundle) URL.revokeObjectURL(bundle.url); }, [bundle]);
+
+  async function collectBundle() {
+    setBundling(true); setBundleErr(null);
+    if (bundle) URL.revokeObjectURL(bundle.url);
+    setBundle(null);
+    try {
+      // API.blob, not an <a href>: sessions are Bearer-header-only, so a
+      // browser-initiated request would 401 (see the note on API.blob).
+      const b = await API.blob('/api/support/bundle');
+      const now = new Date();
+      const p = n => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}`
+                  + `-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+      setBundle({ url: URL.createObjectURL(b), name: `echomuse-support-${stamp}.json`, bytes: b.size });
+    } catch(e) {
+      setBundleErr(e.error || 'Failed to collect bundle');
+    }
+    setBundling(false);
+  }
 
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); setSaveMsg(null); }
 
@@ -4724,8 +4751,10 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
     setPwSaving(false);
   }
 
-  const TABS = ['fleet', 'account'];
-  const TAB_LABELS = { fleet: 'Fleet Config', account: 'Account' };
+  // Support is admin-only because the endpoint is: the bundle spans the whole
+  // fleet, so a tab a non-admin can only be refused by is worse than no tab.
+  const TABS = isAdmin ? ['fleet', 'account', 'support'] : ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Config', account: 'Account', support: 'Support' };
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
@@ -4795,6 +4824,51 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
               <Pill accent disabled={pwSaving || !curPw || !newPw || !confirmPw} onClick={changePassword}>
                 {pwSaving ? 'Updating…' : 'Update password'}
               </Pill>
+            </div>
+          )}
+
+          {tab === 'support' && (
+            <div style={{ maxWidth: 520 }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
+                A single file describing the fleet's state, to attach to a GitHub issue.
+              </div>
+
+              <div className="em-panel" style={{ padding:'16px 18px', marginBottom:18 }}>
+                <div className="em-label" style={{ marginBottom:10 }}>What it contains</div>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', lineHeight:1.7 }}>
+                  Controller and firmware versions, device capabilities, config,
+                  and the last 24 hours of turns, metrics and logs.
+                </div>
+                <div className="em-label" style={{ margin:'16px 0 10px' }}>What it never contains</div>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', lineHeight:1.7 }}>
+                  Transcripts or recordings, device names, Wi-Fi networks,
+                  addresses, tokens or passwords. Fields are allowlisted, so
+                  anything new is left out until it is added deliberately.
+                </div>
+              </div>
+
+              <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                <Pill accent disabled={bundling} onClick={collectBundle}>
+                  {bundling ? 'Collecting…' : bundle ? 'Collect again' : 'Collect bundle'}
+                </Pill>
+                {bundle && (
+                  <a href={bundle.url} download={bundle.name} className="em-pill em-pill--accent"
+                     style={{ textDecoration:'none' }}>
+                    Download {(bundle.bytes / 1024).toFixed(0)} KB
+                  </a>
+                )}
+              </div>
+
+              {bundleErr && (
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--error)' }}>
+                  {bundleErr}
+                </div>
+              )}
+              {bundle && (
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--muted)', lineHeight:1.6 }}>
+                  Worth opening before you post it — it is plain JSON.
+                </div>
+              )}
             </div>
           )}
 
@@ -5192,6 +5266,7 @@ function App() {
           onGlobalConfigChange={setGlobalConfig}
           onClose={() => setShowSettings(false)}
           username={role}
+          isAdmin={isAdmin}
         />
       )}
 

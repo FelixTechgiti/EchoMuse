@@ -4,7 +4,7 @@ When something misbehaves and it isn't obvious why, a support bundle collects
 the diagnostics in one file you can attach to a
 [GitHub issue](https://github.com/wilbowes/EchoMuse/issues).
 
-**Settings → Support → Download support bundle**, or
+**Settings → Support → Collect bundle**, then Download, or
 `GET /api/support/bundle` if you prefer the API. Admin only.
 
 It is a plain JSON file. **Open it before you send it** — it is readable, and
