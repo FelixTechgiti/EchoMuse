@@ -700,3 +700,128 @@ def test_an_unseekable_stream_is_only_discovered_once():
         assert s._seekable, "seekability must not leak across URLs"
         await s.stop()
     asyncio.run(main())
+
+
+class MixingDevice(FakeDevice):
+    """A device announcing the audio_mix capability."""
+    audio_mix_capable = True
+
+
+def test_music_rides_its_own_plane_on_a_mixing_device():
+    """
+    0x04/0x05, so the device can hold it separately from voice and mix the
+    two. On 0x02 it would share the voice plane and ducking is impossible.
+    """
+    async def main():
+        device = MixingDevice()
+        _wire(device)
+        s = StubSession("office", periods=3)
+        await s.play("http://radio/stream")
+        await asyncio.wait_for(s._task, 5)
+        return device
+    device = asyncio.run(main())
+    assert [f[0] for f in device.data_frames] == [0x04, 0x04, 0x04, 0x05]
+
+
+def test_music_stays_on_the_voice_plane_for_older_firmware():
+    """
+    Degrade to the old behaviour, never to silence: firmware without the
+    capability would simply never play a 0x04 frame.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2)
+        await s.play("http://radio/stream")
+        await asyncio.wait_for(s._task, 5)
+        return device
+    device = asyncio.run(main())
+    assert [f[0] for f in device.data_frames] == [0x02, 0x02, 0x03]
+
+
+def test_a_turn_ducks_instead_of_pausing_when_the_device_can_mix():
+    """
+    The whole point. Pausing costs a seek, and a Music Assistant flow stream
+    cannot seek — so a 28s turn cost 28s of the song. Ducking keeps the music
+    playing under the response and loses nothing.
+    """
+    async def main():
+        device = MixingDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        await em_player.interrupt("office")
+        state_during = s.state
+        await em_player.resume_interrupted("office")
+        await s.stop()
+        return device, s, state_during
+    device, s, state_during = asyncio.run(main())
+
+    assert state_during == PLAYING, "the music must keep playing under the turn"
+    ducks = [m for m in device.control_msgs if m.get("type") == "duck"]
+    assert [m["on"] for m in ducks] == [True, False]
+    assert not any(m.get("type") == "speaker_flush" for m in device.control_msgs), \
+        "ducking must not flush — that discards the buffer that makes it instant"
+    assert s.spawns == [0.0], "no reseek: the stream was never interrupted"
+
+
+def test_a_turn_still_pauses_on_firmware_that_cannot_mix():
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        await em_player.interrupt("office")
+        paused = s.state
+        await em_player.resume_interrupted("office")
+        await s.stop()
+        return device, paused
+    device, paused = asyncio.run(main())
+    assert paused == PAUSED
+    assert not any(m.get("type") == "duck" for m in device.control_msgs), \
+        "a device that cannot mix must never be told to duck"
+
+
+def test_pausing_during_a_ducked_turn_actually_pauses():
+    """
+    On the pausing path interrupt() had already paused, so the deferred
+    "pause" needed no wire action. When we duck instead, nothing was ever
+    paused — so the user's pause has to actually happen at turn end, or it is
+    silently dropped and the music plays on.
+    """
+    async def main():
+        device = MixingDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        await em_player.interrupt("office")
+        await em_player.pause("office")          # user speaks: "pause the music"
+        await em_player.resume_interrupted("office")
+        return device, s
+    device, s = asyncio.run(main())
+    assert s.state == PAUSED, "the user's pause must survive a ducked turn"
+
+
+def test_stopping_music_flushes_the_music_plane_not_the_voice_one():
+    """
+    speaker_flush would cut the response and leave the music playing, which
+    is exactly backwards.
+    """
+    async def main():
+        device = MixingDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        await s.stop()
+        return device
+    device = asyncio.run(main())
+    kinds = [m.get("type") for m in device.control_msgs]
+    assert "music_flush" in kinds
+    assert "speaker_flush" not in kinds
