@@ -48,6 +48,7 @@ without them nothing correlates — but nothing else is.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -141,6 +142,83 @@ _URL = re.compile(r"""https?://[^\s'"]+""")
 # fixture had no such line.
 _IPV4 = re.compile(r"""\b\d{1,3}(?:\.\d{1,3}){3}\b""")
 _MAC = re.compile(r"""\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b""")
+
+
+# Device log lines that are pure volume. `[mem]` heap dumps were 89% of the
+# device_logs table and 87% of a real bundle's log tail — 294 lines of 339 —
+# which is the diagnostic budget spent on a number already in `metrics` as
+# `mem_used_avg`. They are THINNED, not dropped: the newest few still answer
+# "what is the heap doing right now", and goroutine count is not recorded
+# anywhere else, so a leak hunt would lose its only source.
+_LOG_NOISE = ("[mem]",)
+
+
+def is_noise(line: str) -> bool:
+    """True for a line that is volume rather than evidence."""
+    return any(marker in line for marker in _LOG_NOISE)
+
+
+def thin_noise(items: list, keep: int = 3, key=lambda x: x) -> list:
+    """
+    Keep the first `keep` noise items and drop the rest, order preserved.
+
+    `items` must be NEWEST FIRST, which is how `db.get_device_logs` returns
+    them — "first" is then "most recent", and the caller sorts for display.
+    `key` extracts the text, so callers can carry a timestamp alongside it
+    rather than parsing one back out of the formatted line.
+    """
+    out, seen = [], 0
+    for item in items:
+        if is_noise(key(item)):
+            seen += 1
+            if seen > keep:
+                continue
+        out.append(item)
+    return out
+
+
+class LogRing(logging.Handler):
+    """
+    The controller's own recent log, in memory, for support bundles.
+
+    The bundle shipped without it: `controller_log_tail` was in fact the
+    per-device `device_logs` table, while every line that would have
+    explained issue #62 — the media state pushed to HA, the ESPHome command
+    flow, barge-in decisions — goes to stdout and was nowhere in the file. A
+    bundle that cannot answer the issue it was built for is worth fixing
+    before it is released.
+
+    Bounded by line count, not bytes, and formatted on emit: holding the
+    LogRecord instead would keep every argument object alive for the length
+    of the ring, which is a memory leak wearing a cache's clothing.
+
+    Sized against the measured rate, not a guess: this controller emits ~38
+    lines a minute, of which **65% is `aiohttp.access`** — the dashboard
+    polling itself, which says nothing about a device. Dropping that and
+    holding 2000 lines covers a couple of hours, so someone who hits a
+    problem and then goes to collect a bundle still has the event in it. At
+    600 lines including access logs it was sixteen minutes, which is a ring
+    that reliably contains everything except the thing you wanted.
+    """
+
+    IGNORED = ("aiohttp.access",)
+
+    def __init__(self, capacity: int = 2000) -> None:
+        super().__init__()
+        self.lines: deque[str] = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name.startswith(self.IGNORED):
+            return
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            # A logging handler that raises takes down the call site it was
+            # only supposed to observe.
+            pass
+
+    def tail(self) -> list[str]:
+        return list(self.lines)
 
 
 class CpuHistory:
@@ -307,7 +385,8 @@ def build(
     counters: list,
     device_configs: dict[str, dict],
     live_state: dict[str, dict],
-    log_tail: list[str],
+    controller_log: list[str],
+    device_log: list[str],
     accounts: dict[str, str] | None = None,
     controller_stats: dict | None = None,
 ) -> dict:
@@ -317,7 +396,9 @@ def build(
     """
     bundle: dict = {
         "generated_at": int(time.time()),
-        "format": 1,
+        # 2: controller_log_tail became the CONTROLLER's log; the relayed
+        # per-device lines moved to device_log_tail.
+        "format": 2,
         "redaction": (
             "Allowlisted fields only. Contains no speech, no transcripts, no "
             "audio, no device labels, no account names, and no network "
@@ -340,7 +421,8 @@ def build(
         "turns": [_pick(t, _TURN_FIELDS) for t in turns],
         "metrics": [_pick(m, _METRIC_FIELDS) for m in metrics],
         "wake_counters": [_pick(c, _COUNTER_FIELDS) for c in counters],
-        "controller_log_tail": sanitise_log(log_tail, accounts),
+        "controller_log_tail": sanitise_log(controller_log, accounts),
+        "device_log_tail": sanitise_log(device_log, accounts),
     }
 
     for n, d in enumerate(devices, start=1):

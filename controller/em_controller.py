@@ -77,11 +77,17 @@ import em_ble_proxy
 import em_oww_models
 import em_player
 
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    format=_LOG_FORMAT,
 )
 log = logging.getLogger("echomuse")
+
+# Keep the last few hundred lines in memory so a support bundle can carry the
+# controller's own log, not just the relayed per-device one.
+api.install_log_ring(_LOG_FORMAT)
 
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 

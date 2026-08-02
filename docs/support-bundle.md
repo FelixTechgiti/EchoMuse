@@ -49,7 +49,8 @@ on a regular expression.
 | Hourly metrics per device — CPU, memory, storage, temperature, RSSI, RTT | Trends. Signal strength is included; the network's name is not. |
 | The controller's own CPU (1m/5m/1h), memory, storage and uptime | A device starving for audio can be the host running out of CPU, memory or disk. The three windows separate "busy right now" from "busy earlier", which need different answers. Sizes and counts only, never paths. |
 | Wake counters — near-misses, on-device drops, inference timings | Wake-word behaviour without any audio. |
-| Recent controller log lines, sanitised | Message types and timings, with quoted text and URLs removed. |
+| Recent controller log lines, sanitised | What the controller itself was doing — the part that explains most "it did the wrong thing" reports. Quoted text and URLs removed. |
+| Recent per-device log lines, sanitised | What each device reported. Repetitive memory dumps are thinned so they cannot crowd out the rest. |
 
 Roughly the last 24 hours, capped per device.
 
