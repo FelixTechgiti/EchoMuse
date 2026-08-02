@@ -80,6 +80,8 @@ type ControlClient struct {
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
+	musicFlushCallback    StateCallback
+	duckCallback          func(on bool)
 	wifiChangeCallback    WifiChangeCallback
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
@@ -123,6 +125,8 @@ func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppl
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
+func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
+func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallback = cb }
 func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
 func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
@@ -504,6 +508,28 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.speakerFlushCallback()
 			}
 
+		case "music_flush":
+			// The user genuinely stopped or paused. A voice turn must NOT
+			// send this — it ducks instead, which is the whole reason the
+			// music plane is separate. Flushing discards the buffered audio
+			// that makes ducking instant, and on a non-seekable stream that
+			// audio is gone for good.
+			log.Printf("[control] music_flush received — discarding buffered music")
+			if c.musicFlushCallback != nil {
+				c.musicFlushCallback()
+			}
+
+		case "duck":
+			// Duck the music under a voice turn. Sent at turn start and
+			// released at turn end; the DEPTH is config (duckDb), so it can
+			// be tuned by ear in a real room without a firmware push.
+			var msg struct {
+				On bool `json:"on"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.duckCallback != nil {
+				c.duckCallback(msg.On)
+			}
+
 		case "ping":
 			// Echo the controller's sequence id so it can pair the reply
 			// with the send it timed. The device deliberately does NOT
@@ -701,8 +727,12 @@ func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty
 // off the back of it, and an entity that can never produce a reading is worse
 // than no entity at all.
 func capabilities() []string {
+	// "audio_mix": this firmware holds music on its own plane and mixes it
+	// with voice at the ALSA write, so the controller can duck instead of
+	// pausing. Without it the controller must keep the pause/resume path —
+	// a device that cannot mix would simply never play the 0x04 stream.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "button_hold"}
+		"oww_shadow", "button_hold", "audio_mix"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

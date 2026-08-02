@@ -26,6 +26,12 @@ const (
 	frameTypeMic     = byte(0x01)
 	frameTypeSpeaker = byte(0x02)
 	frameTypeEOS     = byte(0x03)
+	// Music rides its own frame types so the device can hold it on a second
+	// plane and mix it under voice rather than pausing it. An older
+	// controller simply never sends these; a newer one only sends them to a
+	// device announcing "audio_mix".
+	frameTypeMusic    = byte(0x04)
+	frameTypeMusicEOS = byte(0x05)
 	frameTypeVADEnd  = byte(0x04)
 	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
 	// was ever detected — distinct from frameTypeVADEnd (speech detected,
@@ -452,6 +458,17 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			log.Println("[data] Speaker: end of stream")
 			if d.spk != nil {
 				d.spk.EndStream()
+			}
+		case frameTypeMusic:
+			if len(data) > 1 && d.spk != nil {
+				if err := d.spk.PumpMusic(data[1:]); err != nil {
+					log.Printf("[data] PumpMusic error: %v", err)
+				}
+			}
+		case frameTypeMusicEOS:
+			log.Println("[data] Music: end of stream")
+			if d.spk != nil {
+				d.spk.EndMusicStream()
 			}
 		default:
 			log.Printf("[data] Unknown binary frame type: 0x%02x", data[0])

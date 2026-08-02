@@ -3,7 +3,6 @@
 package speaker
 
 import (
-	"fmt"
 	"log"
 	"math"
 	"os/exec"
@@ -47,58 +46,35 @@ const primePeriods = 24
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
-	session  *tinyalsa.AudioSession
-	audioCh  chan []byte
-	stopCh   chan struct{}
-	// deadCh is closed by silenceLoop on any exit so PumpPeriod can return
+	session *tinyalsa.AudioSession
+	stopCh  chan struct{}
+	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
-	deadCh   chan struct{}
-	// eosPending is set by EndStream (WS reader received 0x03) and consumed
-	// by silenceLoop when audioCh drains, so a drain at natural end of
-	// stream isn't misreported as an underrun.
-	eosPending atomic.Bool
+	deadCh chan struct{}
 
-	// ── per-stream delivery instrumentation ───────────────────────────
-	// Underruns are a rare binary event; these give the *margin* on every
-	// stream, so a link that is merely close to starving is visible before
-	// it audibly breaks (2026-07-20: added after underruns appeared with
-	// no measurable cause — every metric we had timed the wrong thing).
+	// Two independent playback planes, mixed at the ALSA write.
 	//
-	// Written only by PumpPeriod, which the WS read loop calls
-	// sequentially — single writer, so a plain load/compare/store needs no
-	// lock. silenceLoop reads them once per stream at EOS. Cost on the
-	// audio hot path is one time.Now() plus an integer compare per ~42ms
-	// period (~23/s); nothing here allocates or logs.
-	recvFirstNs  atomic.Int64  // arrival of this stream's first 0x02
-	recvLastNs   atomic.Int64  // arrival of the most recent 0x02
-	recvMaxGapNs atomic.Int64  // largest inter-arrival gap this stream
-	recvBytes    atomic.Uint64 // wire bytes received this stream
+	// voice carries TTS and announcements (0x02/0x03); music carries the
+	// media player (0x04/0x05). They are separate so a voice turn can duck
+	// the music instead of pausing it: the music feed runs LEAD_S=4s ahead
+	// of realtime, so by the time a wake word fires the next four seconds
+	// are already in this buffer, and audio that has left the controller
+	// cannot be ducked by the controller. Holding both here means the music
+	// keeps its full ~5.5s of link-stall protection AND the duck is instant.
+	//
+	// All the per-stream machinery — prime gate, discard-until-EOS,
+	// underrun accounting, delivery instrumentation — lives in audioStream,
+	// so both planes get the behaviour that was worked out on the single
+	// one rather than a simplified copy.
+	voice *audioStream
+	music *audioStream
 
-	// stateMu guards streamActive and discarding as one unit. They used to
-	// be independent atomics, but Flush's check-streamActive-then-arm and
-	// EndStream's clear-both are compound transitions: a barge-in Flush
-	// racing a stream's natural EndStream (control and data ride separate
-	// WebSockets) could observe streamActive just before EndStream cleared
-	// it and then arm discarding just after EndStream consumed it — leaving
-	// discard armed with no EOS ever coming, silently swallowing the whole
-	// NEXT response up to its EOS.
-	stateMu sync.Mutex
-	// streamActive tracks whether a 0x02 stream is mid-flight (set by
-	// PumpPeriod, cleared by EndStream — both on the WS read goroutine).
-	// Read by Flush to decide whether to arm discarding.
-	streamActive bool
-	// discarding, when set, makes PumpPeriod drop incoming periods until
-	// the stream's 0x03 EOS arrives. Armed by Flush (barge-in) when a
-	// stream is mid-flight: draining audioCh alone is not enough, because
-	// the rest of the cancelled stream is typically already in flight in
-	// the TCP buffers of both ends — the WS reader would refill the channel
-	// straight after the drain and playback would carry on after a ~1.3s
-	// skip (observed 2026-07-08: barge-in cut the LED but the TTS kept
-	// talking, and the interrupting turn transcribed the device's own
-	// voice). The controller always terminates a stream with 0x03, on the
-	// cancel path included, so discard-until-EOS consumes exactly the
-	// remainder of the cancelled stream no matter how much was buffered.
-	discarding bool
+	// duckTarget is the gain applied to MUSIC while it plays under a voice
+	// turn, Q15. Written from the control plane (SetDuck) and read by the
+	// ALSA goroutine every period, hence atomic; the ramp toward it lives in
+	// the Mixer, which is single-consumer and needs no synchronisation.
+	duckTarget atomic.Int32
+	mixer      Mixer
 
 	// echoTap, when non-nil, receives every period pumped to ALSA — real
 	// audio and silence alike — so an AEC reference stream advances in
@@ -125,32 +101,6 @@ type PcmSpeaker struct {
 	statsCb func(StreamStats)
 }
 
-// StreamStats is the per-stream delivery report, emitted once at EOS.
-//
-// Periods/Underruns answer "did it break". The rest answer "how close did
-// it come, and which side was late" — the questions we could not answer on
-// 2026-07-20 because every available metric measured something else (the
-// controller's "Streaming took 0.0s" times a socket write, not delivery).
-//
-//   - MinDepth: fewest periods left in the buffer at any point mid-stream.
-//     The headline margin number. 0 means it starved (an underrun); a
-//     stream that only ever reached 2 was one hiccup away.
-//   - PrimeWaitMs: first frame arriving → first frame played. Long means
-//     the sender could not fill the prime buffer promptly.
-//   - RecvSpanMs vs audio duration: delivery slower than realtime is the
-//     definitive "the wire could not keep up" signal.
-//   - MaxGapMs: the worst single stall in arrivals, which distinguishes a
-//     uniformly slow link from a briefly stalled one.
-type StreamStats struct {
-	Periods     uint64 `json:"periods"`
-	Underruns   uint64 `json:"underruns"`
-	MinDepth    int    `json:"minDepth"`
-	PrimeWaitMs int64  `json:"primeWaitMs"`
-	RecvSpanMs  int64  `json:"recvSpanMs"`
-	MaxGapMs    int64  `json:"maxGapMs"`
-	BytesRecv   uint64 `json:"bytesRecv"`
-}
-
 // OnStreamStats registers a per-stream stats callback, reported once when a
 // stream reaches its EOS. Invoked on its own goroutine so a slow consumer
 // (network send) can never stall the ALSA pump. Safe to call any time
@@ -163,12 +113,15 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 
 func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
-		audioCh:  make(chan []byte, audioChanDepth),
 		stopCh:   make(chan struct{}),
 		deadCh:   make(chan struct{}),
 		echoTap:  echoTap,
 		levelTap: levelTap,
 	}
+	s.voice = newAudioStream(audioChanDepth, s.deadCh)
+	s.music = newAudioStream(audioChanDepth, s.deadCh)
+	s.duckTarget.Store(unityGain)
+	s.mixer.SetGainImmediate(unityGain)
 	if err := s.Init(); err != nil {
 		return nil, err
 	}
@@ -212,189 +165,133 @@ func (p *PcmSpeaker) Init() error {
 	return nil
 }
 
-// silenceLoop runs continuously, playing real audio from audioCh when available
-// and silence when the channel is empty. No pause/resume needed — the select
-// naturally yields to real audio. Closes deadCh on any exit so PumpPeriod
-// callers unblock and receive an error rather than hanging.
+// silenceLoop is the ALSA write path: every period, take what each plane has
+// to offer, mix them, and pump. When neither has audio it pumps silence,
+// which is what paces this loop — ALSA blocks in Pump at realtime rate, so
+// there is no timer anywhere and no busy-waiting.
 //
-// audioStreaming tracks whether we are mid-stream. When the channel drains
-// while audioStreaming is true, that's an underrun — a silence period is
-// being injected mid-content. Logged at WARNING so it shows up in server.log
-// against the stutter symptom. Remove once the cause is confirmed and fixed.
+// It replaced a blocking select on a single channel. Two planes cannot be
+// waited on that way without one starving the other, and mixing needs both
+// in hand at the same instant; a non-blocking take from each, with silence
+// as the floor, keeps the pacing property that made the original correct.
+//
+// Closes deadCh on any exit so blocked pump callers unblock with an error
+// rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
-	audioStreaming := false
-	var underruns uint64 // loop-local: only this goroutine drains audioCh
-	// Per-stream accounting for the stats callback: accumulates across
-	// mid-stream drains (a drain flips audioStreaming but the stream isn't
-	// over until its EOS), reported and reset at EOS consume.
-	var streamPeriods, streamUnderruns uint64
-	// Consumption-side instrumentation (see StreamStats). Loop-local: only
-	// this goroutine drains audioCh, so no synchronisation is needed.
-	streamMinDepth := -1     // -1 = nothing consumed yet this stream
-	var firstPumpNs int64    // first period actually played this stream
 	for {
-		// Prime gate: while idle, hold on silence until the buffer has
-		// primePeriods queued or the stream's EOS is already in (short
-		// clip — everything it will ever have is queued). A nil channel
-		// disables the receive case; the silence default then paces the
-		// wait at ALSA rate while the sender fills the buffer. Once
-		// audioStreaming, the gate stays out of the way — mid-stream
-		// drains keep their underrun accounting below. (A stale
-		// eosPending from a barge-in flush can skip one prime — harmless:
-		// the follow-up response just starts eagerly, pre-2026-07-14
-		// behaviour.)
-		audioSrc := p.audioCh
-		if !audioStreaming {
-			if n := len(p.audioCh); n > 0 && n < primePeriods && !p.eosPending.Load() {
-				audioSrc = nil
-			}
-		}
 		select {
 		case <-p.stopCh:
 			return
-		case period := <-audioSrc:
-			audioStreaming = true
-			streamPeriods++
-			// Buffer margin: occupancy remaining *after* taking this
-			// period. len() on a channel is O(1); no allocation, no log.
-			//
-			// Sampled ONLY while the sender still has audio to send. The
-			// last periods of every stream necessarily drain the buffer to
-			// zero, so measuring across the tail made this read 0 on 100%
-			// of streams — healthy ones included — which is how it shipped
-			// in v2.9.6 and told us nothing (caught on first field data,
-			// 2026-07-20). eosPending is set by EndStream the instant the
-			// 0x03 arrives, so !eosPending means "more audio is still
-			// expected" and a low buffer *there* is a real margin warning.
-			if !p.eosPending.Load() {
-				if d := len(p.audioCh); streamMinDepth < 0 || d < streamMinDepth {
-					streamMinDepth = d
-				}
-			}
-			if firstPumpNs == 0 {
-				firstPumpNs = time.Now().UnixNano()
-			}
-			if p.echoTap != nil {
-				p.echoTap(period)
-			}
-			if p.levelTap != nil {
-				p.levelTap(periodRMS(period))
-			}
-			if err := p.session.Pump(period); err != nil {
-				log.Printf("silenceLoop: pump error: %v", err)
-				return
-			}
 		default:
-			if audioStreaming {
-				if p.eosPending.Swap(false) {
-					// Natural end of stream (0x03 received), or a barge-in
-					// flush (Flush sets eosPending so its drain isn't
-					// miscounted as an underrun).
-					firstRecv := p.recvFirstNs.Load()
-					lastRecv := p.recvLastNs.Load()
-					st := StreamStats{
-						Periods:   streamPeriods,
-						Underruns: streamUnderruns,
-						MinDepth:  streamMinDepth,
-						MaxGapMs:  p.recvMaxGapNs.Load() / 1e6,
-						BytesRecv: p.recvBytes.Load(),
-					}
-					if firstRecv > 0 && lastRecv > firstRecv {
-						st.RecvSpanMs = (lastRecv - firstRecv) / 1e6
-					}
-					if firstRecv > 0 && firstPumpNs > firstRecv {
-						st.PrimeWaitMs = (firstPumpNs - firstRecv) / 1e6
-					}
-					log.Printf("[speaker] stream complete — returning to silence "+
-						"(periods=%d underruns=%d minDepth=%d primeWait=%dms recvSpan=%dms maxGap=%dms)",
-						streamPeriods, streamUnderruns, streamMinDepth,
-						st.PrimeWaitMs, st.RecvSpanMs, st.MaxGapMs)
-					p.statsMu.Lock()
-					cb := p.statsCb
-					p.statsMu.Unlock()
-					if cb != nil && streamPeriods > 0 {
-						go cb(st)
-					}
-					streamPeriods, streamUnderruns = 0, 0
-					streamMinDepth, firstPumpNs = -1, 0
-				} else {
-					// Mid-stream drain: the WS sender fell behind real-time
-					// playback and a silence gap is being injected — the
-					// audible stutter on weak WiFi links. One count per
-					// drain event (not per silence period); rate-limited so
-					// a chronically starved link can't flood the log.
-					underruns++
-					streamUnderruns++
-					if underruns == 1 || underruns%16 == 0 {
-						log.Printf("[speaker] UNDERRUN: audio channel drained mid-stream — injecting silence (underruns=%d)", underruns)
-					}
-				}
-				audioStreaming = false
-			}
-			if p.echoTap != nil {
-				p.echoTap(silencePeriod)
-			}
-			if p.levelTap != nil {
+		}
+
+		var voice, music []byte
+		if p.voice.ready(primePeriods) {
+			voice = p.voice.take()
+		} else if p.voice.playing {
+			p.report(p.voice.drained(), "voice")
+		}
+		if p.music.ready(primePeriods) {
+			music = p.music.take()
+		} else if p.music.playing {
+			p.report(p.music.drained(), "music")
+		}
+
+		out := p.mixer.Mix(voice, music, p.duckTarget.Load())
+		if out == nil {
+			out = silencePeriod
+		}
+
+		// Taps see the MIXED output, which is what the speaker actually
+		// emits. That matters for AEC: the far-end reference is what needs
+		// cancelling from the mic, and with music playing under a response
+		// the echo is the sum, not the voice alone. It was already correct
+		// by accident when only one stream existed.
+		if p.echoTap != nil {
+			p.echoTap(out)
+		}
+		if p.levelTap != nil {
+			if voice == nil && music == nil {
 				p.levelTap(0)
+			} else {
+				p.levelTap(periodRMS(out))
 			}
-			if err := p.session.Pump(silencePeriod); err != nil {
-				log.Printf("silenceLoop: silence pump error: %v", err)
-				return
-			}
+		}
+		if err := p.session.Pump(out); err != nil {
+			log.Printf("silenceLoop: pump error: %v", err)
+			return
 		}
 	}
 }
 
-// PumpPeriod queues one period of audio for playback. Called by the WS client
-// for each incoming 0x02 binary frame — MONO S16 on the wire, duplicated to
-// the stereo frames the ALSA device requires here. Blocks until the silence
-// loop has consumed a slot (rate-limiting to ALSA speed), or returns an error
-// if the silence loop has died — preventing an infinite block on a dead
-// consumer.
-func (p *PcmSpeaker) PumpPeriod(data []byte) error {
-	p.stateMu.Lock()
-	if p.discarding {
-		// Flushed stream — swallow the network-buffered remainder without
-		// queueing it (see the discarding field for why draining audioCh
-		// alone can't do this).
-		p.stateMu.Unlock()
-		return nil
+// report logs and forwards a completed stream's stats. A nil st is an
+// underrun, which is counted inside the stream and only logged here.
+func (p *PcmSpeaker) report(st *StreamStats, plane string) {
+	if st == nil {
+		log.Printf("[speaker] UNDERRUN: %s channel drained mid-stream — injecting silence", plane)
+		return
 	}
-	newStream := !p.streamActive
-	p.streamActive = true
-	p.stateMu.Unlock()
-	// Arrival-side instrumentation (see StreamStats). Single writer —
-	// the WS read loop calls this sequentially — so load/compare/store
-	// needs no lock. ~23 calls/s, no allocation, no logging.
-	now := time.Now().UnixNano()
-	if newStream {
-		p.recvFirstNs.Store(now)
-		p.recvMaxGapNs.Store(0)
-		p.recvBytes.Store(0)
-	} else if last := p.recvLastNs.Load(); last > 0 {
-		if gap := now - last; gap > p.recvMaxGapNs.Load() {
-			p.recvMaxGapNs.Store(gap)
-		}
+	log.Printf("[speaker] %s stream complete — returning to silence "+
+		"(periods=%d underruns=%d minDepth=%d primeWait=%dms recvSpan=%dms maxGap=%dms)",
+		plane, st.Periods, st.Underruns, st.MinDepth,
+		st.PrimeWaitMs, st.RecvSpanMs, st.MaxGapMs)
+	// Only the voice plane reports upstream: the controller attaches these
+	// to the turn that produced them (device.last_turn_id), and a music
+	// stream ending would overwrite a turn's delivery figures with a song's.
+	if plane != "voice" || st.Periods == 0 {
+		return
 	}
-	p.recvLastNs.Store(now)
-	p.recvBytes.Add(uint64(len(data)))
-	n := len(data) / 2 // mono S16 samples
+	p.statsMu.Lock()
+	cb := p.statsCb
+	p.statsMu.Unlock()
+	if cb != nil {
+		go cb(*st)
+	}
+}
+
+// toStereo converts a mono S16 wire period into the stereo frames the ALSA
+// device requires. The stereo config is an I2S/codec-path constraint, not a
+// wire one — shipping two identical channels would double bandwidth for
+// nothing on links that are already marginal.
+func toStereo(data []byte) []byte {
+	n := len(data) / 2
 	period := make([]byte, n*4)
 	for i := 0; i < n; i++ {
 		lo, hi := data[i*2], data[i*2+1]
 		period[i*4+0], period[i*4+1] = lo, hi // L
 		period[i*4+2], period[i*4+3] = lo, hi // R
 	}
-	select {
-	case p.audioCh <- period:
-		return nil
-	case <-p.deadCh:
-		return fmt.Errorf("speaker: ALSA loop has died")
-	}
+	return period
 }
 
-// IsStreaming reports whether a 0x02 stream is currently mid-flight.
+// PumpPeriod queues one period of VOICE audio (TTS, announcements). Called by
+// the WS client for each incoming 0x02 frame. Blocks until the ALSA loop has
+// consumed a slot (rate-limiting to playback speed), or returns an error if
+// that loop has died — preventing an infinite block on a dead consumer.
+func (p *PcmSpeaker) PumpPeriod(data []byte) error {
+	_, err := p.voice.pump(toStereo(data), len(data))
+	return err
+}
+
+// PumpMusic queues one period of MUSIC audio (0x04). Identical handling to
+// the voice plane — it is a full stream with its own prime gate, buffer and
+// discard semantics, not a lesser one — but kept separate so a voice turn
+// can duck it rather than stopping it.
+func (p *PcmSpeaker) PumpMusic(data []byte) error {
+	_, err := p.music.pump(toStereo(data), len(data))
+	return err
+}
+
+// SetDuck sets the gain applied to music while it plays under voice, in dB of
+// attenuation (0 = no ducking). The change is ramped by the mixer rather than
+// applied at once, because a gain step at a period boundary is a click — and
+// it would land on exactly the moment the user started speaking.
+func (p *PcmSpeaker) SetDuck(db float64) {
+	p.duckTarget.Store(DuckGain(db))
+}
+
+// IsStreaming reports whether a VOICE stream is currently mid-flight.
 //
 // Added for on-device wake word scoring: while the speaker is playing, the
 // controller lowers its wake threshold to bargeInThreshold, because echo at the
@@ -402,69 +299,47 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 // The device has to know when it is playing in order to mirror that, or it
 // disagrees with the controller on every barge-in.
 //
-// Reads under stateMu rather than an atomic on purpose: streamActive is one half
-// of a pair guarded together with `discarding` (see the field comment), and
-// reading it outside that lock is what the pairing exists to prevent.
-func (p *PcmSpeaker) IsStreaming() bool {
-	p.stateMu.Lock()
-	defer p.stateMu.Unlock()
-	return p.streamActive
-}
+// Music deliberately does NOT count here. It is a quieter, continuous bed
+// rather than a response the user is talking over, and the controller applies
+// the same rule on its side (wake-over-music scores against bargeInThreshold
+// only when barge-in is enabled). Reporting music as "streaming" would drop
+// the device's bar for as long as a song plays.
+func (p *PcmSpeaker) IsStreaming() bool { return p.voice.isActive() }
 
-// EndStream marks the in-flight stream as complete. Called by the WS client
-// on the 0x03 EOS frame — always after every 0x02 period of that stream has
-// already been handed to PumpPeriod (frames are processed sequentially on
-// the read loop), so by the time silenceLoop drains audioCh the flag is set.
-func (p *PcmSpeaker) EndStream() {
-	p.stateMu.Lock()
-	p.streamActive = false
-	wasDiscarding := p.discarding
-	p.discarding = false
-	p.stateMu.Unlock()
-	if wasDiscarding {
-		log.Printf("[speaker] flush complete — EOS reached, discard disarmed")
-		return
-	}
-	p.eosPending.Store(true)
-}
+// IsPlayingMusic reports whether a music stream is mid-flight.
+func (p *PcmSpeaker) IsPlayingMusic() bool { return p.music.isActive() }
 
-// Flush cuts a playing stream immediately (barge-in). Two parts:
-//   1. Drain audioCh — kills up to ~5.5s already queued on-device.
-//   2. Arm discarding (if a stream is mid-flight) — PumpPeriod then drops
-//      every subsequent period of this stream until its 0x03 EOS arrives.
-//      Necessary because the controller writes the whole response into the
-//      WebSocket ahead of playback: at barge time the rest of the stream
-//      is already in TCP buffers and would refill audioCh right after the
-//      drain (the pre-2026-07-08 version drained only, and playback
-//      resumed after a ~1.3s skip). The controller sends 0x03 on the
-//      cancel path too, so the discard always terminates.
+// EndStream marks the in-flight voice stream complete (0x03). Always arrives
+// after every 0x02 period of that stream has been handed to PumpPeriod —
+// frames are processed sequentially on the read loop — so by the time the
+// ALSA loop drains the buffer the flag is already set.
+func (p *PcmSpeaker) EndStream() { p.voice.endStream() }
+
+// EndMusicStream marks the in-flight music stream complete (0x05).
+func (p *PcmSpeaker) EndMusicStream() { p.music.endStream() }
+
+// Flush cuts a playing VOICE stream immediately (barge-in). Two parts:
+//   1. Drain the buffer — kills up to ~5.5s already queued on-device.
+//   2. Arm discarding (if a stream is mid-flight) — subsequent periods of
+//      this stream are dropped until its EOS arrives. Necessary because the
+//      controller writes the whole response into the WebSocket ahead of
+//      playback: at barge time the rest of the stream is already in TCP
+//      buffers and would refill the channel right after the drain (the
+//      pre-2026-07-08 version drained only, and playback resumed after a
+//      ~1.3s skip). The controller sends the EOS on the cancel path too, so
+//      the discard always terminates.
 //
 // Up to PeriodCount ALSA periods (~170ms) already handed to the hardware
 // still play — cutting those needs a stream restart, which costs more in
-// click/pop than it saves. The streamActive check keeps a flush that races
-// a stream's natural end (control and data travel on separate WebSockets)
-// from arming discard against the *next* stream's audio.
-func (p *PcmSpeaker) Flush() {
-	p.stateMu.Lock()
-	armed := p.streamActive
-	if armed {
-		p.discarding = true
-	}
-	p.stateMu.Unlock()
-	n := 0
-	for {
-		select {
-		case <-p.audioCh:
-			n++
-		default:
-			if n > 0 || armed {
-				p.eosPending.Store(true)
-				log.Printf("[speaker] flushed %d buffered periods (barge-in), discard-until-EOS armed=%v", n, armed)
-			}
-			return
-		}
-	}
-}
+// click/pop than it saves.
+func (p *PcmSpeaker) Flush() { p.voice.flush() }
+
+// FlushMusic stops music the same way. This is now reserved for the user
+// GENUINELY stopping or pausing playback: a voice turn ducks instead, which
+// is the whole point of holding the two planes apart. Flushing here would
+// throw away the buffered audio that makes ducking instant, and on a
+// non-seekable stream that audio cannot be recovered.
+func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
 
 // Close shuts the speaker down in the reverse of Init's bring-up: mute,
 // amp off, then tear the stream down. Muting first makes the PCM-close
