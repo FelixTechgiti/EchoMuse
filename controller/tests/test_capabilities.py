@@ -95,35 +95,39 @@ def test_capabilities_reported_before_the_server_exists_are_not_lost():
     that list is a ONE-SHOT at ListEntities time: HA caches it and the sensor
     is absent for the life of the connection.
 
-    Observed on Retreat, 2026-08-03: connected 05:25:33, server created
+    Observed on Retreat, 2026-08-03: registered 05:25:33, server created
     05:25:34, no ambient light entity in HA afterwards. The same race resolves
-    differently per controller restart, which is why the graph came and went.
+    differently on each controller restart, which is why the graph came and
+    went rather than simply never working.
+
+    Read as source, not imported: em_esphome pulls in zeroconf and aiohttp,
+    which this suite deliberately does without.
     """
-    import em_esphome
+    src = ESPHOME.read_text()
+    setter = re.search(r"def set_device_capabilities\(.*?\n(?=\n\ndef |\Z)", src, re.S)
+    assert setter, "could not find set_device_capabilities"
+    body = setter.group(0)
+    # The store must happen unconditionally — not inside the "if server" arm,
+    # which is exactly what dropped it.
+    store = re.search(r"^\s{4}_pending_caps\[device_id\]\s*=", body, re.M)
+    assert store, (
+        "set_device_capabilities must hold the capabilities unconditionally; "
+        "pushing them only when a server already exists loses them"
+    )
 
-    device_id = "G090LFTESTCAPS"
-    em_esphome._pending_caps.pop(device_id, None)
-    try:
-        # Registration lands first, with no server yet.
-        em_esphome.set_device_capabilities(device_id, ["mic", "ambient_light"])
-        assert device_id not in em_esphome._servers, "precondition: no server yet"
-        assert em_esphome._pending_caps[device_id] == ["mic", "ambient_light"], \
-            "the capabilities must be held until a server exists to take them"
-    finally:
-        em_esphome._pending_caps.pop(device_id, None)
 
-
-def test_the_pending_capabilities_are_what_the_entity_gate_reads():
+def test_the_pending_capabilities_are_applied_when_the_server_is_built():
     """
     Guard against the two halves drifting: holding the value is only useful
     if server creation applies it to the same attribute the ListEntities gate
-    checks (_device_has → srv.capabilities).
+    reads (_device_has → srv.capabilities).
     """
-    import inspect
-    import em_esphome
-
-    src = inspect.getsource(em_esphome._register_device_server)
-    assert "_pending_caps" in src, \
+    src = ESPHOME.read_text()
+    create = re.search(r"async def _register_device_server\(.*?\n(?=\n\nasync def |\n\ndef |\Z)",
+                       src, re.S)
+    assert create, "could not find _register_device_server"
+    body = create.group(0)
+    assert "_pending_caps" in body, \
         "server creation must seed capabilities from the pending map"
-    assert "set_capabilities" in src, \
-        "and must apply them via the same setter the gate reads"
+    assert "set_capabilities" in body, \
+        "and must apply them via the same setter the entity gate reads"
