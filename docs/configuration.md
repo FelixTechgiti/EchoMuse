@@ -82,6 +82,27 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
+### Duck depth
+How far music drops while the assistant is talking over it. Music **keeps
+playing** through a voice turn — it isn't paused — so the answer arrives
+mixed over a quiet bed, and the bed comes back up when the answer ends.
+
+Default **−18dB**. Less negative (−6, −10) leaves the music more present;
+more negative (−25, −30) all but silences it for the length of the answer.
+It's worth setting by ear in the room it plays in: the right depth depends
+on what you listen to and how loud, and there is no value that is correct
+everywhere. The response itself is never turned down, only the music under
+it — so if an answer is hard to hear over music, this is the setting, not
+the volume.
+
+Requires firmware **v2.10.0 or newer**, which mixes the two audio streams on
+the device itself. That is not an arbitrary requirement: the controller runs
+about four seconds ahead of what you actually hear, so when you say the wake
+word those four seconds of music are already sitting on the Echo, past
+anything the controller could still change. Older firmware shows the slider
+disabled and falls back to pausing the music for the turn and resuming
+after.
+
 ### Volume
 Volume **tracks what you actually use** and survives reboots: every change —
 buttons, Home Assistant slider, wherever — is remembered by the controller

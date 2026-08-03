@@ -213,10 +213,12 @@ is the only party that knows when its own buffer runs dry.
 **Benefit:** centrally-applied EQ means every device gets consistent,
 tuned sound, adjustable live from the dashboard.
 
-**Caveat:** the whole reply is currently fetched, decoded and EQ'd before a
-single sample plays, so you wait for the entire response to be generated
-before hearing the start of it. Streaming it — which the music path above
-already does — is the obvious next improvement.
+The reply is **streamed while Home Assistant is still generating it**: the
+response is piped through ffmpeg and out to the Dot as it arrives, rather
+than being fetched and decoded in full first. A long answer starts speaking
+at roughly the same moment a short one would, instead of making you wait for
+the last word to be synthesised before hearing the first. The EQ carries its
+filter state across chunks, so there's no click at the joins.
 
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but
@@ -231,12 +233,27 @@ Each Echo appears in Home Assistant as a **media player** you can
 actually play things on: `media_player.play_media`, the HA media
 browser, Music Assistant, radio streams. The controller decodes
 whatever you throw at it with ffmpeg and streams it to the speaker,
-keeping only a small buffer ahead so pause and stop respond instantly.
-Saying the wake word over music pauses it, runs your request, then
-picks the music back up where it left off — announcements do the same.
+running a few seconds ahead so a WiFi hiccup doesn't become an audible
+gap. Pause and stop are still instant — they don't wait for that buffer
+to drain, they throw it away.
+
+Saying the wake word over music **ducks** it: the music drops to a quiet
+bed under the answer and comes back up afterwards. It doesn't pause.
+That matters because those few seconds of lead are already inside the
+Dot when you start speaking, so ducking has to happen on the device —
+and because a Music Assistant flow stream can't be seeked, so pausing
+one used to cost you however long the conversation took, sometimes
+landing you in the next track. The voice itself is never turned down,
+only the bed under it. How far it drops is yours to set (**Ducking**,
+in the Playback section) — it's a taste call best made by ear in the
+actual room.
+
 For reliable wake-over-music, enable AEC and barge-in (Stage 3): the
 same echo cancellation that lets you interrupt the assistant's own
 voice is what lets it hear you over a song.
+
+Older firmware that can't mix the two streams falls back to the previous
+behaviour — pause for the turn, resume after.
 
 ---
 

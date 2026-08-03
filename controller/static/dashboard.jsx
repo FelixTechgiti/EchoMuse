@@ -4283,7 +4283,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               <Slider label="Duck depth" disabled={!mixCapable}
                 sub={mixCapable
                   ? "how far music drops under a voice response — it keeps playing instead of pausing"
-                  : "needs firmware that mixes music and voice (v3.0+)"}
+                  : "needs firmware that mixes music and voice (v2.10.0+)"}
                 value={config.duckDb ?? -18} min={-40} max={0} step={1} unit="dB"
                 onChange={v => set('duckDb', v)}/>
             </div>
