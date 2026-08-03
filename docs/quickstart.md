@@ -188,3 +188,10 @@ The LED ring tells you what's happening:
    [configuration.md](configuration.md) for exactly what's kept.
 4. The troubleshooting section of [SETUP.md](../SETUP.md) covers the deeper
    stuff.
+5. Still stuck, and want to ask? The dashboard's **Support** tab downloads a
+   single diagnostic file to attach to a GitHub issue — versions, device
+   state, recent logs and the delivery statistics that make audio problems
+   diagnosable at a distance. It is built as an allowlist: no transcripts, no
+   recordings, no network names, no account names, and device labels are
+   replaced with pseudonyms. [support-bundle.md](support-bundle.md) lists
+   exactly what's in one so you can check before you share it.

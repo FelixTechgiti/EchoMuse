@@ -28,7 +28,9 @@ hear the answer through the Dot's speaker. The hardware you already own
   **one** response: detections are pooled and the best-placed device answers.
 - **Music** — each Dot is an HA `media_player` you can actually play things
   on (media browser, Music Assistant, radio streams), with instant
-  pause/stop and automatic pause-for-voice, resume-after.
+  pause/stop. Speaking over music **ducks** it rather than pausing it: the
+  bed drops under the answer and comes back up, so nothing is lost and a
+  non-seekable stream doesn't skip the seconds a turn took.
 - **Bluetooth proxy** — each Echo doubles as an HA Bluetooth advertisement
   proxy (great with [Bermuda](https://github.com/agittins/bermuda) for room
   presence).

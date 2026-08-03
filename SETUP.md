@@ -317,6 +317,50 @@ Action button triggers the same pipeline directly, bypassing wake word detection
 
 ---
 
+## On-device wake word (shadow mode)
+
+The Echo can run the wake model itself. `owwOnDevice` is `off` (default) or
+`shadow`; a mode letting the device *trigger* turns is deliberately not
+implemented, and an unrecognised value normalises to `off` rather than being
+guessed at.
+
+**Shadow mode scores and reports; it never acts.** It exists to answer whether
+on-device detection is good enough to trust, by running both detectors over the
+same audio. The tap sits where the ungated wake stream's frames are written to
+the wire, so the device scores byte-identical 80ms frames on identical
+boundaries — a score difference can then only be the engine, not the framing.
+
+- Inference runs on **its own goroutine**, never the mic goroutine: it costs
+  ~31ms per 80ms frame against a mic loop reading 160ms ALSA batches into a
+  ring only 160ms deep. `Push` hands off to a buffered channel and returns,
+  and the scorer **drops frames and counts them** when behind. A run that
+  drops frames is informative; one that stutters the microphone is not.
+- **Nothing is sent per frame.** Threshold crossings go immediately (rare, and
+  their whole value is the timing); everything else is a window summary riding
+  the existing ~30s stats tick.
+- **The device never sends a timestamp** — an Echo's clock is bogus pre-NTP, so
+  it reports how long *ago* a crossing happened and the controller converts
+  against its own monotonic clock.
+- **Thresholds must match or the comparison is meaningless.** The controller
+  drops its bar to `bargeInThreshold` while the speaker streams, so the device
+  mirrors that and never *raises* the bar if misconfigured above the normal one.
+
+Correlation happens at turn-persist time, not at detection — a crossing report
+can land after the wake it belongs to. The nearest crossing within a 2.0s
+window wins and is consumed, so two quick turns can't both be credited to one
+crossing.
+
+ONNX Runtime plus three models must be installed at
+`/data/local/share/echomuse/oww` — they are **not** in the firmware (12.3MB
+would double the OTA payload and both A/B slots). The provisioning wizard
+pushes them over USB/ADB; fielded devices get them over the shell plane from
+the Updates tab. Absence is an ordinary condition, logged once, and the device
+carries on with controller-side wake word. Costs ~38% of one core permanently
+on top of the ~18–20% mic-pipeline baseline, so **enable it one device at a
+time.**
+
+---
+
 ## WebSocket Protocol
 
 ### Control plane (`ws://server:8767/control`) — JSON
@@ -324,11 +368,27 @@ Action button triggers the same pipeline directly, bypassing wake word detection
 Device → Server:
 ```json
 {"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.3.0", "capabilities": [...]}
-{"type": "button", "clickType": 138, "down": false}
+{"type": "button", "clickType": 138, "down": false, "heldMs": 812}
 {"type": "mute_state", "muted": true}
+{"type": "volume_state", "volume": 40}
 {"type": "log", "level": "info", "message": "..."}
-{"type": "pong"}
+{"type": "stats", "cpuPct": 25.5, "coresOnline": 2, ...}   // ~30s; carries the
+                                                            // RTT and shadow
+                                                            // window summaries
+{"type": "playback_stats", "periods": 56, "underruns": 0, "minDepth": 41, ...}
+{"type": "ambient_light", "lux": 132}      // cap: ambient_light; omitted, never 0
+{"type": "oww_shadow_cross", "score": 0.71, "agoMs": 340}  // cap: oww_shadow
+{"type": "ble_adverts", "adverts": [...]}  // bleProxyEnabled
+{"type": "identify"}
+{"type": "wifi_result", ...} / {"type": "wifi_scan_result", ...}
+{"type": "pong", "seq": 41}                // seq echoed; unsolicited keepalive
+                                           // pongs carry none and are ignored
 ```
+
+`capabilities` is what negotiation keys off — **never the version string.**
+Currently: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`,
+`button_hold`, `audio_mix`, and `ambient_light` (the last only when the sensor
+actually reads).
 
 Server → Device:
 ```json
@@ -343,9 +403,19 @@ Server → Device:
                            // mid-stream, no restart (no-op if beamforming
                            // disabled in config or already locked)
 {"type": "beam_unlock"}    // v2.7.0: release beam lock, back to ch6 omni
+{"type": "led_anim", "pattern": "spin", "colors": [...], "periodMs": 900, "ttlSec": 135}
+                           // v2.9: device renders frames on its own ticker;
+                           // ttlSec is a dead-man so a dropped clear cannot
+                           // leave the ring lit. cap: led_anim
+{"type": "duck", "db": -18.0}      // v2.10.0, cap: audio_mix
+{"type": "speaker_flush"}          // voice plane — barge-in, turn cancel
+{"type": "music_flush"}            // music plane — genuine stop/pause
+{"type": "volume_set", "volume": 40}
+{"type": "wifi_change"} / {"type": "wifi_commit"} / {"type": "wifi_scan"}
 {"type": "shell_open"}
 {"type": "shell_close"}
-{"type": "ping"}
+{"type": "ping", "seq": 41}        // every 5s; seq makes the RTT measurable
+                                   // against one monotonic clock
 ```
 
 ### Data plane (`ws://server:8767/data`) — binary
@@ -362,13 +432,47 @@ All three share the same `frameTypeMic` (`0x01`) wrapper and seq header — the 
 
 Server → Device (speaker frames):
 ```
-[0x02][mono S16_LE PCM, 4096 bytes = one ALSA period]   — mono on the wire
+[0x02][mono S16_LE PCM, 4096 bytes = one ALSA period]   — voice: TTS
+                                                           responses and
+                                                           announcements.
+                                                           Mono on the wire
                                                            since v2.8.4; the
                                                            device duplicates
                                                            L=R at the ALSA
                                                            write
-[0x03] end of stream
+[0x03] end of voice stream
+[0x04][mono S16_LE PCM, 4096 bytes = one ALSA period]   — music (v2.10.0,
+                                                           `audio_mix`)
+[0x05] end of music stream
 ```
+
+**0x04/0x05 mean different things in each direction — this is deliberate but
+easy to misread.** Device→server they are single-byte *payloads* inside a
+`0x01` mic frame (VAD end / no-speech timeout, above); server→device they are
+genuine top-level frame types carrying music. The two never appear on the
+same leg of the link, so there is no ambiguity on the wire, but a reader
+scanning for `0x04` will find both.
+
+**The music plane (v2.10.0).** Music rides its own frame types into a second
+buffer on the device, and the two buffers are **mixed at the ALSA write** —
+music is attenuated by `duckDb` (default −18dB) while a voice stream is
+active, voice never is. Ducking has to happen device-side: `LEAD_S` = 4.0s
+means the next four seconds of music are already in the device's buffer when
+a wake word fires, so audio that has left the controller cannot be ducked by
+the controller. The gain ramp is a constant slew interpolated **per sample**,
+not per period — a gain step at a period boundary is an audible click landing
+on exactly the moment the user started speaking.
+
+Firmware without `audio_mix` never receives 0x04 at all; the controller falls
+back to pausing music for the turn. Correspondingly there are two flush
+messages and they are not interchangeable: `music_flush` clears the music
+plane (a genuine stop/pause), `speaker_flush` clears the voice plane
+(barge-in, turn cancel). A voice turn sends **neither** — flushing discards
+the buffered audio that makes ducking instant, and on a non-seekable stream
+it cannot be recovered. Both planes honour the same discard-until-EOS
+contract, and a flushed stream must not leave EOS armed for the next one (the
+regression that made a following response report itself complete at its first
+buffer dip).
 
 ### Shell plane (`ws://server:8767/shell/{device_id}`) — binary
 
