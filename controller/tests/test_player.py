@@ -825,3 +825,60 @@ def test_stopping_music_flushes_the_music_plane_not_the_voice_one():
     kinds = [m.get("type") for m in device.control_msgs]
     assert "music_flush" in kinds
     assert "speaker_flush" not in kinds
+
+
+def test_the_music_feed_yields_the_wire_during_a_turn():
+    """
+    Music and TTS share one WebSocket, so a 4s music lead puts ~380KB ahead
+    of the response in the socket. Measured on the first ducked turn: the
+    response waited 2087ms to start and took a 3549ms gap mid-stream. The
+    feed drops its lead for the turn so the response gets the wire.
+    """
+    async def main():
+        device = MixingDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        before = s.lead_s
+        await em_player.interrupt("office")
+        during = s.lead_s
+        await em_player.resume_interrupted("office")
+        after = s.lead_s
+        await s.stop()
+        return before, during, after
+    before, during, after = asyncio.run(main())
+    assert before == em_player.LEAD_S
+    assert during == em_player.TURN_LEAD_S, "the feed must yield during a turn"
+    assert during < before
+    assert after == em_player.LEAD_S, "and take the wire back afterwards"
+
+
+def test_the_reduced_lead_still_protects_the_music():
+    """
+    Not zero: at zero the music would be sent at the instant it is needed,
+    with no margin against a stall DURING the turn — trading one dropout for
+    another.
+    """
+    assert em_player.TURN_LEAD_S > 0
+
+
+def test_a_pausing_device_does_not_change_its_lead():
+    """
+    On firmware that cannot mix, music is paused for the turn, so there is
+    nothing sharing the wire and nothing to yield.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=3, endless=True)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/stream")
+        await asyncio.sleep(0)
+        await em_player.interrupt("office")
+        during = s.lead_s
+        await em_player.resume_interrupted("office")
+        await s.stop()
+        return during
+    assert asyncio.run(main()) == em_player.LEAD_S

@@ -658,3 +658,23 @@ def test_support_bundle_redacts_account_names():
         "accounts must carry the role: a name is replaced by <admin>, and a "
         "positional alias would be one-to-one with a real person"
     )
+
+
+def test_the_music_feed_reads_its_lead_per_chunk():
+    """
+    A voice turn lowers the music feed's lead so the response gets the shared
+    data plane (TURN_LEAD_S). That only works if the pacing loop reads the
+    CURRENT lead each time round — capturing LEAD_S once, or referring to the
+    module constant, silently restores the old behaviour and the fix becomes
+    a no-op with every test still passing.
+    """
+    src = (CONTROLLER / "em_player.py").read_text()
+    feed = src.split("async def _feed")[-1]
+    pacing = re.search(r"ahead = sent / BYTES_PER_SEC.*?await asyncio\.sleep\(([^)]*)\)",
+                       feed, re.S)
+    assert pacing, "could not find the feed's pacing sleep"
+    window = feed[:pacing.end()]
+    assert "self.lead_s" in window, (
+        "the pacing loop must read self.lead_s, not the LEAD_S constant — "
+        "otherwise lowering the lead for a voice turn does nothing"
+    )

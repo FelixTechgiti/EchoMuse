@@ -198,6 +198,14 @@ func (p *PcmSpeaker) silenceLoop() {
 			p.report(p.music.drained(), "music")
 		}
 
+		// The ring's level must be measured BEFORE mixing: Mix sums into the
+		// voice buffer in place, so afterwards there is no voice-only signal
+		// left to measure.
+		var level float64
+		if voice != nil && p.levelTap != nil {
+			level = periodRMS(voice)
+		}
+
 		out := p.mixer.Mix(voice, music, p.duckTarget.Load())
 		if out == nil {
 			out = silencePeriod
@@ -211,12 +219,12 @@ func (p *PcmSpeaker) silenceLoop() {
 		if p.echoTap != nil {
 			p.echoTap(out)
 		}
+		// VOICE only, deliberately — unlike the echo tap above. The meter
+		// ring visualises the RESPONSE; feeding it the mix made the ring
+		// throb along to ducked music before the response had started, which
+		// reads as the device doing something it is not.
 		if p.levelTap != nil {
-			if voice == nil && music == nil {
-				p.levelTap(0)
-			} else {
-				p.levelTap(periodRMS(out))
-			}
+			p.levelTap(level)
 		}
 		if err := p.session.Pump(out); err != nil {
 			log.Printf("silenceLoop: pump error: %v", err)
