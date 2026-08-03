@@ -778,3 +778,69 @@ are **append-only and in ascending date order** — new work goes at the end.
   comment on the field claimed a satellite attaching first would "pick them up
   on the next HA reconnect", which was true and was the problem: HA does not
   reconnect on its own.
+
+- **2026-08-03 — a transfer that could only tell you it had finished, not that
+  it had worked.** Someone on Reddit had one Dot that would not leave v2.9.8
+  while the rest of their fleet updated fine. Answering it exposed a gap that
+  was ours, not theirs — though, as it turned out, **not the gap that was
+  causing their problem.** Their Dot had a slot symlink pointing at neither
+  `server_a` nor `server_b`; correcting it and retrying updated the device
+  first time, on a controller predating everything below. Worth stating
+  plainly so the record does not imply the fix and the resolution were the
+  same event.
+
+  That real cause deserves its own note, because it is a failure mode with no
+  natural end. `/data/local/bin/server` pointing anywhere unexpected makes the
+  controller's slot detection return nothing, so the OTA refuses before it
+  transfers a byte — and the device meanwhile runs perfectly on whatever the
+  symlink resolves to. A Dot in that state works indefinitely and can never
+  update, with no symptom other than updates not happening. `start_server.sh`
+  recognises the condition (`Unknown slot ... cannot auto-rollback, giving up`)
+  and the controller reports `Could not determine active slot`, which is
+  accurate and tells the user nothing about what to do. Neither end offers to
+  repair it. `ls -la /data/local/bin/` is what found it, and that it took a
+  human reading a directory listing is the argument for making the OTA say
+  what is wrong in words someone can act on.
+
+  A firmware transfer was confirmed by `TRANSFER_OK`, which the device echoes
+  when the base64 decode pipeline and `chmod` both exit 0. That is a statement
+  about the shell, not about the bytes. Nothing compared what landed against
+  what was sent.
+
+  Which matters because of what a bad binary looks like from outside: three
+  fast exits, `start_server.sh` flips the symlink, the device comes back on
+  its old version. **A corrupt transfer and a genuinely broken build produce
+  exactly that same picture**, and the supervisor log — which records the
+  rollback faithfully — cannot separate them either. So "one Dot won't update,
+  it's fine on the old version" was a question neither end of the system could
+  answer.
+
+  The fix is the one the asset path has had all along: land in `.part`, rename
+  only on an md5 match. What is worth keeping is *where* it sits rather than
+  what it says. A mismatch is now caught while the device is still running
+  happily on its current slot, so it never reaches the symlink flip — where
+  the old path spent a reboot and a rollback to arrive at the same place
+  knowing less. The error message is the small half; the ordering is the
+  point, and it is what the test pins.
+
+  Two details that would be easy to undo. Verification rides the *same* shell
+  session as the transfer and the md5 tool is detected alongside the base64
+  decoder in a round trip that was already happening, so the whole thing costs
+  a round trip on an open socket rather than a session. And it uses no `cut`:
+  `md5sum` prints `<hash>  <path>`, and the branch where busybox is missing is
+  precisely the branch where `busybox cut` would be missing too — a `case`
+  glob needs nothing external. Distinguishing "no md5 tool here" from "md5
+  did not match" is why `require_verify` exists: every other payload keeps its
+  old accept-with-a-warning behaviour, and only firmware refuses.
+
+  Also added the free-space check the OTA path never had, and did **not** add
+  the theory that prompted looking: the binary has barely grown, 10.1MB at
+  v2.9.8 against 10.3MB at v2.10.0. Worth recording as falsified so nobody
+  re-derives it.
+
+  One test lesson, found only because the house rule is to reintroduce the bug
+  rather than trust a green tick. A guard asserting that firmware requires
+  verification passed with the argument deleted — it had matched the docstring
+  *explaining* `require_verify` instead of the call *setting* it, and would
+  have gone on passing forever. Source-shape assertions must be anchored on
+  the call site; prose in the same function will happily satisfy them.
