@@ -85,3 +85,45 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "owwShadowCapable" in jsx, \
         "the dashboard must gate the on-device toggle on the capability"
+
+
+def test_capabilities_reported_before_the_server_exists_are_not_lost():
+    """
+    A device registers BEFORE its ESPHome server is created — the listener
+    only comes up once the device is present — so the capability push finds
+    no server. Dropping it there built the entity list from an empty set, and
+    that list is a ONE-SHOT at ListEntities time: HA caches it and the sensor
+    is absent for the life of the connection.
+
+    Observed on Retreat, 2026-08-03: connected 05:25:33, server created
+    05:25:34, no ambient light entity in HA afterwards. The same race resolves
+    differently per controller restart, which is why the graph came and went.
+    """
+    import em_esphome
+
+    device_id = "G090LFTESTCAPS"
+    em_esphome._pending_caps.pop(device_id, None)
+    try:
+        # Registration lands first, with no server yet.
+        em_esphome.set_device_capabilities(device_id, ["mic", "ambient_light"])
+        assert device_id not in em_esphome._servers, "precondition: no server yet"
+        assert em_esphome._pending_caps[device_id] == ["mic", "ambient_light"], \
+            "the capabilities must be held until a server exists to take them"
+    finally:
+        em_esphome._pending_caps.pop(device_id, None)
+
+
+def test_the_pending_capabilities_are_what_the_entity_gate_reads():
+    """
+    Guard against the two halves drifting: holding the value is only useful
+    if server creation applies it to the same attribute the ListEntities gate
+    checks (_device_has → srv.capabilities).
+    """
+    import inspect
+    import em_esphome
+
+    src = inspect.getsource(em_esphome._register_device_server)
+    assert "_pending_caps" in src, \
+        "server creation must seed capabilities from the pending map"
+    assert "set_capabilities" in src, \
+        "and must apply them via the same setter the gate reads"
