@@ -3743,6 +3743,7 @@ def _merge_device(row) -> dict:
         # scoring: a toggle that silently does nothing on old firmware is worse
         # than no toggle, because it looks like the feature is broken.
         "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
+        "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
         # Update state

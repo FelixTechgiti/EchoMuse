@@ -279,7 +279,7 @@ function CircleButton({ onClick, title, color, children }) {
   );
 }
 
-function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue, onChange }) {
+function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue, onChange, disabled = false }) {
   const display = formatValue ? formatValue(value) : `${value}${unit}`;
   // minWidth: 0 (root + label div) and width: 100% on the range input for
   // the same reason as Toggle below: a grid item's min-width defaults to
@@ -290,12 +290,16 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
     <div style={{ marginBottom: 20, minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 7, minWidth: 0, gap: 8 }}>
         <div style={{ minWidth: 0 }}>
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
           {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
         </div>
         <Lcd value={display} size={12} />
       </div>
-      <input type="range" min={min} max={max} step={step} value={value} style={{ width: '100%' }} onChange={e => onChange(Number(e.target.value))} />
+      {/* A control whose feature the device lacks is shown disabled WITH the
+          reason (in sub), never as one that silently does nothing. */}
+      <input type="range" min={min} max={max} step={step} value={value} disabled={disabled}
+        style={{ width: '100%', opacity: disabled ? 0.45 : 1 }}
+        onChange={e => onChange(Number(e.target.value))} />
     </div>
   );
 }
@@ -1701,6 +1705,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 disabled={!isAdmin}
                 sections={sections}
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
+                mixCapable={!device.connected || !!device.audioMixCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -4005,7 +4010,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness"],
+  "playback": ["eqBands", "eqLoudness", "duckDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -4123,7 +4128,7 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
 }
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
-                            shadowCapable = true }) {
+                            shadowCapable = true, mixCapable = true }) {
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -4273,6 +4278,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <div>
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Slider label="Duck depth" disabled={!mixCapable}
+                sub={mixCapable
+                  ? "how far music drops under a voice response — it keeps playing instead of pausing"
+                  : "needs firmware that mixes music and voice (v3.0+)"}
+                value={config.duckDb ?? -18} min={-40} max={0} step={1} unit="dB"
+                onChange={v => set('duckDb', v)}/>
             </div>
             {/* The startup-volume slider used to live here and was removed
                 (2026-07-25): volume is persisted device STATE, not a setting.

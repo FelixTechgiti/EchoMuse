@@ -279,6 +279,23 @@ func main() {
 		pcmSpeaker.Flush()
 	})
 
+	// Music flush — the user genuinely stopped or paused. A voice turn ducks
+	// instead and must never send this.
+	controlClient.OnMusicFlush(func() {
+		pcmSpeaker.FlushMusic()
+	})
+
+	// Duck — music is attenuated under a voice turn and restored at the end.
+	// The depth is read at duck time rather than latched, so a config change
+	// takes effect on the next turn without a restart.
+	controlClient.OnDuck(func(on bool) {
+		if on {
+			pcmSpeaker.SetDuck(config.Get().DuckDb)
+		} else {
+			pcmSpeaker.SetDuck(0)
+		}
+	})
+
 	// Per-stream playback stats — underrun/period counts reported upstream
 	// once per completed TTS stream, persisted against the voice turn.
 	pcmSpeaker.OnStreamStats(func(st speaker.StreamStats) {

@@ -198,6 +198,56 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, `em_arbiter.py` applies **first-detector-wins** suppression: the first device to cross threshold answers *immediately* (no added latency, the claim is synchronous) and any other device detecting within `wakeArbitrationMs` (default 700, 0 = off) stands down and logs "Wake ceded". The claim is released at turn end. Do NOT reinstate the original best-SNR-after-a-wait design: it taxed every wake ~364ms (it gated on devices *connected*, not in earshot) and field data showed SNR at detection was indistinguishable across devices (0.9/1.15/0.93) while the SNR winner produced a worse transcript than the first detector.
 2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → fetch + ffmpeg-decode straight to 48kHz mono → EQ (`em_eq.py`) → stream back as 0x02 frames
+### Ducking: music and voice are separate planes on the device
+
+**A voice turn DUCKS music; it does not pause it** — on firmware announcing
+the `audio_mix` capability. Music rides its own frame types (`0x04`/`0x05`)
+into a second buffer on the device, and the two are mixed at the ALSA write.
+
+It has to be device-side, and that is the whole design constraint. `LEAD_S` =
+4.0s means the next four seconds of music are already in the device's buffer
+when a wake word fires, so **audio that has left the controller cannot be
+ducked by the controller**. Every controller-side alternative buys ducking by
+shortening that lead — giving back the stall protection it exists for, during
+the seconds the user is listening most closely.
+
+What this removes, not just improves: pausing needed a seek to resume, and a
+Music Assistant flow stream **cannot seek**, so a 28s turn cost 28s of the
+song and a long one landed in the next track. Behaviour differed by source
+with no way for the user to tell which they had.
+
+- **Voice is never attenuated**; only the bed under it. The sum saturates
+  rather than wrapping (a wrap turns a loud peak into full-scale opposite
+  polarity, far worse than the clipping).
+- **The gain ramp is a constant slew, not proportional.** `(target-gain)/n`
+  per period is an exponential approach, which made "4 periods" a time
+  constant rather than a duration — measured at 31 periods (1.3s) to settle
+  against the 170ms intended. Gain is interpolated per SAMPLE across the
+  period: a step at a period boundary is a click, landing on exactly the
+  moment the user started speaking.
+- **`duckDb` is config** (default −18dB, Playback section), because it is a
+  taste parameter that wants tuning by ear in a real room — same reasoning as
+  the LED meter response curve.
+- **`music_flush` vs `speaker_flush`.** A genuine stop/pause flushes the
+  MUSIC plane; `speaker_flush` would cut the response and leave the music
+  playing. A voice turn sends neither — flushing discards the buffered audio
+  that makes ducking instant, and on a non-seekable stream it cannot be
+  recovered.
+- **`MediaSession.ducked` changes what turn end must do.** On the pausing
+  path `interrupt()` had already paused, so a deferred user "pause" needed no
+  wire action. When we duck, nothing was ever paused — the pause has to
+  actually happen at release, or it is silently dropped and the music plays
+  on.
+- **Music does NOT count as "streaming"** for the device's wake threshold
+  (`IsStreaming` is voice-only). It is a quiet continuous bed, not a response
+  being talked over; reporting it would drop the device's wake bar for the
+  length of a song.
+- Taps see the MIXED output, which is more correct than before: the AEC
+  far-end reference is what needs cancelling from the mic, and with music
+  under a response the echo is the sum.
+- `reported_state` stays for firmware that cannot mix. On the ducking path it
+  is simply never triggered, because nothing is ever paused behind HA's back.
+
 3. **Media playback** (`em_player.py`) — the HA `media_player` entity accepts `play_media`/browse (PLAY_MEDIA+BROWSE_MEDIA feature flags): ffmpeg subprocess streams s16le/48k/mono, fed to the same 0x02 plane, paced to `LEAD_S`=**4.0s** ahead of realtime. That is sized against the device's own depth (`audioChanDepth` 128 periods × 42.7ms ≈ 5.46s) leaving ~1.4s headroom so the feed can never outrun `audioCh`. It was 1.5s until 2026-07-25, which left ~4s of hardware buffer unused and let measured 1.8-2.6s link stalls drain it into audible gaps. **The lead is NOT what makes pause/stop/voice-preempt instant** — `speaker_flush` drains the device buffer and the discard-until-EOS contract swallows what is still in TCP; the old comment misattributed that. Resume passes `-ss` before `-i`, an INPUT seek: ffmpeg does NOT ignore a seek it cannot perform, it decodes and discards until it reaches the timestamp, so a 173s bookmark on a non-seekable live stream (Music Assistant flow) is 173s of silence — a first-chunk deadline (`SEEK_STALL_S`) catches that and rejoins the live edge. Pause = speaker_flush + position bookmark, resume = ffmpeg `-ss` (live streams rejoin the live edge); teardown always EOSes the stream (flush-discard contract, same as barge-in). **Voice turns and announcements OWN the speaker**: `interrupt()` takes ownership and `resume_interrupted()` releases it. Ownership is taken unconditionally, even with nothing playing — the old behaviour only paused what was ALREADY playing, which did nothing to stop something *starting* mid-turn, and "play some jazz" runs the intent **before** HA generates the spoken reply, so `play_media` lands while the TTS is still coming and puts music on the same 0x02 plane as the response. While owned, `play`/`resume`/`pause`/`stop` record the user's intent instead of touching the wire; the release applies it, **last write wins** ("play jazz… actually, pause"). A user command **overrides** the auto-resume — theirs is an instruction, `resume_after` is bookkeeping — which is what makes pausing during a barge-in possible at all (issue #53: `MediaSession.pause()` returns early unless PLAYING, so the command was discarded and then contradicted by the resume). Deferred commands still push the **intended** state to HA (`push_intent`) so the entity is not stale for the length of a turn. The feed must NOT set `device.speaking` (that makes the wake loop drop frames — deaf for a whole song); wake-over-music scores against `bargeInThreshold` when barge-in is enabled, same physics as barge during TTS. Music EQ runs through `em_eq.StreamingEQ` (chunk-carried filter state — per-chunk `apply()` would click at boundaries).
 
     **Never send HA a hardcoded `MediaPlayerState`.** The feed announces `playing` exactly ONCE, when the decoder starts producing audio, so anything sent afterwards becomes HA's last word. Two places asserted a constant `IDLE` — turn end, and every device volume report — and each left the entity showing idle over audible music (issue #53, twice: fixing the first instance is how the second survived). Use `_media_state_msg()`, which reads em_player truth. `tests/test_deploy.py` forbids the shape, allowing only the documented optimistic `PLAYING` for `play_media` and `ANNOUNCING`.
@@ -585,7 +635,7 @@ Two device behaviours the wizard works around rather than fixes:
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances` and `wakeArbitrationMs` are ignored by it).
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances` and `wakeArbitrationMs` are ignored by it).
 
 ### Fleet vs device scoping (schema v8)
 

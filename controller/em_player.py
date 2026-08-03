@@ -56,6 +56,21 @@ BYTES_PER_SEC = SPEAKER_RATE * 2
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 
+# Music rides its own plane on firmware that can mix (the "audio_mix"
+# capability), so a voice turn ducks it instead of pausing it. On older
+# firmware music stays on 0x02 and the pause/resume path is kept — a device
+# that cannot mix would never play 0x04 at all, which is silence rather than
+# degraded behaviour.
+MUSIC_FRAME_TYPE = 0x04
+MUSIC_EOS_TYPE   = 0x05
+
+
+def _frame_types(device) -> tuple[int, int]:
+    """(audio frame type, EOS type) for this device's music stream."""
+    if device is not None and getattr(device, "audio_mix_capable", False):
+        return MUSIC_FRAME_TYPE, MUSIC_EOS_TYPE
+    return SPEAKER_FRAME_TYPE, SPEAKER_EOS_TYPE
+
 # Feed-ahead target over realtime. The device buffers audioChanDepth=128
 # periods x 42.7ms = ~5.46s, so 1.5s left roughly four seconds of hardware
 # buffer unused — and control-plane RTT measurement shows stalls of 1.8s and
@@ -72,6 +87,27 @@ SPEAKER_EOS_TYPE   = 0x03
 # explaining them. The stalls are still unexplained — see the RTT
 # instrumentation and docs/led-ring-states.md-era investigation notes.
 LEAD_S          = 4.0
+
+# The lead the music feed drops to while a voice turn owns the speaker.
+#
+# Music and TTS share ONE /data WebSocket, so a 4s music lead means up to
+# ~380KB of music can be queued ahead of the response in the socket. When the
+# link hiccups — and this fleet stalls for seconds at a time — the device must
+# drain all that music before it reaches the TTS frames. Measured on the first
+# ducked turn: the response waited 2087ms to start and then took a 3549ms gap
+# mid-stream, against 41ms/0ms on turns where nothing else was streaming.
+#
+# Dropping the lead makes the feed stop sending until it has drained back to
+# TURN_LEAD_S, which clears the queue ahead of the response. The music keeps
+# playing throughout, from the buffer the device already holds — that buffer
+# is exactly why ducking has to happen device-side, and this is the same
+# property paying for itself twice.
+#
+# Not zero: the music would then be sent frame-by-frame at the instant it is
+# needed, with no protection at all against a stall DURING the turn. This
+# trades the BACKGROUND's stall margin for the FOREGROUND's, which is the
+# right way round — the response is what the user is listening to.
+TURN_LEAD_S     = 1.0
 RESUME_REWIND_S = 1.0   # replay this much before the pause bookmark
 DRAIN_FUDGE_S   = 1.1   # device prime hold — same constant class as turns
 # How long to wait for the first decoded audio after a seek before deciding
@@ -227,6 +263,24 @@ async def interrupt(device_id: str) -> None:
     s = _session(device_id)
     s.owned_by_turn = True
     s.pending = None
+
+    device = _get_device(device_id) if _get_device else None
+    if device is not None and getattr(device, "audio_mix_capable", False):
+        # DUCK, do not pause. The device holds music on its own plane and
+        # mixes it under the response, so the music keeps playing quietly and
+        # nothing is lost: no seek, no bookmark, no position drift on a
+        # non-seekable flow stream, and no need for the entity to claim it is
+        # playing while internally paused.
+        s.ducked = True
+        # Yield the shared data plane to the response. The music keeps
+        # playing from the device's own buffer while the feed holds off.
+        s.lead_s = TURN_LEAD_S
+        try:
+            await device.send_control({"type": "duck", "on": True})
+        except Exception as e:
+            log.warning(f"[{device_id}] duck failed: {e}")
+        return
+
     if s.state == PLAYING:
         s.resume_after = True
         await s.pause()
@@ -250,6 +304,18 @@ async def resume_interrupted(device_id: str) -> None:
     s.owned_by_turn = False
     pending, s.pending = s.pending, None
     resume_after, s.resume_after = s.resume_after, False
+    ducked, s.ducked = s.ducked, False
+    s.lead_s = LEAD_S
+
+    if ducked:
+        # Release the duck before settling any deferred command, so the music
+        # is already back at level by the time a stop or pause lands.
+        device = _get_device(device_id) if _get_device else None
+        if device is not None:
+            try:
+                await device.send_control({"type": "duck", "on": False})
+            except Exception as e:
+                log.warning(f"[{device_id}] unduck failed: {e}")
 
     if pending is not None:
         kind, url = pending
@@ -259,8 +325,12 @@ async def resume_interrupted(device_id: str) -> None:
             await s.resume()
         elif kind == "stop":
             await s.stop()
-        # "pause" needs no wire action: interrupt() already paused it, and
-        # dropping resume_after above is the whole of what the user asked for.
+        elif kind == "pause" and ducked:
+            # When we ducked, nothing was ever paused — so the user's pause
+            # has to actually happen here. On the pausing path interrupt()
+            # had already done it and dropping resume_after was the whole of
+            # what the user asked for.
+            await s.pause()
         return
 
     if resume_after and s.state == PAUSED:
@@ -288,6 +358,14 @@ class MediaSession:
         # WE paused something and should put it back afterwards — distinct
         # from ownership, and overridden by any pending user command.
         self.resume_after = False
+        # ducked: this turn lowered the music rather than pausing it (a device
+        # that mixes). It changes what turn end has to do — there is nothing
+        # to resume, but a deferred pause must actually be carried out.
+        self.ducked = False
+        # Effective pacing lead. Reduced while a turn owns the speaker so the
+        # music feed stops monopolising the shared data plane (see
+        # TURN_LEAD_S); restored when the turn releases it.
+        self.lead_s = LEAD_S
         self._pos = 0.0            # seconds into the media at last pause
         self._task: asyncio.Task | None = None
         self._proc = None
@@ -379,10 +457,16 @@ class MediaSession:
 
     async def _halt(self, bookmark: bool) -> None:
         """
-        Tear down an active feed. Order matters and mirrors barge-in:
-        speaker_flush first (arms the device's discard-until-EOS + drains
-        its buffer), then cancel the feed — whose finally sends the EOS
-        that disarms the discard.
+        Tear down an active feed. Order matters and mirrors barge-in: flush
+        first (arms the device's discard-until-EOS + drains its buffer), then
+        cancel the feed — whose finally sends the EOS that disarms the
+        discard.
+
+        On a device that mixes, the flush must target the MUSIC plane:
+        speaker_flush would cut the voice stream and leave the music playing,
+        which is precisely backwards. This path is reached only when playback
+        genuinely ends — stop, pause, or a new track — never for a voice
+        turn, which ducks.
         """
         task = self._task
         self._task = None
@@ -392,10 +476,12 @@ class MediaSession:
             return
         device = _get_device(self.device_id) if _get_device else None
         if device is not None:
+            flush = ("music_flush" if getattr(device, "audio_mix_capable", False)
+                     else "speaker_flush")
             try:
-                await device.send_control({"type": "speaker_flush"})
+                await device.send_control({"type": flush})
             except Exception as e:
-                log.warning(f"[{self.device_id}] speaker_flush failed: {e}")
+                log.warning(f"[{self.device_id}] {flush} failed: {e}")
         task.cancel()
         try:
             await task
@@ -436,6 +522,10 @@ class MediaSession:
             self.state = IDLE
             await self._push_state()
             return
+
+        # Resolved once per feed rather than per chunk: the device cannot
+        # gain or lose the capability mid-stream, and this runs ~23×/s.
+        frame_type, eos_type = _frame_types(device)
 
         eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness)
         start_pos = self._pos
@@ -526,16 +616,19 @@ class MediaSession:
                     if chunk:
                         chunk = chunk + bytes(SPEAKER_BYTES - len(chunk))
                         await device.send_data(
-                            bytes([SPEAKER_FRAME_TYPE]) + eq.process(chunk))
+                            bytes([frame_type]) + eq.process(chunk))
                         sent += SPEAKER_BYTES
                     break
-                # Pacing: hold the lead at LEAD_S over realtime so a flush
-                # (pause/stop/voice preempt) feels instant.
+                # Pacing. Read per chunk, not captured once: a voice turn
+                # lowers the lead mid-stream so the response gets the wire,
+                # and that has to take effect on the next frame rather than
+                # the next track.
+                lead = self.lead_s
                 ahead = sent / BYTES_PER_SEC - (loop.time() - seg_start)
-                if ahead > LEAD_S:
-                    await asyncio.sleep(ahead - LEAD_S)
+                if ahead > lead:
+                    await asyncio.sleep(ahead - lead)
                 await device.send_data(
-                    bytes([SPEAKER_FRAME_TYPE]) + eq.process(chunk))
+                    bytes([frame_type]) + eq.process(chunk))
                 if t_first_send is None:
                     t_first_send = loop.time()
                     # The chain, as deltas from the play command. Without this
@@ -554,7 +647,7 @@ class MediaSession:
 
             # Natural end of media: close the stream and wait out the
             # device buffer before reporting idle.
-            await device.send_data(bytes([SPEAKER_EOS_TYPE]))
+            await device.send_data(bytes([eos_type]))
             eos_sent = True
             remaining = (sent / BYTES_PER_SEC
                          - (loop.time() - seg_start) + DRAIN_FUDGE_S)
@@ -594,7 +687,7 @@ class MediaSession:
                 # EOS — same contract as barge-in aborting stream_speaker.
                 try:
                     await asyncio.shield(
-                        device.send_data(bytes([SPEAKER_EOS_TYPE])))
+                        device.send_data(bytes([eos_type])))
                 except BaseException:
                     pass
             if proc is not None and proc.returncode is None:

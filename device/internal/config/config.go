@@ -39,6 +39,12 @@ type Device struct {
 	// barge-in look like an on-device miss.
 	BargeInEnabled   bool
 	BargeInThreshold float64
+	// DuckDb is how far MUSIC is attenuated while a voice turn plays over
+	// it, in dB (negative = quieter). Config rather than a constant because
+	// it is a taste parameter that needs iterating in a real room, the same
+	// reasoning as the LED meter response curve — not something to discover
+	// via a firmware OTA per attempt.
+	DuckDb float64
 	// OwwOnDevice selects on-device wake word scoring: "off" or "shadow".
 	// Shadow mode scores the wake stream locally and reports what it would
 	// have detected, without acting on it, so device and controller can be
@@ -120,6 +126,7 @@ func (d *Device) loadDefaults() {
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.10)
+	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -170,6 +177,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.BargeInThreshold > 0 {
 		d.BargeInThreshold = msg.BargeInThreshold
+	}
+	// Negative-going, so the usual "non-zero means set" rule is inverted:
+	// a duck of 0dB is a legitimate setting ("do not duck at all") and must
+	// be distinguishable from an absent field, hence the pointer.
+	if msg.DuckDb != nil {
+		d.DuckDb = *msg.DuckDb
 	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
@@ -273,6 +286,7 @@ type ConfigMessage struct {
 	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
 	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
 	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
+	DuckDb             *float64 `json:"duckDb,omitempty"`
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`

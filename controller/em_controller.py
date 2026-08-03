@@ -539,6 +539,23 @@ class Device:
         return "led_anim" in (self.capabilities or [])
 
     @property
+    def audio_mix_capable(self) -> bool:
+        """
+        Whether this firmware holds music on its own plane and mixes it with
+        voice at the ALSA write.
+
+        When it does, a voice turn DUCKS the music instead of pausing it —
+        which is the only place ducking can happen. The music feed runs
+        LEAD_S=4s ahead of realtime, so the next four seconds are already on
+        the device when a wake word fires, and audio that has left here
+        cannot be ducked from here. Without the capability the controller
+        keeps the pause/resume path: a device that cannot mix would never
+        play the 0x04 stream at all, which is silence rather than degraded
+        behaviour.
+        """
+        return "audio_mix" in (self.capabilities or [])
+
+    @property
     def oww_shadow_capable(self) -> bool:
         """
         Whether this firmware can score the wake word on-device at all.

@@ -103,6 +103,13 @@ DEFAULT_DEVICE_CONFIG = {
     # no self-trigger risk down to ~0.08.
     "bargeInEnabled":   False,
     "bargeInThreshold": 0.10,
+    # How far music is attenuated while a voice turn plays OVER it, on
+    # firmware that can mix the two planes (the "audio_mix" capability).
+    # Ducking replaces pausing there: the music feed runs 4s ahead of
+    # realtime, so pausing costs a seek that a Music Assistant flow stream
+    # cannot perform. A taste parameter — it wants tuning by ear in a real
+    # room, like the LED meter curve, not a firmware push per attempt.
+    "duckDb": -18.0,
     "owwModel":         "hey_jarvis_v0.1",
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting

@@ -1504,9 +1504,14 @@ class DeviceESPhomeServer:
         self._send_volume_set = None
         # What the DEVICE says it implements, from its register message.
         # Drives which HA entities are advertised — negotiate by capability,
-        # never by version (CLAUDE.md). Empty until the device connects, so a
-        # satellite that attaches first simply advertises fewer entities and
-        # picks them up on the next HA reconnect.
+        # never by version (CLAUDE.md).
+        #
+        # Seeded from _pending_caps at creation, because the device registers
+        # BEFORE this object exists and the entity list is a one-shot. The
+        # old comment here claimed a satellite attaching first would "pick
+        # them up on the next HA reconnect" — which is true, and was the
+        # problem: HA does not reconnect on its own, so the entity stayed
+        # missing for the life of the connection.
         self.capabilities: list[str] = []
 
     def set_capabilities(self, caps: list[str]) -> None:
@@ -1607,6 +1612,12 @@ class _RejectProtocol(SatelliteServerProtocol):
 
 # device_id → DeviceESPhomeServer
 _servers: dict[str, DeviceESPhomeServer] = {}
+
+# Capabilities reported by a device whose server does not exist yet. The
+# device's registration always precedes server creation (the listener only
+# comes up once the device is present), so without this the very first
+# ListEntities — the one HA caches — is built from an empty list.
+_pending_caps: dict[str, list[str]] = {}
 _azc: Optional[AsyncZeroconf] = None
 
 
@@ -1690,6 +1701,11 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
         oww_model_id=oww_model_id,
         port=port,
     )
+    # Capabilities that arrived before this server existed decide which HA
+    # entities are advertised, and advertising happens once.
+    caps = _pending_caps.get(device_id)
+    if caps:
+        server.set_capabilities(caps)
     _servers[device_id] = server
 
     # mDNS registration — _esphomelib._tcp, one per device port,
@@ -2079,7 +2095,20 @@ async def device_disconnected(device_id: str) -> None:
 
 
 def set_device_capabilities(device_id: str, caps: list[str]) -> None:
-    """Called by em_controller when a device registers."""
+    """
+    Called by em_controller when a device registers, BEFORE the server for it
+    exists — so the value is held here as well as pushed.
+
+    Dropping it when no server was registered yet is how Retreat lost its
+    ambient light sensor in Home Assistant (2026-08-03): the device connects,
+    the capability push finds no server and silently does nothing, the server
+    is created a beat later with an empty list, and the entity list — a
+    ONE-SHOT at ListEntities time — is then built without the sensor. HA
+    caches that until it reconnects, so the entity is simply absent for the
+    life of the connection. The same race decides it differently on each
+    controller restart, which is what made the graph come and go.
+    """
+    _pending_caps[device_id] = list(caps or [])
     server = _servers.get(device_id)
     if server is not None:
         server.set_capabilities(caps)

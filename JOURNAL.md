@@ -679,3 +679,102 @@ are **append-only and in ascending date order** — new work goes at the end.
   fix. It was `"will be rejected"` — a substring search on a three-letter
   name. Word-boundary matching showed it absent. The wrong tool made me report
   a leak that was not there, one step after failing to report one that was.
+
+- **2026-08-02 — ducking had to happen on the device, and the reason is a number.**
+  Barge-in paused the music, answered, then resumed. Wil's framing was "no
+  bandaids — how would Alexa do it?", and the answer is that every assistant
+  people compare us to **ducks**. Pausing was not merely less familiar: it
+  needed a seek to resume, and a Music Assistant flow stream **cannot seek**,
+  so a 28-second turn cost 28 seconds of the song and a long one landed in the
+  next track. Behaviour differed by source with no way for the user to tell
+  which they had, and the `media_player` entity had to report `PLAYING` while
+  internally paused or HA would decline the user's own pause.
+
+  The obstacle was never the arithmetic — both streams are 48kHz mono s16, so
+  mixing is an add and a limiter. It is **`LEAD_S = 4.0`**: the next four
+  seconds of music are already in the device's buffer when a wake word fires,
+  and **audio that has left the controller cannot be ducked by the
+  controller**. Every controller-side option buys ducking by shortening that
+  lead — handing back the stall protection it exists for (raised from 1.5s
+  because measured 1.8–2.6s link stalls drained the shorter buffer), during
+  the seconds the user is listening hardest. So music got its own frame types
+  and its own buffer on the device, and the two planes mix at the ALSA write.
+
+  The mixer taught me something about ramps. My first gain ramp moved
+  `(target-gain)/n` per period, which is an *exponential* approach — "4
+  periods" was a time constant, not a duration, and a test measured it
+  settling in **31 periods (1.3s)** against the 170ms the comment claimed. A
+  constant slew, interpolated per sample so the change is a fade rather than a
+  click landing exactly when the user starts speaking.
+
+  Two traps on the controller side, both the same shape: an assumption that
+  quietly stopped being true. `speaker_flush` is the wrong flush for music —
+  it cuts the response and leaves the music playing. And the deferred "pause
+  the music" needed no wire action *because* `interrupt()` had already paused;
+  duck instead and nothing was ever paused, so the user's pause is silently
+  discarded and the music plays on. That is #53 again, arriving by a different
+  route, which is the second time this month a fix has had to be made twice
+  because the first one addressed the instance rather than the shape.
+
+  `reported_state` survives for firmware that cannot mix, and on the ducking
+  path is simply never triggered — the entity stops needing to lie because
+  nothing is paused behind HA's back.
+
+- **2026-08-03 — three bugs behind one symptom, and two of them were mine.**
+  The first real listening test of ducking. The duck itself was right on the
+  first try — music drops to a good level, the response mixes over it, no
+  seek, no position loss — and everything around it was wrong in a way that
+  only a room could reveal.
+
+  **Dropouts.** Music and TTS share one `/data` WebSocket, and the music feed
+  holds a 4s lead, so up to ~380KB of music can sit in the socket ahead of
+  the response. When the link hiccups the device must drain all of it before
+  reaching the TTS frames — head-of-line blocking. Measured: the response
+  waited 2087ms to start and took a 3549ms gap mid-stream, against 41ms/0ms
+  on turns with nothing else streaming. The feed now drops its lead while a
+  turn owns the speaker, so the music plays out of the buffer the device
+  already holds — the same buffer that forced ducking to be device-side,
+  paying for itself twice.
+
+  **The ring throbbing to the music.** I had routed both device taps to the
+  mixed output. That is right for the AEC reference — the mic hears the sum,
+  so the sum is what must be cancelled — and wrong for the meter, which
+  visualises the RESPONSE. Wil saw a low throb before the response started,
+  which is the ring reporting on a bed nobody asked it to watch.
+
+  **A response that ended after 15 of 56 periods.** The worst of the three,
+  and a regression I introduced: splitting the speaker into two planes
+  dropped a branch from `EndStream`. The original returned early when the
+  stream had been discarding — `flush()` already set `eosPending` and the
+  drain consumed it — while mine set it again, leaving the flag armed with no
+  stream behind it. The next response then reported itself complete at its
+  first buffer dip, so the controller ended the turn, cleared the ring and
+  released the duck while the device still held most of the audio. It needed
+  a cancelled turn immediately before to show up, which is why it looked
+  intermittent and why more testing made it seem to improve.
+
+  All three were found from recorded numbers rather than from listening
+  again: `periods=15` against `audio=2800ms` says something specific in a way
+  that "it sounded odd" cannot. And the fix carries tests because extracting
+  the buffering state machine into an untagged file made it host-testable —
+  before this, every one of those behaviours could only be checked by ear.
+
+- **2026-08-03 — the light sensor was fine; the entity never existed.**
+  Retreat had stopped reporting ambient light to Home Assistant and the other
+  devices' graphs came and went. The device was reporting all along, and the
+  controller was logging the readings.
+
+  A device registers BEFORE its ESPHome server is created — the listener only
+  comes up once the device is present — so `set_device_capabilities` looked
+  for a server, found none, and **silently did nothing**. The server was then
+  built with an empty capability list, and the entity list is a one-shot at
+  `ListEntities`: no `ambient_light` capability, no sensor entity, and HA
+  caches that for the life of the connection. Measured on Retreat: registered
+  05:25:33, server created 05:25:34.
+
+  Being a race, it resolved differently on every controller restart — which is
+  what made readings vanish and return rather than never work, and is why it
+  survived this long. It silently costs the action-button entity too. The
+  comment on the field claimed a satellite attaching first would "pick them up
+  on the next HA reconnect", which was true and was the problem: HA does not
+  reconnect on its own.
