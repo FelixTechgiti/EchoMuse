@@ -584,6 +584,41 @@ The device runs an A/B slot binary system:
 
 OTA is triggered from the dashboard — the controller pushes the new binary via the `/shell` WebSocket.
 
+**md5 decides whether a transfer succeeded, not the shell's exit status.**
+`TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`
+exited 0 — never that the bytes on the device match the bytes sent. Bytes
+therefore land in `{dest}.part` and are renamed only on an md5 match
+(`_stream_file_to_device`), the same discipline the asset path has always
+had. **The point is the ordering, not the error message**: a corrupt binary
+and a genuinely broken one produce the *same* observable — three fast exits,
+a symlink flip, a device back on its old version — so an unverified transfer
+costs a reboot and a rollback to arrive at the same place with less
+information, and the mismatch must be caught while the device is still
+running happily on its current slot. A failed verification must never reach
+the `ln -sf`; `tests/test_deploy.py` pins that ordering.
+
+Three things not to undo:
+- Verification rides the **same shell session** as the transfer, and the md5
+  tool is detected alongside the base64 decoder in the round trip that was
+  already happening — so it costs a round trip on an open socket, not a
+  session.
+- **No `cut`.** `md5sum` prints `<hash>  <path>`, and the branch where
+  busybox is absent is exactly the branch where `busybox cut` is absent too.
+  A `case` glob needs no external tool.
+- `require_verify` separates "no md5 tool on this device" from "md5 did not
+  match". Callers default to accepting the former with a warning — their
+  prior behaviour, and the base64 detection already treats a busybox-less
+  device as a contemplated state. **Firmware passes True and refuses**, being
+  the payload we are about to boot.
+
+Free space is checked before anything is written, via
+`em_oww_assets.parse_free_mb` — never an awk field index, for the busybox
+line-wrap reason documented in the asset section. An unreadable `df` reads as
+**carry on**: it is not evidence of a full disk, and refusing on it would
+block updates on any device whose `df` we have not seen. Note binary growth
+is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
+v2.10.0 is 10.3MB.
+
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
