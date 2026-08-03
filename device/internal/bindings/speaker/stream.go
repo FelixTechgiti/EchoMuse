@@ -155,12 +155,24 @@ func (s *audioStream) pump(period []byte, wireBytes int) (bool, error) {
 // endStream marks the EOS. Called from the WS read goroutine the instant the
 // frame arrives, so by the time the pump loop drains the channel the flag is
 // already set and the drain is not counted as an underrun.
+//
+// A stream that was being DISCARDED is the exception, and it is load-bearing.
+// flush() already set eosPending and the drain that followed already consumed
+// it, so setting it again here leaves it armed with no stream behind it —
+// and the NEXT stream then reports itself complete at its first buffer dip.
+// Measured after this was briefly wrong: a 2800ms response reported complete
+// after 15 periods (640ms), which ended the turn, cleared the ring and
+// released the duck while the device was still holding most of the audio.
 func (s *audioStream) endStream() {
-	s.eosPending.Store(true)
 	s.mu.Lock()
 	s.active = false
+	wasDiscarding := s.discarding
 	s.discarding = false
 	s.mu.Unlock()
+	if wasDiscarding {
+		return
+	}
+	s.eosPending.Store(true)
 }
 
 // flush drops everything queued and, if a stream is mid-flight, arms discard
