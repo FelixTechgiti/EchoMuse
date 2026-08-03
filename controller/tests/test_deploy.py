@@ -678,3 +678,97 @@ def test_the_music_feed_reads_its_lead_per_chunk():
         "the pacing loop must read self.lead_s, not the LEAD_S constant — "
         "otherwise lowering the lead for a voice turn does nothing"
     )
+
+
+def _fn_body(src: str, name: str) -> str:
+    """Slice one async def out of a module's source, up to the next top-level def."""
+    start = src.index(f"async def {name}")
+    rest  = src[start + 1:]
+    end   = rest.index("\nasync def ") if "\nasync def " in rest else len(rest)
+    return src[start:start + 1 + end]
+
+
+def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
+    """
+    TRANSFER_OK only ever proved that the decode pipeline and chmod exited 0 —
+    not that the bytes on the device match the bytes we sent (#76).
+
+    That matters because a corrupt binary and a genuinely broken one produce
+    the SAME observable: three fast exits, a symlink flip, and a device back on
+    its old version. Shipping an unverified binary therefore costs a reboot and
+    a rollback to learn nothing at all.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _fn_body(src, "_stream_file_to_device")
+
+    assert "hashlib.md5(data).hexdigest()" in fn, (
+        "the transfer must hash what it actually sent — hashing anything else "
+        "verifies the wrong thing"
+    )
+    assert ".part" in fn and "mv " in fn, (
+        "bytes must land in .part and be renamed only once verified, so a bad "
+        "transfer leaves the destination as it was"
+    )
+    # The rename must be conditional on the comparison, not merely nearby.
+    assert re.search(r"case .*GOT.*in .*want.*mv ", fn, re.S), (
+        "the rename must be guarded by the md5 comparison"
+    )
+    assert "rm -f" in fn, "a failed verification must remove the .part"
+
+    # Anchored on the CALL, not the function body: the docstring explains why
+    # require_verify is set, so a body-wide search passes on the prose alone
+    # while the argument is gone (caught by reintroducing exactly that).
+    slot = _fn_body(src, "_stream_binary_to_slot")
+    call = slot[slot.index("return await _stream_file_to_device"):]
+    assert "require_verify=True" in call, (
+        "firmware is the payload where an unverifiable transfer must fail "
+        "rather than proceed — it is the one we are about to boot"
+    )
+
+
+def test_a_corrupt_binary_never_reaches_the_symlink_flip():
+    """
+    The real win of verifying is not the error message, it is the ordering:
+    a mismatch must be caught while the device is still running fine, not
+    after it has taken a reboot and a rollback to tell us the same thing.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    ota = src[src.index("_stream_binary_to_slot(live, binary"):]
+    ota = ota[:ota.index("_monitor_reconnect")]
+
+    guard = ota.index("if not ok:")
+    flip  = ota.index("ln -sf")
+    assert guard < flip, (
+        "the transfer result must be checked BEFORE the symlink flip"
+    )
+    assert "return" in ota[guard:flip], (
+        "a failed transfer must return, not fall through to the flip — "
+        "otherwise verification changes the log message and nothing else"
+    )
+
+
+def test_ota_checks_free_space_before_writing_anything():
+    """
+    The OTA path had no space check at all, unlike the asset path.
+
+    Two traps, both already paid for elsewhere: read the figure with
+    parse_free_mb rather than an awk field index (busybox wraps a long
+    filesystem name onto its own line, so $4 is the PERCENTAGE on these
+    devices), and treat an unreadable df as "carry on" rather than as a full
+    disk — refusing on an unparsed reading blocks updates on any device whose
+    df we have not seen.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    ota = src[src.index("inactive_slot = "):src.index("_stream_binary_to_slot(live, binary")]
+
+    assert "parse_free_mb" in ota, (
+        "free space must be read with parse_free_mb, never an awk field index"
+    )
+    # Comments are stripped first: the trap is worth explaining in a comment,
+    # and a test that reads its own warning as the bug is a test that can only
+    # be silenced by deleting the explanation.
+    code = "\n".join(l for l in ota.splitlines() if not l.lstrip().startswith("#"))
+    assert "awk" not in code, "an awk field index reads the percentage on these devices"
+    assert "free_mb is not None and free_mb <" in ota, (
+        "an unknown reading must not be compared as if it were a number"
+    )
