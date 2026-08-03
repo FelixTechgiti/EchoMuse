@@ -1401,14 +1401,43 @@ async def _run_update(device_id: str, release: dict,
         await _sync_debloat(live, device_id)
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
+
+        # Free space, checked BEFORE writing anything. The transfer needs room
+        # for the new binary alongside its .part, and running /data out of
+        # space mid-write is a bad way to find out. Read with parse_free_mb,
+        # never an awk field index — busybox wraps a long filesystem name onto
+        # its own line, so $4 is the percentage on these devices.
+        need_mb  = (len(binary) * 2) // 1048576 + 8   # binary + .part + slack
+        free_out = await _shell_run(
+            live, 'echo "FREE $(busybox df -m /data | busybox tail -1)"')
+        free_mb = None
+        for line in (free_out or "").splitlines():
+            if line.startswith("FREE"):
+                free_mb = em_oww_assets.parse_free_mb(line[5:])
+                break
+        if free_mb is not None and free_mb < need_mb:
+            await _update_failed(
+                device_id,
+                f"Not enough space on /data: {free_mb}MB free, needs ~{need_mb}MB")
+            return
+        if free_mb is None:
+            # Unknown reads as "carry on" — a df we cannot parse is not
+            # evidence of a full disk, and refusing on it would block updates
+            # on any device whose df we have not seen.
+            log.warning(f"[api] Could not read free space on {device_id} "
+                        f"from {free_out!r} — proceeding with update")
+
         await _push_log_event(device_id, "info", "controller",
                               f"Deploying to slot {inactive_slot} (active: {active_slot})")
 
-        # Stream binary to inactive slot
+        # Stream binary to inactive slot. Verified by md5 before it is renamed
+        # into place, so a corrupt transfer leaves the slot as it was and never
+        # reaches the symlink flip below (#76).
         ok = await _stream_binary_to_slot(live, binary, inactive_slot)
         if not ok:
             await _update_failed(device_id,
-                                 f"Binary transfer to {inactive_slot} failed")
+                                 f"Binary transfer to {inactive_slot} failed "
+                                 f"or did not verify — slot left untouched")
             return
 
         # Brief pause so device can cleanly close the transfer shell before
@@ -1684,12 +1713,22 @@ async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
 
 
 async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
-    """Transfer a firmware binary to /data/local/bin/{slot}."""
-    return await _stream_file_to_device(live, binary, f"/data/local/bin/{slot}")
+    """
+    Transfer a firmware binary to /data/local/bin/{slot}.
+
+    require_verify=True: firmware is the one payload where an unverifiable
+    transfer must fail rather than proceed. A corrupt binary and a genuinely
+    broken one produce the same observable — three fast exits and a rollback —
+    so shipping one to the slot we are about to boot costs a reboot and a
+    rollback to learn nothing (#76).
+    """
+    return await _stream_file_to_device(live, binary, f"/data/local/bin/{slot}",
+                                        require_verify=True)
 
 
 async def _stream_file_to_device(live, data: bytes, dest: str,
-                                 mode: str = "755") -> bool:
+                                 mode: str = "755",
+                                 require_verify: bool = False) -> bool:
     """
     Transfer a file to `dest` on the device via shell heredoc (default mode 755).
 
@@ -1697,6 +1736,18 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
     transferring, since 'base64' is not always in PATH on Android/FireOS.
     Uses a heredoc so no intermediate .b64 file is needed.
     The heredoc delimiter contains '_' which is not in the base64 alphabet.
+
+    **md5 decides success, not the shell's exit status.** Bytes land in
+    `{dest}.part` and are renamed only once their md5 matches what we sent, so
+    a bad transfer leaves whatever was at `dest` untouched. `TRANSFER_OK` alone
+    only ever proved that the decode pipeline and chmod exited 0 — not that the
+    bytes arrived intact (#76). The verification rides the SAME shell session as
+    the transfer, so it costs a round trip on an open socket, not a new session.
+
+    `require_verify` decides what happens when the device has no md5 tool at
+    all. Callers default to False, which warns and accepts — the same behaviour
+    they had before this existed, and the base64 detection below already treats
+    a busybox-less device as a contemplated state. Firmware passes True.
     """
     import base64 as _b64
 
@@ -1714,11 +1765,17 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
         # ── Detect available base64 decoder ──────────────────────────────────
         # Try busybox first (Magisk provides it), then python3/python.
         # We run a round-trip sanity test so we know the decode flag works.
+        # The md5 tool is detected in the SAME round trip, not a second one.
+        # busybox first for the same reason as the decoder (Magisk provides
+        # it); bare md5sum as a fallback since some SKUs have it in PATH.
         await ws.send(
             "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
             "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
             "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
-            f"else echo DECODER:none; fi; echo {DETECT_MARKER}\n"
+            "else echo DECODER:none; fi; "
+            "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
+            "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
+            f"else echo MD5:none; fi; echo {DETECT_MARKER}\n"
         )
 
         detect_buf = ""
@@ -1750,15 +1807,36 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
 
         log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
 
+        if "MD5:busybox" in detect_buf:
+            md5_cmd = "busybox md5sum"
+        elif "MD5:plain" in detect_buf:
+            md5_cmd = "md5sum"
+        else:
+            md5_cmd = None
+            if require_verify:
+                log.error(f"[api] No md5 tool on device — refusing to transfer "
+                          f"{dest} unverified. Detection output: {detect_buf!r}")
+                return False
+            log.warning(f"[api] No md5 tool on device — {dest} will be "
+                        f"transferred WITHOUT verification")
+
         # ── Heredoc transfer ─────────────────────────────────────────────────
         lines = _b64.encodebytes(data).decode("ascii").splitlines(keepends=True)
         log.info(f"[api] Transferring {len(data):,} bytes to {dest} "
                  f"({len(lines)} base64 lines via heredoc)")
 
-        # Single shell command: decode heredoc → dest, set permissions, confirm
+        # Bytes land in .part; only a matching md5 promotes them to dest. With
+        # no md5 tool there is nothing to promote against, so write straight to
+        # dest and keep the old behaviour (require_verify already refused above
+        # for the payloads where that is not acceptable).
+        landing = f"{dest}.part" if md5_cmd else dest
+
+        # Single shell command: decode heredoc → landing, set permissions,
+        # confirm. chmod here rather than after the rename so the mode travels
+        # with the file and dest is never briefly present with the wrong one.
         await ws.send(
-            f"{decode_cmd} << '{DELIM}' > {dest} && "
-            f"chmod {mode} {dest} && "
+            f"{decode_cmd} << '{DELIM}' > {landing} && "
+            f"chmod {mode} {landing} && "
             f"echo TRANSFER_OK\n"
         )
 
@@ -1771,20 +1849,65 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
         log.info(f"[api] Heredoc sent — waiting for TRANSFER_OK")
 
         # Wait for confirmation (decode of ~13 MB on ARM takes a few seconds)
-        deadline = time.monotonic() + 120
+        deadline    = time.monotonic() + 120
+        transferred = False
         while time.monotonic() < deadline:
             try:
                 msg  = await asyncio.wait_for(ws.recv(), timeout=5)
                 text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
                 if "TRANSFER_OK" in text:
-                    log.info(f"[api] Transfer to {dest} confirmed")
-                    return True
+                    transferred = True
+                    break
                 if text.strip():
                     log.debug(f"[api] Shell output during transfer: {text!r}")
             except asyncio.TimeoutError:
                 continue
 
-        log.error(f"[api] Transfer to {dest} timed out waiting for TRANSFER_OK")
+        if not transferred:
+            log.error(f"[api] Transfer to {dest} timed out waiting for TRANSFER_OK")
+            return False
+
+        if md5_cmd is None:
+            log.info(f"[api] Transfer to {dest} confirmed (unverified)")
+            return True
+
+        # ── Verify, then promote ─────────────────────────────────────────────
+        # Same shell session, so this is a round trip on an open socket rather
+        # than a new session. A mismatch removes the .part and leaves dest as
+        # it was — for firmware that means the rollback slot keeps its previous
+        # binary instead of being replaced by a broken one.
+        # No `cut`: md5sum prints "<hash>  <path>", and the busybox-less branch
+        # is exactly where `busybox cut` would not be there either. A case glob
+        # needs no external tool at all.
+        want = hashlib.md5(data).hexdigest()
+        await ws.send(
+            f'GOT=$({md5_cmd} {landing} 2>/dev/null); '
+            f'case "$GOT" in {want}*) mv {landing} {dest} && echo VERIFY_OK ;; '
+            f'*) rm -f {landing}; echo "VERIFY_BAD:$GOT" ;; esac\n'
+        )
+
+        verify_buf = ""
+        verify_dl  = time.monotonic() + 120
+        while time.monotonic() < verify_dl:
+            try:
+                msg  = await asyncio.wait_for(ws.recv(), timeout=5)
+                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
+                verify_buf += text
+                if "VERIFY_OK" in verify_buf:
+                    log.info(f"[api] Transfer to {dest} confirmed "
+                             f"({len(data):,} bytes, md5 {want})")
+                    return True
+                if "VERIFY_BAD" in verify_buf:
+                    got = verify_buf.split("VERIFY_BAD:")[-1].strip().split()
+                    log.error(f"[api] Transfer to {dest} CORRUPT — md5 {want} "
+                              f"expected, device reported {got[0] if got else '(none)'}. "
+                              f"{dest} left untouched.")
+                    return False
+            except asyncio.TimeoutError:
+                continue
+
+        log.error(f"[api] Transfer to {dest} timed out waiting for md5 verification "
+                  f"— {dest} left untouched")
         return False
 
     except Exception as e:
