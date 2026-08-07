@@ -299,6 +299,7 @@ async def create_app() -> web.Application:
 
     # System
     app.router.add_get("/api/support/bundle",  _get_support_bundle)
+    app.router.add_get("/api/support/recovery_tool", _get_recovery_tool)
     app.router.add_get("/api/system/status",    _get_system_status)
     app.router.add_get("/api/system/config",    _get_system_config)
     app.router.add_patch("/api/system/config",  _patch_system_config)
@@ -3562,6 +3563,41 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         content_type="application/json",
         headers={"Content-Disposition":
                  f'attachment; filename="echomuse-support-{stamp}.json"'},
+    )
+
+
+# Host-side tooling, served rather than shipped separately: the moment someone
+# needs it is the moment their device is unreachable, and "find the repo and
+# check out the right branch" is a poor first instruction at that point.
+HOST_TOOLS_DIR = Path(__file__).parent / "host_tools"
+RECOVERY_TOOL = "echomuse-recovery.py"
+
+
+@auth.require_admin
+async def _get_recovery_tool(request: web.Request) -> web.Response:
+    """
+    GET /api/support/recovery_tool — the host-side recovery script.
+
+    Read from disk per request, like the device payloads, so an edit ships
+    without a rebuild. The controller's version is stamped into the copy that
+    leaves here: a bug report that names the tool's vintage saves a round trip,
+    and a file downloaded months ago is otherwise indistinguishable from a
+    current one.
+    """
+    path = HOST_TOOLS_DIR / RECOVERY_TOOL
+    if not path.is_file():
+        raise web.HTTPInternalServerError(
+            text=f"{RECOVERY_TOOL} missing from {HOST_TOOLS_DIR} — "
+                 "broken install/image")
+
+    source = path.read_text()
+    stamped = source.replace('TOOL_VERSION = "dev"',
+                             f'TOOL_VERSION = "{CONTROLLER_VERSION}"', 1)
+    return web.Response(
+        text=stamped,
+        content_type="text/x-python",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{RECOVERY_TOOL}"'},
     )
 
 

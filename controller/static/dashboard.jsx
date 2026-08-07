@@ -4704,9 +4704,29 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [bundle, setBundle]       = useState(null);  // {url, name, bytes}
   const [bundleErr, setBundleErr] = useState(null);
 
+  const [toolBusy, setToolBusy]   = useState(false);
+  const [tool, setTool]           = useState(null);  // {url, name}
+  const [toolErr, setToolErr]     = useState(null);
+
   // Object URLs pin their blob in memory until revoked; the panel closing is
   // the last moment we can still reach this one.
   useEffect(() => () => { if (bundle) URL.revokeObjectURL(bundle.url); }, [bundle]);
+  useEffect(() => () => { if (tool) URL.revokeObjectURL(tool.url); }, [tool]);
+
+  async function downloadTool() {
+    setToolBusy(true); setToolErr(null);
+    if (tool) URL.revokeObjectURL(tool.url);
+    setTool(null);
+    try {
+      // API.blob for the same reason as the bundle: Bearer-header-only
+      // sessions mean a browser-initiated request would 401.
+      const b = await API.blob('/api/support/recovery_tool');
+      setTool({ url: URL.createObjectURL(b), name: 'echomuse-recovery.py' });
+    } catch(e) {
+      setToolErr(e.error || 'Failed to fetch the recovery tool');
+    }
+    setToolBusy(false);
+  }
 
   async function collectBundle() {
     setBundling(true); setBundleErr(null);
@@ -4880,6 +4900,45 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               {bundle && (
                 <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--muted)', lineHeight:1.6 }}>
                   Worth opening before you post it — it is plain JSON.
+                </div>
+              )}
+
+              <div style={{ height:1, background:'var(--border-soft)', margin:'26px 0 22px' }} />
+
+              <div className="em-panel" style={{ padding:'16px 18px', marginBottom:16 }}>
+                <div className="em-label" style={{ marginBottom:10 }}>Recovery tool</div>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', lineHeight:1.7 }}>
+                  A script for a device this dashboard cannot reach — off the
+                  network, half provisioned, or not booting. Runs over USB on
+                  the machine with the cable, and needs only Python and adb.
+                </div>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', lineHeight:1.7, marginTop:12 }}>
+                  Reimages FireOS 5, repairs a firmware slot that can never
+                  update, and pulls the logs a reboot would erase.
+                </div>
+              </div>
+
+              <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                <Pill disabled={toolBusy} onClick={downloadTool}>
+                  {toolBusy ? 'Fetching…' : 'Download recovery tool'}
+                </Pill>
+                {tool && (
+                  <a href={tool.url} download={tool.name} className="em-pill"
+                     style={{ textDecoration:'none' }}>
+                    Save {tool.name}
+                  </a>
+                )}
+              </div>
+
+              {toolErr && (
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--error)' }}>
+                  {toolErr}
+                </div>
+              )}
+              {tool && (
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--muted)', lineHeight:1.6 }}>
+                  Run <code>python3 {tool.name} --help</code> to start.
+                  Reimaging erases the device and needs it in TWRP.
                 </div>
               )}
             </div>

@@ -844,3 +844,78 @@ are **append-only and in ascending date order** — new work goes at the end.
   *explaining* `require_verify` instead of the call *setting* it, and would
   have gone on passing forever. Source-shape assertions must be anchored on
   the call site; prose in the same function will happily satisfy them.
+
+- **2026-08-07 — the tool for when the dashboard cannot help you.** The
+  provisioning wizard drives a Dot over WebUSB from the browser, which is the
+  right shape for setting one up and the wrong shape for every case where
+  something has already gone wrong. It needs Chromium and a secure context, it
+  needs the device to reach the stage the wizard expects, and it has no answer
+  at all for a device that is off the network or will not boot. Those are
+  precisely the moments someone needs a tool.
+
+  So: `controller/host_tools/echomuse-recovery.py`, a single stdlib-only
+  script driving real `adb`, downloadable from the Support tab and stamped
+  with the controller's version on the way out. It reimages FireOS 5, installs
+  the ADB-enablement patch on its own, repairs a firmware slot, pulls the logs
+  and runs a root command. It talks to nothing but the device — a recovery
+  tool that needs the controller to be reachable is no use in any of the
+  cases it exists for.
+
+  **What it deliberately is not is a second provisioning wizard.** The
+  wizard's thirteen steps carry workarounds that were expensive to find and
+  that fail silently when wrong: how long to wait for the framework and why
+  `sys.boot_completed` alone is not enough, the two different error shapes
+  `pm` produces before it is ready, when the OOBE has to be muted, that
+  `SmartHomeWifid` must be stopped rather than killed. Reimplemented here they
+  would be two copies of the same knowledge, and the one that drifted would
+  produce a subtly worse device with nothing to say so. Provisioning stays in
+  the dashboard.
+
+  The reimage is the interesting part, and it is interesting because of a
+  single asymmetry: **the device is not bootable between the wipe and the
+  patch being installed.** FireOS will not come up usefully without
+  `f1r30s.zip`, so a run that flashes the image and then fails to install the
+  patch leaves someone holding a Dot that boots to nothing. Everything about
+  the sequence follows from making that window as short as possible and
+  letting nothing unverified enter it.
+
+  Both files are hash checked before anything runs, and the two want opposite
+  strictness. `f1r30s.zip` is one known artefact and it is the file that
+  decides whether the device comes back, so a mismatch simply refuses. The
+  FireOS image has legitimate build variants in the wild, so pinning one build
+  would reject a valid image someone already has — an unknown hash refuses by
+  default and can be overridden explicitly, which still catches the mistake
+  that actually bricks a device: a corrupt download, or an image for a
+  different model.
+
+  The patch is then staged **before the first destructive command**, into
+  TWRP's `/tmp`. That is a ramdisk, so it survives both the data wipe and the
+  image flash — nothing reboots in between — where `/sdcard` is the partition
+  about to be erased and may be formatted again by the image. It lands in
+  `.part` and is renamed only on an md5 match, the same discipline the OTA
+  path uses, which doubles as the free-space check: a device with no room
+  fails here, before anything has been touched. Only then does it ask for a
+  typed confirmation.
+
+  Two smaller decisions worth recording. It **never reboots the device**,
+  because a failure that leaves the Dot in recovery is one command from fixed
+  and a failure that has been power cycled and put away is an afternoon —
+  so the post-wipe failure path prints the exact `install-patch` command and
+  says not to reboot, and `install-patch` exists as its own command purely so
+  that instruction is true. And it verifies the flash by mounting `/system`
+  and reading `build.prop` rather than booting Android, which answers the same
+  question in a second instead of ~86s plus an OOBE we go on to silence.
+
+  It also repairs the slot symlink described in the entry above — the failure
+  with no natural end, where the device runs perfectly and can never update.
+  That had been diagnosed by a human reading a directory listing; `info` now
+  names it and `fix-slot` corrects it.
+
+  On testing: the ordering invariant is asserted twice, once against the AST
+  and once by running the whole flow against a fake adb that records every
+  call, then checking that the push, the md5 comparison and the rename all
+  precede the wipe. Every guard was verified by reintroducing the bug it
+  claims to catch — five of them — which is how the "never reboots" guard was
+  caught matching the prose *telling the operator not to reboot* rather than
+  any actual call. That is the same failure as the `require_verify` guard in
+  the previous entry, found the same way, four days later.

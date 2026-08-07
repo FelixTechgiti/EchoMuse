@@ -625,6 +625,53 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 
 `com.amazon.whad` is `PERSISTENT`: `pm disable` is ignored, **`am force-stop` is a no-op**, and `pm hide` does not stop a running instance — it stays until the next reboot, which is why the log line says so. Note RSS overstates the win ~6x (shared zygote pages): the measured recovery is ~20-35MB per device by `memUsedMb`, not the 62MB RSS suggests.
 
+## Recovery tool (`controller/host_tools/echomuse-recovery.py`)
+
+Host-side script driving real `adb`, served from the Support tab
+(`GET /api/support/recovery_tool`, admin) and stamped with the controller
+version on the way out. It exists for the cases the WebUSB wizard structurally
+cannot reach — device off the network, half provisioned, or not booting — and
+so it **talks to nothing but the device**: a recovery tool that needs the
+controller reachable is no use in any of them. stdlib only, enforced by test,
+because `python3 echomuse-recovery.py` must be the whole install instruction.
+
+**It is not a second provisioning wizard, and must not become one.** The
+wizard's steps carry workarounds that fail silently when wrong (framework
+wait, `pm`'s two not-ready error shapes, the OOBE mute, `SmartHomeWifid`
+stop-not-kill). A second copy would drift and produce a subtly worse device
+with nothing to say so. Payloads are already shared over `/api/provision/*`;
+orchestration is not shared and should not be duplicated.
+
+The reimage rests on one asymmetry: **the device is not bootable between the
+wipe and `f1r30s.zip` being installed.** Everything follows from keeping that
+window short and letting nothing unverified into it.
+
+- **Both files are user-supplied and hash-checked, with opposite strictness.**
+  `f1r30s.zip` is one known artefact and decides whether the device comes
+  back, so a mismatch refuses outright. The FireOS image has legitimate build
+  variants, so an unknown hash refuses *by default* and is explicitly
+  overridable — that still catches the mistake that bricks (corrupt download,
+  wrong model) without rejecting a valid image someone already has.
+- **The patch is staged before the first destructive command**, into TWRP's
+  `/tmp` — a ramdisk, so it survives the wipe and the flash (nothing reboots
+  in between), where `/sdcard` is the partition being erased. Lands in `.part`,
+  renamed on md5 match, which doubles as the free-space check.
+- **It never reboots the device.** A failure left in TWRP is one command from
+  fixed; the same failure power-cycled is an afternoon. Hence the post-wipe
+  failure path naming `install-patch`, and `install-patch` existing as its own
+  command so that instruction is true.
+- Verification mounts `/system` and reads `build.prop` rather than booting
+  Android — same answer, one second instead of ~86s plus the OOBE.
+- `fix-slot` repairs the slot-symlink failure with no natural end (device runs
+  fine, can never update, both logs accurate and neither actionable).
+
+`tests/test_recovery_tool.py` asserts the ordering twice — against the AST and
+by running the whole flow against a fake adb that records every call — plus the
+version-placeholder coupling em_api substitutes on, and the device paths shared
+with `em_api.SUPERVISOR_LOG` and `start_server.sh`. Every guard was verified by
+reintroducing its bug; the no-reboot guard initially matched the prose telling
+the operator not to reboot, the same failure as the `require_verify` guard.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,

@@ -71,6 +71,9 @@ COPY version.py .
 COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
+# Host-side tooling, served to the operator from the Support tab. Not run in
+# the container — it drives adb on whatever machine has the USB cable.
+COPY host_tools/ ./host_tools/
 
 # DTLN noise-suppression models (em_ns.py) — vendored at build time like the
 # JS deps above; pinned to a commit so builds are reproducible. MIT licensed.
