@@ -44,25 +44,26 @@ TOOL_VERSION = "dev"
 # ── Pinned artefacts ──────────────────────────────────────────────────────────
 #
 # Both files are user-supplied — Amazon's firmware and a community patch,
-# neither of which we redistribute. The hashes are the guard, and the two want
-# DIFFERENT strictness:
+# neither of which we redistribute — and BOTH hashes are strict. A mismatch
+# refuses; there is no override.
 #
-#   f1r30s.zip is a single known artefact, and it is the file that decides
-#   whether the freshly flashed device boots at all. A mismatch refuses, full
-#   stop.
+# That is deliberate rather than cautious. R0rt1z2's thread lists six FireOS 5
+# builds, but this project targets the newest one and there is no reason to
+# want an older: it is the build EchoMuse firmware is tested and running on.
+# So every file that is not this exact image is one of — a corrupt download, an
+# image for a different device, or a FireOS 6 image, and the thread is explicit
+# that "once the exploit is installed, only Fire OS 5 based ROMs will boot.
+# Flashing Fire OS 6 may result in a (soft) brick."
 #
-#   The FireOS image has legitimate variants in the wild, so a hard pin
-#   against one build would reject a valid image someone already has. An
-#   unknown hash refuses BY DEFAULT and can be overridden explicitly, which
-#   still catches the failure that actually bricks a device: a corrupt
-#   download, or an image for a different model.
+# An escape hatch would therefore only ever let through something unwanted.
+# The one legitimate reason to add an image here is a NEW FireOS 5 build, and
+# that is a code change with a hash someone has checked, not a flag.
 
 F1R30S_SHA256 = "f1e522fb3b86a6c90d559e7b8085501ffc59165850310b39468a3acfbff5bbc8"
 
-KNOWN_IMAGES = {
-    "6ababc517529938f0d1e836c3410a91df19683ae62d7fca9e2ca57320d5d2faa":
-        "Fire OS 5.5.5.4 (680767620) — update-kindle-csm_biscuit-272.6.8.0_user",
-}
+FIREOS_SHA256 = "6ababc517529938f0d1e836c3410a91df19683ae62d7fca9e2ca57320d5d2faa"
+FIREOS_NAME = ("Fire OS 5.5.5.4 (680767620) — "
+               "update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin")
 
 # Canonical device paths. Coupled with em_api.SUPERVISOR_LOG and the slot
 # layout in device_payloads/start_server.sh; a test pins them together.
@@ -241,27 +242,21 @@ def verify_patch(path: str) -> None:
     ok(f"patch verified  {os.path.basename(path)}")
 
 
-def verify_image(path: str, allow_unknown: bool) -> None:
+def verify_image(path: str) -> None:
+    """Strict, with no override — see the note on the constants."""
     got = sha256_file(path)
-    known = KNOWN_IMAGES.get(got)
-    if known:
-        ok(f"image verified  {known}")
-        return
-    if allow_unknown:
-        warn(f"image hash not recognised: {got}")
-        warn("proceeding because --allow-unknown-image was given")
-        info("please report that hash so it can be added to the known list")
+    if got == FIREOS_SHA256:
+        ok(f"image verified  {FIREOS_NAME}")
         return
     raise Fail(
-        f"FireOS image hash not recognised: {got}\n"
-        f"  file: {path}\n"
-        "Known-good images:\n"
-        + "".join(f"    {h}  {n}\n" for h, n in KNOWN_IMAGES.items())
-        + "If you are sure this is a genuine FireOS 5 image for the Echo Dot "
-          "Gen 2 (biscuit), re-run with --allow-unknown-image, and report the "
-          "hash above so it can be added.\n"
-          "An image for a different device is the one mistake here that can "
-          "leave a Dot unrecoverable.")
+        f"this is not the FireOS image EchoMuse targets.\n"
+        f"  file:     {path}\n"
+        f"  its hash: {got}\n"
+        f"  expected: {FIREOS_SHA256}\n"
+        f"            {FIREOS_NAME}\n"
+        "There is no override. A file that is not this image is a corrupt "
+        "download, an image for a different device, or a FireOS 6 image — and "
+        "flashing FireOS 6 onto an unlocked Dot can soft-brick it.")
 
 
 # ── Device-side helpers ───────────────────────────────────────────────────────
@@ -555,6 +550,13 @@ def cmd_reimage(adb: Adb, args) -> int:
     say("is flashed back on. TWRP survives it (it sits below the system "
         "image),")
     say("so a failure is recoverable while the device stays in recovery.")
+    say("")
+    say("One thing to know before starting. Between the image being flashed")
+    say("and the f1r30s patch being installed, the device WILL NOT BOOT, and")
+    say("on this hardware repeated failed boots are not harmless: the")
+    say("preloader counts boot attempts per slot, and if both slots run out")
+    say("the device bricks permanently. If anything goes wrong, leave it in")
+    say("TWRP and finish the job — do not power cycle it to see what happens.")
 
     # Both files are hash-checked before the first destructive command. That
     # is host-side and costs nothing, and an image for the wrong device is the
@@ -571,7 +573,7 @@ def cmd_reimage(adb: Adb, args) -> int:
     ok(f"in TWRP recovery  ({fp or 'fingerprint unknown'})")
 
     step("Verifying the files")
-    verify_image(image, args.allow_unknown_image)
+    verify_image(image)
     verify_patch(patch)
 
     remote_patch = f"{STAGE_DIR}/f1r30s.zip"
@@ -658,16 +660,25 @@ def cmd_reimage(adb: Adb, args) -> int:
         say("=" * 72)
         say(f"{e}")
         say("")
-        say("Leave the device in TWRP with the cable attached. Do not reboot:")
-        say("recovery is cheap from here and expensive once it has been power")
-        say("cycled and put away.")
-        say("")
         if flashed:
-            say("The system image WAS flashed, so the device needs the patch")
-            say("before it can be reached. Fix the cause, then:")
+            say("*** DO NOT REBOOT OR POWER CYCLE THIS DEVICE. ***")
+            say("")
+            say("The system image WAS flashed and the patch was NOT installed,")
+            say("so there is no bootable OS on the device right now. This")
+            say("hardware counts failed boot attempts per slot in the")
+            say("preloader, and if both slots run out it bricks permanently —")
+            say("so trying a reboot to see what happens is the one action that")
+            say("can turn this into a dead device.")
+            say("")
+            say("Leave it in TWRP with the cable attached. Fix the cause, then")
+            say("finish the job:")
             say("")
             say(f"    {_self()} install-patch --patch {args.patch}")
         else:
+            say("Leave the device in TWRP with the cable attached. Do not")
+            say("reboot: recovery is cheap from here and expensive once it has")
+            say("been power cycled and put away.")
+            say("")
             say("The system image was NOT flashed — the device still has its")
             say("previous system and has only been wiped. Fix the cause and")
             say("run the same reimage command again.")
@@ -739,11 +750,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("reimage", parents=[shared],
                        help="flash FireOS 5 back on (DESTRUCTIVE)")
     s.add_argument("--image", required=True,
-                   help="Amazon FireOS 5 update .bin")
+                   help=f"{FIREOS_NAME} (hash-checked, no override)")
     s.add_argument("--patch", required=True, help="f1r30s.zip")
-    s.add_argument("--allow-unknown-image", action="store_true",
-                   help="proceed with a FireOS image whose hash is not in the "
-                        "known list")
     s.add_argument("--yes", action="store_true",
                    help="skip the typed confirmation")
     s.set_defaults(func=cmd_reimage)

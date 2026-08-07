@@ -646,12 +646,13 @@ The reimage rests on one asymmetry: **the device is not bootable between the
 wipe and `f1r30s.zip` being installed.** Everything follows from keeping that
 window short and letting nothing unverified into it.
 
-- **Both files are user-supplied and hash-checked, with opposite strictness.**
-  `f1r30s.zip` is one known artefact and decides whether the device comes
-  back, so a mismatch refuses outright. The FireOS image has legitimate build
-  variants, so an unknown hash refuses *by default* and is explicitly
-  overridable — that still catches the mistake that bricks (corrupt download,
-  wrong model) without rejecting a valid image someone already has.
+- **Both files are user-supplied and both hashes are strict — no override.**
+  R0rt1z2's thread lists six FireOS 5 builds, but EchoMuse targets the newest
+  and its firmware is tested there, so anything else is a corrupt download, an
+  image for another device, or a FireOS 6 image — and **only FireOS 5 boots on
+  an unlocked Dot; FireOS 6 can soft-brick it.** An escape hatch could
+  therefore only admit something unwanted. A new FireOS 5 build is a code
+  change with a checked hash, not a flag.
 - **The sequence is the one that has been run on this hardware** — wipe, wipe,
   push the patch to `/sdcard`, sideload, install — with verification layered
   on, not substituted for it. Staging to TWRP's `/tmp` was tried first on the
@@ -662,11 +663,13 @@ window short and letting nothing unverified into it.
   flash and re-pushes if it is gone, rather than betting on either answer.
   Pushes land in `.part` and rename on md5 match, which doubles as the
   free-space check.
-- **It never reboots the device.** A failure left in TWRP is one command from
-  fixed; the same failure power-cycled is an afternoon. The failure path
+- **It never reboots the device, and says why in the strongest terms.** The
+  preloader counts boot attempts per slot and **the device bricks permanently
+  when both slots run out**, so between the flash and the patch a power cycle
+  "to see what happens" is the one action that can kill it. The failure path
   branches on whether the image actually went on: unflashed means the old
-  system is still there and the answer is to re-run, flashed means the device
-  is unreachable and the answer is `install-patch` — which exists as its own
+  system is still there and the answer is to re-run, flashed means there is no
+  bootable OS and the answer is `install-patch` — which exists as its own
   command so that instruction is true. One message for both states is wrong in
   one of them.
 - Verification mounts `/system` and reads `build.prop` rather than booting

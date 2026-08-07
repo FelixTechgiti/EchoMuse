@@ -97,9 +97,7 @@ def test_download_endpoint_is_admin_and_read_only():
 
 def test_hashes_are_well_formed(tool):
     assert re.fullmatch(r"[0-9a-f]{64}", tool.F1R30S_SHA256)
-    assert tool.KNOWN_IMAGES, "no known FireOS image hashes are pinned"
-    for h in tool.KNOWN_IMAGES:
-        assert re.fullmatch(r"[0-9a-f]{64}", h), f"malformed image hash: {h}"
+    assert re.fullmatch(r"[0-9a-f]{64}", tool.FIREOS_SHA256)
 
 
 def test_patch_hash_mismatch_always_refuses(tool, tmp_path):
@@ -113,33 +111,48 @@ def test_patch_hash_mismatch_always_refuses(tool, tmp_path):
         tool.verify_patch(str(bad))
 
 
-def test_unknown_image_refuses_by_default_and_can_be_overridden(tool, tmp_path):
+def test_wrong_image_always_refuses_and_has_no_override(tool, tmp_path,
+                                                       monkeypatch):
     """
-    The opposite strictness, deliberately: FireOS 5 has legitimate build
-    variants, so an unknown hash must be refusable-but-overridable rather than
-    fatal. What it must never do is pass silently.
+    Strict, with no escape hatch.
+
+    EchoMuse targets one FireOS 5 build and there is no reason to want an
+    older one, so anything else is a corrupt download, an image for another
+    device, or a FireOS 6 image — and FireOS 6 on an unlocked Dot can
+    soft-brick it. An override could only ever admit one of those.
     """
+    import hashlib
+    import inspect
+
     img = tmp_path / "update.bin"
     img.write_bytes(b"some other build")
-
     with pytest.raises(tool.Fail):
-        tool.verify_image(str(img), allow_unknown=False)
+        tool.verify_image(str(img))
 
-    tool.verify_image(str(img), allow_unknown=True)  # must not raise
+    # verify_image takes the path and nothing else — no flag can be threaded in.
+    assert list(inspect.signature(tool.verify_image).parameters) == ["path"]
+
+    # And no call site passes one. Checked against the call, not the source
+    # text: a comment containing the word "allows" is not an override.
+    reimage = ast.parse(_reimage_src())
+    for node in ast.walk(reimage):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "verify_image":
+            assert not node.keywords and len(node.args) == 1, (
+                "verify_image is being called with more than a path"
+            )
+
+    # And the pinned hash must actually accept a file that matches it.
+    good = tmp_path / "good.bin"
+    good.write_bytes(b"x")
+    monkeypatch.setattr(tool, "FIREOS_SHA256", hashlib.sha256(b"x").hexdigest())
+    tool.verify_image(str(good))  # must not raise
 
 
-def test_known_image_is_accepted_without_the_override(tool, tmp_path):
-    """A pinned hash must actually match a file with that hash."""
-    import hashlib
-
-    img = tmp_path / "update.bin"
-    img.write_bytes(b"x")
-    digest = hashlib.sha256(b"x").hexdigest()
-    tool.KNOWN_IMAGES[digest] = "test fixture"
-    try:
-        tool.verify_image(str(img), allow_unknown=False)  # must not raise
-    finally:
-        del tool.KNOWN_IMAGES[digest]
+def test_cli_offers_no_way_to_skip_the_image_check(tool):
+    parser = tool.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reimage", "--image", "a.bin", "--patch", "b.zip",
+                           "--allow-unknown-image"])
 
 
 # ── Device coupling ───────────────────────────────────────────────────────────
@@ -365,16 +378,15 @@ def staged(tool, tmp_path, monkeypatch):
 
     monkeypatch.setattr(tool, "F1R30S_SHA256",
                         hashlib.sha256(patch.read_bytes()).hexdigest())
-    monkeypatch.setattr(tool, "KNOWN_IMAGES", {
-        hashlib.sha256(image.read_bytes()).hexdigest(): "test build",
-    })
+    monkeypatch.setattr(tool, "FIREOS_SHA256",
+                        hashlib.sha256(image.read_bytes()).hexdigest())
 
     adb = FakeAdb(md5_of={
         f"{tool.STAGE_DIR}/f1r30s.zip.part":
             hashlib.md5(patch.read_bytes()).hexdigest(),
     })
     args = Args(image=str(image), patch=str(patch),
-                allow_unknown_image=False, yes=True)
+                yes=True)
     return tool, adb, args
 
 
@@ -460,6 +472,15 @@ def test_reimage_that_fails_after_the_wipe_reports_and_does_not_reboot(
     assert "NOT READY TO BOOT" in out
     assert "install-patch" in out, "the resume command is not offered"
     assert not any("reboot" in text for _, text in adb.calls)
+
+    # The consequence has to be named. R0rt1z2's thread: the preloader counts
+    # boot attempts per slot and the device bricks permanently when both run
+    # out — so "do not reboot" is not tidiness advice here, and a message that
+    # leaves someone thinking a power cycle is worth a try is a bad message.
+    assert "DO NOT REBOOT OR POWER CYCLE" in out
+    assert "brick" in out.lower(), (
+        "the failure path does not say what a reboot actually risks"
+    )
 
 
 def test_reimage_refuses_when_the_device_is_not_in_recovery(staged):

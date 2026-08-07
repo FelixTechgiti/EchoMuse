@@ -64,12 +64,15 @@ and the other is a community patch:
 - **The FireOS 5 image**, `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin`
 - **`f1r30s.zip`**, the ADB-enablement patch
 
-Both are checked against known SHA-256 hashes before anything happens. The
-patch must match exactly — it is what makes the flashed system reachable, so
-a wrong or truncated copy is refused rather than risked. The FireOS image is
-checked against a list of known builds; if yours is not on the list the tool
-stops and tells you the hash, and `--allow-unknown-image` proceeds if you are
-sure. Please report an unrecognised hash so it can be added.
+Both are checked against a known SHA-256 before anything happens, and **both
+checks are strict — there is no override.** EchoMuse targets one FireOS 5
+build (5.5.5.4, the newest), and its firmware is tested on that build, so
+anything else is a corrupt download, an image for a different device, or a
+FireOS 6 image. That last one matters: on an unlocked Dot, only FireOS 5 will
+boot, and flashing FireOS 6 can soft-brick it.
+
+The patch is equally strict, because it is what makes the flashed system
+reachable at all.
 
 **The device must be in TWRP recovery.** `adb reboot recovery` gets you there
 from Android.
@@ -79,6 +82,12 @@ python3 echomuse-recovery.py reimage \
     --image update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin \
     --patch f1r30s.zip
 ```
+
+The sequence it runs is the one from
+[R0rt1z2's XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
+which is canon for this device — wipe data, wipe cache, push the patch,
+sideload the image, install the patch — with hash and transfer verification
+added around it.
 
 It checks both files against their hashes first, then asks you to type
 `REIMAGE` to confirm. Nothing on the device is touched before that point.
@@ -92,9 +101,14 @@ always possible from here as long as the device stays in recovery.
 
 ### If it fails part way
 
-**Do not reboot a device that reported a failure.** Recovery is cheap while
-it is sitting in TWRP and a much longer afternoon once it has been power
-cycled and put away.
+**Do not reboot a device that reported a failure.** This is the one piece of
+advice on this page that can cost you the device.
+
+Between the image being flashed and the patch being installed there is no
+bootable OS. This hardware counts boot attempts per slot in the preloader,
+and if both slots run out **it bricks permanently** — so a power cycle "just
+to see" is exactly the wrong move. Left in TWRP with the cable attached, the
+situation is one command from fixed.
 
 The tool tells you which of two situations you are in, because they need
 different things:
