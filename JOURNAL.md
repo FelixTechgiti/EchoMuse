@@ -844,3 +844,84 @@ are **append-only and in ascending date order** — new work goes at the end.
   *explaining* `require_verify` instead of the call *setting* it, and would
   have gone on passing forever. Source-shape assertions must be anchored on
   the call site; prose in the same function will happily satisfy them.
+
+- **2026-08-07 — three things the devices knew and we could not see.** A day
+  of working through reported issues, in which the useful move each time was
+  to stop reasoning and go and measure. Every answer below came off a live
+  device in under a minute, and two of them killed a feature that was already
+  half designed.
+
+  **#79, a Dot dropping off USB after boot.** The plan was to force
+  `persist.sys.usb.config` and `persist.service.adb.enable` into
+  `/data/property/` before the reboot. Then: all three connected devices have
+  **no file in that directory matching usb or adb at all**, while
+  `persist.sys.usb.config` still reads `mtp,adb`. On this firmware it is a
+  boot-time default, not stored. Writing the file would have added a
+  persisted override that none of the known-good devices carry, on a
+  hypothesis the evidence does not support. Dropped.
+
+  What replaced it is duller and probably more useful. R0rt1z2's thread lists
+  six FireOS 5 builds; every device here runs `272.6.8.0_user_680767620` and
+  `docs/rooting.md` listed that .bin among "files you need" without ever
+  saying it was the only one tested. The wizard now reads
+  `ro.build.version.incremental` at step 0, logs it, and warns when it
+  differs. A warning, not a refusal: an older build may be fine, we have no
+  evidence either way, and blocking someone whose device works is the worse
+  error.
+
+  **#82, wifi that never associates.** The log showed config written,
+  verified, no interferers, then twenty identical `wpa_state=SCANNING` lines
+  and an error naming nothing. Asking the radio what it can do:
+
+      key_mgmt:  NONE IEEE8021X WPA-EAP WPA-PSK
+      auth_alg:  OPEN SHARED LEAP
+
+  No SAE. WPA3-Personal is not a configuration problem on this hardware, it
+  is impossible, and the reporter's first network is a Pixel hotspot, which
+  Android 13 and later default to exactly that.
+
+  The wizard could have said so and did not, because `scanWifi` parsed
+  `bssid / frequency / signal / flags / ssid` and threw away two of those.
+  The security flags were in hand the whole time. So: the parser keeps them,
+  the picker shows band and security and greys out what cannot be joined,
+  `key_mgmt` is no longer hardcoded to WPA-PSK (the device reports `NONE`, so
+  open networks always worked and were simply never configurable),
+  `scan_ssid=1` for a typed SSID, and a failed association now rescans and
+  reports whether the network is on the air and with what security. That last
+  one is the point: it turns this class of report into something the log
+  answers by itself.
+
+  This also brought the **first test coverage of `dashboard.jsx`**. Its pure
+  logic is untested by construction, since it compiles to a single classic
+  script with no module boundary to import across, so the test lifts the
+  functions out of the source rather than keeping a copy that would drift.
+  The check worth having is the one in the opposite direction: a mixed
+  WPA2/WPA3 AP advertises both and is joinable through its WPA2 half, so
+  refusing it for mentioning SAE would lock people out of a working network.
+
+  **The 5GHz preference, which we are not building.** The complaint was a
+  microwave knocking a device off the air, and the obvious fix is to prefer
+  5GHz. Per-band signal over 440 hours:
+
+  | Device | Band | Hours | RSSI avg | Link avg |
+  |---|---|---|---|---|
+  | Office | 5GHz | 440 | -30.4 | 148 |
+  | Lounge | 5GHz | 419 | -52.8 | 143 |
+  | Lounge | 2.4GHz | 21 | -55.5 | 61 |
+  | Retreat | 5GHz | 361 | -64.2 | 126 |
+  | Retreat | 2.4GHz | 79 | -54.8 | 59 |
+
+  **Retreat's 5GHz is about 10dB worse than its 2.4GHz.** It changes band for
+  a good reason, and forcing it would trade a slow link for an unreliable one
+  on the device furthest from an AP. Lounge is the opposite. One setting
+  cannot serve both, which is the argument for doing it at the access point
+  where it can be per-client and RSSI-aware. Two further reasons device-side
+  was wrong: Android 5.1 offers a band *lock* rather than a preference, and
+  `internal/wifi/wifi.go` already documents that WifiStateMachine writes its
+  network list back over `wpa_supplicant.conf` on `svc wifi disable`, so a
+  hand-written `freq_list` would work when tested and vanish later.
+
+  What survives is the observation rather than the control: the Status tab
+  now shows band and link speed. Lounge had been sitting on 2.4GHz for 21
+  hours at 61 Mbps after two weeks at 143, and nothing in the dashboard said
+  so.
