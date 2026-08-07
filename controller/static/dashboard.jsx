@@ -413,6 +413,16 @@ function EqCurve({ bands, fs = 22050 }) {
 
 // ─── WiFi signal bars ─────────────────────────────────────────────────────────
 
+// 2.4 or 5GHz from the frequency the device reports, or null when it has not
+// reported one (old firmware, or wpa_cli unavailable when the stat was taken).
+// Null rather than a guess: "2.4GHz" shown for a device we cannot actually
+// see the band of is worse than showing nothing, since the whole point is
+// spotting a device that has quietly landed on the slower radio.
+function wifiBand(freqMhz) {
+  if (!freqMhz) return null;
+  return freqMhz >= 4900 ? '5GHz' : '2.4GHz';
+}
+
 function SignalBars({ rssi }) {
   // 0 bars = no signal / null, 4 bars = excellent
   const level = rssi == null ? 0
@@ -455,7 +465,13 @@ function MicroMeter({ pct, sev }) {
 // StatTile is one cell of the scalar row: label, value, optional glyph, and a
 // headroom meter. `note` carries an exception worth seeing (thermal
 // throttling), which is the only thing here that should ever shout.
-function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
+//
+// `sub` is the quiet counterpart: context that qualifies the value without
+// being a problem, like which WiFi band a link reading was taken on. It is
+// deliberately a separate prop rather than a second use of `note`, because
+// `note` is red — routing neutral information through it would make every
+// device look like it was in trouble.
+function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub }) {
   const dim = value == null;
   return (
     <div style={{ flex:'1 1 0', minWidth:0 }}>
@@ -482,6 +498,7 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
       </div>
       <MicroMeter pct={dim ? null : pct} sev={sev}/>
       {note && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:SEV.bad, marginTop:3 }}>{note}</div>}
+      {!note && sub && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:3 }}>{sub}</div>}
     </div>
   );
 }
@@ -1577,11 +1594,22 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         when they are not. Each carries a headroom meter so the
                         row rhymes with the capacity bars above it. */}
                     <div style={{ display:'flex', gap:14, marginTop:2 }}>
+                      {/* Band alongside RSSI, because one SSID spanning both
+                          radios lets a device re-associate to the slower one
+                          silently: measured on this fleet, 2.4GHz runs about
+                          60 Mbps against 143 on 5GHz. A device knocked off
+                          5GHz can then sit on 2.4 indefinitely with nothing
+                          on screen to say so. Shown as a note rather than its
+                          own tile — it qualifies the link reading, it is not
+                          a separate health metric. */}
                       <StatTile
                         label="Link" value={s?.wifiRssi != null ? s.wifiRssi : null} unit="dBm"
                         sev={s?.wifiRssi == null ? 'ok' : s.wifiRssi > -70 ? 'ok' : s.wifiRssi > -80 ? 'warn' : 'bad'}
                         pct={s?.wifiRssi == null ? null : Math.max(0, Math.min(100, (s.wifiRssi + 95) / 35 * 100))}
                         glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
+                        sub={[wifiBand(s?.wifiFreqMhz),
+                              s?.linkSpeedMbps ? `${s.linkSpeedMbps} Mbps` : null]
+                             .filter(Boolean).join(' · ') || null}
                       />
                       {/* Amber past 200ms, red past 1s — the same thresholds the
                           RTT instrumentation counts excursions against. */}
