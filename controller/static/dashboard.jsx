@@ -413,6 +413,16 @@ function EqCurve({ bands, fs = 22050 }) {
 
 // ─── WiFi signal bars ─────────────────────────────────────────────────────────
 
+// 2.4 or 5GHz from the frequency the device reports, or null when it has not
+// reported one (old firmware, or wpa_cli unavailable when the stat was taken).
+// Null rather than a guess: "2.4GHz" shown for a device we cannot actually
+// see the band of is worse than showing nothing, since the whole point is
+// spotting a device that has quietly landed on the slower radio.
+function wifiBand(freqMhz) {
+  if (!freqMhz) return null;
+  return freqMhz >= 4900 ? '5GHz' : '2.4GHz';
+}
+
 function SignalBars({ rssi }) {
   // 0 bars = no signal / null, 4 bars = excellent
   const level = rssi == null ? 0
@@ -455,7 +465,13 @@ function MicroMeter({ pct, sev }) {
 // StatTile is one cell of the scalar row: label, value, optional glyph, and a
 // headroom meter. `note` carries an exception worth seeing (thermal
 // throttling), which is the only thing here that should ever shout.
-function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
+//
+// `sub` is the quiet counterpart: context that qualifies the value without
+// being a problem, like which WiFi band a link reading was taken on. It is
+// deliberately a separate prop rather than a second use of `note`, because
+// `note` is red — routing neutral information through it would make every
+// device look like it was in trouble.
+function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub }) {
   const dim = value == null;
   return (
     <div style={{ flex:'1 1 0', minWidth:0 }}>
@@ -482,6 +498,7 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note }) {
       </div>
       <MicroMeter pct={dim ? null : pct} sev={sev}/>
       {note && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:SEV.bad, marginTop:3 }}>{note}</div>}
+      {!note && sub && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:3 }}>{sub}</div>}
     </div>
   );
 }
@@ -1577,11 +1594,22 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         when they are not. Each carries a headroom meter so the
                         row rhymes with the capacity bars above it. */}
                     <div style={{ display:'flex', gap:14, marginTop:2 }}>
+                      {/* Band alongside RSSI, because one SSID spanning both
+                          radios lets a device re-associate to the slower one
+                          silently: measured on this fleet, 2.4GHz runs about
+                          60 Mbps against 143 on 5GHz. A device knocked off
+                          5GHz can then sit on 2.4 indefinitely with nothing
+                          on screen to say so. Shown as a note rather than its
+                          own tile — it qualifies the link reading, it is not
+                          a separate health metric. */}
                       <StatTile
                         label="Link" value={s?.wifiRssi != null ? s.wifiRssi : null} unit="dBm"
                         sev={s?.wifiRssi == null ? 'ok' : s.wifiRssi > -70 ? 'ok' : s.wifiRssi > -80 ? 'warn' : 'bad'}
                         pct={s?.wifiRssi == null ? null : Math.max(0, Math.min(100, (s.wifiRssi + 95) / 35 * 100))}
                         glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
+                        sub={[wifiBand(s?.wifiFreqMhz),
+                              s?.linkSpeedMbps ? `${s.linkSpeedMbps} Mbps` : null]
+                             .filter(Boolean).join(' · ') || null}
                       />
                       {/* Amber past 200ms, red past 1s — the same thresholds the
                           RTT instrumentation counts excursions against. */}
@@ -2314,6 +2342,19 @@ service echomuse /data/local/bin/start_server.sh
 // against the uploaded file's SHA-256 before flashing — catches wrong-
 // version uploads (e.g. a newer Magisk that doesn't support Android 5.1's
 // non-namespaced su, or a corrupted download) before they hit TWRP.
+// The one FireOS 5 build EchoMuse is developed and tested against. R0rt1z2's
+// thread lists five older ones that also boot on an unlocked Dot, and nothing
+// stops someone flashing those — but only this one has ever been through the
+// wizard here, and firmware defaults differ between builds. A device on a
+// different build is the first thing worth knowing when it behaves oddly, and
+// until now the wizard never even looked (see #79).
+//
+// A warning, not a refusal: an older build may well provision fine, we just
+// have no evidence either way, and blocking someone whose device works would
+// be the worse error. Mirrored in docs/rooting.md, pinned by test.
+const _TESTED_FIREOS_BUILD = '272.6.8.0_user_680767620';
+const _TESTED_FIREOS_NAME  = 'Fire OS 5.5.5.4';
+
 // WiFi security labels, used in the network picker and in error messages.
 // Module scope so WifiPanel and the wizard's step runners share one set.
 const _SECURITY_LABEL = {
@@ -2519,9 +2560,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const release = await c.shell('getprop ro.build.version.release');
     const name    = await c.shell('getprop ro.product.name');
     const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
+    const fwBuild = await c.shell('getprop ro.build.version.incremental');
+    const fwName  = await c.shell('getprop ro.build.version.name');
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
+    addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
+    }
+    if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
+      addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `
+           + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
+           + `particularly around USB and ADB.`, 'warn');
     }
     if (model && !model.toLowerCase().includes('amazon') && !name.toLowerCase().includes('biscuit')) {
       addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');

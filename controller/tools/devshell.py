@@ -1,9 +1,58 @@
-"""One-shot device shell command runner via controller shell proxy."""
+"""One-shot device shell command runner via controller shell proxy.
+
+    devshell.py [-d SERIAL]... [--all] "<cmd>" ["<cmd>" ...]
+
+The device used to be a constant at the top of this file, which meant asking
+the same question of a second device was a file edit — and in practice meant
+writing a throwaway copy of this script instead. Hence -d, and --all for the
+whole fleet, which is what most diagnostic questions actually want.
+
+READ ONLY, in practice: a shell opened here is a CHILD OF THE SERVER, so
+`stop`ping the service kills this shell at the first word and takes the device
+down until it is power cycled. Inspect freely; do not stop the server.
+"""
 import asyncio, json, secrets, sqlite3, sys, time
 import websockets
 
+# Default when neither -d nor --all is given — kept so existing invocations
+# and the README's one-liner behave exactly as before.
 DEVICE = "G090LF11803611NF"
 DB = "/app/data/echomuse.db"
+
+
+def all_devices(max_age_s=300):
+    """Devices seen recently — i.e. ones a shell can actually reach.
+
+    Filtered rather than "every row" because the shell proxy has no fast
+    failure for an absent device: it simply waits, so one retired device turns
+    a fleet-wide question into a minute of nothing. Name an offline device
+    with -d if you really want to wait for it.
+    """
+    con = sqlite3.connect(DB)
+    cutoff = time.time() - max_age_s
+    rows = [r[0] for r in con.execute(
+        "SELECT device_id FROM devices WHERE last_seen > ? ORDER BY last_seen DESC",
+        (cutoff,))]
+    con.close()
+    return rows
+
+
+def parse_args(argv):
+    """Returns (devices, commands). Anything not a flag is a command."""
+    devices, cmds, i = [], [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-d", "--device"):
+            i += 1
+            if i >= len(argv):
+                raise SystemExit("-d needs a device serial")
+            devices.append(argv[i])
+        elif a == "--all":
+            devices.extend(all_devices())
+        else:
+            cmds.append(a)
+        i += 1
+    return (devices or [DEVICE]), cmds
 
 def make_token():
     tok = secrets.token_hex(32)
@@ -23,10 +72,10 @@ def drop_token(tok):
     con.execute("DELETE FROM sessions WHERE token=?", (tok,))
     con.commit(); con.close()
 
-async def run(cmds):
+async def run(cmds, device=DEVICE):
     tok = make_token()
     try:
-        uri = f"ws://127.0.0.1:8768/api/devices/{DEVICE}/shell?token={tok}"
+        uri = f"ws://127.0.0.1:8768/api/devices/{device}/shell?token={tok}"
         async with websockets.connect(uri, max_size=None) as ws:
             out = bytearray()
             async def read_until(marker, timeout=15):
@@ -51,4 +100,10 @@ async def run(cmds):
         drop_token(tok)
 
 if __name__ == "__main__":
-    asyncio.run(run(sys.argv[1:]))
+    devices, commands = parse_args(sys.argv[1:])
+    if not commands:
+        raise SystemExit(__doc__)
+    for dev in devices:
+        if len(devices) > 1:
+            print(f"\n═══ {dev}")
+        asyncio.run(run(commands, dev))
