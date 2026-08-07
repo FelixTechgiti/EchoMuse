@@ -12,6 +12,15 @@ name: Controller Release (Docker image)
 #
 # The image is CPU-only (onnxruntime). GPU users build locally with
 # --build-arg GPU=1 (see controller/docker-compose.yml).
+#
+# Built for linux/amd64 AND linux/arm64. A Raspberry Pi is a natural host for
+# this project, and an amd64-only manifest meant docker-compose.deploy.yml
+# could not work on one at all — building locally was the only route, and
+# until #81 even that failed on the hard-coded x86-64 esbuild download.
+# Every Python dependency resolves to a prebuilt aarch64 wheel on this base
+# image, including speexdsp-ns and onnxruntime, so the arm64 build compiles
+# nothing; it is emulated with QEMU, which costs time on the runner and
+# nothing at run time.
 
 on:
   push:
@@ -28,6 +37,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        # arm64 is cross-built on an amd64 runner, so the emulation layer has
+        # to be registered before buildx can target that platform at all.
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -58,7 +72,7 @@ jobs:
         with:
           context: controller
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           build-args: |
             EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
