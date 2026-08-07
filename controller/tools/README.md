@@ -12,7 +12,12 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
 
 - **devshell.py** — run commands on a device over the `/shell` proxy (PTY
   mode; output includes echoed input — device is mksh + busybox, no
-  tail/sed/head, use `busybox <applet>`). Device ID is hardcoded at the top.
+  tail/sed/head, use `busybox <applet>`). Defaults to the device hardcoded at
+  the top; `-d <serial>` picks another (repeatable) and `--all` runs against
+  every currently-connected device, which is what most diagnostic questions
+  want. **Read-only in practice**: the shell is a child of the server, so
+  stopping the service kills the shell mid-command and takes the device down
+  until it is power cycled.
 - **ota.py** — push a locally built binary: `docker cp device/build/server
   echomuse-controller:/tmp/server-new` first, then
   `python /tmp/ota.py <device_id>` (upload → `/api/devices/{id}/update`).

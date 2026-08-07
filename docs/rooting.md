@@ -25,9 +25,22 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
 - The following files downloaded and ready:
   - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread
   - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
+    (**this exact build** — see below)
   - `f1r30s.zip` — ADB enablement patch
   - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
   - `server` — compiled EchoMuse binary (ARM, API 22)
+
+> **Which FireOS 5 build?** R0rt1z2's thread lists six that boot on an
+> unlocked Dot, and EchoMuse is developed and tested against exactly one:
+> **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`. Every device in the
+> project's own fleet runs it. The older builds are not known to be broken —
+> they are simply untested here, and firmware defaults differ between builds
+> in ways that reach USB and ADB behaviour. If you are choosing, choose this
+> one. If you already have a device on another build and something behaves
+> oddly, that is the first thing to mention when reporting it.
+>
+> Check what you have with `adb shell getprop ro.build.version.name`. The
+> provisioning wizard reads it at the first step and says so in the log.
 
 > **Why Magisk 17.3?** Newer versions dropped support for Android 5.1 (API 22). 25.x installs but the daemon silently fails. 17.3 is the last version that works reliably on this device.
 

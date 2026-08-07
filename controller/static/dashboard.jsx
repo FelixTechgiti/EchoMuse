@@ -2342,6 +2342,19 @@ service echomuse /data/local/bin/start_server.sh
 // against the uploaded file's SHA-256 before flashing — catches wrong-
 // version uploads (e.g. a newer Magisk that doesn't support Android 5.1's
 // non-namespaced su, or a corrupted download) before they hit TWRP.
+// The one FireOS 5 build EchoMuse is developed and tested against. R0rt1z2's
+// thread lists five older ones that also boot on an unlocked Dot, and nothing
+// stops someone flashing those — but only this one has ever been through the
+// wizard here, and firmware defaults differ between builds. A device on a
+// different build is the first thing worth knowing when it behaves oddly, and
+// until now the wizard never even looked (see #79).
+//
+// A warning, not a refusal: an older build may well provision fine, we just
+// have no evidence either way, and blocking someone whose device works would
+// be the worse error. Mirrored in docs/rooting.md, pinned by test.
+const _TESTED_FIREOS_BUILD = '272.6.8.0_user_680767620';
+const _TESTED_FIREOS_NAME  = 'Fire OS 5.5.5.4';
+
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
@@ -2531,9 +2544,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const release = await c.shell('getprop ro.build.version.release');
     const name    = await c.shell('getprop ro.product.name');
     const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
+    const fwBuild = await c.shell('getprop ro.build.version.incremental');
+    const fwName  = await c.shell('getprop ro.build.version.name');
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
+    addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
+    }
+    if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
+      addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `
+           + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
+           + `particularly around USB and ADB.`, 'warn');
     }
     if (model && !model.toLowerCase().includes('amazon') && !name.toLowerCase().includes('biscuit')) {
       addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
