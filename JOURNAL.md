@@ -888,14 +888,34 @@ are **append-only and in ascending date order** — new work goes at the end.
   that actually bricks a device: a corrupt download, or an image for a
   different model.
 
-  The patch is then staged **before the first destructive command**, into
-  TWRP's `/tmp`. That is a ramdisk, so it survives both the data wipe and the
-  image flash — nothing reboots in between — where `/sdcard` is the partition
-  about to be erased and may be formatted again by the image. It lands in
-  `.part` and is renamed only on an md5 match, the same discipline the OTA
-  path uses, which doubles as the free-space check: a device with no room
-  fails here, before anything has been touched. Only then does it ask for a
-  typed confirmation.
+  The sequence itself is the one that has actually been run on this hardware:
+  wipe data, wipe cache, push the patch to `/sdcard`, sideload, install.
+  Verification is layered onto it rather than substituted for it — the hash
+  checks are host-side and happen before the typed confirmation, so nothing on
+  the device is touched until both files are known good, and the push lands in
+  `.part` and renames on an md5 match, the same discipline the OTA path uses.
+
+  I first staged the patch into TWRP's `/tmp` instead, reasoning that a
+  ramdisk cannot be wiped and `/sdcard` sits on the partition about to be
+  erased. Wil pushed back, and he was right twice over. TWRP's Wipe Data is a
+  factory reset that conventionally preserves `/data/media` — which is what
+  `/sdcard` is here — and the repo already depends on that, since the wizard
+  reads `/sdcard/f1r30s.zip` and `docs/rooting.md` has you put it there by
+  hand. So the concern was probably imaginary, and answering it swapped a path
+  with history for one with none: unknown free space on a 512MB device, and no
+  confirmation the ramdisk persists as assumed. In a conversation whose whole
+  theme was not guessing about hardware, I had guessed.
+
+  What survives from that is the question rather than the answer. Whether the
+  image flash formats the partition is genuinely unknown for this device, so
+  the tool re-checks the patch after the flash and re-pushes if it has gone.
+  That is correct whichever way the semantics fall, and reports which one it
+  met — better than either bet, and it cost one md5.
+
+  The failure path also had to learn **where** it failed. It originally told
+  everyone to run `install-patch`, which is right only once the image is on;
+  before that the device still has its old system, and patching that is not
+  what anyone wants. One message for two states is wrong in one of them.
 
   Two smaller decisions worth recording. It **never reboots the device**,
   because a failure that leaves the Dot in recovery is one command from fixed

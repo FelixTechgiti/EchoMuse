@@ -72,11 +72,24 @@ BIN_DIR = "/data/local/bin"
 SERVER_LINK = BIN_DIR + "/server"
 SLOTS = ("server_a", "server_b")
 
-# Where the patch is staged before anything destructive runs. TWRP's /tmp is a
-# ramdisk, so it survives both the data wipe and the image flash — nothing
-# reboots in between. Staging on /sdcard instead would put the file on the
-# partition we are about to wipe, and the image flash may format it again.
-STAGE_DIR = "/tmp"
+# Where the patch is staged before anything destructive runs.
+#
+# /sdcard, because that is the path this hardware has actually been through:
+# the wizard reads /sdcard/f1r30s.zip and docs/rooting.md has you put it there
+# by hand, so a file surviving there across the rooting process is established
+# rather than assumed. TWRP's Wipe Data is a factory reset and conventionally
+# preserves /data/media, which is what /sdcard is here.
+#
+# "Conventionally" is not "verified", and the image flash could format the
+# partition regardless — so the file is re-verified after the flash and before
+# it is installed (see cmd_reimage). That way the tool is correct whichever
+# way the wipe semantics fall, and says which one it met, instead of betting
+# on an answer nobody has checked on this device.
+#
+# /tmp was the first choice, on the reasoning that a ramdisk cannot be wiped.
+# It trades a path with history for one with none: unknown free space on a
+# 512MB device, and no confirmation TWRP's /tmp persists as assumed.
+STAGE_DIR = "/sdcard"
 
 
 class Fail(Exception):
@@ -283,23 +296,44 @@ def push_verified(adb: Adb, local: str, remote: str) -> None:
     part = remote + ".part"
     adb.run(["push", local, part], timeout=600, check=True)
 
-    tool = _md5_tool(adb)
-    if not tool:
+    match = remote_matches(adb, local, part)
+    if match is None:
         warn("no md5 tool on the device — transfer not verified")
+    elif not match:
+        adb.shell(f"rm -f {part}")
+        raise Fail(f"transfer of {os.path.basename(local)} did not verify — "
+                   f"the bytes on the device do not match the file sent")
     else:
-        import hashlib as _h
-        want = _h.md5(open(local, "rb").read()).hexdigest()
-        out = adb.shell_out(f"{tool} {part}", timeout=120)
-        # `<hash>  <path>` — compare on the prefix, no cut needed.
-        if not out.lower().startswith(want.lower()):
-            adb.shell(f"rm -f {part}")
-            raise Fail(f"transfer of {os.path.basename(local)} did not verify "
-                       f"(expected md5 {want}, device said: {out.strip()})")
         ok(f"staged and verified  {remote}")
 
     rc, out = adb.shell(f"mv {part} {remote}", timeout=60)
     if rc != 0:
         raise Fail(f"could not move staged file into place: {out}")
+
+
+def _md5_local(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def remote_matches(adb: Adb, local: str, remote: str):
+    """
+    Does `remote` on the device hold the same bytes as `local`?
+
+    True / False, or None when the device has no md5 tool — three answers,
+    because "cannot check" and "does not match" want different handling and
+    collapsing them into a bool loses the distinction at the call site.
+    """
+    tool = _md5_tool(adb)
+    if not tool:
+        return None
+    want = _md5_local(local)
+    out = adb.shell_out(f"{tool} {remote}", timeout=120)
+    # `<hash>  <path>` — compare on the prefix, no cut needed.
+    return out.lower().startswith(want.lower())
 
 
 def read_system_build(adb: Adb) -> dict:
@@ -522,10 +556,9 @@ def cmd_reimage(adb: Adb, args) -> int:
         "image),")
     say("so a failure is recoverable while the device stays in recovery.")
 
-    # ── Everything below this point that can be checked, is checked BEFORE
-    # the first destructive command. The window between the wipe and the patch
-    # being installed is the only part that cannot be undone by stopping, so
-    # nothing unverified is allowed to enter it.
+    # Both files are hash-checked before the first destructive command. That
+    # is host-side and costs nothing, and an image for the wrong device is the
+    # one mistake here with no way back.
 
     step("Checking the device")
     state = adb.state()
@@ -537,23 +570,11 @@ def cmd_reimage(adb: Adb, args) -> int:
     fp = adb.shell_out("getprop ro.build.fingerprint", timeout=30)
     ok(f"in TWRP recovery  ({fp or 'fingerprint unknown'})")
 
-    rc, _ = adb.shell(f"touch {STAGE_DIR}/.em-write-test", timeout=30)
-    if rc != 0:
-        raise Fail(f"{STAGE_DIR} is not writable on the device — cannot stage "
-                   "the patch safely")
-    adb.shell(f"rm -f {STAGE_DIR}/.em-write-test", timeout=30)
-    ok(f"{STAGE_DIR} is writable")
-
     step("Verifying the files")
     verify_image(image, args.allow_unknown_image)
     verify_patch(patch)
 
-    step("Staging the patch before anything is erased")
-    # /tmp is a ramdisk that survives the wipe and the flash, so the file the
-    # device needs in order to be reachable afterwards is already on it before
-    # the first destructive command runs. A push failure here costs nothing.
     remote_patch = f"{STAGE_DIR}/f1r30s.zip"
-    push_verified(adb, patch, remote_patch)
 
     if not args.yes:
         say("")
@@ -567,6 +588,11 @@ def cmd_reimage(adb: Adb, args) -> int:
             return 1
 
     # ── Danger window opens here ─────────────────────────────────────────────
+    # `flashed` decides what the failure path tells you to do. Before the image
+    # is on, the device still has its old system and the answer is to re-run;
+    # after, the system is new and unreachable and the answer is to install the
+    # patch. One message for both states would be wrong in one of them.
+    flashed = False
     try:
         step("Wiping data")
         rc, out = adb.shell("twrp wipe data", timeout=900)
@@ -580,6 +606,12 @@ def cmd_reimage(adb: Adb, args) -> int:
         if rc != 0:
             raise Fail("`twrp wipe cache` failed — see the output above")
 
+        # Pushed after the wipes, which is the order this sequence has actually
+        # been run in on this hardware. A wipe is recoverable — the device is
+        # still in TWRP and the file can simply be pushed again.
+        step("Staging the ADB-enablement patch")
+        push_verified(adb, patch, remote_patch)
+
         step("Entering sideload mode")
         adb.shell("twrp sideload", timeout=60)
         # Sideload mode restarts adbd, which re-enumerates USB.
@@ -591,11 +623,26 @@ def cmd_reimage(adb: Adb, args) -> int:
         rc, _ = adb.run(["sideload", image], timeout=3600, stream=True)
         if rc != 0:
             raise Fail(f"`adb sideload` failed (rc={rc})")
+        flashed = True
         ok("image sideloaded")
 
         step("Waiting for recovery to come back")
         adb.wait_for("recovery", timeout=300)
         ok("back in TWRP")
+
+        # The image flash may or may not have formatted the partition /sdcard
+        # lives on. Rather than bet on an answer nobody has checked on this
+        # device, ask: one md5 against a file already there, and a clear
+        # statement of which world we are in if it is gone.
+        step("Confirming the patch is still on the device")
+        still = remote_matches(adb, patch, remote_patch)
+        if still is False or not adb.shell(f"ls {remote_patch}")[1].strip():
+            info(f"{remote_patch} did not survive the flash — re-pushing")
+            push_verified(adb, patch, remote_patch)
+        elif still is None:
+            warn("no md5 tool on the device — assuming the patch is intact")
+        else:
+            ok("still present and unchanged")
 
         step("Installing the ADB-enablement patch")
         rc, out = adb.shell(f"twrp install {remote_patch}", timeout=900)
@@ -615,11 +662,15 @@ def cmd_reimage(adb: Adb, args) -> int:
         say("recovery is cheap from here and expensive once it has been power")
         say("cycled and put away.")
         say("")
-        say("When the cause is fixed, finish the job with:")
-        say("")
-        say(f"    {_self()} install-patch --patch {args.patch}")
-        say("")
-        say("If the flash itself failed, re-run the full reimage instead.")
+        if flashed:
+            say("The system image WAS flashed, so the device needs the patch")
+            say("before it can be reached. Fix the cause, then:")
+            say("")
+            say(f"    {_self()} install-patch --patch {args.patch}")
+        else:
+            say("The system image was NOT flashed — the device still has its")
+            say("previous system and has only been wiped. Fix the cause and")
+            say("run the same reimage command again.")
         return 2
 
     # ── Danger window closed ─────────────────────────────────────────────────

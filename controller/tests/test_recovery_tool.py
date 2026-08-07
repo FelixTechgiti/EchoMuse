@@ -163,14 +163,18 @@ def test_device_paths_match_the_controller(tool):
     )
 
 
-def test_staging_dir_is_the_ramdisk(tool):
+def test_staging_dir_matches_the_path_this_hardware_has_been_through(tool):
     """
-    /tmp in TWRP is a ramdisk, which is the whole reason the patch is staged
-    there: it survives the data wipe and the image flash because nothing
-    reboots in between. Staging on /sdcard puts the file on the partition
-    about to be erased.
+    /sdcard, because that is where the documented sequence and the wizard both
+    put this file — the wizard reads /sdcard/f1r30s.zip directly. A different
+    staging path would be reasoning where there is history available.
     """
-    assert tool.STAGE_DIR == "/tmp"
+    assert tool.STAGE_DIR == "/sdcard"
+    wizard = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    assert f"{tool.STAGE_DIR}/f1r30s.zip" in wizard, (
+        "the wizard no longer reads the patch from the path the recovery tool "
+        "stages it to"
+    )
 
 
 # ── The ordering that matters ─────────────────────────────────────────────────
@@ -200,27 +204,20 @@ def _reimage_src() -> str:
     return "def cmd_reimage(" + body
 
 
-def test_reimage_verifies_and_stages_before_anything_destructive():
+def test_reimage_hash_checks_both_files_before_anything_destructive():
     """
-    The invariant the whole design rests on.
-
-    Nothing after the wipe can be undone by stopping, and the device is
-    unbootable until the patch is installed — so both files must be hash
-    checked and the patch must already be on the device's ramdisk before the
-    first destructive command runs.
+    Host-side verification costs nothing and must happen first. An image for
+    the wrong device is the one mistake here with no way back, so it can never
+    be discovered after the wipe.
     """
     src = _reimage_src()
 
     verify_image = _call_lines(src, "verify_image")
     verify_patch = _call_lines(src, "verify_patch")
-    staged = _call_lines(src, "push_verified")
-
-    assert verify_image and verify_patch and staged, (
-        "reimage no longer verifies both files and stages the patch"
+    assert verify_image and verify_patch, (
+        "reimage no longer hash-checks both files"
     )
 
-    # The wipe is issued through adb.shell; find the first destructive one by
-    # its command text, which is what actually erases the device.
     lines = src.splitlines()
     destructive = [i + 1 for i, line in enumerate(lines)
                    if "twrp wipe" in line or '"sideload"' in line]
@@ -228,12 +225,10 @@ def test_reimage_verifies_and_stages_before_anything_destructive():
     first_destructive = min(destructive)
 
     for label, calls in (("verify_image", verify_image),
-                         ("verify_patch", verify_patch),
-                         ("push_verified", staged)):
+                         ("verify_patch", verify_patch)):
         assert max(calls) < first_destructive, (
             f"{label} runs at line {max(calls)}, after the first destructive "
-            f"command at line {first_destructive} — the device could be wiped "
-            f"while carrying an unverified dependency"
+            f"command at line {first_destructive}"
         )
 
 
@@ -384,27 +379,63 @@ def staged(tool, tmp_path, monkeypatch):
 
 
 def test_reimage_runs_the_sequence_in_the_right_order(staged):
+    """
+    The sequence is the one that has actually been run on this hardware:
+    wipe data, wipe cache, push the patch, sideload the image, install the
+    patch. Verification is layered onto it, not substituted for it.
+    """
     tool, adb, args = staged
     assert tool.cmd_reimage(adb, args) == 0
 
-    push = adb.index_of("run", "push")
-    verify = adb.index_of("shell", "md5sum /tmp/f1r30s.zip.part")
-    rename = adb.index_of("shell", "mv /tmp/f1r30s.zip.part")
     wipe_data = adb.index_of("shell", "twrp wipe data")
     wipe_cache = adb.index_of("shell", "twrp wipe cache")
+    push = adb.index_of("run", "push")
+    verify = adb.index_of("shell", "md5sum /sdcard/f1r30s.zip.part")
+    rename = adb.index_of("shell", "mv /sdcard/f1r30s.zip.part")
     sideload_mode = adb.index_of("shell", "twrp sideload")
     sideload = adb.index_of("run", "sideload")
     install = adb.index_of("shell", "twrp install")
 
-    # The patch is on the device, verified, before anything is erased.
-    assert push < verify < rename < wipe_data, (
-        "the patch was not staged and verified before the wipe"
+    assert wipe_data < wipe_cache < push < verify < rename < sideload_mode, (
+        "the wipe/stage order does not match the tested sequence"
     )
-    assert wipe_data < wipe_cache < sideload_mode < sideload < install, (
+    assert sideload_mode < sideload < install, (
         "the flash sequence ran out of order"
     )
     # And the device is left alone at the end.
     assert not any("reboot" in text for _, text in adb.calls)
+
+
+def test_reimage_rechecks_the_patch_after_the_flash(staged):
+    """
+    Whether the image flash formats the partition /sdcard lives on is not
+    known for this device. The tool must not assume either answer: if the
+    patch is gone after the flash it re-pushes rather than installing nothing.
+    """
+    tool, adb, args = staged
+    real_shell = adb.shell
+    gone = {"yes": True}
+
+    def vanish_after_flash(cmd, **kw):
+        # The file disappears once, right after the sideload, exactly as a
+        # format of /data would leave things.
+        if gone["yes"] and cmd.startswith("ls /sdcard/f1r30s.zip"):
+            return 0, ""
+        if gone["yes"] and cmd.startswith("md5sum /sdcard/f1r30s.zip") \
+                and ".part" not in cmd:
+            return 0, "no-such-file"
+        return real_shell(cmd, **kw)
+
+    adb.shell = vanish_after_flash
+    sideload_at = None
+    assert tool.cmd_reimage(adb, args) == 0
+
+    pushes = [i for i, (k, t) in enumerate(adb.calls)
+              if k == "run" and t.startswith("push")]
+    sideload_at = adb.index_of("run", "sideload")
+    assert any(i > sideload_at for i in pushes), (
+        "the patch went missing after the flash and was not re-pushed"
+    )
 
 
 def test_reimage_that_fails_after_the_wipe_reports_and_does_not_reboot(
@@ -439,20 +470,32 @@ def test_reimage_refuses_when_the_device_is_not_in_recovery(staged):
     assert "recovery" in str(e.value)
 
 
-def test_reimage_stops_before_the_wipe_when_the_patch_will_not_verify(
-        staged, tmp_path):
+def test_a_staging_failure_never_reaches_the_flash(staged, capsys):
     """
-    A staging failure must cost nothing. If the bytes on the device do not
-    match, the device must still be untouched.
+    If the patch cannot be got onto the device intact, the image must not be
+    flashed: an unflashed device still has a working system, and a flashed one
+    without the patch does not.
+
+    The advice must also match where it stopped — telling someone to run
+    `install-patch` when no image was flashed would have them patch the system
+    they already had.
     """
     tool, adb, args = staged
-    adb._md5 = {}  # device reports a hash that matches nothing
+    adb._md5 = {}  # device reports a hash matching nothing
 
-    with pytest.raises(tool.Fail):
-        tool.cmd_reimage(adb, args)
+    rc = tool.cmd_reimage(adb, args)
+    out = capsys.readouterr().out
 
-    assert not any("twrp wipe" in text for _, text in adb.calls), (
-        "the device was wiped despite the patch failing verification"
+    assert rc == 2
+    assert not any(k == "run" and t.startswith("sideload")
+                   for k, t in adb.calls), (
+        "the image was flashed despite the patch failing verification"
+    )
+    assert "was NOT flashed" in out, (
+        "the failure advice does not say the image never went on"
+    )
+    assert "install-patch" not in out, (
+        "the failure advice offers install-patch when nothing was flashed"
     )
 
 

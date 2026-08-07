@@ -652,14 +652,23 @@ window short and letting nothing unverified into it.
   variants, so an unknown hash refuses *by default* and is explicitly
   overridable — that still catches the mistake that bricks (corrupt download,
   wrong model) without rejecting a valid image someone already has.
-- **The patch is staged before the first destructive command**, into TWRP's
-  `/tmp` — a ramdisk, so it survives the wipe and the flash (nothing reboots
-  in between), where `/sdcard` is the partition being erased. Lands in `.part`,
-  renamed on md5 match, which doubles as the free-space check.
+- **The sequence is the one that has been run on this hardware** — wipe, wipe,
+  push the patch to `/sdcard`, sideload, install — with verification layered
+  on, not substituted for it. Staging to TWRP's `/tmp` was tried first on the
+  reasoning that a ramdisk cannot be wiped; it trades a path with history for
+  one with none (unknown free space on a 512MB device, unconfirmed
+  persistence). **Whether the image flash formats the partition `/sdcard` sits
+  on is not known for this device**, so the tool re-checks the patch after the
+  flash and re-pushes if it is gone, rather than betting on either answer.
+  Pushes land in `.part` and rename on md5 match, which doubles as the
+  free-space check.
 - **It never reboots the device.** A failure left in TWRP is one command from
-  fixed; the same failure power-cycled is an afternoon. Hence the post-wipe
-  failure path naming `install-patch`, and `install-patch` existing as its own
-  command so that instruction is true.
+  fixed; the same failure power-cycled is an afternoon. The failure path
+  branches on whether the image actually went on: unflashed means the old
+  system is still there and the answer is to re-run, flashed means the device
+  is unreachable and the answer is `install-patch` — which exists as its own
+  command so that instruction is true. One message for both states is wrong in
+  one of them.
 - Verification mounts `/system` and reads `build.prop` rather than booting
   Android — same answer, one second instead of ~86s plus the OOBE.
 - `fix-slot` repairs the slot-symlink failure with no natural end (device runs

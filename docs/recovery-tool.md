@@ -80,27 +80,33 @@ python3 echomuse-recovery.py reimage \
     --patch f1r30s.zip
 ```
 
-It checks both files, stages the patch onto the device, and only then asks you
-to type `REIMAGE` to confirm. Everything before that point is reversible by
-stopping.
+It checks both files against their hashes first, then asks you to type
+`REIMAGE` to confirm. Nothing on the device is touched before that point.
+
+Then it wipes, pushes the patch to `/sdcard`, sideloads the image, and
+installs the patch — checking after the flash that the patch is still there
+and still intact, and re-pushing it if not.
 
 TWRP survives a reimage — it sits below the system image — so recovery is
 always possible from here as long as the device stays in recovery.
 
 ### If it fails part way
 
-The device is not bootable between the wipe and the patch being installed.
-If something goes wrong in that window the tool says so plainly, tells you to
-leave the device in TWRP with the cable attached, and gives you the command
-to finish the job:
+**Do not reboot a device that reported a failure.** Recovery is cheap while
+it is sitting in TWRP and a much longer afternoon once it has been power
+cycled and put away.
 
-```
-python3 echomuse-recovery.py install-patch --patch f1r30s.zip
-```
+The tool tells you which of two situations you are in, because they need
+different things:
 
-**Do not reboot a device that reported a failure.** Recovery is one command
-while it is sitting in TWRP, and a much longer afternoon once it has been
-power cycled and put away.
+- **The image was not flashed.** The device still has its previous system and
+  has only been wiped. Fix the cause and run the same reimage command again.
+- **The image was flashed but the patch was not installed.** This is the state
+  where the device cannot be reached, and finishing the job is one command:
+
+  ```
+  python3 echomuse-recovery.py install-patch --patch f1r30s.zip
+  ```
 
 ### After a successful reimage
 
