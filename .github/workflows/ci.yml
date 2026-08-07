@@ -61,6 +61,19 @@ jobs:
           fi
           echo "No undefined names."
 
+  dashboard-tests:
+    name: Dashboard logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No setup-node step: ubuntu-latest ships a node, and this test needs
+      # nothing beyond the standard library. The dashboard is otherwise
+      # untested by construction — it compiles to a single classic script
+      # with no module boundary to import across — so this covers the pure
+      # logic that decides what the wizard will and will not attempt.
+      - name: Run dashboard tests
+        run: node controller/tests/wifi_scan.test.mjs
+
   device-tests:
     name: Device Go tests
     runs-on: ubuntu-latest

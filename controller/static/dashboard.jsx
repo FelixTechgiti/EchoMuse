@@ -2314,6 +2314,12 @@ service echomuse /data/local/bin/start_server.sh
 // against the uploaded file's SHA-256 before flashing — catches wrong-
 // version uploads (e.g. a newer Magisk that doesn't support Android 5.1's
 // non-namespaced su, or a corrupted download) before they hit TWRP.
+// WiFi security labels, used in the network picker and in error messages.
+// Module scope so WifiPanel and the wizard's step runners share one set.
+const _SECURITY_LABEL = {
+  wpa2: 'WPA2', wpa3: 'WPA3', open: 'Open', wep: 'WEP', enterprise: 'Enterprise',
+};
+
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
@@ -2389,22 +2395,32 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
           border: '1px solid var(--border-soft)', borderRadius: 6, overflow: 'hidden',
           maxHeight: 140, overflowY: 'auto',
         }}>
-          {networks.map(n => (
+          {networks.map(n => {
+            // A network the radio cannot join is shown, greyed, with the
+            // reason. Hiding it would leave someone hunting for a network
+            // they can see on their phone; offering it silently costs them
+            // twenty seconds of SCANNING and no explanation.
+            const blocked = n.blocker;
+            return (
             <div key={n.ssid}
-              onClick={() => setWifiSsid(n.ssid)}
+              onClick={() => { if (!blocked) setWifiSsid(n.ssid); }}
+              title={blocked || ''}
               style={{
                 padding: '6px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 background: wifiSsid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent',
-                borderBottom: '1px solid var(--sunken)', cursor: 'pointer',
+                borderBottom: '1px solid var(--sunken)',
+                cursor: blocked ? 'not-allowed' : 'pointer',
+                opacity: blocked ? 0.5 : 1,
               }}>
               <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: wifiSsid === n.ssid ? 'var(--accent)' : 'var(--text)' }}>
                 {n.ssid}
               </span>
               <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
-                {n.signal} dBm
+                {[n.securityLabel, (n.bands || []).join('+'), `${n.signal} dBm`]
+                  .filter(Boolean).join(' · ')}
               </span>
             </div>
-          ))}
+          );})}
         </div>
       )}
 
@@ -2907,23 +2923,83 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await new Promise(r => setTimeout(r, 3000));
     const raw = await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results'");
     addLog('Scan complete.');
-    // Parse wpa_cli scan_results: bssid / frequency / signal / flags / ssid
+    return parseScanResults(raw);
+  }
+
+  // Parse wpa_cli scan_results: bssid / frequency / signal / flags / ssid.
+  //
+  // The frequency and flags columns used to be read and thrown away, which
+  // is how a WPA3 network came to look identical to a WPA2 one in the picker
+  // and produced twenty seconds of SCANNING with an error that named nothing
+  // (#82). They are the two facts that explain most association failures on
+  // this hardware, so they are kept.
+  function parseScanResults(raw) {
     const networks = [];
-    for (const line of raw.split('\n')) {
+    for (const line of (raw || '').split('\n')) {
       const parts = line.split('\t');
       if (parts.length < 5) continue;
       const ssid = parts[4].trim();
       if (!ssid || ssid === 'SSID') continue;
+      const freq   = parseInt(parts[1], 10);
       const signal = parseInt(parts[2], 10);
+      const flags  = parts[3] || '';
+      const band   = freq >= 4900 ? '5GHz' : (freq > 0 ? '2.4GHz' : '');
+
       const existing = networks.find(n => n.ssid === ssid);
       if (!existing) {
-        networks.push({ ssid, signal });
-      } else if (signal > existing.signal) {
-        existing.signal = signal; // keep strongest AP's signal for duplicate SSIDs (multiple APs/bands)
+        networks.push({ ssid, signal, freq, flags, bands: band ? [band] : [] });
+      } else {
+        // Same SSID on more than one AP or band. Keep the strongest for the
+        // headline numbers, but remember every band it was seen on.
+        if (band && !existing.bands.includes(band)) existing.bands.push(band);
+        if (signal > existing.signal) {
+          existing.signal = signal;
+          existing.freq = freq;
+          existing.flags = flags;
+        }
       }
+    }
+    // Derived here rather than in the panel, so WifiPanel stays presentational
+    // and the same objects can be reused by the failure diagnostics.
+    for (const n of networks) {
+      n.security = classifySecurity(n.flags);
+      n.securityLabel = _SECURITY_LABEL[n.security] || n.security;
+      n.blocker = securityBlocker(n.security);
     }
     networks.sort((a, b) => b.signal - a.signal);
     return networks;
+  }
+
+  // What can this device actually join?
+  //
+  // Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
+  // IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
+  // configuration problem, it is impossible on this radio — hence 'wpa3'
+  // being refused outright rather than attempted. Mixed WPA2/WPA3 APs
+  // advertise both and are joinable through the WPA2 half.
+  function classifySecurity(flags) {
+    const f = (flags || '').toUpperCase();
+    const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
+    if (f.includes('EAP')) return 'enterprise';
+    if (f.includes('SAE') && !hasPsk) return 'wpa3';
+    if (hasPsk) return 'wpa2';
+    if (f.includes('WEP')) return 'wep';
+    return 'open';
+  }
+
+  // Why a network cannot be used, or null when it can.
+  function securityBlocker(security) {
+    if (security === 'wpa3') {
+      return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
+           + 'Enable WPA2 compatibility mode on the router or hotspot.';
+    }
+    if (security === 'enterprise') {
+      return 'Enterprise (802.1X). The wizard cannot configure this.';
+    }
+    if (security === 'wep') {
+      return 'WEP. The wizard cannot configure this.';
+    }
+    return null;
   }
 
   // Quote a value for safe embedding inside a wpa_supplicant.conf network
@@ -2937,10 +3013,66 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return value;
   }
 
+  // Diagnose a failed association from the device's own view of the air.
+  //
+  // Three outcomes worth telling apart, all of which look identical in the
+  // wpa_state log: the network is not on the air at all, it is there but the
+  // radio cannot join it (WPA3), or it is there and joinable, which points at
+  // the password or the AP rather than at us.
+  async function reportWhyNoAssociation(c, ssid) {
+    try {
+      await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan'");
+      await new Promise(r => setTimeout(r, 3000));
+      const raw = await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results'");
+      const seen = parseScanResults(raw);
+      const match = seen.find(n => n.ssid === ssid);
+
+      if (!match) {
+        addLog(`"${ssid}" was not seen in a fresh scan (${seen.length} other network(s) were).`, 'warn');
+        addLog('Either it is out of range, or it is hidden and the SSID is not spelled exactly right.', 'warn');
+        return;
+      }
+      addLog(`"${ssid}" IS on the air: ${_SECURITY_LABEL[match.security] || match.security}`
+           + `, ${match.bands.join(' + ') || match.freq + ' MHz'}, ${match.signal} dBm`, 'warn');
+      addLog(`  flags: ${match.flags}`);
+      const blocker = securityBlocker(match.security);
+      if (blocker) {
+        addLog(`  ${blocker}`, 'error');
+      } else {
+        addLog('  The Dot can join this kind of network, so the likely cause is the '
+             + 'password, or the AP refusing the client.', 'warn');
+      }
+    } catch (e) {
+      addLog(`Could not scan to diagnose: ${e.message || e}`, 'warn');
+    }
+  }
+
   async function runConfigWifi(c, ssid, psk) {
     if (!ssid) throw new Error('No SSID selected.');
     wpaConfEscape(ssid);
     wpaConfEscape(psk);
+
+    // What the scan said about this network, if it was picked from the list.
+    // A typed SSID that no scan saw is treated as hidden, which needs
+    // scan_ssid=1 or wpa_supplicant never probes for it and sits in SCANNING
+    // indefinitely.
+    const known  = (wifiNetworks || []).find(n => n.ssid === ssid);
+    const hidden = !known;
+    const security = known ? known.security : (psk ? 'wpa2' : 'open');
+
+    const blocker = securityBlocker(security);
+    if (blocker) throw new Error(`Cannot join "${ssid}": ${blocker}`);
+
+    if (security === 'wpa2' && !psk) {
+      throw new Error(`"${ssid}" needs a password.`);
+    }
+    if (known) {
+      addLog(`Network: ${_SECURITY_LABEL[security] || security}`
+           + `${known.bands.length ? ', ' + known.bands.join(' + ') : ''}`
+           + `, ${known.signal} dBm`);
+    } else {
+      addLog(`"${ssid}" was not in the last scan — configuring it as a hidden network.`, 'warn');
+    }
 
     addLog('Enabling WiFi radio…');
     await c.shell("su -c 'svc wifi enable'");
@@ -2975,8 +3107,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       'wowlan_triggers=disconnect',
       'network={',
       `\tssid="${ssid}"`,
-      `\tpsk="${psk}"`,
-      '\tkey_mgmt=WPA-PSK',
+      // key_mgmt used to be hardcoded to WPA-PSK, which made an open network
+      // unjoinable with no explanation. The device reports NONE among its
+      // supported key_mgmt values, so open networks work, they were just
+      // never configurable.
+      ...(security === 'open'
+            ? ['\tkey_mgmt=NONE']
+            : [`\tpsk="${psk}"`, '\tkey_mgmt=WPA-PSK']),
+      // Without this, wpa_supplicant only ever joins networks that appear in
+      // a passive scan, so a hidden SSID never associates and reports nothing
+      // more useful than SCANNING.
+      ...(hidden ? ['\tscan_ssid=1'] : []),
       '\tpriority=1',
       '}',
       '',
@@ -3121,6 +3262,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       if (lastStatus.includes('wpa_state=COMPLETED')) { associated = true; break; }
     }
     if (!associated) {
+      // Say what the radio can actually see. Without this the log ends on
+      // twenty identical SCANNING lines and a status block naming nothing
+      // that would explain them, which is precisely how #82 arrived: correct
+      // config, verified on device, no interferers, and no clue.
+      await reportWhyNoAssociation(c, ssid);
       throw new Error(`Did not associate to "${ssid}" within 20s. Last status:\n${lastStatus}`);
     }
     addLog('Associated.', 'ok');
