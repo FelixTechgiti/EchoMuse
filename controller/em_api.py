@@ -3905,6 +3905,13 @@ def _merge_device(row) -> dict:
         # than no toggle, because it looks like the feature is broken.
         "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Whether the device found its ambient light sensor. Reported so the
+        # dashboard can tell "no sensor" apart from "sensor present, no reading
+        # yet" — which is the question #90 had to be answered by hand, because
+        # nothing on screen showed the lux value at all and the only way to
+        # check was a support bundle.
+        "ambientLightCapable":
+            "ambient_light" in (getattr(live, "capabilities", []) or []) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
         # Update state

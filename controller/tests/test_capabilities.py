@@ -131,3 +131,54 @@ def test_the_pending_capabilities_are_applied_when_the_server_is_built():
         "server creation must seed capabilities from the pending map"
     assert "set_capabilities" in body, \
         "and must apply them via the same setter the entity gate reads"
+
+
+def test_a_capability_that_changes_later_rebuilds_the_entity_list():
+    """
+    The other half of the one-shot problem, and `_pending_caps` does not reach
+    it: when capabilities change AFTER HA has enumerated, the server has the
+    new list but HA read the entity list once at connect and never asks again.
+
+    Reachable in normal operation rather than only in theory. `als.resolve()`
+    deliberately does not cache a negative result, because the first lookup
+    happens moments after a cold boot when sysfs is least likely to be
+    complete — so a device can register without `ambient_light` and acquire it
+    on a later scan. Before this, that device kept the entity list from the
+    registration that missed the sensor, and the only cure was a controller
+    restart that happened to win the race (#90).
+
+    Bouncing the HA connection is the documented remedy; `update_oww_model`
+    does the same for the wake word configuration, and HA redials in seconds.
+    """
+    src = ESPHOME.read_text()
+    setter = re.search(r"def set_device_capabilities\(.*?\n(?=\n\ndef |\Z)", src, re.S)
+    assert setter, "could not find set_device_capabilities"
+    body = setter.group(0)
+
+    assert "disconnect()" in body, (
+        "a capability change after ListEntities must bounce the HA connection, "
+        "or the new entity never appears for the life of that connection"
+    )
+    # It must be conditional on an actual change. Bouncing on every register
+    # would drop HA's connection on every device reconnect.
+    assert re.search(r"if\s+set\(caps\)\s*==\s*before", body), (
+        "the bounce must be gated on the capability set actually changing; "
+        "bouncing unconditionally disconnects HA on every device reconnect"
+    )
+
+
+def test_the_api_can_tell_no_sensor_from_no_reading():
+    """
+    0 lux is a real reading from a covered sensor, so absence cannot be
+    expressed as a value: whether the device HAS the sensor has to be a
+    separate field from what it read.
+
+    Asserted on the API rather than the dashboard deliberately. A first
+    attempt put this on the Status tab, which pushed the panel past its
+    height and gave the page a scrollbar — what the device panel should show
+    is its own question, tracked separately. The API field stands on its own
+    merits regardless of who renders it.
+    """
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    assert "ambientLightCapable" in api, \
+        "/api/devices must report whether the device found its ALS"
