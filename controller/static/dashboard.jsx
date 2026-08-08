@@ -1568,19 +1568,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
-                    {/* Three states, not two. A device with no readable sensor
-                        and a device whose sensor has not reported yet need
-                        different next steps, and until now neither was visible
-                        anywhere: the lux value existed only in a support
-                        bundle, so "is the sensor working" could not be answered
-                        from the dashboard at all (#90). 0 lux is a real reading
-                        from a covered sensor, so it must not read as missing. */}
-                    {row('Ambient light', !device.connected ? '—'
-                         : !device.ambientLightCapable ? 'No sensor detected'
-                         : s?.ambientLux != null ? `${Math.round(s.ambientLux)} lux`
-                         : 'Detected, no reading yet',
-                         !device.connected ? undefined
-                         : !device.ambientLightCapable ? 'var(--muted)' : undefined)}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;

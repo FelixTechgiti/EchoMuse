@@ -167,22 +167,18 @@ def test_a_capability_that_changes_later_rebuilds_the_entity_list():
     )
 
 
-def test_the_dashboard_can_tell_no_sensor_from_no_reading():
+def test_the_api_can_tell_no_sensor_from_no_reading():
     """
     0 lux is a real reading from a covered sensor, so absence cannot be
-    expressed as a value. The API therefore reports the capability separately,
-    and the dashboard renders three states rather than two.
+    expressed as a value: whether the device HAS the sensor has to be a
+    separate field from what it read.
 
-    Until this existed the lux value appeared nowhere in the dashboard at all,
-    so "is the sensor working" could only be answered from a support bundle —
-    which is how #90 had to be triaged.
+    Asserted on the API rather than the dashboard deliberately. A first
+    attempt put this on the Status tab, which pushed the panel past its
+    height and gave the page a scrollbar — what the device panel should show
+    is its own question, tracked separately. The API field stands on its own
+    merits regardless of who renders it.
     """
     api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
     assert "ambientLightCapable" in api, \
         "/api/devices must report whether the device found its ALS"
-
-    jsx = (Path(__file__).resolve().parent.parent
-           / "static" / "dashboard.jsx").read_text()
-    assert "ambientLightCapable" in jsx, \
-        "the dashboard must distinguish no-sensor from no-reading"
-    assert "ambientLux" in jsx, "the dashboard must show the reading itself"
