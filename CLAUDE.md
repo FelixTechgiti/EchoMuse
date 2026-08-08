@@ -163,10 +163,10 @@ directions.
   turn a 750ms gesture into noise. Absent `heldMs` reads as a tap, so old
   firmware keeps its existing behaviour. A hold always fires `long`; a tap
   fires `single` only under `buttonSingleTapEvent`, which makes the tap an HA
-  event rather than a voice turn. Double and triple were parked deliberately,
-  because knowing a press was *single* requires delaying every single press by
-  the multi-tap window — a tax on the primary action, which is why they are
-  only available once a tap is no longer the start of speech.
+  event rather than a voice turn. `double`/`triple` need `buttonMultiTapMs`
+  as well, since knowing a press was *single* means delaying it by the
+  multi-tap window — a cost worth paying only once a tap is an event and not
+  speech.
   **`buttonSingleTapEvent` is gated on `button_hold`** — the event entity is
   only advertised for a hold-capable device, so on older firmware the setting
   is refused rather than leaving the button inert.
@@ -797,7 +797,7 @@ house, so rows survive with the SSID replaced and the selected network marked.
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs` and `buttonSingleTapEvent` are ignored by it).
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs` and the two `button*` keys are ignored by it).
 
 ### Fleet vs device scoping (schema v8)
 

@@ -94,6 +94,11 @@ DEFAULT_DEVICE_CONFIG = {
     # True: a tap fires "single" on the HA event entity instead of starting a
     # turn. Gives up cancel-by-tap; mute still cancels. Hold is unaffected.
     "buttonSingleTapEvent": False,
+    # Window (ms) for coalescing taps into double/triple; 0 disables. Delays
+    # every tap by this much, which is why it needs buttonSingleTapEvent — the
+    # delay is only acceptable once a tap is an event rather than speech.
+    # 300ms is a reasonable starting point.
+    "buttonMultiTapMs": 0,
     "owwThreshold":     0.3,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)

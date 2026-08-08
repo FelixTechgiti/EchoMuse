@@ -213,16 +213,16 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 
-# Press types the event entity advertises. double/triple remain parked,
-# because detecting them means delaying the single press by the multi-tap
-# window to know it was single — a latency cost on the primary action for a
-# feature most people will not bind. Adding one later is additive; HA
-# tolerates new event types.
+# Press types the event entity advertises. double/triple were parked because
+# detecting them means delaying the single press by the multi-tap window to
+# know it was single — a latency cost on the primary action. That cost only
+# lands while a tap starts a turn, so they are emitted under buttonMultiTapMs,
+# which requires buttonSingleTapEvent.
 #
-# "single" is emitted only when buttonSingleTapEvent is on, but is advertised
-# unconditionally: event_types is sent once at connect, so adding it when the
-# setting flipped would not reach HA until the satellite reconnected.
-BUTTON_EVENT_TYPES = ["long", "single"]
+# All are advertised unconditionally: event_types is sent once at connect, so
+# a type added when a setting flipped would not reach HA until reconnect.
+BUTTON_EVENT_TYPES = ["long", "single", "double", "triple"]
+# em_tap_burst decides which of the tap types a given burst becomes.
 
 # How long the action button must be held to count as a hold rather than a
 # tap. Measured ON THE DEVICE (heldMs) rather than by timing the down/up

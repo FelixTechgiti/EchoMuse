@@ -804,6 +804,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.barge_threshold = float(effective["bargeInThreshold"])
     if "buttonSingleTapEvent" in effective:
         live.button_single_tap_event = bool(effective["buttonSingleTapEvent"])
+    if "buttonMultiTapMs" in effective:
+        live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
     if "eqBands" in effective:
