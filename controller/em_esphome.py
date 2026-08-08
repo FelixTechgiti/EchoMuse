@@ -2108,10 +2108,42 @@ def set_device_capabilities(device_id: str, caps: list[str]) -> None:
     life of the connection. The same race decides it differently on each
     controller restart, which is what made the graph come and go.
     """
-    _pending_caps[device_id] = list(caps or [])
+    caps = list(caps or [])
+    _pending_caps[device_id] = caps
     server = _servers.get(device_id)
-    if server is not None:
-        server.set_capabilities(caps)
+    if server is None:
+        return
+
+    # A capability set that CHANGES after HA has already enumerated is the
+    # other half of the same one-shot problem, and _pending_caps does not
+    # reach it: the server has the new list, but HA read the entity list once
+    # at connect and will not ask again.
+    #
+    # It is reachable in normal operation, not just in theory. `als.resolve()`
+    # deliberately does not cache a negative result, because the first lookup
+    # happens moments after a cold boot when sysfs is least likely to be
+    # complete — so a device can register WITHOUT ambient_light and acquire it
+    # on a later scan. Before this, that device kept its entity list from the
+    # registration that missed the sensor, and the only cure was a controller
+    # restart that happened to win the race (#90).
+    #
+    # Bouncing the HA connection is the documented way to force a re-read;
+    # update_oww_model does the same thing for the wake word configuration.
+    # HA redials within seconds.
+    before = set(server.capabilities or [])
+    server.set_capabilities(caps)
+    if set(caps) == before:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    gained = sorted(set(caps) - before)
+    lost   = sorted(before - set(caps))
+    log.info(f"[{device_id}] capabilities changed"
+             + (f", gained {gained}" if gained else "")
+             + (f", lost {lost}" if lost else "")
+             + " — bouncing HA connection so the entity list is rebuilt")
+    satellite.disconnect()
 
 
 def send_button_event(device_id: str, event_type: str) -> None:
