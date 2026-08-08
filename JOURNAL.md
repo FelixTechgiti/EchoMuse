@@ -925,3 +925,114 @@ are **append-only and in ascending date order** — new work goes at the end.
   now shows band and link speed. Lounge had been sitting on 2.4GHz for 21
   hours at 61 Mbps after two weeks at 143, and nothing in the dashboard said
   so.
+
+- **2026-08-08 — the provisioning day, and a guard that was right by
+  accident.** Four of the five issues waiting overnight were provisioning
+  failures, which is where every new follower lands. Nine PRs went out as
+  `controller-v2.16.0`, the first multi-arch controller image. The
+  interesting parts were not the fixes.
+
+  **The wizard's one partition write, and the map that differs by
+  environment.** Patch Boot Image `dd`s to `/dev/block/other-boot` with
+  stderr discarded on both sides, checked nothing about where the symlink
+  pointed, and logged the image size without acting on it. Adding a guard
+  seemed simple. Measured on hardware, the by-name directory means opposite
+  things depending on where you are standing:
+
+  ```
+                   TWRP    Android
+    boot_a          p10        p17
+    boot_a_x        p10        p10
+    boot_a_amonet   p17          -
+  ```
+
+  TWRP remaps the bare names onto the kernel partitions and names amonet's
+  unlock payload explicitly. The first version of the guard was written
+  against the Android map, so it was inverted for the environment the wizard
+  actually runs in, **and it passed anyway**: `p10` answers to two names and
+  the glob happened to list the safe one last. A test that reverses the probe
+  output now pins the order-independence.
+
+  It caught the mistake because Wil ran two commands in TWRP before touching
+  a device. Thirty seconds of measurement against a guard that would have
+  kept passing on every device we own.
+
+  **And the branch I had called defensive is the live one.** Pulling the USB
+  cable powers the Dot off, because the same micro-USB carries power and
+  data, and `reboot recovery` is a one-shot BCB flag. So a replug is a cold
+  boot into Android whatever phase the wizard thinks it is in. Reconnect
+  during the TWRP phase, retry Patch Boot Image, and `other-boot` points at
+  `boot_b`: the unlock payload. Reachable by unplugging a cable and clicking
+  two buttons. In the PR I had described that check as protection against an
+  amonet version nobody here runs.
+
+  **A step that loses its device hangs rather than failing.** Found by Wil
+  pulling the cable during Configure WiFi. The ADB calls do not reject when
+  the device goes away. `shell` waits on a stream reader that never produces,
+  so the step neither resolves nor throws, `running` stays true, and every
+  control in the panel is gated on `!running`. The wizard sat there looking
+  busy with no way out but a page reload, which loses the transcript people
+  paste into issues.
+
+  A timeout on `shell` is the wrong instrument: `waitForFramework` budgets
+  ten minutes and `twrp install` takes thirty seconds, so anything loose
+  enough to be safe is useless. The browser was reporting the disconnect all
+  along and nothing was listening. Two follow-on subtleties, both found in a
+  second real run rather than reasoned about: four steps end by rebooting the
+  device, so our own teardowns were being reported as failures on a step that
+  had just succeeded; and the in-flight transfer can throw *before* the
+  disconnect event lands, which put a WebUSB internal in the transcript as
+  though it were a provisioning failure and sent the diagnostics probes at a
+  device that was no longer plugged in.
+
+  **`Unknown package` is the package manager answering, not refusing.** It is
+  an `IllegalArgumentException` meaning the package is not installed. The
+  Alexa and debloat steps counted successes and nothing else, so "this build
+  does not carry these packages" and "the package manager is broken" produced
+  the same fatal error and the same advice, which is to wait and retry. On an
+  image whose package set differs, that advice can never work and the wizard
+  can never be completed. Writing the test for the fix caught a second bug in
+  it: `pm disable` prints `new state: disabled` and `pm hide` prints `new
+  hidden state: true`, and the first draft guessed at `new state: hidden`,
+  which matches neither.
+
+  **Deleting a device was a one-way door.** Delete removed the row, the link
+  token is a column on it, and the device kept presenting the credential it
+  still had on disk. That was refused on all three planes including the shell
+  plane the controller would have used to push a fresh one, so the device sat
+  retrying behind a pulsing orange ring with nothing in the dashboard to
+  explain it, because as far as the controller was concerned it did not
+  exist. The rule bought nothing either: the check beside it admits a
+  connection presenting *no* token at all, so an unrecognised one was being
+  treated as worse than none while anyone can simply omit the header. The
+  decision moved to `em_linkauth.py` as a pure function, because it was
+  security logic with no test coverage, since the suite deliberately does not
+  import `em_controller`, and it had just cost a device.
+
+  **Every device log line was being written twice.** `_push_log_event`
+  persists as well as pushing, and the device `log` handler called
+  `db.log_device` and then called it. Roughly half of `device_logs` on every
+  connected device was immediate repeats, six milliseconds apart. It stayed
+  invisible because a doubled log line looks like a device that logged twice.
+  The cost beyond the wasted rows: `thin_noise` keeps the newest three
+  `[mem]` lines per device in a support bundle, so three slots held about one
+  and a half distinct readings, and the one artefact built to carry a leak
+  hunt was quietly carrying half of what it claimed.
+
+  **Measured, and it settled an assumption.** The published image is CPU-only
+  for wake word inference and the local build uses CUDA. Switching cost
+  nothing: 14.6/16.6/11.7/14.9% against 16.1% on the GPU build. The models
+  are small enough that call overhead cancels the gain, so `GPU: "1"` is
+  buying nothing at this fleet size.
+
+  Three mistakes of my own worth keeping. `git checkout` on an *uncommitted*
+  file, to undo a deliberate test-breaking edit, deleted an afternoon of
+  work. A sabotage test that leaves the asserted string elsewhere in the same
+  function proves nothing: my first attempt at breaking the capability bounce
+  left `disconnect()` present further down and the test passed against broken
+  code. And two claims about the codebase went into a public issue
+  from memory rather than from reading it: the two ESPHome ports are not a
+  duplicate, they are the voice satellite and the BT proxy, and mute is not
+  missing, it is in the device icon. The second mattered most, because the
+  right conclusion was the opposite of the one drawn. Mute already being
+  shown is an argument for taking rows out of that panel, not adding one.
