@@ -73,6 +73,7 @@ import em_eq
 import em_scenes
 import em_shadow
 import em_arbiter
+import em_button
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
@@ -1988,12 +1989,30 @@ async def handle_button_event(device: Device, event: dict):
         # button keeps working exactly as before on devices that have not
         # updated — degrade to old behaviour, never to a wrong answer.
         held_ms = event.get("heldMs") or 0
-        if held_ms >= esphome.BUTTON_HOLD_MS:
+        # Mute is read from the EVENT where the firmware reports it, falling
+        # back to the last mute_state message. The event is authoritative: it
+        # carries the state at the instant of the press, where device.muted is
+        # whatever the last message left behind.
+        muted = bool(event.get("muted", device.muted))
+        action = em_button.decide(
+            held_ms=held_ms,
+            hold_ms=esphome.BUTTON_HOLD_MS,
+            muted=muted,
+            turn_active=device.voice_lock.locked(),
+        )
+
+        if action == em_button.HOLD:
             log.info(f"[{device.device_id}] Dot button held {held_ms}ms → HA event")
             esphome.send_button_event(device.device_id, "long")
             return
 
-        if device.voice_lock.locked():
+        if action == em_button.BLOCKED:
+            # Only the TURN is blocked. The hold above has already been
+            # forwarded, muted or not.
+            log.info(f"[{device.device_id}] Dot button tap ignored — mic is muted")
+            return
+
+        if action == em_button.CANCEL:
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
             esphome.cancel_voice_turn(device.device_id)

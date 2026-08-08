@@ -164,6 +164,20 @@ directions.
   firmware keeps its existing behaviour. Only `long` is emitted — double and
   triple were parked deliberately, because knowing a press was *single*
   requires delaying every single press by the multi-tap window.
+  **Mute blocks the voice TURN, not the gesture.** A hold fires `long` while
+  muted; only the tap-starts-a-turn path is refused (`em_button.decide`, with
+  the mute state read off the press itself — the device sends `muted` on every
+  button event). The device used to drop every dot press while muted, which
+  was right while the button meant one thing and became wrong the day a hold
+  started firing an HA event: a hold bound to something unrelated to speech
+  stopped working whenever the mic was off, with nothing on the device
+  connecting the two. It shipped that way in v2.10.0 and no test noticed,
+  which is why the decision is now a pure function with one.
+  **Moving that check controller-side does not weaken mute**: sovereignty is
+  the device rejecting every `mic_start` while muted plus the hardware ADC
+  mute, not the button filter. A controller with a stale mute view can at
+  worst start a turn that captures silence and ends `no_speech` — keep that
+  rejection in `cmd/server.go` where it is, it is what makes this safe.
   **The evdev reader must filter to `EV_KEY`**: every press is followed by an
   `EV_SYN` whose code and value are both 0, and without the filter that SYN
   read as a release microseconds after the press. The button therefore acted
