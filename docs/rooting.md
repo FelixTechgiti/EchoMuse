@@ -83,9 +83,68 @@ Once those are done, EchoMuse takes over. The provisioning wizard in the
 dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
 from a device already in that state; it does not run the exploit.
 
-The steps the wizard performs — the SELinux patch, Magisk, and the root-grant
-database — happen with TWRP already installed, so a failure can usually be
+The steps the wizard performs (the SELinux patch, Magisk, and the root-grant
+database) happen with TWRP already installed, so a failure can usually be
 re-flashed from recovery.
+
+## What EchoMuse writes, and what it does not
+
+This device has several layers below the operating system, and EchoMuse only
+ever writes the FireOS one. Lowest first:
+
+| Layer | What it is | Written by EchoMuse |
+|---|---|---|
+| Preloader | First stage of boot. Tracks boot attempts per slot. | No |
+| LK (bootloader) | What `lk_build_desc` and `unlock_status` come from. amonet patches this. | No |
+| amonet's unlock payload | Chainloads the real kernel. `mmcblk0p17` / `p18`. | No |
+| TWRP (recovery) | | No, the wizard only runs commands inside it |
+| FireOS kernel and ramdisk | `mmcblk0p10` / `p11`. | **Yes**, one write |
+| `/system`, `/data` | FireOS userspace. | Yes, files only |
+
+The single partition write is in the wizard's Patch Boot Image step, and it
+puts the SELinux permissive cmdline and the `service echomuse` init entry into
+the FireOS kernel. TWRP presents that partition as `/dev/block/other-boot`.
+
+**The by-name directory means different things in TWRP and in Android**, which
+is worth knowing before reading any of it as gospel. Measured on hardware:
+
+| by-name entry | In TWRP | In Android |
+|---|---|---|
+| `boot_a` | `p10`, the kernel | `p17`, the payload |
+| `boot_a_x` | `p10`, the kernel | `p10`, the kernel |
+| `boot_a_amonet` | `p17`, the payload | not present |
+
+TWRP remaps the bare names onto the kernel partitions and exposes the payload
+explicitly as `*_amonet`. So the same name means opposite things depending on
+where you are standing, and `p10` answers to two names at once.
+
+Before writing, the wizard resolves `/dev/block/other-boot`, collects every
+by-name alias of whatever it points at, and refuses if any of them is an
+amonet payload partition. Writing a kernel there would destroy the unlock and
+mean running amonet again, so it is checked rather than assumed. It also
+verifies the image it read is a real boot image before patching it, and reads
+the cmdline back off the partition afterwards rather than trusting that the
+write succeeded.
+
+If any of those checks fail the wizard stops with the device still in TWRP,
+which is a recoverable place to be.
+
+## If a device will not boot
+
+Anything at or below the bootloader is the unlock's territory, and
+[R0rt1z2's thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
+is the authority on it. One thing from that thread is worth repeating here
+because it is time-critical:
+
+> **Stop trying to boot it.** The preloader tracks boot attempts per slot, and
+> if both slots run out of attempts the device stops booting altogether.
+
+That state is recoverable, but the easy routes are gone: getting back in means
+opening the case and shorting a pin on the board to reach the bootrom, which
+R0rt1z2's thread documents and describes as not especially difficult. A device
+sitting in fastboot or TWRP on the end of a cable needs none of that.
+Repeatedly power cycling one that will not boot is what turns the first
+situation into the second.
 
 ## How well tested is this?
 
