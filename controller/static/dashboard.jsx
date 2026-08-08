@@ -2326,6 +2326,11 @@ const _ALEXA_PKGS = [
   'com.amazon.device.smarthome.adapters.wifi',
 ];
 
+// Steps that establish an ADB connection rather than needing one. They show
+// "Retry Connection" on error, and they are the only steps runStep will enter
+// without a live handle.
+const CONNECT_STEPS = new Set([0, 1, 6]);
+
 const _INIT_RC_APPEND = `
 service mixer /system/bin/sh
     oneshot
@@ -2888,6 +2893,33 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return c;
   }
 
+  // Re-establish ADB from ANY step, without running that step.
+  //
+  // Reconnecting used to be reachable only from the three connection steps, so
+  // unplugging the cable anywhere else was unrecoverable inside the wizard:
+  // the handle held in `adb` is dead, Retry hands that dead handle straight
+  // back to the step, and the operator is left on a step that cannot succeed
+  // with no way to get a working connection. Reported in #91 as being stuck on
+  // step 9 with no way to press Retry or reach the USB picker.
+  //
+  // Unplugging a device is a normal thing to do when something has gone wrong,
+  // so it must not be a state the wizard cannot leave.
+  async function reconnectAdb() {
+    setRunning(true);
+    try {
+      // Drop the old handle first. WebUSB will not hand out a second claim on
+      // the same interface, so a stale client that still believes it is open
+      // makes the picker fail with a permissions error that reads as though
+      // the operator picked the wrong device.
+      if (adb) { try { await adb.close(); } catch {} setAdb(null); }
+      addLog('Reconnecting to the device…');
+      await runReconnect();
+    } catch (e) {
+      addLog(`Reconnect failed: ${e.message}`, 'error');
+    }
+    setRunning(false);
+  }
+
   // The two distinct ways a too-early `pm` call fails on FireOS 5. The
   // friendly one is what you get before PMS is published; the NullPointer
   // is what you get once it IS published but has not finished initialising,
@@ -2897,6 +2929,28 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const _pmNotReady = (out) =>
     out.includes('Could not access the Package Manager')
     || out.includes('java.lang.NullPointerException');
+
+  // What a `pm disable`/`pm hide` call actually said, in three outcomes.
+  //
+  // The distinction that matters is between pm REFUSING and pm ANSWERING that
+  // the package is not there. `Unknown package: <name>` is an
+  // IllegalArgumentException out of PackageManagerService: the call worked and
+  // the package is simply not installed on this build. Treating that as a
+  // failure is why a reporter on an image without these packages could never
+  // finish the wizard, and was told to wait longer and retry, which could
+  // never help (#91).
+  //
+  // Anything unrecognised counts as rejected rather than absent, deliberately:
+  // the consequence of being wrong is continuing to WiFi with the Alexa stack
+  // live, so an unfamiliar message is treated as the bad case.
+  // Note the two success strings differ in shape, not just in word: `pm
+  // disable` prints "new state: disabled" and `pm hide` prints "new hidden
+  // state: true". Guessing at "new state: hidden" matches neither.
+  const _pmVerdict = (out) => {
+    if (out.includes('new state: disabled') || out.includes('hidden state: true')) return 'disabled';
+    if (/Unknown package/i.test(out)) return 'absent';
+    return 'rejected';
+  };
 
   // Wait for the Android framework to be genuinely usable, and REFUSE to
   // continue if it isn't.
@@ -3467,12 +3521,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       .split('\n').map(l => l.trim().split(/\s+/)[1]).filter(p => /^\d+$/.test(p || ''));
     for (const pid of oobePids) await c.shell(`su -c "kill -9 ${pid}"`);
     const oobeLeft = (await c.shell(`su -c 'ps' | grep -F ${OOBE} | grep -v grep`)).trim();
-    addLog(`  → ${oobeDisable.includes('new state: disabled') ? 'disabled' : oobeDisable || 'no output'}`
+    const oobeVerdict = _pmVerdict(oobeDisable);
+    addLog(`  → ${oobeVerdict === 'disabled' ? 'disabled'
+                : oobeVerdict === 'absent'   ? 'not installed on this build'
+                : (oobeDisable || 'no output')}`
          + `, ${oobePids.length} running process(es) killed`
-         + (oobeLeft ? ' — still running, it will stop at the reboot that ends provisioning' : ''),
-           oobeLeft ? 'warn' : 'ok');
+         + (oobeLeft ? ', still running, it will stop at the reboot that ends provisioning' : ''),
+           oobeLeft || oobeVerdict === 'rejected' ? 'warn' : 'ok');
 
-    let disabled = 0;
+    let disabled = 0, absent = 0, rejected = 0;
     for (const pkg of _ALEXA_PKGS) {
       addLog(`Disabling ${pkg}…`);
       let out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
@@ -3482,21 +3539,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         await new Promise(r => setTimeout(r, 3000));
         out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
       }
-      // pm prints "Package <pkg> new state: disabled" on success. A package
-      // absent from this SKU is a normal, expected miss; anything else is not.
-      const ok = out.includes('new state: disabled');
-      if (ok) disabled++;
-      addLog(`  → ${out.trim() || 'ok'}`, ok ? undefined : 'warn');
+      const verdict = _pmVerdict(out);
+      if (verdict === 'disabled') disabled++;
+      else if (verdict === 'absent') absent++;
+      else rejected++;
+      addLog(`  → ${verdict === 'absent' ? 'not installed on this build' : (out.trim() || 'ok')}`,
+             verdict === 'disabled' ? undefined : 'warn');
     }
-    // Zero successes means the framework lied about being ready or root is
-    // not what we think it is — either way the Alexa stack is still live and
-    // the device must not be put on WiFi. Fail loudly instead of ticking the
-    // step green, which is what happened on 2026-07-31.
-    if (disabled === 0) {
+    // Three outcomes, not two.
+    //
+    // The original check counted successes and nothing else, so "every package
+    // is absent from this build" and "the package manager rejected every call"
+    // produced the same fatal error and the same advice, which is to wait
+    // longer and retry. On a device whose image genuinely lacks these packages
+    // that advice can never work and the wizard can never be completed (#91).
+    //
+    // `Unknown package` is an IllegalArgumentException out of PackageManager:
+    // pm answered, and the answer was that the package is not installed. That
+    // is not a failure, it is a different SKU or build.
+    if (rejected > 0 && disabled === 0) {
       throw new Error(
-        `None of the ${_ALEXA_PKGS.length} Alexa packages could be disabled — the package manager rejected every call. `
-        + `Do NOT continue to WiFi: the Alexa stack is still running and will phone home. `
+        `The package manager rejected ${rejected} of ${_ALEXA_PKGS.length} calls and disabled none. `
+        + `Do NOT continue to WiFi: the Alexa stack may still be running and will phone home. `
         + `Give the device longer to boot and click Retry.`);
+    }
+    if (disabled === 0 && absent === _ALEXA_PKGS.length) {
+      // Nothing to disable, and pm said so cleanly for every one. Continuing
+      // is correct, but say plainly what was concluded rather than ticking
+      // the step green in silence — this is an image nobody here has seen.
+      addLog(`None of the ${_ALEXA_PKGS.length} Alexa packages are installed on this build, `
+           + `so there was nothing to disable. If the device is silent and its ring is off, `
+           + `that is the expected state and provisioning can continue.`, 'warn');
+    } else {
+      addLog(`${disabled} disabled, ${absent} not installed on this build.`,
+             disabled ? 'ok' : 'warn');
     }
 
     // pm disable on com.amazon.device.smarthome.adapters.wifi does NOT stop
@@ -3546,28 +3622,38 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await waitForFramework(c, 'debloat');
 
     addLog(`Hiding ${packages.length} packages…`);
-    let hidden = 0;
+    let hidden = 0, absentPkgs = 0, rejectedPkgs = 0;
     for (const pkg of packages) {
       let out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
       if (_pmNotReady(out)) {
         await new Promise(r => setTimeout(r, 3000));
         out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
       }
-      // pm hide prints "Package <pkg> new hidden state: true" on success;
-      // a package absent from this SKU errors — log it and move on, the
-      // list spans SKU variants by design.
-      const ok = out.includes('hidden state: true');
-      if (ok) hidden++;
-      addLog(`  ${pkg} → ${ok ? 'hidden' : (out || 'no output')}`, ok ? undefined : 'warn');
+      // pm hide prints "Package <pkg> new hidden state: true" on success; a
+      // package absent from this build answers `Unknown package`, which is pm
+      // working, not pm refusing. The list spans SKU variants by design, so
+      // absences are expected here even more than in the Alexa step.
+      const verdict = _pmVerdict(out);
+      if (verdict === 'disabled') hidden++;
+      else if (verdict === 'absent') absentPkgs++;
+      else rejectedPkgs++;
+      addLog(`  ${pkg} → ${verdict === 'disabled' ? 'hidden'
+                         : verdict === 'absent'   ? 'not installed on this build'
+                         : (out || 'no output')}`,
+             verdict === 'disabled' ? undefined : 'warn');
     }
-    // Some of the list is expected to miss on any given SKU, but none of it
-    // landing means pm was not working, not that the SKU is unusual.
-    if (hidden === 0) {
+    // Same three outcomes as the Alexa step, and the same reason: counting
+    // only successes made "this build does not carry these packages"
+    // indistinguishable from "pm is broken", and only the second is worth
+    // stopping for (#91).
+    if (rejectedPkgs > 0 && hidden === 0) {
       throw new Error(
-        `None of the ${packages.length} packages could be hidden — the package manager rejected every call. `
+        `The package manager rejected ${rejectedPkgs} of ${packages.length} calls and hid none. `
         + `Give the device longer to boot and click Retry.`);
     }
-    addLog(`${hidden}/${packages.length} packages hidden.`, 'ok');
+    addLog(`${hidden}/${packages.length} packages hidden`
+         + (absentPkgs ? `, ${absentPkgs} not installed on this build.` : '.'),
+           hidden ? 'ok' : 'warn');
 
     addLog('Installing boot-time daemon-stop script (Magisk service.d)…');
     const scrResp = await fetch('/api/provision/debloat_script', { headers: { Authorization: `Bearer ${token}` } });
@@ -3803,6 +3889,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`── ${stepIdx + 1}/${_WIZARD_STEPS.length}  ${_WIZARD_STEPS[stepIdx].label.toUpperCase()} ──`, 'head');
     let c = adb;
     try {
+      // Every step but the three connection steps needs a live handle. Passing
+      // a null one through produced an error naming a property of undefined,
+      // which says nothing about the cable having been unplugged.
+      if (!CONNECT_STEPS.has(stepIdx) && !c) {
+        throw new Error('There is no ADB connection. Click Reconnect, pick the '
+                      + 'device from the USB picker, then Retry this step.');
+      }
       switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
         case  1: c = await runConnectTwrp(); break;
@@ -3860,8 +3953,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const isDone = step === _WIZARD_STEPS.length - 1 && stepState[step] === 'done';
 
   // Buttons are shown for manual steps; auto steps start themselves.
-  // CONNECT_STEPS: step is a connection step — show "Retry Connection" on error.
-  const CONNECT_STEPS = new Set([0, 1, 6]);
 
   // Dashboard-palette step states — same tones the rest of the UI uses
   // (accent slate for activity, deep green for done, rust for error).
@@ -4010,6 +4101,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {!running && stepState[step] === 'error' && ![3, 10, 11].includes(step) && (
               <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill onClick={() => runStep(step)}>Retry</Pill>
+                {/* Reachable from every step, not just the connection ones.
+                    Unplugging the cable is a normal reaction to something
+                    going wrong, and it used to leave the wizard holding a dead
+                    handle with no way to get a live one (#91). */}
+                {!CONNECT_STEPS.has(step) && (
+                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                )}
                 {/* Collection is automatic on failure; sharing is deliberate.
                     The file is redacted controller-side (no SSIDs, BSSIDs or
                     IPs) so it is safe to attach to a public issue, but it is
@@ -4028,6 +4126,19 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                       addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
                     }
                   }}>Delete "{duplicateDeviceId}" from controller</Pill>
+                )}
+              </div>
+            )}
+
+            {/* The file steps run their own buttons above and are excluded
+                from the Retry block, which left them with no way to reconnect
+                either. A dead handle is a dead handle whichever step is
+                showing, and step 11 pushes 10MB over that handle. */}
+            {!running && stepState[step] === 'error' && [3, 10, 11].includes(step) && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                {diagnostics && (
+                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
                 )}
               </div>
             )}
