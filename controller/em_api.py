@@ -312,6 +312,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_assets",    _get_provision_oww_manifest)
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
+    app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
@@ -3481,6 +3482,43 @@ def _controller_stats() -> dict:
         pass
 
     return stats
+
+
+@auth.require_admin
+async def _post_provision_diagnostics(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/diagnostics
+
+    The wizard collects raw probe output when a step fails and posts it here;
+    this returns the sanitised file to attach to an issue (#87).
+
+    Packaged on the controller rather than in the browser on purpose. The
+    redaction rules and their tests live in em_support, and a second copy in
+    JavaScript would drift from them without anyone noticing until a file
+    carried an SSID. This function only carries; em_support decides.
+
+    Admin-only and a download rather than a display, the same call the support
+    bundle makes: it is meant to be looked at before it is shared.
+    """
+    body = await _json_body(request)
+    diag = em_support.build_provision_diagnostics(
+        step=body.get("step") or "unknown",
+        error=body.get("error") or "",
+        probes=body.get("probes") or {},
+        transcript=body.get("transcript") or None,
+        # The wizard knows which network the operator picked; the file cannot
+        # work it out once the names are gone, and "the one you wanted is
+        # WPA3" is the whole answer on a #82-shaped failure.
+        selected_ssid=body.get("selected_ssid") or None,
+        controller_version=CONTROLLER_VERSION,
+    )
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return web.Response(
+        body=em_support.to_json(diag).encode(),
+        content_type="application/json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="echomuse-provision-{stamp}.json"'},
+    )
 
 
 @auth.require_admin

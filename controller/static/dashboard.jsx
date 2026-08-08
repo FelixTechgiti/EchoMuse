@@ -2517,6 +2517,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [progress, setProgress] = useState(null);
   const [latestRelease, setLatestRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
+  const [diagnostics, setDiagnostics] = useState(null);
   const logRef = useRef(null);
 
   function addLog(msg, type = 'info') {
@@ -2529,6 +2530,99 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  // What to ask the device when a step fails (#87).
+  //
+  // Diagnosing #79 and #82 each took several rounds of asking the reporter to
+  // run `getprop` and `wpa_cli` by hand, and by the time they answered the
+  // device had usually been retried or rebooted, so the state at the moment of
+  // failure was gone. This collects it while it is still true.
+  //
+  // Everything here is READ-ONLY and cheap. It runs on a device that has just
+  // failed something, which is the worst moment to be issuing commands that
+  // change anything, and it must not turn one failure into two.
+  //
+  // The keys must match `_PROVISION_PROBES` in em_support.py, which drops any
+  // name it does not recognise — a probe added here and not there collects
+  // output that is silently discarded. `tests/test_support.py` pins the pair.
+  //
+  // Sent RAW. The controller does the redaction, because those rules and their
+  // tests live in em_support.py and a second copy here would drift from them
+  // without anyone noticing until a file carried an SSID.
+  const _PROVISION_PROBES = {
+    props:         'getprop',
+    root:          'su -c id 2>&1',
+    selinux:       'getenforce 2>&1',
+    // The two distinct shapes a too-early `pm` produces, which is what the
+    // retry path keys off — worth capturing verbatim rather than as a verdict.
+    pm_ready:      'pm path android 2>&1',
+    storage:       'df /data 2>&1',
+    wpa_status:    "su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status' 2>&1",
+    wpa_scan:      "su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results' 2>&1",
+    wpa_caps:      "su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 get_capability key_mgmt' 2>&1",
+    services:      'getprop | grep init.svc',
+    processes:     "ps | grep -E 'wpa_supplicant|SmartHomeWifid' | grep -v grep",
+    // Answers "did the package steps achieve anything", which is the case
+    // that reports success having done nothing. It is also the exact question
+    // #91 had to be asked by hand.
+    packages:      "pm list packages 2>&1 | grep -i amazon",
+    data_property: 'ls /data/property 2>&1',
+    // TWRP steps only, and harmless elsewhere: which partition the boot image
+    // write would have gone to.
+    boot_target:   'readlink -f /dev/block/other-boot 2>&1',
+  };
+
+  async function collectProvisionDiagnostics(c, stepIdx, err) {
+    const probes = {};
+    for (const [name, cmd] of Object.entries(_PROVISION_PROBES)) {
+      try {
+        // Bounded per probe. The device has just failed something and may be
+        // half gone; without this, one unanswered command hangs the whole
+        // collection and the operator gets nothing at all.
+        probes[name] = await Promise.race([
+          c.shell(cmd),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+        ]);
+      } catch (e) {
+        probes[name] = `<probe failed: ${e.message}>`;
+      }
+    }
+    return API.post('/api/provision/diagnostics', {
+      step:  _WIZARD_STEPS[stepIdx]?.id || String(stepIdx),
+      error: err?.message || '',
+      probes,
+      transcript: log.map(l => l.msg),
+      selected_ssid: wifiSsid || null,
+    });
+  }
+
+  async function captureDiagnostics(stepIdx, err) {
+    if (!adb) {
+      // No connection means no probes, and a button that downloads a file
+      // containing nothing but the error would be worse than no button.
+      addLog('No ADB connection, so device state could not be captured.', 'warn');
+      return;
+    }
+    addLog('Capturing device state for diagnostics…');
+    try {
+      setDiagnostics(await collectProvisionDiagnostics(adb, stepIdx, err));
+      addLog('Device state captured — "Download diagnostics" below.', 'ok');
+    } catch (e) {
+      // Never let the diagnostic path bury the real failure.
+      addLog(`Could not capture device state: ${e.error || e.message}`, 'warn');
+    }
+  }
+
+  function downloadDiagnostics() {
+    const blob = new Blob([JSON.stringify(diagnostics, null, 2)],
+                          { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `echomuse-provision-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   async function doCheckRelease() {
     setCheckingRelease(true);
@@ -3868,6 +3962,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog(`Error: ${e.message}`, 'error');
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
+      // Collect device state while it is still the state that failed. A
+      // duplicate-device stop is our own bookkeeping and has nothing to ask
+      // the device about.
+      if (!e.matchedDeviceId) await captureDiagnostics(stepIdx, e);
       // Clear the file selection on failure — forces a deliberate reselect
       // before retry rather than silently re-flashing whatever was picked
       // last time (which, on a hash-mismatch failure, is the wrong file).
@@ -4050,6 +4148,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {!running && stepState[step] === 'error' && ![3, 10, 11].includes(step) && (
               <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill onClick={() => runStep(step)}>Retry</Pill>
+                {/* Collection is automatic on failure; sharing is deliberate.
+                    The file is redacted controller-side (no SSIDs, BSSIDs or
+                    IPs) so it is safe to attach to a public issue, but it is
+                    still the operator's call whether to. */}
+                {diagnostics && (
+                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                )}
                 {step === 0 && duplicateDeviceId && (
                   <Pill danger onClick={async () => {
                     try {
