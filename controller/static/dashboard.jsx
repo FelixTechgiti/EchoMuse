@@ -2726,6 +2726,89 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return c;
   }
 
+  // Where the patched kernel is allowed to land, decided from a probe of the
+  // device rather than from trusting a symlink.
+  //
+  // This device has layers below FireOS that EchoMuse does not write: the
+  // preloader, LK, and the partitions holding amonet's unlock payload. The
+  // FireOS kernel and ramdisk live elsewhere, and a kernel written over the
+  // payload costs the unlock and means running amonet again. So the one
+  // partition write the wizard performs is checked against where it is about
+  // to go rather than trusting the symlink to be pointing where it was last
+  // time.
+  //
+  // THE BY-NAME MAP DIFFERS BETWEEN TWRP AND ANDROID, and a rule written
+  // against one is wrong in the other. Measured on hardware 2026-08-08:
+  //
+  //            TWRP    Android
+  //   boot_a          p10        p17
+  //   boot_a_x        p10        p10
+  //   boot_a_amonet   p17          -
+  //
+  // TWRP remaps the bare names onto the kernel partitions and exposes the
+  // payload explicitly as *_amonet, which is the remapping R0rt1z2's thread
+  // describes TWRP as doing for you. So under TWRP `boot_a` is SAFE and under
+  // Android it is the payload. Match on the suffix, never on the bare name
+  // alone, and read every alias of the target rather than one: p10 answers to
+  // both boot_a and boot_a_x, so keeping a single name per partition makes the
+  // verdict depend on glob order.
+  //
+  // An unresolvable target is refused rather than warned about: dd to a name
+  // that is not a block device creates an ordinary file in TWRP's tmpfs, so
+  // nothing reaches flash and the failure surfaces later as a confusing
+  // magiskboot error on a zero-byte image.
+  //
+  // A target with no names at all is allowed through with a warning. Not being
+  // able to read by-name is not evidence of danger, and refusing on it would
+  // block any device whose TWRP lays that directory out differently — the same
+  // reading the OTA free-space check applies to an unreadable df.
+  function classifyBootTarget(probe) {
+    const target = (probe.match(/TARGET=(\S*)/) || [])[1] || '';
+    const isBlock = /ISBLK=yes/.test(probe);
+    const names = [];
+    for (const m of probe.matchAll(/^NAME (\S+) (\S+)$/gm)) {
+      if (m[2] === target && !names.includes(m[1])) names.push(m[1]);
+    }
+    names.sort();
+    const label = names.length ? `${names.join(', ')} (${target})` : target;
+
+    if (!target) {
+      return { ok: false, target, names, reason:
+        '/dev/block/other-boot did not resolve to anything. TWRP normally creates it; '
+        + 'without it there is nothing safe to write to.' };
+    }
+    if (!isBlock) {
+      return { ok: false, target, names, reason:
+        `/dev/block/other-boot resolves to "${target}", which is not a block device. `
+        + 'Writing there would land in TWRP\'s tmpfs and never reach flash.' };
+    }
+    // The payload, named explicitly. Checked before the kernel test because a
+    // partition carrying both names is not one we are willing to guess about.
+    if (names.some(n => n.endsWith('_amonet'))) {
+      return { ok: false, target, names, reason:
+        `/dev/block/other-boot resolves to ${label}, which holds amonet's unlock payload, `
+        + 'not the FireOS kernel. Writing there would cost you the unlock and mean running '
+        + 'amonet again, so nothing has been written. The device is still in TWRP. Please '
+        + 'report this with the line above: it is not a state the wizard has seen.' };
+    }
+    if (names.some(n => n.endsWith('_x'))) {
+      return { ok: true, target, names, reason: label };
+    }
+    // No _x alias and no _amonet alias, but named boot_a/boot_b: this is the
+    // Android-style map, where the bare name IS the payload. The wizard should
+    // never see it, since it runs in TWRP, but being wrong here is expensive
+    // and being cautious costs a re-run.
+    if (names.some(n => n === 'boot_a' || n === 'boot_b')) {
+      return { ok: false, target, names, reason:
+        `/dev/block/other-boot resolves to ${label}, and there is no matching _x partition. `
+        + 'Under that layout the bare name is amonet\'s payload rather than the FireOS '
+        + 'kernel, so this is not somewhere to write a kernel. Refusing.' };
+    }
+    return { ok: true, warn: true, target, names, reason:
+      `could not identify ${target} in by-name — continuing, but it is not a partition this `
+      + 'has been checked against.' };
+  }
+
   async function runPatchBoot(c) {
     addLog('Setting up work directories…');
     await c.shell('mkdir -p /tmp/work /tmp/bin');
@@ -2734,10 +2817,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(unzipOut || '(done)');
     await c.shell('chmod 755 /tmp/bin/magiskboot');
 
+    addLog('Checking which partition the boot image lives in…');
+    const probe = await c.shell(
+      'd=$(readlink -f /dev/block/other-boot 2>/dev/null); echo "TARGET=$d"; '
+      + 'if [ -b "$d" ]; then echo "ISBLK=yes"; else echo "ISBLK=no"; fi; '
+      // Glob every boot_* rather than naming the four we expect: the payload
+      // is only visible under TWRP as boot_a_amonet/boot_b_amonet, and a
+      // fixed list cannot report a name it was not told to look for.
+      + 'for n in /dev/block/platform/*/by-name/boot_*; do '
+      + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done');
+    const boot = classifyBootTarget(probe);
+    if (!boot.ok) throw new Error(boot.reason);
+    addLog(`  → ${boot.reason}`, boot.warn ? 'warn' : 'ok');
+
     addLog('Pulling boot image from device (10–20s)…');
-    await c.shell('dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576 2>/dev/null');
+    // stderr carried through rather than discarded: dd reports its record
+    // counts there, and a silenced read failure used to reach magiskboot as
+    // an empty file with nothing in the log to say why.
+    const pullOut = await c.shell('dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576 2>&1');
+    addLog(pullOut.trim() || '(done)');
     const bootImg = await c.pull('/tmp/work/boot.img');
     addLog(`Boot image: ${(bootImg.length / 1024 / 1024).toFixed(1)} MB`);
+    // Refuse anything that is not an Android boot image before the byte-offset
+    // cmdline patch below runs against it. That patch writes at a fixed header
+    // offset and would happily corrupt whatever it was handed.
+    const magic = new TextDecoder().decode(bootImg.slice(0, 8));
+    if (magic !== 'ANDROID!') {
+      throw new Error(
+        `Read ${bootImg.length} bytes from ${boot.target} and it does not start with `
+        + `"ANDROID!" (got "${magic.replace(/[^\x20-\x7e]/g, '.')}"). That is not a boot image, `
+        + `so nothing is being patched or flashed.`);
+    }
 
     // Check the CURRENT cmdline before touching anything — magiskboot's
     // own unpack log already echoes CMDLINE [...] for the unmodified
@@ -2796,9 +2906,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const repackOut = await c.shell(`cd /tmp/work && /tmp/bin/magiskboot repack ${workImg} 2>&1`);
     addLog(repackOut || '(done)');
 
-    addLog('Flashing patched boot image…');
-    await c.shell('dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576 2>/dev/null');
-    addLog('Boot image flashed.', 'ok');
+    addLog(`Flashing patched boot image to ${boot.names.length ? `${boot.names.join(', ')} (${boot.target})` : boot.target}…`);
+    const flashOut = await c.shell('dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576 2>&1');
+    addLog(flashOut.trim() || '(done)');
+
+    // Read the cmdline back off the partition rather than trusting dd's exit.
+    // This is the write the device has to boot from next, and a bad one costs
+    // a rollback and a boot attempt to discover — the same reasoning the OTA
+    // path applies to md5 before it moves a symlink.
+    const readback = await c.shell('dd if=/dev/block/other-boot bs=1 skip=64 count=512 2>/dev/null');
+    if (!readback.includes('androidboot.selinux=permissive')) {
+      throw new Error(
+        `Flashed the patched image to ${boot.target} but reading it back does not show the `
+        + `patched cmdline. The write did not take. Do not reboot the device: it is still in `
+        + `TWRP and recoverable from here.`);
+    }
+    addLog('Boot image flashed and verified.', 'ok');
   }
 
   async function runInstallMagisk(c, file) {
@@ -3047,8 +3170,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // app" as soon as the framework is up, and the earliest we can stop the
     // app itself is the Disable Alexa step — which is on the far side of
     // magiskd attaching, measured at 74s on a cold device. So the app cannot
-    // be silenced in time, but the speaker can: `input` needs only the shell
-    // user, and this runs the moment the framework answers.
+    // be silenced in time, and this is an attempt to silence the speaker
+    // instead: `input` needs only the shell user, and it runs the moment the
+    // framework answers.
+    //
+    // IT DOES NOT RELIABLY WORK. Observed on hardware 2026-08-08: she talks
+    // regardless. Two candidates, not yet separated — OOBE raises the volume
+    // back after we lower it, or it plays on a stream `keyevent 25` does not
+    // address (25 adjusts whichever stream is active, which with nothing
+    // playing is not necessarily the one she uses). `dumpsys audio` while she
+    // is talking settles it. It is left in because turning the volume down
+    // costs nothing and may help, but the log line must not claim more than
+    // that.
     //
     // Safe to leave muted. This moves Android's stream volume; EchoMuse drives
     // the codec itself and seeds its own level from `startupVolume` (85) on
@@ -3062,7 +3195,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Muting the speaker — Amazon\'s setup assistant starts talking here, and cannot be stopped until root lands…');
     try {
       await c.shell('i=0; while [ $i -lt 15 ]; do input keyevent 25; i=$((i+1)); done');
-      addLog('  → speaker muted for the rest of provisioning (EchoMuse restores volume after the final reboot).', 'ok');
+      // Measured on hardware 2026-08-08: the setup assistant talks anyway. It
+      // either raises the volume back or plays on a stream these keyevents do
+      // not touch, and which of those it is has not been established. Say what
+      // was done, not what was achieved — claiming it is muted for the rest of
+      // provisioning sends someone looking for a fault when they hear her.
+      addLog('  → volume turned down; the setup assistant may raise it again and talk anyway.', 'warn');
     } catch (e) {
       addLog(`  → could not mute (${e.message}) — the setup prompt may talk over the wizard.`, 'warn');
     }
