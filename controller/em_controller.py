@@ -68,6 +68,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_pki
+import em_linkauth
 import em_eq
 import em_scenes
 import em_shadow
@@ -2048,15 +2049,34 @@ async def _link_auth_ok(
     device_id is known.
 
     Rules (rollout-safe by construction):
-      - a presented token that MISMATCHES the stored one always rejects;
+      - a presented token that MISMATCHES a stored one always rejects;
       - a stored token with NO token presented is allowed unless
         REQUIRE_DEVICE_TLS — the DB row is minted before the files land
         on the device, and rejecting in that window would cut off the
         shell plane that the credential push itself rides on;
+      - a presented token for a device with NOTHING on record is ignored,
+        not rejected (see below);
       - REQUIRE_DEVICE_TLS=1 requires TLS + a matching token, full stop.
-    """
-    import hmac as _hmac
 
+    That third rule used to be a rejection, and it made deleting a device a
+    one-way door. Delete removes the row, the token is a column on it, and the
+    device re-reads its credential file on every dial — so it presented a token
+    nothing recognised and was refused on all three planes, INCLUDING the shell
+    plane the controller would otherwise push fresh credentials over. The
+    device retried forever behind a pulsing orange ring, and the dashboard had
+    nothing to show because as far as it was concerned the device did not
+    exist.
+
+    Rejecting there also never bought anything. The rule immediately above
+    admits a connection presenting no token at all, so an unrecognised token
+    was being treated as worse than none while anyone could simply omit the
+    header. A device with a stale credential now comes back as pending and
+    waits for approval, which is the decision a human should be making anyway.
+
+    `REQUIRE_DEVICE_TLS=1` installs are unaffected: the last rule still
+    demands a token that matches a stored one, so a deleted device is refused
+    there regardless and re-provisioning over USB stays the intended path.
+    """
     presented = None
     try:
         presented = ws.request.headers.get("X-EM-Token")
@@ -2066,18 +2086,23 @@ async def _link_auth_ok(
     loop = asyncio.get_event_loop()
     expected = await loop.run_in_executor(None, db.get_device_token, device_id)
 
-    if presented and expected and not _hmac.compare_digest(presented, expected):
-        log.warning(f"[{plane}] {device_id}: token mismatch — rejecting")
+    verdict = em_linkauth.decide(
+        presented=presented,
+        expected=expected,
+        secure=secure,
+        require_tls=REQUIRE_DEVICE_TLS,
+    )
+    if not verdict.ok:
+        log.warning(f"[{plane}] {device_id}: {verdict.reason} — rejecting")
         return False
-    if presented and not expected:
-        log.warning(f"[{plane}] {device_id}: token presented but none on record — rejecting")
-        return False
-    if REQUIRE_DEVICE_TLS and not (secure and presented and expected):
+    if verdict.stale_token:
+        # Allowed, but worth seeing in the log: almost always a device that was
+        # deleted and has come back carrying the credential from its previous
+        # life, which is the answer to "why is this in pending again".
         log.warning(
-            f"[{plane}] {device_id}: REQUIRE_DEVICE_TLS is set and connection "
-            f"is {'plain' if not secure else 'missing a valid token'} — rejecting"
+            f"[{plane}] {device_id}: {verdict.reason}. "
+            f"Treating as an unregistered device; it will need approval."
         )
-        return False
     return True
 
 

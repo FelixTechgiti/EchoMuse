@@ -58,6 +58,7 @@ COPY em_support.py .
 COPY em_shadow.py .
 COPY em_ns.py .
 COPY em_pki.py .
+COPY em_linkauth.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./
