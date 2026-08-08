@@ -2172,10 +2172,13 @@ const _ADB = (() => {
   let _lastUsbDevice = null;
 
   class Client {
-    constructor(adb, transport, banner) {
+    constructor(adb, transport, banner, serial) {
       this._adb = adb;
       this._transport = transport;
       this.banner = banner;  // product name string, e.g. "omni_biscuit" or "csm_biscuit"
+      // Carried so a WebUSB 'disconnect' event can be matched to this client
+      // rather than to any other USB device the operator happens to unplug.
+      this.serial = serial ?? null;
       this._log = () => {};
     }
 
@@ -2271,7 +2274,7 @@ const _ADB = (() => {
       const banner = adb.banner?.product ?? '(unknown)';
       logFn(`Connected. Banner: ${banner}`);
 
-      return new Client(adb, transport, banner);
+      return new Client(adb, transport, banner, usbDevice.serial ?? null);
     }
   }
 
@@ -2524,6 +2527,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [checkingRelease, setCheckingRelease] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const logRef = useRef(null);
+  // Bumped whenever the step in flight is abandoned — by the cable being
+  // pulled, or by the operator cancelling. A step that later settles compares
+  // this against the value it captured and drops its result on the floor
+  // rather than marking a step done that nobody is waiting on any more.
+  const stepEpoch = useRef(0);
 
   function addLog(msg, type = 'info') {
     // 200 lines truncated a normal successful run — the transcript above the
@@ -2535,6 +2543,48 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  // Abandon whatever step is in flight.
+  //
+  // The ADB calls a step awaits do NOT reliably reject when the device goes
+  // away: `shell` waits on a stream reader that simply never produces, so the
+  // step neither resolves nor throws. `running` stays true, every button here
+  // is gated on `!running`, and the wizard sits there looking busy with no
+  // Retry, no Reconnect and no way out but reloading the page and losing the
+  // transcript. Observed by pulling the cable during Configure WiFi.
+  //
+  // A timeout on `shell` would be the wrong instrument: waitForFramework
+  // budgets ten minutes and `twrp install` takes thirty seconds or more, so
+  // any timeout loose enough to be safe is too loose to be useful.
+  function abandonStep(reason) {
+    stepEpoch.current++;
+    setRunning(false);
+    markStep(step, 'error');
+    addLog(reason, 'error');
+  }
+
+  // The browser knows the cable was pulled; nothing was listening.
+  //
+  // Matched on serial so unplugging an unrelated USB device does not abort a
+  // provision. When either serial is unavailable the event is treated as ours:
+  // a spurious abort costs a Retry, and a missed one costs the hang above.
+  useEffect(() => {
+    if (!navigator.usb) return;
+    const onDisconnect = (e) => {
+      if (!adb && !running) return;
+      const theirs = adb?.serial && e.device?.serialNumber
+                   && e.device.serialNumber !== adb.serial;
+      if (theirs) return;
+      setAdb(null);
+      if (running) {
+        abandonStep('Device disconnected. The step was abandoned — reconnect and retry.');
+      } else {
+        addLog('Device disconnected.', 'warn');
+      }
+    };
+    navigator.usb.addEventListener('disconnect', onDisconnect);
+    return () => navigator.usb.removeEventListener('disconnect', onDisconnect);
+  }, [adb, running, step]);
 
   // What to ask the device when a step fails (#87).
   //
@@ -3880,6 +3930,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runStep(stepIdx, useLatest) {
+    // Captured up front. If the cable is pulled mid-step the handler above
+    // bumps this and has already set the UI to a usable state, so everything
+    // below must become a no-op — including the failure path, which would
+    // otherwise spend ~100s probing a device that is not there.
+    const epoch = stepEpoch.current;
+    const abandoned = () => epoch !== stepEpoch.current;
+
     setRunning(true);
     markStep(stepIdx, 'running');
     // One banner per step. The transcript is the only record of a provision
@@ -3911,9 +3968,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case 11: await runInstallEchoMuse(c, binaryFile, useLatest); break;
         case 12: await runInstallOwwAssets(c); break;
       }
+      if (abandoned()) return;
       markStep(stepIdx, 'done');
       if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
     } catch (e) {
+      // A step abandoned mid-flight may still throw on its way out, once the
+      // transport notices. The UI already says what happened; saying it again
+      // in the language of whatever call happened to fail is noise.
+      if (abandoned()) return;
       addLog(`Error: ${e.message}`, 'error');
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
@@ -3927,7 +3989,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       if (stepIdx === 3) setMagiskFile(null);
       if (stepIdx === 11) setBinaryFile(null);
     }
-    setRunning(false);
+    if (!abandoned()) setRunning(false);
   }
 
   // Auto-advance steps that need no user input once adb is connected.
@@ -4090,6 +4152,19 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 onSkip={() => { markStep(10, 'done'); setStep(11); }}
                 onAbort={() => { markStep(10, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
               />
+            )}
+
+            {/* The only control available while a step is in flight. The
+                disconnect listener handles the cable being pulled, but a step
+                can stall for reasons the browser does not report — a device
+                that has stopped answering while still enumerated, say — and
+                without this the only way out is reloading the page, which
+                loses the transcript the operator would otherwise paste into
+                an issue. */}
+            {running && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <Pill danger onClick={() => abandonStep('Step cancelled.')}>Cancel step</Pill>
+              </div>
             )}
 
             {/* Retry button — re-runs the step directly (runStep marks it running).
