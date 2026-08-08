@@ -93,3 +93,64 @@ if (failures) {
   process.exit(1);
 }
 console.log("pm_verdict: all checks passed.");
+
+// ─── Step mode / banner classification ────────────────────────────────────────
+//
+// Pulling the cable powers the Dot off, and `reboot recovery` is a one-shot,
+// so a replug is a cold boot into Android whatever phase the wizard is in.
+// Reconnecting during the TWRP phase hands back an Android device that looks
+// healthy. In Android `/dev/block/other-boot` points at boot_b, which holds
+// amonet's unlock payload, so a retried Patch Boot Image there would write
+// over the unlock.
+
+function liftConstObject(name) {
+  const start = src.indexOf(`const ${name} = {`);
+  if (start < 0) throw new Error(`dashboard.jsx no longer defines ${name}`);
+  const end = src.indexOf("};", start);
+  return src.slice(start, end + 2);
+}
+
+function liftFunctionDecl(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`dashboard.jsx no longer defines ${name}()`);
+  let depth = 0, seen = false, i = src.indexOf("{", start);
+  for (; i < src.length; i++) {
+    if (src[i] === "{") { depth++; seen = true; }
+    else if (src[i] === "}") { depth--; if (seen && depth === 0) break; }
+  }
+  return src.slice(start, i + 1);
+}
+
+const { _bannerMode, _STEP_MODE } = await import(
+  "data:text/javascript;base64," + Buffer.from(
+    liftFunctionDecl("_bannerMode") + "\n" + liftConstObject("_STEP_MODE")
+    + "\nexport { _bannerMode, _STEP_MODE };"
+  ).toString("base64"));
+
+// Real banners, from provisioning transcripts.
+check("TWRP is recognised", _bannerMode("omni_biscuit") === "twrp",
+      _bannerMode("omni_biscuit"));
+check("Android is recognised", _bannerMode("csm_biscuit") === "android",
+      _bannerMode("csm_biscuit"));
+
+// The ordering trap: "omni_biscuit" contains "biscuit", so an Android-first
+// test calls every TWRP device Android — which is the exact direction that
+// lets a TWRP step run against Android.
+check("TWRP is not mistaken for Android", _bannerMode("omni_biscuit") !== "android");
+
+check("an unknown banner is not guessed at",
+      _bannerMode("something_else") === "unknown", _bannerMode("something_else"));
+check("an empty banner is not guessed at", _bannerMode("") === "unknown");
+check("a missing banner is not guessed at", _bannerMode(undefined) === "unknown");
+
+// The boot-image step must be a TWRP step. If this ever flips, the wizard
+// would invite a write to boot_b.
+check("patch boot image is a TWRP step", _STEP_MODE[2] === "twrp", _STEP_MODE[2]);
+check("connect device is an Android step", _STEP_MODE[0] === "android");
+check("verify root is an Android step", _STEP_MODE[7] === "android");
+
+// Every step must have a mode, or the check silently does nothing for it.
+for (let i = 0; i <= 12; i++) {
+  check(`step ${i} has a mode`, _STEP_MODE[i] === "twrp" || _STEP_MODE[i] === "android",
+        String(_STEP_MODE[i]));
+}
