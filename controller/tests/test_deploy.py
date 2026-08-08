@@ -795,3 +795,38 @@ def test_tested_firmware_build_matches_the_docs():
         f"the wizard warns against build {build} but docs/rooting.md never "
         f"names it — a reader has nowhere to go"
     )
+
+
+def test_push_log_event_callers_do_not_also_persist():
+    """
+    `_push_log_event` persists AND pushes. A caller that also calls
+    `db.log_device` writes the line twice.
+
+    That is not hypothetical: the device `log` handler did both, so every
+    device log line landed twice about 6ms apart, and roughly half of
+    `device_logs` was duplicates. It stayed invisible because a doubled log
+    line looks like a device that logged twice.
+
+    Two things it cost beyond the wasted rows. `em_support.thin_noise` keeps
+    the newest three `[mem]` lines per device, so duplication halved the
+    distinct readings a leak hunt gets from a bundle. And the redundant call
+    was a synchronous SQLite write on the event loop, which
+    `event_loop_lag_monitor` exists to catch.
+
+    Checked by source shape because the alternative is importing
+    em_controller, which the suite deliberately does not do.
+    """
+    root = Path(__file__).resolve().parent.parent
+    for name in ("em_controller.py", "em_api.py"):
+        lines = (root / name).read_text().splitlines()
+        for i, line in enumerate(lines):
+            if "_push_log_event(" not in line or "async def" in line:
+                continue
+            # The persist would sit just above the push, in the same block.
+            window = lines[max(0, i - 6):i]
+            offenders = [w.strip() for w in window if "db.log_device(" in w]
+            assert not offenders, (
+                f"{name}:{i+1} calls _push_log_event, which already persists, "
+                f"but is preceded by {offenders[0]!r}. That writes the log "
+                f"line twice. Drop the db.log_device call."
+            )
