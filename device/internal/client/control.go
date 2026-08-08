@@ -740,7 +740,7 @@ func capabilities() []string {
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
-	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d", event.ClickType, event.Down, event.HeldMs)
+	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d muted=%v", event.ClickType, event.Down, event.HeldMs, event.Muted)
 	msg := map[string]interface{}{
 		"type":      "button",
 		"clickType": int(event.ClickType),
@@ -750,6 +750,10 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		// long press would silently stop the action button starting voice
 		// turns on older devices.
 		"heldMs": event.HeldMs,
+		// Always sent, never omitempty: absent must mean "this firmware does
+		// not report it" so the controller can fall back to mute_state, and
+		// omitempty would make an unmuted press indistinguishable from that.
+		"muted":  event.Muted,
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},

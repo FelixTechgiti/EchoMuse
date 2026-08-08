@@ -156,10 +156,18 @@ func main() {
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
-		if event.ClickType == pkgbuttons.DotClick && s.IsMuted() {
-			log.Println("Dot button blocked — mic is muted")
-			return
-		}
+		// Muted presses are FORWARDED, with the mute state attached, and the
+		// controller decides what the gesture is allowed to do. Dropping them
+		// here was right while the dot button meant only "start a voice turn";
+		// it became wrong when a hold started firing an HA event, because a
+		// hold bound to something unrelated to speech then stopped working
+		// whenever the mic was muted.
+		//
+		// This does not weaken mute. The mic_start rejection above is what
+		// makes mute sovereign — the controller cannot open the mic while
+		// muted however it reads this event, and the ADC is muted in hardware
+		// regardless.
+		event.Muted = s.IsMuted()
 		// A press outranks the volume arc: adjusting volume and immediately
 		// pressing the button used to leave the arc holding the ring for the
 		// rest of its 2s window, with nothing showing that the device had

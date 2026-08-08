@@ -64,6 +64,7 @@ COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
 COPY em_arbiter.py .
+COPY em_button.py .
 COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
