@@ -64,6 +64,28 @@ If you find anything in there you would rather not publish, **that is a bug
 and we want to hear about it** — please report it privately rather than in a
 public issue.
 
+## If a provisioning step failed instead
+
+A support bundle describes a device the controller already knows about. A Dot
+that is halfway through the provisioning wizard is not one of those, so the
+wizard collects its own file.
+
+When a step fails it reads the device's state there and then, and a **Download
+diagnostics** button appears next to the error. Collection happens
+automatically, because by the time you have been asked to run `getprop` by
+hand the device has usually been retried or rebooted and the state that failed
+is gone. Sharing it is still your decision.
+
+It carries what a failed step needs explaining: which step, the error, the
+build and model, whether root and the package manager answered, free space,
+and what the radio can see. It follows the same rules as a bundle: no speech,
+no network names, no addresses. WiFi scan results keep the security flags and
+frequencies, which are the part that explains a failure, with the network
+names replaced by `network-1`, `network-2` and so on, and the one you were
+trying to join marked.
+
+Same advice: open it before you send it.
+
 ## Retention
 
 The bundle is a file on your machine. Nothing is uploaded anywhere by

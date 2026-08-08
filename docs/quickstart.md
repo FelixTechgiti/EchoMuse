@@ -34,6 +34,14 @@ The good news: the dashboard has a **provisioning wizard** (plug the Dot into
 your laptop's USB port, open the dashboard in Chrome, follow the steps) that
 automates most of the process after the initial unlock.
 
+If a step fails, the wizard offers a **Download diagnostics** file to attach
+to an issue. It captures the device's state at the moment it failed, which
+saves a round trip of being asked to run things by hand. If you unplug the
+device at any point you can carry on, because **Reconnect** is on every step.
+Note that the cable is the Dot's only power, so unplugging reboots it and it
+comes back in Android. The wizard will say so if the step you are on needed
+recovery mode.
+
 You only ever do this once per device. Everything afterwards — updates,
 configuration, even a remote terminal — happens over WiFi from the dashboard.
 

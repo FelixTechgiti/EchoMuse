@@ -137,7 +137,15 @@ its registry on them, so renumbering renames everyone's entities.
 
 **The entity list is a ONE-SHOT at `ListEntities`, so a capability that
 arrives late is lost for the life of the HA connection** — and HA does not
-reconnect on its own. A device **registers before its ESPHome server exists**
+reconnect on its own. There are two ways to arrive late and they need
+different fixes. Arriving before the server exists is `_pending_caps`, below.
+Arriving after HA has already enumerated is `set_device_capabilities`
+bouncing the HA connection so it redials and re-reads, the same remedy
+`update_oww_model` uses for the wake word configuration. **Gate that bounce on
+the set actually changing**, or HA is disconnected on every device reconnect.
+It is not a theoretical path: `als.resolve()` deliberately does not cache a
+negative result, so a device can register without `ambient_light` and acquire
+it on a later scan. A device **registers before its ESPHome server exists**
 (the listener only comes up once the device is present), so
 `set_device_capabilities` used to find no server and silently do nothing;
 `_pending_caps` holds them until there is a server to take them, and the
@@ -185,7 +193,7 @@ All three WS planes exist twice: plain on `SERVER_PORT` (8767) and TLS on `SERVE
 
 Device behaviour (`tlscreds.go`): credentials live at `/data/local/etc/echomuse/{ca.pem,token}` (canonical path constant: `em_api.DEVICE_TLS_DIR`) and are **re-read on every dial**, so a push takes effect on the next reconnect, no restart. CA present + `tls_port` mDNS TXT property → dial wss; CA present but no TXT → plain with a warning (deliberate rollout fallback). The token rides as `X-EM-Token` on all three dials.
 
-Controller enforcement (`_link_auth_ok`): presented-but-wrong token always rejects; stored-token-but-none-presented is allowed (the credential push itself rides the plain shell plane — rejecting there would deadlock the rollout) until `REQUIRE_DEVICE_TLS=1` flips the posture to TLS+token mandatory. Flip it only when every device shows `wss (TLS)` in the dashboard (Status tab "Link" row; `linkTls` in `/api/devices`).
+Controller enforcement (`em_linkauth.decide`, called by `_link_auth_ok`): presented-but-wrong token always rejects; stored-token-but-none-presented is allowed (the credential push itself rides the plain shell plane, and rejecting there would deadlock the rollout); a token presented for a device with NOTHING on record is **ignored, not rejected**. Rejecting it made deleting a device a one-way door, since delete takes the token with the row while the device keeps re-reading its credential file, and the refusal covered the shell plane the controller would have fixed it over. It also bought nothing: a connection presenting no token at all is already allowed, so an attacker just omits the header. `REQUIRE_DEVICE_TLS=1` flips the posture to TLS+token mandatory and is unaffected by that: a deleted device is still refused there and needs credentials pushed over USB. Flip it only when every device shows `wss (TLS)` in the dashboard (Status tab "Link" row; `linkTls` in `/api/devices`).
 
 Credential delivery: the provisioning wizard installs credentials over adb pre-first-contact (`POST /api/provision/tls_credentials` mints the token + pending device row from the serial); already-fleet devices get the dashboard **Secure link** action (`POST /api/devices/{id}/secure_link` — shell-plane file push, then a connection bounce to redial over wss).
 
@@ -307,6 +315,7 @@ with no way for the user to tell which they had.
 | `em_player.py` | Media playback sessions — `media_player.play_media` → streaming ffmpeg decode → paced 0x02 feed; pause/resume/stop; voice preempts music (`interrupt`/`resume_interrupted`) |
 | `em_config_sections.py` | Fleet-vs-device config scoping — the six sections, `STATE_KEYS`, and the merge that resolves a device's effective config |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
+| `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
 
@@ -658,6 +667,34 @@ when broken — the wizard drives hardware nobody is watching a log of.
   boots take ~86s, so the 30s poll it replaced was never enough. No step may
   require the operator to have guessed a long enough wait.
 
+Three more rules, all learned on 2026-08-08 by pulling a cable at the wrong
+moment:
+
+- **A step that loses the device does not fail. It HANGS.** The ADB calls do
+  not reject when the device goes away: `shell` waits on a stream reader that
+  never produces. `running` stays true, and every control in the panel is
+  gated on `!running`, so the wizard sits there looking busy with no way out
+  but a page reload. A `navigator.usb` `disconnect` listener abandons the step;
+  an epoch counter makes the step's own later completion a no-op. Do NOT
+  replace this with a timeout on `shell`: `waitForFramework` budgets ten
+  minutes and `twrp install` takes thirty seconds, so any timeout loose enough
+  to be safe is useless. Note the in-flight transfer can ALSO throw first; the
+  two race, so both paths take the same exit.
+- **Pulling the cable powers the Dot off.** Micro-USB carries power and data,
+  and `reboot recovery` is a one-shot BCB flag, so a replug is a cold boot into
+  **Android** whatever phase the wizard thinks it is in. `_STEP_MODE` records
+  which mode each step needs and Reconnect says so when they disagree. This is
+  not cosmetic: in Android `/dev/block/other-boot` points at the unlock
+  payload, so retrying Patch Boot Image there would destroy the unlock.
+- **`Unknown package` is pm ANSWERING, not pm refusing.** It is an
+  `IllegalArgumentException` meaning the package is not installed. Counting
+  only successes made "this build lacks these packages" and "the package
+  manager is broken" identical, and the advice for the second (wait and retry)
+  can never fix the first, so a device on such an image could never finish the
+  wizard (#91). `_pmVerdict` returns disabled / absent / rejected, and only a
+  rejection stops the run. Anything unrecognised counts as rejected, because
+  the cost of being wrong is continuing to WiFi with the Alexa stack live.
+
 Two device behaviours the wizard works around rather than fixes:
 
 - **Amazon's OOBE cannot be stopped in time.** It announces itself and spins
@@ -670,7 +707,12 @@ Two device behaviours the wizard works around rather than fixes:
   transaction number that differs per release, and
   `settings put system volume_music` is not read live by AudioService. Safe
   to leave muted — EchoMuse drives the codec and seeds `startupVolume` after
-  the final reboot.
+  the final reboot. **It does not reliably work.** Observed 2026-08-08: she
+  talks regardless, either raising the volume back or playing on a stream
+  `keyevent 25` does not address (25 adjusts whichever stream is ACTIVE).
+  `dumpsys audio` while she is talking would settle which. Left in because
+  turning the volume down costs nothing, but the log line says what was done,
+  not what was achieved.
 - **`SmartHomeWifid` cannot be killed, only stopped.** It rewrites
   `wpa_supplicant.conf`, and `kill -9` does not hold because it is an init
   service — init restarts it and the re-check finds a fresh pid. Read the
@@ -678,6 +720,56 @@ Two device behaviours the wizard works around rather than fixes:
   survives the name differing across SKUs), `stop` it, then kill. Its
   presence is not cosmetic: a run with it running spent 9s cycling
   DISCONNECTED/SCANNING before associating, against 1s on a clean one.
+
+### The one partition the wizard writes
+
+Patch Boot Image is the only partition write in the whole wizard, and the only
+point at which it could reach below FireOS. EchoMuse writes the FireOS kernel
+and userspace; it does not write the preloader, LK, amonet's unlock payload or
+TWRP. `docs/rooting.md` states that boundary for users.
+
+**The by-name map differs between TWRP and Android**, measured on hardware:
+
+```
+                 TWRP    Android
+  boot_a          p10        p17
+  boot_a_x        p10        p10
+  boot_a_amonet   p17          -
+```
+
+TWRP remaps the bare names onto the KERNEL partitions and exposes the payload
+explicitly as `*_amonet`. So a rule written against one map is INVERTED in the
+other, and `p10` answers to two names at once. The first version of this guard
+was written against Android's map and passed anyway, on the accident that the
+glob listed the safe alias last. So `classifyBootTarget` matches on
+suffix, reads every alias of the target, and has a test that reverses the
+probe output.
+
+Around it: `dd`'s stderr reaches the log rather than `/dev/null`, the pulled
+image must carry the `ANDROID!` magic before the fixed-offset cmdline patch
+runs against it, and the cmdline is read back off the partition afterwards.
+Every failure path leaves the device in TWRP and says so.
+
+### Diagnostics when a step fails (`em_support.build_provision_diagnostics`)
+
+On a step failure the wizard runs a fixed read-only probe set, POSTs it raw to
+`/api/provision/diagnostics`, and offers the sanitised result as a download.
+Collection is automatic; sharing is deliberate.
+
+**Packaged on the controller, never in the browser.** The redaction rules and
+their tests live in `em_support.py`; a second copy in JavaScript would drift
+until a file carried an SSID. The wizard collects raw and `em_support` decides
+what survives, which also treats the browser as untrusted input. That is
+correct, since it is talking to a device we know nothing about yet.
+
+It is an allowlist twice over: an unlisted probe name is dropped whole, and
+the key/value probes have their keys listed too. `tests/test_support.py` pins
+the JS probe list against the Python allowlist. Drift there is silent, since
+a probe collected and dropped looks identical to one never asked for.
+
+Scan results are the real tension: the flags and frequency ARE the diagnosis
+(`[SAE-CCMP]` is the whole answer to #82) while the names locate someone's
+house, so rows survive with the SSID replaced and the selected network marked.
 
 ## Device config push
 
