@@ -2581,7 +2581,16 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 elif msg_type == "log":
                     level   = msg.get("level", "info")
                     message = msg.get("message", "")
-                    db.log_device(device_id, level, "device", message)
+                    # _push_log_event PERSISTS as well as pushing, so this must
+                    # not also call db.log_device — doing both wrote every
+                    # device log line twice, ~6ms apart, which is how half the
+                    # device_logs table came to be duplicates. It also matters
+                    # for the support bundle: thin_noise keeps the newest three
+                    # [mem] lines per device, so duplication halved the readings
+                    # a leak hunt actually gets.
+                    #
+                    # The removed call was a synchronous DB write on the event
+                    # loop; _push_log_event does it in an executor.
                     await api._push_log_event(device_id, level, "device", message)
 
                 elif msg_type == "pong":
