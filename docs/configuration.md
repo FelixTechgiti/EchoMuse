@@ -387,9 +387,13 @@ ring looks too static, raise **Decay** and **Gamma** first.
 ## 05 — Advanced
 
 Everything in this section affects **only button-press conversations**
-(holding the action button to talk without a wake word). Wake-word
+(tapping the action button to talk without a wake word — a *hold* is a
+separate gesture that fires an event in Home Assistant instead). Wake-word
 conversations ignore all of it — they're managed by Home Assistant's own
 speech detection.
+
+While the mic is muted a tap does nothing, but a hold still fires its event:
+the mute silences speech, not the button.
 
 ### Turn processing
 

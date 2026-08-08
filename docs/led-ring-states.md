@@ -177,7 +177,8 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 | A4 | IDLE | DOWN / SUSPECT | Do not send, do not paint a turn state | Orange pulse continues (unchanged) | — | [proposed] |
 | A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
 | A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
-| A7 | **MUTED** | any | **Blocked device-side — event never sent** (`cmd/server.go:149`) | Red ring unchanged — **silent by design** (see §6 Q1) | — | [today, keep] |
+| A7 | **MUTED** | tap | Sent with `muted: true`; **controller refuses the turn** (`em_button.decide` → `BLOCKED`) | Red ring unchanged — **silent by design** (see §6 Q1) | Nothing. Mic never opens: `mic_start` is rejected device-side while muted | [today] |
+| A8 | **MUTED** | hold | Sent with `muted: true` | Red ring unchanged | **Fires `long` to HA.** A hold is not speech, so the mute has no opinion about it | [today] |
 | A9 | VOL-DISPLAY | LINKED | Send button event **and cancel the arc's hold** (`CancelVolumeDisplay`) | Arc stops being sovereign; the turn's listening frame paints as soon as it arrives | Starts turn normally | [today] |
 
 ### 4.2 Mute button — clickType 113 (device-local, never leaves the device)
@@ -333,6 +334,16 @@ The red ring plus the red mute-button LED are sufficient signal that the device
 is deaf. This is how Alexa behaves, and there is no reason to reinvent
 behaviour that extensive focus-group work has already settled. No re-assert
 flash, no refusal signal. Row A7 stands as-is.
+
+**Amended 2026-08-08.** The *silence* decision above is unchanged, but what
+gets refused narrowed. The device used to drop every dot press while muted,
+which was right while the button meant only "start a voice turn" and became
+wrong once a hold also fired an HA event: a hold bound to something unrelated
+to speech stopped working whenever the mic was off, with nothing on the ring
+to connect the two. Presses now carry the mute state and the controller
+refuses only the **turn** (row A7); a hold forwards (row A8). Mute is still
+sovereign on the device, because sovereignty was never the button filter —
+it is the ADC mute plus the device rejecting every `mic_start` while muted.
 
 ### Q2 — how the device knows it is mid-turn: **semantic field on `led_anim`** (recommended)
 

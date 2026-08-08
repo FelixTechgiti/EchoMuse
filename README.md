@@ -38,7 +38,8 @@ hear the answer through the Dot's speaker. The hardware you already own
   Amazon's software never exposed; it turns up as a lux sensor, reported
   immediately when a light goes on rather than on a slow poll. Holding the
   action button fires an event you can trigger automations from, while a
-  normal press still starts a voice turn.
+  normal press still starts a voice turn. The hold keeps working with the
+  mic muted, so a Dot muted for privacy is still a button.
 - **Fleet dashboard** — provisioning wizard, per-device or global config
   pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
   automatic fallback, root shell, logs, and per-turn activity analytics

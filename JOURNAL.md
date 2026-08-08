@@ -1036,3 +1036,62 @@ are **append-only and in ascending date order** — new work goes at the end.
   missing, it is in the device icon. The second mattered most, because the
   right conclusion was the opposite of the one drawn. Mute already being
   shown is an argument for taking rows out of that panel, not adding one.
+
+- **2026-08-08 (evening) — the button that stopped being a button when you
+  muted the mic.** A contributor's PR (#107, external) proposed making a tap
+  fire an HA event instead of starting a voice turn. Reviewing it meant
+  reading the whole action-button path, and that turned up a fault in what we
+  had already shipped.
+
+  **A hold has never fired while the mic was muted.** `cmd/server.go` dropped
+  every dot press while muted, in a filter dating to the first controller
+  commit in May, when the dot button meant exactly one thing: start a voice
+  turn. Blocking it was obviously right then. It became wrong in v2.10.0, the
+  day a hold also began firing an HA event, and nobody revisited the filter
+  because nothing about adding the hold looked like it touched mute. So
+  anyone binding a hold to their lights had a switch that silently stopped
+  working whenever the mic was off, with nothing on the device connecting the
+  two. It shipped that way and no test noticed, because the filter sat in
+  device code and the decision it was really making was a controller one.
+
+  **The rule was in the wrong place, not merely wrong.** What the filter
+  enforced is *while muted, do not start a voice turn*. That says nothing
+  about which gestures reach Home Assistant, and only the controller starts
+  turns. So the device now forwards muted presses with the mute state
+  attached and the controller decides: `em_button.decide` refuses the turn
+  and still emits `long`. Stated that way it also composes with #107 for
+  free, because a tap that is an event rather than speech is in exactly the
+  same position as a hold.
+
+  **Moving it does not weaken mute, and it is worth being precise about
+  why.** Sovereignty was never the button filter. It is the ADC muting all
+  four codec pairs in hardware, plus the device rejecting every `mic_start`
+  while muted whatever the controller believes. Both untouched. The worst a
+  controller with a stale mute view can now do is start a turn that captures
+  silence and ends `no_speech`. Those two guards were defence in depth and
+  are now load-bearing for the button path, so the code says so in three
+  places — the next person to tidy up a redundant-looking check needs to
+  know.
+
+  The decision went into its own pure module for the same reason
+  `em_linkauth` did: the suite does not import `em_controller`, so this was
+  policy with no coverage, and it had just cost a feature for a release. Ten
+  tests. Verified on Office by holding the button with the mic muted.
+
+  **Three docs were describing behaviour that predated the hold entirely.**
+  `configuration.md` still told people to *hold* the action button to talk,
+  which has been the wrong gesture since v2.10.0; `SETUP.md` still said mute
+  "blocks dot button events"; and the LED state table's row A7 documented the
+  device-side block as settled with a "keep" marker. None of these were
+  caused by this fix. They were caused by the earlier change, and they sat
+  through a docs freshness pass because the pass enumerated from code that
+  was itself consistent with the old story.
+
+  **On the review itself**: #107 was good work and is blocked on one thing,
+  which is a capability gate. The HA event entity is only advertised when the
+  device declares `button_hold` (v2.10.0+), so on older firmware every press
+  reads as a tap, takes the new branch, and is sent to an entity that was
+  never advertised, while the turn and cancel branches become unreachable.
+  The button goes completely inert. Two of the five Dots here are still on
+  v2.9.11, which is the reminder that "the fleet is current" is a statement
+  about the devices you happen to be looking at.
