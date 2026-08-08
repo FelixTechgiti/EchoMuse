@@ -213,12 +213,16 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 
-# Press types the event entity advertises. Only "long" is emitted today:
-# double/triple were deliberately parked, because detecting them means
-# delaying the single press by the multi-tap window to know it was single —
-# a latency cost on the primary action for a feature most people will not
-# bind. Adding one later is additive; HA tolerates new event types.
-BUTTON_EVENT_TYPES = ["long"]
+# Press types the event entity advertises. double/triple remain parked,
+# because detecting them means delaying the single press by the multi-tap
+# window to know it was single — a latency cost on the primary action for a
+# feature most people will not bind. Adding one later is additive; HA
+# tolerates new event types.
+#
+# "single" is emitted only when buttonSingleTapEvent is on, but is advertised
+# unconditionally: event_types is sent once at connect, so adding it when the
+# setting flipped would not reach HA until the satellite reconnected.
+BUTTON_EVENT_TYPES = ["long", "single"]
 
 # How long the action button must be held to count as a hold rather than a
 # tap. Measured ON THE DEVICE (heldMs) rather than by timing the down/up
@@ -2151,13 +2155,19 @@ def send_button_event(device_id: str, event_type: str) -> None:
     Fire the action-button event entity in HA.
 
     Fire-and-forget: a button press whose event cannot be delivered is not
-    worth failing a turn over, and HA reconnects on its own.
+    worth failing a turn over, and HA reconnects on its own. Warned rather
+    than dropped silently — with buttonSingleTapEvent on this is the tap's
+    only effect, so a silent drop is indistinguishable from dead hardware.
     """
     server = _servers.get(device_id)
     if server is None:
+        log.warning(f"[esphome] {event_type} dropped — no server for {device_id}")
         return
     satellite = server.get_satellite()
     if satellite is None:
+        log.warning(
+            f"[esphome.{device_id[-8:]}] {event_type} dropped — HA not attached"
+        )
         return
     log.info(f"[esphome.{device_id[-8:]}] action button {event_type} → HA")
     satellite._send_one(api_pb2.EventResponse(

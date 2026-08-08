@@ -91,6 +91,9 @@ DEFAULT_DEVICE_CONFIG = {
     # this closes the DB/UI mismatch. Tune up to 1200 if sentences still
     # get clipped; 600 caused the "must finish quickly" behaviour.
     "vadSilenceMs":     900,
+    # True: a tap fires "single" on the HA event entity instead of starting a
+    # turn. Gives up cancel-by-tap; mute still cancels. Hold is unaffected.
+    "buttonSingleTapEvent": False,
     "owwThreshold":     0.3,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
