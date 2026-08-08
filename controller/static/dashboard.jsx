@@ -2563,6 +2563,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // this against the value it captured and drops its result on the floor
   // rather than marking a step done that nobody is waiting on any more.
   const stepEpoch = useRef(0);
+  // Set immediately before a teardown WE asked for. Four steps end by rebooting
+  // the device, which drops USB, and without this the disconnect listener races
+  // the rest of the step: observed on a real run, Connect Device succeeded, the
+  // event landed while `running` was still true, and a step that had just
+  // worked was marked failed with "the step was abandoned".
+  const expectDisconnect = useRef(false);
+
+  // Errors thrown by an in-flight transfer when the device goes away. These
+  // race the disconnect event and can arrive first, in which case the catch in
+  // runStep would report a WebUSB internal as though it were a provisioning
+  // failure and then go and probe the absent device for diagnostics.
+  const _isDisconnectError = (e) =>
+    /disconnect|transferOut|transferIn|NetworkError|device was lost/i.test(
+      e?.message || '');
 
   function addLog(msg, type = 'info') {
     // 200 lines truncated a normal successful run — the transcript above the
@@ -2587,10 +2601,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // A timeout on `shell` would be the wrong instrument: waitForFramework
   // budgets ten minutes and `twrp install` takes thirty seconds or more, so
   // any timeout loose enough to be safe is too loose to be useful.
-  function abandonStep(reason) {
+  // `idx` defaults to the step on screen, which is what the disconnect listener
+  // wants. runStep passes its own index explicitly: the two are the same in
+  // practice, but the caller that knows should say so rather than rely on it.
+  function abandonStep(reason, idx = step) {
     stepEpoch.current++;
     setRunning(false);
-    markStep(step, 'error');
+    markStep(idx, 'error');
     addLog(reason, 'error');
   }
 
@@ -2602,6 +2619,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   useEffect(() => {
     if (!navigator.usb) return;
     const onDisconnect = (e) => {
+      if (expectDisconnect.current) {
+        // A reboot we asked for. Consumed rather than left set, so the next
+        // unexpected disconnect is still reported.
+        expectDisconnect.current = false;
+        return;
+      }
       if (!adb && !running) return;
       const theirs = adb?.serial && e.device?.serialNumber
                    && e.device.serialNumber !== adb.serial;
@@ -2772,6 +2795,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         // next Transport.authenticate() races a half-torn-down session
         // and hangs at "Authenticating ADB…". Mirrors the clean-exit
         // close()/setAdb(null) a few lines below.
+        //
+        // Closing the transport can surface as a USB disconnect, and this
+        // path is about to throw a message the operator needs to read. The
+        // listener must not overwrite it with "the step was abandoned".
+        expectDisconnect.current = true;
         await c.close();
         setAdb(null);
         const err = new Error(
@@ -2785,6 +2813,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
 
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
+    expectDisconnect.current = true;
     try { await c.shell('reboot recovery'); } catch {}
     await c.close();
     setAdb(null);
@@ -2954,6 +2983,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   async function runReboot(c) {
     addLog('Sending reboot command…');
+    expectDisconnect.current = true;
     try { await c.shell('reboot'); } catch {}
     await c.close();
     setAdb(null);
@@ -3968,6 +3998,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // the success path (not in a finally) means a failure above leaves the
     // connection alive and the Retry button usable.
     addLog('Rebooting device to finish provisioning…');
+    expectDisconnect.current = true;
     try { await c.shell('su -c reboot'); } catch {}
     await c.close();
     setAdb(null);
@@ -4021,6 +4052,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // transport notices. The UI already says what happened; saying it again
       // in the language of whatever call happened to fail is noise.
       if (abandoned()) return;
+      // The in-flight transfer can also throw BEFORE the disconnect event
+      // arrives — the two race, and on a real run the throw won. That put
+      // "Failed to execute 'transferOut' on 'USBDevice'" in the transcript as
+      // though it were a provisioning failure, and then sent the diagnostics
+      // probes at a device that was no longer plugged in. Take the same exit
+      // the listener would have.
+      if (_isDisconnectError(e)) {
+        abandonStep('Device disconnected. The step was abandoned — reconnect and retry.', stepIdx);
+        setAdb(null);
+        return;
+      }
       addLog(`Error: ${e.message}`, 'error');
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);

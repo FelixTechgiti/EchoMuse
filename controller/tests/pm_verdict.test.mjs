@@ -154,3 +154,42 @@ for (let i = 0; i <= 12; i++) {
   check(`step ${i} has a mode`, _STEP_MODE[i] === "twrp" || _STEP_MODE[i] === "android",
         String(_STEP_MODE[i]));
 }
+
+// ─── Disconnect-shaped errors ─────────────────────────────────────────────────
+//
+// The in-flight transfer can throw BEFORE the WebUSB disconnect event lands —
+// the two race, and on a real run the throw won. That put "Failed to execute
+// 'transferOut' on 'USBDevice'" in the transcript as though it were a
+// provisioning failure, and then sent the diagnostics probes at a device that
+// was no longer plugged in.
+
+const { _isDisconnectError } = await import(
+  "data:text/javascript;base64," + Buffer.from(
+    liftArrow("_isDisconnectError") + "\nexport { _isDisconnectError };"
+  ).toString("base64"));
+
+// The real one, from the transcript that prompted this.
+check("the observed transferOut error is recognised",
+  _isDisconnectError(new Error(
+    "Failed to execute 'transferOut' on 'USBDevice': The device was disconnected.")));
+check("the transferIn direction is recognised",
+  _isDisconnectError(new Error(
+    "Failed to execute 'transferIn' on 'USBDevice': The device was disconnected.")));
+check("a NetworkError is recognised",
+  _isDisconnectError(new Error("NetworkError: A transfer error has occurred.")));
+
+// Provisioning failures must NOT be swallowed as disconnects: taking the
+// abandon path on a genuine failure hides the real message and skips the
+// diagnostics capture, which is the whole point of #87.
+for (const msg of [
+  "Hash mismatch — expected 18e46b16b25e… (Magisk-v17.3.zip)",
+  "Did not associate to the network within 20s",
+  "The package manager rejected 11 of 11 calls and disabled none.",
+  "Install verification failed: /data/local/bin/server points to \"\"",
+]) {
+  check(`a real failure is not treated as a disconnect: ${msg.slice(0, 34)}`,
+        !_isDisconnectError(new Error(msg)), msg);
+}
+
+check("a missing message does not throw", _isDisconnectError(undefined) === false);
+check("an error with no message does not throw", _isDisconnectError({}) === false);
