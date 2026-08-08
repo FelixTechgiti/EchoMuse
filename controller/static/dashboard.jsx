@@ -2334,6 +2334,37 @@ const _ALEXA_PKGS = [
 // without a live handle.
 const CONNECT_STEPS = new Set([0, 1, 6]);
 
+// Which mode each step has to run in.
+//
+// This matters because the Dot's only power source is the same micro-USB port
+// carrying data, so pulling the cable POWERS IT OFF, and `reboot recovery` is
+// a one-shot BCB flag. A replug is therefore a cold boot into Android, whatever
+// phase the wizard thinks it is in. Reconnecting during the TWRP phase hands
+// back an Android device that looks perfectly healthy.
+//
+// It is not a cosmetic mismatch. In Android `/dev/block/other-boot` resolves to
+// boot_b, which holds amonet's B-slot unlock payload rather than a kernel, so
+// retrying Patch Boot Image there would write over the unlock. The guard in
+// runPatchBoot refuses that, and this exists so the operator finds out before
+// they get as far as being refused.
+const _STEP_MODE = {
+  0: 'android',
+  1: 'twrp', 2: 'twrp', 3: 'twrp', 4: 'twrp', 5: 'twrp',
+  6: 'android', 7: 'android', 8: 'android', 9: 'android',
+  10: 'android', 11: 'android', 12: 'android',
+};
+
+// TWRP is checked first: its banner is "omni_biscuit", which also contains
+// "biscuit", so an Android-first test would call every TWRP device Android.
+function _bannerMode(banner) {
+  const b = (banner || '').toLowerCase();
+  if (b.includes('omni') || b.includes('twrp') || b.includes('recovery')) return 'twrp';
+  if (b.includes('csm') || b.includes('biscuit')) return 'android';
+  return 'unknown';
+}
+
+const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
+
 const _INIT_RC_APPEND = `
 service mixer /system/bin/sh
     oneshot
@@ -2963,7 +2994,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // the operator picked the wrong device.
       if (adb) { try { await adb.close(); } catch {} setAdb(null); }
       addLog('Reconnecting to the device…');
-      await runReconnect();
+      const c = await runReconnect();
+      // Say so when the device came back in the wrong mode. Without this the
+      // reconnect looks like a success and the next Retry runs a TWRP step
+      // against Android, or the reverse.
+      const want = _STEP_MODE[step];
+      const got  = _bannerMode(c.banner);
+      if (want && got !== 'unknown' && got !== want) {
+        addLog(`Reconnected in ${_MODE_NAME[got]}, but this step needs ${_MODE_NAME[want]} `
+             + `(banner "${c.banner}").`, 'error');
+        addLog('Pulling the cable powers the Dot off, and a cold boot comes up in Android.', 'warn');
+        if (want === 'twrp') {
+          addLog('To reach TWRP: unplug, plug back in, and hold the mute button for about '
+               + '5 seconds as soon as the blue LED appears.', 'warn');
+        }
+      }
     } catch (e) {
       addLog(`Reconnect failed: ${e.message}`, 'error');
     }
