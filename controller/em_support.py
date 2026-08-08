@@ -443,3 +443,216 @@ def build(
 
 def to_json(bundle: dict) -> str:
     return json.dumps(bundle, indent=2, default=str)
+
+
+# ─── Provisioning diagnostics ─────────────────────────────────────────────────
+#
+# What the wizard collects when a step fails, packaged here rather than in the
+# browser. The redaction rules and their tests already live in this module, and
+# a second copy in JavaScript would drift from them without anyone noticing
+# until a bundle carried something it should not have.
+#
+# The wizard collects RAW and posts it. Everything below decides what survives.
+# That direction matters: the browser is talking to a device we know nothing
+# about yet, so treating its output as untrusted input is the only safe
+# posture, and it means adding a probe never needs the redaction re-reviewed.
+#
+# THIS IS AN ALLOWLIST, twice over: a probe name nobody listed is dropped whole,
+# and inside the probes that carry key/value output the keys are listed too. A
+# denylist here gets it wrong once, publicly, and cannot be taken back.
+
+# Properties worth having, chosen against failures actually seen. Build
+# identity dominates because firmware defaults differ between the six FireOS 5
+# builds in circulation in ways that reach USB and ADB behaviour (#79), and
+# "which build" was the first question on every provisioning issue so far.
+_PROVISION_PROPS = (
+    "ro.product.model",
+    "ro.product.name",
+    "ro.product.device",
+    "ro.build.version.name",
+    "ro.build.version.incremental",
+    "ro.build.version.release",
+    "ro.build.version.sdk",
+    "ro.build.fingerprint",
+    "ro.serialno",
+    "ro.boot.slot_suffix",
+    "sys.boot_completed",
+    "persist.sys.usb.config",
+    "persist.wifi.migrate.complete",
+)
+
+# `wpa_cli status` keys. The state and the crypto are the diagnostic value;
+# the identifiers are what makes an SSID geolocatable from public wardriving
+# databases, so ssid, bssid, ip_address, address and uuid are simply absent.
+_WPA_STATUS_KEYS = (
+    "wpa_state",
+    "freq",
+    "key_mgmt",
+    "pairwise_cipher",
+    "group_cipher",
+    "mode",
+    "suppPortStatus",
+)
+
+# Probe names the wizard may post. Anything else is dropped.
+_PROVISION_PROBES = (
+    "props",          # getprop, filtered to _PROVISION_PROPS
+    "root",           # su -c id
+    "selinux",        # getenforce
+    "pm_ready",       # pm path android
+    "storage",        # df /data
+    "wpa_status",     # wpa_cli status
+    "wpa_scan",       # wpa_cli scan_results
+    "wpa_caps",       # wpa_cli get_capability key_mgmt
+    "services",       # getprop | grep init.svc
+    "processes",      # wpa_supplicant / SmartHomeWifid counts
+    "packages",       # how many of the disable/hide lists are still visible
+    "data_property",  # filenames only
+    "boot_target",    # what /dev/block/other-boot resolves to (TWRP steps)
+)
+
+_INIT_SVC = re.compile(r"^\[init\.svc\.[a-z0-9_.-]+\]:\s*\[[a-z]+\]$", re.I)
+
+
+def _scrub(text: str) -> list[str]:
+    """
+    Generic backstop applied to every probe, whatever else was done to it.
+
+    Same substitutions as `sanitise_log`, minus the account names, which
+    cannot appear in device shell output. Runs even on probes that have their
+    own parser, because the parser is the thing most likely to be wrong about
+    an output shape nobody has seen: these devices are the ones behaving
+    unusually, by definition.
+    """
+    out = []
+    for ln in (text or "").splitlines():
+        ln = _QUOTED.sub("<redacted>", ln)
+        ln = _URL.sub("<url>", ln)
+        ln = _IPV4.sub("<ip>", ln)
+        ln = _MAC.sub("<mac>", ln)
+        if ln.strip():
+            out.append(ln.rstrip())
+    return out
+
+
+def _probe_props(text: str) -> dict:
+    """`getprop` output projected onto the property allowlist."""
+    found = {}
+    for ln in (text or "").splitlines():
+        m = re.match(r"^\[([^\]]+)\]:\s*\[(.*)\]$", ln.strip())
+        if m and m.group(1) in _PROVISION_PROPS:
+            found[m.group(1)] = m.group(2)
+    return found
+
+
+def _probe_wpa_status(text: str) -> dict:
+    """`wpa_cli status` projected onto the key allowlist."""
+    found = {}
+    for ln in (text or "").splitlines():
+        k, _, v = ln.strip().partition("=")
+        if k in _WPA_STATUS_KEYS:
+            found[k] = v
+    return found
+
+
+def _probe_wpa_scan(text: str, selected: str | None = None) -> list[dict]:
+    """
+    Scan results with the names taken out and the radio left in.
+
+    This is the one probe where the tension is real. The flags and the
+    frequency ARE the diagnosis — a `[SAE-CCMP]` network is one this radio
+    cannot join, and that single fact explains #82 — while the names are the
+    part that locates someone's house. So the row survives and the SSID
+    becomes a positional placeholder.
+
+    The network the operator was trying to join is marked, because "the one
+    you wanted is WPA3" is the whole answer and is otherwise unrecoverable
+    once the names are gone.
+    """
+    rows = []
+    for ln in (text or "").splitlines():
+        parts = ln.rstrip("\n").split("\t")
+        if len(parts) < 4 or parts[0].strip().lower().startswith("bssid"):
+            continue
+        bssid, freq, signal, flags = (p.strip() for p in parts[:4])
+        ssid = parts[4].strip() if len(parts) > 4 else ""
+        if not _MAC.fullmatch(bssid):
+            continue
+        rows.append({
+            "network":  f"network-{len(rows) + 1}",
+            "freq":     freq,
+            "signal":   signal,
+            "flags":    flags,
+            "selected": bool(selected) and ssid == selected,
+        })
+    return rows
+
+
+def _probe_services(text: str) -> list[str]:
+    """`init.svc.*` lines only. Their names and states, nothing else."""
+    return [ln.strip() for ln in (text or "").splitlines()
+            if _INIT_SVC.match(ln.strip())]
+
+
+def build_provision_diagnostics(
+    *,
+    step: str,
+    error: str,
+    probes: dict,
+    transcript: list[str] | None = None,
+    selected_ssid: str | None = None,
+    controller_version: str = "unknown",
+) -> dict:
+    """
+    One file the reporter can attach to a public issue after a failed step.
+
+    Built because diagnosing #79 and #82 each took several rounds of asking
+    someone to run `getprop` and `wpa_cli` by hand, and by the time they
+    answered the device had usually been retried or rebooted, so the state at
+    the moment of failure was gone. Collection is automatic; the download is
+    deliberate.
+
+    `step` and `error` are OURS — the step id comes from a fixed list and the
+    error is our own message — but they are scrubbed anyway rather than
+    trusted, because an error string interpolates device output often enough
+    that the distinction is not worth relying on.
+
+    The transcript is scrubbed line by line and is where a device's own words
+    reach the file, so it gets the same treatment as everything else.
+    """
+    out = {
+        "format": 1,
+        "kind": "provision_diagnostics",
+        "generated": time.time(),
+        "controller_version": controller_version,
+        "step": " ".join(_scrub(str(step))) or "unknown",
+        "error": _scrub(str(error)),
+        "probes": {},
+    }
+
+    raw = probes if isinstance(probes, dict) else {}
+    for name in _PROVISION_PROBES:
+        if name not in raw:
+            continue
+        text = raw.get(name)
+        if not isinstance(text, str):
+            continue
+        if name == "props":
+            value = _probe_props(text)
+        elif name == "wpa_status":
+            value = _probe_wpa_status(text)
+        elif name == "wpa_scan":
+            value = _probe_wpa_scan(text, selected_ssid)
+        elif name == "services":
+            value = _probe_services(text)
+        else:
+            value = _scrub(text)
+        out["probes"][name] = value
+
+    # Named so a reader can tell "the wizard did not ask" from "the device had
+    # nothing to say", which need opposite next questions.
+    out["probes_missing"] = [n for n in _PROVISION_PROBES if n not in out["probes"]]
+
+    if transcript:
+        out["transcript"] = [ln for t in transcript for ln in _scrub(str(t))]
+    return out

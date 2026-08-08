@@ -13,6 +13,7 @@ predicts.
 import inspect
 import json
 import re
+from pathlib import Path
 
 import em_support as S
 
@@ -465,3 +466,191 @@ def test_the_ring_ignores_the_dashboards_own_http_chatter():
                       ("echomuse", "Barge-in: cancelling playback")):
         ring.emit(logging.LogRecord(name, logging.INFO, "f", 1, msg, None, None))
     assert ring.tail() == ["Barge-in: cancelling playback"]
+
+
+# ─── Provisioning diagnostics (#87) ───────────────────────────────────────────
+#
+# Realistic raw probe output, carrying every kind of thing that must not reach
+# a public issue: an SSID, a BSSID, an IP, a MAC, and a home network name.
+
+_RAW_PROPS = """
+[ro.product.model]: [AEOBC]
+[ro.build.version.incremental]: [272.6.8.0_user_680767620]
+[ro.serialno]: [G090LF1180570SPJ]
+[persist.sys.usb.config]: [mtp,adb]
+[net.hostname]: [SamsPhone-Bedroom]
+[wifi.interface]: [wlan0]
+[dhcp.wlan0.ipaddress]: [10.10.1.188]
+""".strip()
+
+_RAW_STATUS = """
+bssid=74:ac:b9:d6:9b:21
+freq=5180
+ssid=Neptune-Media
+id=0
+mode=station
+pairwise_cipher=CCMP
+group_cipher=CCMP
+key_mgmt=WPA2-PSK
+wpa_state=COMPLETED
+ip_address=10.10.1.188
+address=ac:63:be:11:22:33
+uuid=6f1c2b3a-0000-1111-2222-333344445555
+""".strip()
+
+_RAW_SCAN = (
+    "bssid / frequency / signal level / flags / ssid\n"
+    "74:ac:b9:d6:9b:21\t5180\t-52\t[WPA2-PSK-CCMP][ESS]\tNeptune-Media\n"
+    "24:5a:4c:83:7b:e4\t2437\t-71\t[SAE-CCMP][ESS]\tPixel_7793\n"
+    "aa:bb:cc:dd:ee:ff\t2412\t-80\t[ESS]\tSams Room 2.4\n"
+)
+
+
+def _diag(**kw):
+    kw.setdefault("step", "configure_wifi")
+    kw.setdefault("error", "Association failed")
+    kw.setdefault("probes", {})
+    return S.build_provision_diagnostics(**kw)
+
+
+def test_provision_diagnostics_leak_nothing_identifying():
+    """
+    The whole point is that this gets attached to a public issue, so the
+    check is on the SERIALISED output rather than field by field. A leak
+    through a probe nobody thought to parse is the one that gets missed.
+    """
+    out = json.dumps(_diag(
+        probes={
+            "props":      _RAW_PROPS,
+            "wpa_status": _RAW_STATUS,
+            "wpa_scan":   _RAW_SCAN,
+            "storage":    "/dev/block/mmcblk0p23 5.0G 3.1G 1.9G 62% /data",
+        },
+        transcript=["Writing config for \"Neptune-Media\"…",
+                    "Connected! IP: 10.10.1.188"],
+        selected_ssid="Neptune-Media",
+    ))
+    for secret in ("Neptune-Media", "Pixel_7793", "Sams Room",
+                   "SamsPhone-Bedroom", "10.10.1.188",
+                   "74:ac:b9:d6:9b:21", "ac:63:be:11:22:33",
+                   "6f1c2b3a"):
+        assert secret not in out, f"{secret!r} reached the diagnostics file"
+
+
+def test_the_radio_facts_survive_the_scan_redaction():
+    """
+    Names out, radio in. `[SAE-CCMP]` is the entire answer to #82 and the
+    reason scan results are included at all, so a redaction that took the
+    flags with the SSID would leave the probe pointless.
+    """
+    d = _diag(probes={"wpa_scan": _RAW_SCAN}, selected_ssid="Neptune-Media")
+    rows = d["probes"]["wpa_scan"]
+    assert len(rows) == 3, rows
+    assert [r["flags"] for r in rows] == [
+        "[WPA2-PSK-CCMP][ESS]", "[SAE-CCMP][ESS]", "[ESS]"]
+    assert [r["freq"] for r in rows] == ["5180", "2437", "2412"]
+    assert [r["network"] for r in rows] == ["network-1", "network-2", "network-3"]
+    # Which one they were trying to join is unrecoverable once names are gone.
+    assert [r["selected"] for r in rows] == [True, False, False]
+
+
+def test_props_are_allowlisted_not_filtered():
+    """A property nobody listed does not appear, whatever it is called."""
+    d = _diag(probes={"props": _RAW_PROPS})
+    props = d["probes"]["props"]
+    assert props["ro.build.version.incremental"] == "272.6.8.0_user_680767620"
+    assert props["ro.serialno"] == "G090LF1180570SPJ"
+    assert "net.hostname" not in props
+    assert "dhcp.wlan0.ipaddress" not in props
+
+
+def test_serials_are_kept():
+    """
+    Same call as the support bundle: nothing correlates without them, and
+    they identify the reporter's own hardware to them.
+    """
+    assert "G090LF1180570SPJ" in json.dumps(_diag(probes={"props": _RAW_PROPS}))
+
+
+def test_an_unlisted_probe_is_dropped_whole():
+    """
+    The wizard posts from a browser talking to a device we know nothing about
+    yet, so an unrecognised key is untrusted input, not a new feature.
+    """
+    d = _diag(probes={"logcat": "anything at all", "root": "uid=0(root)"})
+    assert "logcat" not in d["probes"]
+    assert d["probes"]["root"] == ["uid=0(root)"]
+
+
+def test_missing_probes_are_named():
+    """
+    "The wizard did not ask" and "the device had nothing to say" need
+    opposite next questions, so they must not look the same in the file.
+    """
+    d = _diag(probes={"root": "uid=0(root)"})
+    assert "wpa_scan" in d["probes_missing"]
+    assert "root" not in d["probes_missing"]
+
+
+def test_a_probe_with_an_unexpected_shape_still_gets_scrubbed():
+    """
+    The parser is the thing most likely to be wrong about output nobody has
+    seen, and these are by definition the devices behaving unusually. So the
+    generic scrub runs regardless of whether a parser matched anything.
+    """
+    d = _diag(probes={"wpa_status": "garbage 10.10.1.188 aa:bb:cc:dd:ee:ff"})
+    assert "10.10.1.188" not in json.dumps(d)
+    assert "aa:bb:cc:dd:ee:ff" not in json.dumps(d)
+
+
+def test_the_error_and_transcript_are_scrubbed_not_trusted():
+    """
+    Both are ours, but our error strings interpolate device output often
+    enough that the distinction is not worth relying on.
+    """
+    d = _diag(error='Staged config does not contain ssid="Neptune-Media"',
+              transcript=["Connected! IP: 10.10.1.188"])
+    blob = json.dumps(d)
+    assert "Neptune-Media" not in blob
+    assert "10.10.1.188" not in blob
+
+
+def test_no_transcripts_parameter_exists():
+    """
+    Same rule the support bundle has: speech must not become an opt-in,
+    because a flag is a thing people tick. `transcript` here is the WIZARD's
+    log, not speech, and there is no path for the latter.
+    """
+    params = set(inspect.signature(S.build_provision_diagnostics).parameters)
+    assert "transcripts" not in params
+    assert "stt_text" not in params
+    assert "recordings" not in params
+
+
+def test_the_wizard_probe_list_matches_the_allowlist():
+    """
+    `dashboard.jsx` collects the probes and `em_support` decides which survive,
+    so the two lists must agree.
+
+    Drift is silent in the direction that matters: a probe added to the wizard
+    and not here is collected, posted, and dropped, so the operator waits for
+    it, the file does not contain it, and nothing anywhere says so. The other
+    direction just leaves a name in `probes_missing` forever.
+
+    Parsed out of the JSX because the dashboard compiles to a single classic
+    script with no module boundary to import across, the same reason
+    CONFIG_SECTIONS is mirror-checked rather than shared.
+    """
+    jsx = (Path(__file__).resolve().parent.parent
+           / "static" / "dashboard.jsx").read_text()
+    block = re.search(r"const _PROVISION_PROBES = \{(.*?)\n  \};", jsx, re.S)
+    assert block, "dashboard.jsx no longer defines _PROVISION_PROBES"
+    in_jsx = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    in_py = set(S._PROVISION_PROBES)
+
+    assert not (in_jsx - in_py), (
+        f"the wizard collects {sorted(in_jsx - in_py)}, which em_support drops "
+        f"on arrival — add them to _PROVISION_PROBES")
+    assert not (in_py - in_jsx), (
+        f"em_support allows {sorted(in_py - in_jsx)}, which the wizard never "
+        f"collects")
