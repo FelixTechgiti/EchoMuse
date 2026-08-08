@@ -72,7 +72,9 @@ jobs:
       # with no module boundary to import across — so this covers the pure
       # logic that decides what the wizard will and will not attempt.
       - name: Run dashboard tests
-        run: node controller/tests/wifi_scan.test.mjs
+        run: |
+          node controller/tests/wifi_scan.test.mjs
+          node controller/tests/boot_target.test.mjs
 
   device-tests:
     name: Device Go tests
