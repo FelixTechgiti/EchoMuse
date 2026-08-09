@@ -490,7 +490,23 @@ control client, so one held device cost everything — no buttons, no wake word,
 no registration. That is the whole of the "no wake word and no working
 buttons" report. `Init()` now runs `stop media` first (the same stock-service
 takeover as `stop mixer` beside it and `stop smarthomewifid` in `main`) and
-waits on the substream status before opening. **The speaker is card 0 device
+waits on the substream status before opening.
+
+**`stop media` does NOT stick, and the fix does not depend on it doing so.**
+Android restarts mediaserver — measured on hardware: `init.svc.media` reads
+`running` again, with a live pid, while our server still owns `pcm23p` in
+`RUNNING` state. What makes this work is winning the race ONCE and then
+holding the device for the life of the process, and `Init()` re-runs
+`stop media` on every start, so an OTA or a supervisor restart gets the same
+treatment. Do not "improve" this into a permanent disable: mediaserver
+returning is what keeps Amazon's audio HAL — and therefore the DSP and the
+I2S clock — initialised, which SETUP.md's Audio Notes describe as load-bearing.
+
+**Android still reacts to jack events.** With mediaserver back, an insert
+makes its `AudioOut_2` thread reconfigure the amp, DAC mux and ramp
+underneath us (`EXTAMP Enable=0`, `Audio_DacMux_Set()`, `set_ignore_ramp`).
+Removal produced no such reaction — only our own `tinymix`. Worth knowing
+before blaming our code for codec state changing without us. **The speaker is card 0 device
 23**; the mic is 24. Checking `pcm0p` reads `closed` and proves nothing — that
 is Android's own device, and mistaking it for ours cost a wrong conclusion.
 On timeout it opens anyway, which is the pre-existing behaviour: the wait is

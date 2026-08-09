@@ -616,7 +616,11 @@ done
 
 This depends on the HAL having already initialised by the time we stop it, per the note above. On measured boots it has: mediaserver brings the audio path up at ~15s (visible in dmesg as its `AudioOut_2` thread running open/hw_params/prepare on the codec) and our server starts at ~21s. So the sequence is HAL init → we stop it → we take the device, every boot, in that order. Verified on hardware with and without a plug inserted.
 
-The residual risk is a boot where that ordering reverses — `stop media` landing before the DSP is initialised would give the same symptom the note above describes, an open that hangs with no I2S clock. Nothing observed, and the 6s gap is not marginal, but if a device ever comes up with a silent speaker and a stalled open, this is the first thing to suspect. `echoaudioservice` is untouched and still required.
+**`stop media` is temporary, and that is fine — better than fine.** Android restarts mediaserver shortly afterwards: measured on hardware, `init.svc.media` reads `running` again with a live pid, while our server still owns `pcm23p` in `RUNNING` state. So `stop media` is a "get out of the way for a moment" rather than a removal, and what actually makes the fix work is winning the device once and then holding it for the life of the process. `Init()` re-runs it on every start, so an OTA or supervisor restart gets the same treatment.
+
+That also disposes of the worry above: because mediaserver comes back, the HAL, the DSP and the I2S clock stay initialised. Nothing is being permanently deprived. `echoaudioservice` is untouched and still required. **Do not turn this into a permanent disable** — that would remove the very thing the first note says the audio path depends on.
+
+One consequence worth knowing: with mediaserver alive, Android still reacts to jack events. Inserting a plug makes its `AudioOut_2` thread reconfigure the amp, DAC mux and ramp underneath us. Removal produced no such reaction in testing — only our own `tinymix`. If codec state changes with nothing in our logs to explain it, this is why.
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 
