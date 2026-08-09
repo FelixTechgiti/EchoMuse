@@ -3552,6 +3552,14 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             # Capabilities decide which HA entities are advertised at all,
             # which is the first thing to check when one is "missing".
             "capabilities": list(getattr(live, "capabilities", []) or []) if live else [],
+            # When ambient_light is missing from the list above, this says
+            # WHY: no_chip (hardware revision without the part), no_attribute
+            # (driver has not bound), or ok. None means firmware too old to
+            # report it — not a fault. Carries the i2c device names it saw,
+            # which is what makes a no_chip answer checkable rather than
+            # merely asserted, and identifies an unfamiliar board revision
+            # the first time one turns up (#90).
+            "ambient_light_status": getattr(live, "ambient_light_status", None) if live else None,
             "muted":        getattr(live, "muted", None) if live else None,
             "rtt_ms":       getattr(live, "rtt_last_ms", None) if live else None,
             "volume":       getattr(live, "volume", None) if live else None,
