@@ -5,7 +5,9 @@ package speaker
 import (
 	"log"
 	"math"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,8 +16,8 @@ import (
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 )
 
-const cardNr      = 0
-const deviceNr    = 23
+// cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
+// the status path — this file is ARM-only (build tag `server`).
 const periodSize  = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
@@ -135,6 +137,15 @@ func (p *PcmSpeaker) Init() error {
 	// unmuted a floating DAC and then hit it with the stream-open
 	// transient — the "click" on every service start.
 	exec.Command("stop", "mixer").Run()
+	// Android's media stack takes the speaker for itself when a headphone
+	// plug is present at boot, and ALSA parks a blocking open behind it with
+	// no timeout — stranding the whole device, since everything else in
+	// main() is initialised after the speaker (issue #80). Same stock-service
+	// takeover as `stop mixer` above and `stop smarthomewifid` in main: on a
+	// device where EchoMuse drives the codec directly, mediaserver has no
+	// work to do and is only ever in the way.
+	exec.Command("stop", "media").Run()
+	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout)
 	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute before touching amp or stream
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
@@ -163,6 +174,63 @@ func (p *PcmSpeaker) Init() error {
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
+}
+
+// pcmFreeTimeout bounds the wait for another process to release the speaker.
+//
+// Generous, because the wait is the good outcome: releasing takes Android well
+// under a second once `stop media` lands, and a device that waits ten seconds
+// and then works is enormously better than one that gives up early. It is a
+// backstop against a holder that never lets go, not a tuning parameter.
+const pcmFreeTimeout = 10 * time.Second
+
+// waitForFreePcm blocks until the playback substream is released, or the
+// timeout expires.
+//
+// On timeout it RETURNS ANYWAY and lets the open proceed. That open may then
+// block forever, which is the pre-existing behaviour — this function's job is
+// to make the common case work and to leave a log line naming the holder when
+// it does not. Refusing to open would be a bigger behaviour change than the
+// bug warrants, and the proper fix for a permanently-held device is to stop
+// gating the rest of main() on the speaker at all.
+func waitForFreePcm(card, device int, timeout time.Duration) {
+	path := statusPath(card, device)
+	b, err := os.ReadFile(path)
+	if err != nil || pcmFree(string(b)) {
+		return // free, or no status file to consult — open immediately
+	}
+
+	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pcmOwner(string(b)), timeout)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		b, err := os.ReadFile(path)
+		if err != nil || pcmFree(string(b)) {
+			log.Printf("[speaker] speaker released after %s", time.Since(deadline.Add(-timeout)).Round(time.Millisecond))
+			return
+		}
+	}
+	b, _ = os.ReadFile(path)
+	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
+		pcmOwner(string(b)), timeout)
+}
+
+// EnableSpeakerAmp switches the internal speaker amplifier back on.
+//
+// accdet turns it off when a plug is inserted (correctly — the Dot should not
+// play to the room while headphones are connected) and NOTHING turns it back
+// on when the plug is removed. Init is otherwise the only thing that ever sets
+// it, which is why the speaker stayed silent until the next reboot (#80).
+//
+// Note this is the ONLY control involved: output routing is done in hardware
+// by the jack's switch contacts, so there is no mux or headphone-amp control
+// to drive alongside it.
+func (p *PcmSpeaker) EnableSpeakerAmp() {
+	if out, err := exec.Command("tinymix", "-D", "0", "5", "On").CombinedOutput(); err != nil {
+		log.Printf("[speaker] could not re-enable speaker amp: %v — %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Println("[speaker] speaker amp re-enabled")
 }
 
 // silenceLoop is the ALSA write path: every period, take what each plane has

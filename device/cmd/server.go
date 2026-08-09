@@ -23,6 +23,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
@@ -194,6 +195,18 @@ func main() {
 	// (mic/speaker are ARM-only). Only compile.sh compiles this file.
 	go als.Watch(ctx, func(lux int) {
 		controlClient.SendAmbientLight(lux)
+	})
+
+	// Headphone jack — accdet mutes the internal speaker amp on insert and
+	// never restores it on removal, so without this the speaker stays dead
+	// until the next reboot (issue #80, reproduced and fixed on hardware
+	// 2026-08-09). Insert needs nothing from us: accdet already handles the
+	// mute, and the output routing itself is done by the jack's own switch
+	// contacts, not by any mixer control.
+	go jack.Watch(ctx, func(inserted bool) {
+		if !inserted {
+			pcmSpeaker.EnableSpeakerAmp()
+		}
 	})
 
 	controlClient.OnDisconnected(func() {
