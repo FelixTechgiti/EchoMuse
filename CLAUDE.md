@@ -170,6 +170,20 @@ directions.
   **`buttonSingleTapEvent` is gated on `button_hold`** — the event entity is
   only advertised for a hold-capable device, so on older firmware the setting
   is refused rather than leaving the button inert.
+  **Multi-tap repeats the mistake `heldMs` exists to avoid** (#115). The hold
+  is timed on the device; the multi-tap window is timed at the CONTROLLER, on
+  arrival, so the gap it measures is the real gap plus the RTT difference
+  between the two taps. Measured on Test Device: 2566 probes, **26.4% over
+  200ms**, min 1ms, max 9255ms — so a genuine 120ms double-tap routinely
+  arrives >150ms apart and reads as two singles, and a slow-then-fast pair can
+  merge taps that were never a burst. `buttonMultiTapMs: 350` is reliable
+  here for double and triple and 150 is not, but that is a value that clears
+  today's jitter, not one derived from anything. The fix is for the device to
+  report the gap since the previous tap from its own monotonic clock; the
+  expiry timer can stay controller-side, since it only answers "has the burst
+  stopped", where being late costs nothing. **Do not rewrite the coalescer** —
+  per-tap window restart, `enabled()` re-checked at expiry rather than at tap
+  time, and count reset before emit are all correct.
   **Mute blocks the voice TURN, not the gesture.** A hold fires `long` while
   muted; only the tap-starts-a-turn path is refused (`em_button.decide`, with
   the mute state read off the press itself — the device sends `muted` on every
@@ -316,7 +330,8 @@ with no way for the user to tell which they had.
 | `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
 | `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
 | `internal/wakeword/fixture/` | Shared golden-fixture parser, tolerance policy and `Verify`. Used by both the host test and `tools/oww_probe`, deliberately — the probe's answer is the trusted one because it runs on hardware, so it must be exactly as strict as the test by construction. Tolerances are relative to the **tensor's** scale, not per element: per-element relative error is meaningless for tensors straddling zero |
-| `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors` or `/sys/bus/iio`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident; a second ALS, `tsl2584tsv`, is enumerated but undriven). `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick |
+| `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors` or `/sys/bus/iio`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident; a second ALS, `tsl2584tsv`, is enumerated but undriven). `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
+| `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. Exists for ONE job: accdet mutes `Ext_Speaker_Amp_Switch` on insert (correctly) and **nothing turns it back on**, so the speaker stayed dead until the next boot (#80). Output routing itself is done by the jack's own switch contacts — a response was heard in headphones while the mixer still read `Headphone_Speaker_Mux=Speaker`, so those controls do NOT describe where audio goes and nothing should drive them |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
@@ -336,6 +351,7 @@ with no way for the user to tell which they had.
 | `em_arbiter.py` | Multi-device wake arbitration — pools same-utterance detections, best SNR answers |
 | `em_player.py` | Media playback sessions — `media_player.play_media` → streaming ffmpeg decode → paced 0x02 feed; pause/resume/stop; voice preempts music (`interrupt`/`resume_interrupted`) |
 | `em_config_sections.py` | Fleet-vs-device config scoping — the six sections, `STATE_KEYS`, and the merge that resolves a device's effective config |
+| `em_tap_burst.py` | Coalesces a burst of action-button taps into one single/double/triple event. The window is restarted per tap and `enabled()` is re-checked at expiry, both correct. **The window is timed at the CONTROLLER, on arrival**, so the gap it measures is the real gap plus the RTT difference between the two taps — 26.4% of probes on this fleet exceed 200ms, which is why double/triple are unreliable below ~350ms (#115). The fix is a device-measured gap, the same reasoning as `heldMs` |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
@@ -453,6 +469,67 @@ enabled it and nothing happened" this removes.
 - `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
   against the firmware constants **by test**. Drift installs assets the device
   never looks for, and the only symptom is shadow mode silently never starting.
+
+## The external audio jack
+
+Three separate faults, all fixed 2026-08-09 (#80), and one non-fault worth
+knowing so nobody builds it.
+
+**Boot with a plug inserted used to strand the whole device.** Android's
+mediaserver claims the speaker PCM when a headset is present, and ALSA parks a
+blocking open behind it with no timeout:
+
+```
+/proc/<pid>/task/<tid>/wchan          -> snd_pcm_open   (parked indefinitely)
+/proc/asound/card0/pcm23p/sub0/status -> PREPARED, owner_pid: 659
+fuser /dev/snd/pcmC0D23p              -> 258 (/system/bin/mediaserver)
+```
+
+`main()` initialises the speaker **before** `SubscribeToButton`, mDNS and the
+control client, so one held device cost everything — no buttons, no wake word,
+no registration. That is the whole of the "no wake word and no working
+buttons" report. `Init()` now runs `stop media` first (the same stock-service
+takeover as `stop mixer` beside it and `stop smarthomewifid` in `main`) and
+waits on the substream status before opening. **The speaker is card 0 device
+23**; the mic is 24. Checking `pcm0p` reads `closed` and proves nothing — that
+is Android's own device, and mistaking it for ours cost a wrong conclusion.
+On timeout it opens anyway, which is the pre-existing behaviour: the wait is
+there to make the common case work and to leave a log line naming the holder.
+
+**The log looks healthy while this happens**, which is most of why it went
+undiagnosed: `[mic] clock` lines keep appearing every 60s from a goroutine
+started before the block. The tell is what is *missing* — `PcmSpeaker
+initialised` never appears.
+
+**Unplugging left the speaker silent until the next reboot.** accdet mutes
+`Ext_Speaker_Amp_Switch` on insert, which is correct — the Dot should not also
+play to the room — and nothing ever turned it back on. `Init()` was the only
+thing that set it, which is exactly why a reboot appeared to fix it.
+`internal/bindings/jack` watches `h2w` and re-enables the amp on removal.
+Insert needs nothing from us.
+
+**Routing is PHYSICAL and needs no code.** The jack's own switch contacts
+divert the signal. A voice response was heard in headphones while the mixer
+still read `Ext_Speaker_Amp_Switch=On`, `Ext_Headphone_Amp_Switch=Off` and
+`Headphone_Speaker_Mux=Speaker` — so those controls do **not** describe where
+audio goes, and driving them would be wrong. Do not build a routing layer.
+
+**Unresolved:** unplugging stalls the mic pipeline for ~35s, long enough that
+the controller drops the device on keepalive timeout. It self-recovers with
+the same pid, no restart. Presumed accdet reconfiguring the codec under the
+SPI capture; not diagnosed.
+
+**Stereo is not supported and the device end is not the blocker.** ALSA is
+already opened with two channels and `PumpPeriod` duplicates L=R; the mono
+downmix happens at the controller, in three ffmpeg calls (`-ac 1`). That was
+right when a mono internal speaker was the only output. With a jack it throws
+information away — see the stereo issue rather than reinventing the analysis.
+
+**`tinymix` IS on these devices** (`/system/bin/tinymix`), and the codec
+regmap is readable at `/sys/kernel/debug/regmap/2-0018/registers`
+(`tlv320aic32x4`). Do not drive `tinyplay` while the server is running: it
+contends for the same PCM and wedged a device hard enough to need a power
+cycle.
 
 ## CPU topology, thermals and why `cpuPct` lies
 

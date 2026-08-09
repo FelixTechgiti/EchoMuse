@@ -395,6 +395,33 @@ speech detection.
 While the mic is muted a tap does nothing, but a hold still fires its event:
 the mute silences speech, not the button.
 
+### Make the tap an event instead
+
+**Tap fires an event** (`buttonSingleTapEvent`) — turns a tap into a Home
+Assistant event rather than the start of a conversation, so you can bind it to
+anything you like. With it on, the device no longer starts a voice turn from
+the button at all; the wake word is untouched, and a hold still fires `long`.
+A tap fires while muted too, for the same reason a hold does — it's an event,
+not speech.
+
+Needs firmware v2.10.0 or newer. On older firmware the toggle is disabled and
+says so.
+
+**Bind destructive automations to the hold, not the tap.** The button has no
+authentication, and a speaker sitting on a counter is a great deal easier to
+tap by accident than to hold for three quarters of a second.
+
+**Multi-tap window** (`buttonMultiTapMs`) — set it above zero and taps are
+grouped into `single`, `double` or `triple`. The cost is that *every* tap is
+delayed by this window, because a tap can only be called single once no
+second one follows.
+
+**Use 350ms.** Below about 300ms it fights both human timing — double taps
+land roughly 150–400ms apart — and network jitter, because the gap is
+currently measured when the taps reach the controller rather than on the
+device. On a busy or distant device you may need more. Zero disables
+grouping, and a tap fires `single` immediately.
+
 ### Turn processing
 
 **Auto gain (AGC)** — automatically levels your voice volume on button
