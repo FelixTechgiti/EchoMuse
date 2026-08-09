@@ -830,3 +830,37 @@ def test_push_log_event_callers_do_not_also_persist():
                 f"but is preceded by {offenders[0]!r}. That writes the log "
                 f"line twice. Drop the db.log_device call."
             )
+
+
+# ── Ambient light status reaches a support bundle (#90) ──────────────────────
+#
+# Two users reported no light sensor and the bundle could not say why: the
+# firmware knows whether the chip is absent or the driver simply has not
+# bound, but writes that only to its own log, which the bundle does not
+# collect and a reboot clears. Diagnosing it needed a shell session on their
+# hardware. These pin the three links in the chain that fixes it, because
+# each fails silently — a missing field just looks like an old device.
+
+def test_register_handler_stores_ambient_light_status():
+    """The controller must keep what the device reported at registration."""
+    root = Path(__file__).resolve().parent.parent
+    ctl = (root / "em_controller.py").read_text()
+    assert 'device.ambient_light_status = msg.get("ambient_light_status")' in ctl, (
+        "the register handler must store ambient_light_status off the register "
+        "message — without it the reason is received and dropped"
+    )
+
+
+def test_bundle_live_state_carries_ambient_light_status():
+    """And the support bundle must actually carry it.
+
+    em_support takes live_state wholesale rather than through an allowlist, so
+    the field has to be put there by em_api. A reason that never reaches a
+    bundle leaves us exactly where #90 started.
+    """
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+    assert '"ambient_light_status":' in api, (
+        "em_api's live_state must include ambient_light_status so support "
+        "bundles can answer why a device reports no light sensor"
+    )

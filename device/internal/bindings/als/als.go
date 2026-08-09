@@ -39,11 +39,54 @@ const driverName = "tsl2540"
 // sensor, not about the cost of any single scan.
 const RetryInterval = 30 * time.Second
 
+// i2cGlob is where the bus is enumerated. A variable only so the tests can
+// point it at a fixture directory — nothing reassigns it at runtime.
+var i2cGlob = "/sys/bus/i2c/devices/*/name"
+
+// Status codes. Stable identifiers, because the controller and dashboard key
+// off them; the human-readable part rides in Detail.
+const (
+	// StatusOK — sensor found and readable.
+	StatusOK = "ok"
+	// StatusNoChip — no tsl2540 on the bus at all. Strongly suggests a
+	// hardware revision without the part, in which case nothing here is
+	// broken and the honest answer is to say the device has no sensor.
+	StatusNoChip = "no_chip"
+	// StatusNoAttribute — the chip is on the bus but exposes no als_lux, so
+	// the driver has not bound. Unlike no_chip this is potentially fixable.
+	StatusNoAttribute = "no_attribute"
+	// StatusUnknown — the bus could not be enumerated. Distinct from
+	// "nothing found", which is a positive result.
+	StatusUnknown = "unknown"
+)
+
+// Status is why the sensor is or is not available.
+//
+// This exists because the failure was previously only ever LOGGED, on the
+// device, to a file that a reboot clears and that support bundles do not
+// collect (issue #90). Two users with no sensor could not be told apart from
+// each other, or from a device whose driver simply had not bound, without a
+// shell session on their own hardware. The reason is a hardware fact the
+// device already knows at registration — so it should be reported, not left
+// for someone to go and look for.
+type Status struct {
+	Code string `json:"code"`
+	// Detail is a sentence for a human reading a support bundle.
+	Detail string `json:"detail,omitempty"`
+	// Seen is every i2c device name on the bus, which is what makes a
+	// no_chip answer verifiable rather than merely asserted — and what
+	// identifies an unfamiliar revision the first time one appears.
+	Seen []string `json:"seen,omitempty"`
+	// Path is where the sensor was found, when it was.
+	Path string `json:"path,omitempty"`
+}
+
 var (
 	mu       sync.Mutex
 	path     string    // absolute path to als_lux; empty when unresolved
 	lastScan time.Time // when we last looked, for the retry interval
 	reported bool      // absence logged once, not every retry
+	status   = Status{Code: StatusUnknown, Detail: "i2c bus not scanned yet"}
 )
 
 // resolve finds the sensor BY NAME, not by i2c address.
@@ -72,15 +115,24 @@ func resolve() string {
 	}
 	lastScan = time.Now()
 
-	names, err := filepath.Glob("/sys/bus/i2c/devices/*/name")
+	names, err := filepath.Glob(i2cGlob)
 	if err != nil {
+		status = Status{Code: StatusUnknown, Detail: "could not enumerate the i2c bus"}
 		return ""
 	}
 	// Record what IS on the bus, so an absence can be diagnosed remotely
 	// from a log line instead of a round trip asking someone to run i2c
 	// commands on a device they just flashed.
+	//
+	// The WHOLE bus is enumerated before matching, rather than stopping at
+	// the sensor. Returning early left `Seen` truncated at whatever happened
+	// to sort before tsl2540 — and comparing a working device's bus against
+	// a broken one's is the entire point of the field, so a partial list from
+	// the healthy side defeats it. Caught on hardware; the fixtures could not
+	// see it because none of them had devices sorting after the match.
 	seen := make([]string, 0, len(names))
 	nameMatched := false
+	found := ""
 	for _, n := range names {
 		b, err := os.ReadFile(n)
 		if err != nil {
@@ -98,9 +150,31 @@ func resolve() string {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
-		path = p
+		if found == "" {
+			found = p
+		}
+	}
+	if found != "" {
+		path = found
+		status = Status{Code: StatusOK, Path: found, Seen: seen}
 		log.Printf("[als] ambient light sensor at %s", path)
 		return path
+	}
+	// Record the verdict on EVERY scan, not only the first. The log line
+	// below is deliberately once-only, but a status that went stale would
+	// report an old answer for a device whose bus has since changed.
+	if nameMatched {
+		status = Status{
+			Code:   StatusNoAttribute,
+			Detail: driverName + " is on the i2c bus but exposes no als_lux attribute — the driver has not bound",
+			Seen:   seen,
+		}
+	} else {
+		status = Status{
+			Code:   StatusNoChip,
+			Detail: "no " + driverName + " on the i2c bus — this hardware revision appears not to have the sensor fitted",
+			Seen:   seen,
+		}
 	}
 	if !reported {
 		reported = true
@@ -123,6 +197,19 @@ func resolve() string {
 // Used to decide whether to declare the capability at registration, so the
 // controller never advertises an HA entity that could not produce a reading.
 func Present() bool { return resolve() != "" }
+
+// Report returns why the sensor is or is not available, resolving first so the
+// answer reflects the bus as it is now rather than as it was at boot.
+//
+// Sent with the register message: a device that declares no ambient_light
+// capability should be able to say WHY, so the answer reaches a support bundle
+// instead of living in a log file on the user's device (#90).
+func Report() Status {
+	resolve()
+	mu.Lock()
+	defer mu.Unlock()
+	return status
+}
 
 // Lux returns the ambient light level, or nil when there is no sensor or the
 // read fails.

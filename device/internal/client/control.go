@@ -266,6 +266,14 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// device shows "needs newer firmware" rather than a toggle that
 		// silently does nothing.
 		"capabilities": capabilities(),
+		// Why the ambient light sensor is or is not available. A capability
+		// list says WHAT a device has; when the answer is "nothing", nobody
+		// can tell an absent chip from an unbound driver without a shell
+		// session on the user's own hardware — which is exactly where #90
+		// got stuck, twice, because the reason is written only to a log file
+		// the support bundle does not collect. Costs one small object per
+		// registration.
+		"ambient_light_status": als.Report(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was

@@ -246,6 +246,8 @@ class Device:
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
+        # Set from the register message; None on firmware that predates it.
+        self.ambient_light_status: dict | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -2237,6 +2239,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
 
         device = Device(device_id, ip, capabilities, ws)
+        # Why the device has no ambient light sensor, when it has none. The
+        # capability list says only that it is absent; without the reason,
+        # an unfitted chip and an unbound driver are indistinguishable
+        # remotely, and #90 needed a shell session on the user's own hardware
+        # to tell them apart. Absent on firmware that does not send it, which
+        # reads as "not reported" rather than as a fault.
+        device.ambient_light_status = msg.get("ambient_light_status")
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure
