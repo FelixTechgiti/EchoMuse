@@ -315,6 +315,8 @@ No-speech branch (device's 0x05 sentinel — see WebSocket Protocol below):
 
 A tap on the action button triggers the same pipeline directly, bypassing wake word detection. A second tap cancels at any stage. A *hold* (≥`BUTTON_HOLD_MS`) is a separate gesture that fires an HA event instead of starting a turn, and is measured on the device.
 
+Under `buttonSingleTapEvent` the tap becomes an HA event too, and the button stops starting turns entirely; `buttonMultiTapMs` groups taps into single/double/triple at the cost of delaying every tap by that window. The hold's timing is measured on the device precisely because control-plane RTT here is jittery (26.4% of probes over 200ms on one device, max 9255ms); the multi-tap window is not, which is why it needs ≥350ms to be reliable — see issue #115.
+
 ---
 
 ## On-device wake word (shadow mode)
@@ -609,6 +611,12 @@ done
 **Why device 23?** The biscuit exposes 25+ PCM devices. Device 23 is the TLV320 DAC output path. Most other devices are modem/voice paths or internal DSP routes that hang or error on open.
 
 **Why keep echoaudioservice?** The MediaTek audio DSP requires initialisation that happens inside Amazon's audio HAL (`audio.primary.mt8163.so`). Without `echoaudioservice` running, the I2S clock never starts and `tinyplay` hangs indefinitely. The service is a manifest stub — no Java code — its sole job is to trigger HAL initialisation via the Android audio framework.
+
+**`stop media`, and why the ordering matters.** Since the audio-jack fix (#80), `PcmSpeaker.Init()` also runs `stop media` before opening the PCM. It has to: with a headphone plug inserted at boot, mediaserver claims device 23 and our blocking `snd_pcm_open` waits behind it forever, taking the whole device down with it (no buttons, no wake word, no registration — everything in `main()` is initialised after the speaker).
+
+This depends on the HAL having already initialised by the time we stop it, per the note above. On measured boots it has: mediaserver brings the audio path up at ~15s (visible in dmesg as its `AudioOut_2` thread running open/hw_params/prepare on the codec) and our server starts at ~21s. So the sequence is HAL init → we stop it → we take the device, every boot, in that order. Verified on hardware with and without a plug inserted.
+
+The residual risk is a boot where that ordering reverses — `stop media` landing before the DSP is initialised would give the same symptom the note above describes, an open that hangs with no I2S clock. Nothing observed, and the 6s gap is not marginal, but if a device ever comes up with a silent speaker and a stalled open, this is the first thing to suspect. `echoaudioservice` is untouched and still required.
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 

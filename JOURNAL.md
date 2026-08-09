@@ -1095,3 +1095,119 @@ are **append-only and in ascending date order** — new work goes at the end.
   The button goes completely inert. Two of the five Dots here are still on
   v2.9.11, which is the reminder that "the fleet is current" is a statement
   about the devices you happen to be looking at.
+
+- **2026-08-09 — the jack, and four theories that hardware killed.** Issue #80
+  had two reporters saying the same odd thing: boot an Echo with an aux cable
+  already in and it comes up with no wake word *and no working buttons*, and
+  unplugging never restores the speaker without a reboot. It had been open
+  since 2026-08-03 with a plausible explanation and no evidence.
+
+  The plausible explanation was mine and it was wrong. PR #109 resolved the
+  button input devices by name instead of `event1`/`event2`, arguing that
+  accdet — which probes ahead of both keypads — might enumerate differently
+  with a plug inserted and shift everything after it. It is a real failure
+  mode in general: `evdev.Open` succeeds on any input node, so a device whose
+  numbering moved has working hardware, no error anywhere, and a dead button.
+  It also matched the report exactly. The one thing nobody had done was boot a
+  device with a cable in and dump `/proc/bus/input/devices`. Doing that
+  produced `event0` ACCDET, `event1` mtk-kpd, `event2` keys — identical to a
+  device with nothing plugged in. The theory was dead, and #109 with it.
+
+  Two more died the same way. The mixer state changes on insert
+  (`Ext_Speaker_Amp_Switch` On→Off) looked like a half-completed routing
+  transition, so the next theory was that a mixer write hangs with a plug in —
+  killed by `ps` showing no `tinymix` child, and by the `tinymix` entries in
+  dmesg carrying **lower pids than the server's**, making them init's rather
+  than ours. Then the substream-busy theory pointed at `pcm0p`, which read
+  `closed`. That one was right in mechanism and wrong in target: the speaker
+  is card 0 device **23**. `pcm0p` is Android's own, and checking it proves
+  nothing.
+
+  What actually happens is visible in one file. A thread had been parked in
+  `snd_pcm_open` for eighteen minutes:
+
+  ```
+  /proc/1088/task/1094/wchan            -> snd_pcm_open
+  /proc/asound/card0/pcm23p/sub0/status -> PREPARED, owner_pid: 659
+  fuser /dev/snd/pcmC0D23p              -> 258 (/system/bin/mediaserver)
+  ```
+
+  Android's mediaserver claims the speaker when it sees a headset, and ALSA
+  parks a blocking open behind it with no timeout. `main()` initialises the
+  speaker *before* `SubscribeToButton`, mDNS and the control client, so one
+  held device costs everything. The buttons were never broken; nothing was
+  listening to them. `stop media` on the live stuck device made the parked
+  open return, thread 1094 became the substream's owner, `Init()` finished and
+  the device registered — jack still inserted, no reboot. That is also why
+  unplug/replug "fixed" it for users: Android lets go and our open completes.
+
+  **It hid for so long because the log looks healthy.** `[mic] clock` lines
+  keep arriving every 60s throughout, from a goroutine started before the
+  block. Nothing is missing except a line that never appears, `PcmSpeaker
+  initialised`, and absence is the hardest thing to notice in a log you are
+  scrolling.
+
+  The second fault was simpler and had been hiding behind the first. accdet
+  mutes the internal speaker amp on insert, which is correct — the Dot should
+  not also play to the room — and *nothing* turns it back on. `Init()` was the
+  only thing that ever set it, which is precisely why only a reboot restored
+  it. A `jack` package now watches `h2w` and re-enables the amp on removal.
+
+  The third finding was that a whole planned workstream does not exist.
+  Routing was the item this issue was supposed to be about, and it needs no
+  code: the jack's switch contacts do it in hardware. A response was heard in
+  headphones while the mixer still reported the speaker path selected, so
+  those controls do not describe where audio goes. The plan had this as "the
+  real work and genuinely unknown"; it was neither.
+
+  **I took a device down doing this.** Testing routing by running `tinyplay`
+  and two mixer writes on a live device, while the server owned the PCM,
+  wedged it hard enough to need a physical power cycle — which then wiped
+  `/tmp/server.log`, the RAM-backed file that would have explained it. The
+  correct instrument was already available and free: a real voice turn.
+
+  Wil's summary of the day was that the troubleshooting churn was fine and the
+  carelessness was not — specifically opening PRs on the wrong branch and
+  anything that could lose data. He was right: I wrote the #80 fix onto #109's
+  branch having just proved the two were unrelated, then did it again on
+  `main` for the follow-up. Being wrong about a theory costs a round trip;
+  putting work in the wrong place costs someone else's review.
+
+  **Also this day, and each one turned on a measurement rather than an
+  argument:**
+
+  *#90, the missing light sensor.* Two users, both unfixed by
+  controller-v2.16.1, which had addressed HA's one-shot entity list. Their
+  support bundles showed the capability absent from the device's own
+  registration and `ambientLux` reported as `null` rather than `0` — so the
+  controller never learned the sensor existed and the HA layer never entered
+  into it. `null` versus `0` is only distinguishable because `Lux()` returns
+  nil for "no sensor" and a covered sensor reads a genuine zero; the
+  NULL-not-zero rule paid for itself. Every failing device is a `G090LF096`
+  serial and every working one is not, across two unrelated owners and our own
+  six. **We own none of that revision**, so it cannot be reproduced here. The
+  firmware already knew which of two very different things had happened —
+  chip absent, or driver unbound — and wrote it only to its own log, which
+  support bundles do not collect and a reboot clears. It now reports the
+  reason at registration. A bundle that cannot answer the question it was
+  opened for is the failure mode to watch for; this is the second time.
+
+  That change also demonstrated why flashing before opening a PR is worth the
+  round trip. The tests passed; the field was wrong. `seen` was truncated on
+  the success path because `resolve()` returned the moment it matched, so a
+  *working* device reported only the names sorting before `tsl2540` —
+  dropping three real devices on hardware. Comparing a healthy bus against a
+  broken one is the entire point of the field. No fixture had a device
+  sorting after the match, so nothing could have caught it but a real bus.
+
+  *#115, multi-tap.* PR #107 landed tap-as-an-HA-event from an outside
+  contributor, and it works: `single` and `long` both reach HA. `double` did
+  not, reliably, and the reason is not the code. The multi-tap window is timed
+  at the controller, on arrival, so the gap it measures is the real gap plus
+  the RTT difference between the two taps — and 26.4% of control-plane probes
+  on this fleet exceed 200ms, ranging from 1ms to 9255ms. A genuine 120ms
+  double-tap routinely arrives more than 150ms apart. This is the exact trap
+  `heldMs` exists to avoid, documented for the hold and not carried across to
+  the tap, and no contributor could have known it from the code. 350ms works
+  today; the fix is a device-measured gap.
+
