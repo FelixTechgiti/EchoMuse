@@ -1888,9 +1888,21 @@ async def wake_word_listener(device: Device):
                 source = em_shadow.decide_wake_source(
                     device.oww_on_device, dev_wake, ctrl_hit
                 )
-                if source == "none" and ctrl_hit:
+                if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
                     # "on" mode, and this controller heard it too. Recorded for
                     # the comparison and nothing else — the device is driving.
+                    #
+                    # Recorded whoever WON, which is the whole point. Gating
+                    # this on source == "none" lost the crossing whenever the
+                    # device's wake and ours landed on the same iteration — and
+                    # the turn then drains mic_queue, so there is no second
+                    # chance — writing a NULL that reads as "the controller
+                    # missed it" when the controller had in fact scored it
+                    # identically. Two of the first three trial turns agreed to
+                    # four decimal places and the third recorded a miss for
+                    # exactly this reason (2026-08-10). A comparison that is
+                    # wrong only in the direction that flatters the feature is
+                    # the worst kind.
                     device.ctrl_shadow.record_cross(score, 0)
                     device.ctrl_shadow.active = True
 
