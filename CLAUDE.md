@@ -26,6 +26,21 @@ cd device
 docker build -t echomuse-compiler compiler/
 ```
 
+**The compiler base is pinned by DIGEST, and must stay that way.**
+`compiler/Dockerfile` carries the Go toolchain (1.24.0) and NDK
+(21.4.7075529) that compile the firmware, so it is the layer sitting
+directly on top of FireOS 5 — a 2015 platform that cannot be upgraded. It
+was `FROM ghcr.io/binozo/echogo:latest`, a third party's floating tag, and
+`release.yml` rebuilds the image **from scratch on every tag push**: every
+release was free to pick up a different compiler than the last, with no PR
+and no CI signal. The first symptom would be a binary the hardware refuses
+to run, which is the one failure here not recoverable from the dashboard.
+
+Moving the pin needs **a real device in the loop**. The host tests and
+`go vet` cannot speak to it — they run on amd64 with the host toolchain,
+and this image is exercised only by `compile.sh` and `release.yml`, so a
+green CI run on a pin change proves nothing about it.
+
 **Compile:**
 ```bash
 cd device
