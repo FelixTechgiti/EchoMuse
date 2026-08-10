@@ -319,12 +319,22 @@ Under `buttonSingleTapEvent` the tap becomes an HA event too, and the button sto
 
 ---
 
-## On-device wake word (shadow mode)
+## On-device wake word
 
-The Echo can run the wake model itself. `owwOnDevice` is `off` (default) or
-`shadow`; a mode letting the device *trigger* turns is deliberately not
-implemented, and an unrecognised value normalises to `off` rather than being
-guessed at.
+The Echo can run the wake model itself. `owwOnDevice` is `off` (default),
+`shadow` or `on`. An unrecognised value normalises to `off` at **both** ends
+rather than being guessed at — neither end may assume the other is the careful
+one, and the two plausible guesses ("score silently" and "start triggering")
+differ by a live behaviour change.
+
+`on` is gated on the **`oww_trigger` capability, separate from `oww_shadow`**.
+Shadow shipped first, so firmware exists that scores and reports without being
+able to act on it; offering those `on` produces a device that scores perfectly
+and never answers. Absent the capability, `on` degrades to `shadow` — never to
+`on`, which would leave the controller waiting for wakes the firmware cannot
+send while no longer acting on its own.
+
+### Shadow — score and report
 
 **Shadow mode scores and reports; it never acts.** It exists to answer whether
 on-device detection is good enough to trust, by running both detectors over the
@@ -351,6 +361,51 @@ Correlation happens at turn-persist time, not at detection — a crossing report
 can land after the wake it belongs to. The nearest crossing within a 2.0s
 window wins and is consumed, so two quick turns can't both be credited to one
 crossing.
+
+### On — the device triggers
+
+The device sends `oww_wake` (score, the threshold it actually cleared, and how
+long *ago*) instead of a crossing report. It lands in a one-slot holder and the
+wake listener acts on it on its next mic frame, ~80ms, because that is where
+turn setup lives — capture routing, beam lock and arbitration have to happen
+together, and driving them from the control-plane handler would be a second
+copy of the most delicate sequence in the controller.
+
+What this buys is **latency and resilience, not bandwidth**: the mic stream is
+unchanged, because the controller still runs the turn. What changes is that the
+wake decision no longer crosses a network with measured 1.1–2.6s idle RTT
+excursions, and a controller restart no longer deafens the device.
+
+- **The controller keeps scoring, and stops triggering.** Its score records
+  whether it agreed (`turns.ctrl_wake_score`) — the same comparison with the
+  roles inverted, and the only place a *controller* miss is visible. Without
+  it, turning a device on would silently end the measurement: a device score
+  with nothing beside it reads as perfect agreement rather than as no data. It
+  is also what leaves barge-in untouched, since barge is scored
+  controller-side over the turn's own audio.
+- **The recorded wake instant is the crossing, not the arrival.** Using arrival
+  folds the network hop into every comparison and every arbitration decision.
+- **Mute is checked on the device** as well as controller-side. The `mic_start`
+  refusal and the hardware ADC mute already make a muted wake harmless, but
+  harmless still means the ring lights and HA runs a pipeline. The crossing is
+  still reported — it is real data about the detector.
+- **A pending wake expires after 4s**, measured from the crossing. That stale
+  means the person has finished speaking, so acting on it answers into silence.
+  The expiry logs the age, which is the instrument for whether the trigger
+  needs more slack.
+
+Two known gaps, both recorded rather than hidden:
+
+- **Arbitration is not corrected for this.** Claims are still compared by
+  arrival, so on a multi-device fleet a device can lose its window because its
+  claim was late and the wrong room answers. Solo fleets skip the window
+  entirely. The fix needs RTT-corrected claim times, never revoking a granted
+  claim, and a window held longer than it is measured.
+- **A NULL `ctrl_wake_score` is ambiguous.** It means the controller did not
+  detect the utterance *or* never got to look — if it had not yet scored that
+  audio when the turn started and drained the queue, there is no second
+  chance. Answering that needs the unscored backlog buffered and scored after
+  the turn.
 
 ONNX Runtime plus three models must be installed at
 `/data/local/share/echomuse/oww` — they are **not** in the firmware (12.3MB

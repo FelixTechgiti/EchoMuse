@@ -1876,6 +1876,23 @@ async def _persist_turn(device, turn_record: dict) -> None:
                 f"{dev_score if dev_score is not None else 'MISS'}"
                 + (f" ({dev_delta:+d}ms)" if dev_delta is not None else "")
             )
+        # owwOnDevice="on" inverts the question. The device triggered this
+        # turn, so the side that can be missing is OURS: a NULL here is a wake
+        # this controller did not hear, which is the direction that argues
+        # on-device scoring is worth its ~38% of a core. Only recorded when the
+        # device actually drove the turn — on a controller-triggered turn the
+        # column does not apply, and writing our own score into it would make
+        # every row agree with itself.
+        if str(turn_record.get("trigger", "")).startswith("wakeword-dev"):
+            ctrl_score, ctrl_delta = device.ctrl_shadow.match(wake_mono)
+            turn_record["ctrl_wake_score"]    = ctrl_score
+            turn_record["ctrl_wake_delta_ms"] = ctrl_delta
+            log.info(
+                f"[{device.device_id}] wake comparison: device "
+                f"{turn_record.get('wake_score')} vs controller "
+                f"{ctrl_score if ctrl_score is not None else 'MISS'}"
+                + (f" ({ctrl_delta:+d}ms)" if ctrl_delta is not None else "")
+            )
 
     # Surface the outcome to the turn loop's ring cleanup. Without this
     # every ending looks identical to the user — "I didn't hear you",

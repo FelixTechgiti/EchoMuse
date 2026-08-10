@@ -130,9 +130,9 @@ whether or not the controller is reachable.
 ## 02 — Wake word
 
 How the device decides you said the magic word. By default this work happens
-on the controller, not the Dot — the Dot just streams audio to it. (The Dot
-*can* now also score locally, but only as a shadow comparison that changes
-nothing about behaviour — see **Score on device** below.)
+on the controller, not the Dot — the Dot just streams audio to it. The Dot
+can also do this work itself, either alongside the controller as a
+comparison or instead of it; see **Wake word detection** below.
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -199,32 +199,60 @@ commands are untouched). Worth trying in rooms with constant background
 noise (TV, air-con) if wake detection is unreliable there. Off by default —
 it's a "try it and compare" option.
 
-### Score on device (shadow)
-Experimental, off by default, and **changes nothing about how the Dot
-behaves**. With it on, the Echo runs the same wake-word model over the same
-audio and reports what it *would* have detected. It never triggers a turn.
+### Wake word detection
+Who decides you said the wake word. Three settings:
 
-The point is to find out whether on-device detection is trustworthy before
-anything depends on it. Each voice turn's row in **Activity** gains the
-device's own score next to the controller's, and the per-device activity API
-returns an agreement summary (how often they agreed, how far apart in
-milliseconds, and crossings the device saw that never became a turn).
+- **Controller** (default) — the Dot streams audio and the controller
+  listens. What EchoMuse has always done.
+- **Both (compare)** — the Echo *also* runs the same model over the same
+  audio and reports what it would have detected, without acting on it. It
+  never triggers a turn. This is the one to use first: it tells you whether
+  on-device detection is trustworthy on your hardware, in your room, before
+  anything depends on it.
+- **On device** — the Echo decides, and the controller starts the turn on
+  its word.
 
-Three things to know before turning it on:
+**Why you might want "On device".** The wake decision stops crossing your
+network. On a marginal link that is the difference between a Dot that
+responds instantly and one that lags unpredictably, and it keeps working
+through a controller restart. It does *not* reduce network traffic — the
+audio still streams, because the controller runs the rest of the turn.
+
+The controller keeps listening alongside it, which is deliberate: it costs
+nothing extra (it was already scoring), it keeps the comparison in
+**Activity** running so you can see whether the two agree, and it leaves
+barge-in — interrupting a response by speaking over it — working exactly as
+before.
+
+Each voice turn's row in **Activity** shows both scores side by side, and
+the per-device activity API returns an agreement summary (how often they
+agreed, how far apart in milliseconds, and crossings the device saw that
+never became a turn).
+
+**Multi-device caveat.** If you have several Echos in earshot of each other,
+put only one on **On device** for now. The rule that stops two Dots
+answering at once still judges claims by when they arrive rather than when
+each Echo actually heard you, so a device whose message was delayed can lose
+to one that heard you less well. With a single device set this way, or with
+Echos that cannot hear each other, this does not apply.
+
+Three things to know before leaving Controller:
 
 - **It needs files installed on the Dot** that aren't part of the firmware —
   ONNX Runtime plus the wake-word models, about 15MB, placed in
   `/data/local/share/echomuse/oww`. They're deliberately not shipped in the
   firmware image, because that would double both the download and the space
-  each of the two firmware slots takes. Until they're there, the toggle does
+  each of the two firmware slots takes. Until they're there, the setting does
   nothing and the device log says which file is missing.
 - **It costs about half a CPU core, permanently**, because the wake stream is
   always on. Measured on an Echo Dot Gen 2 that has capacity for it — the mic
   pipeline was unaffected across hours of use, including during music
   playback — but enable it on **one device at a time** and watch the
   **Resources** panel on the Status tab.
-- **It needs recent firmware.** The toggle is disabled and says so on Echos
-  whose firmware predates the feature, rather than appearing to work.
+- **It needs recent firmware**, and the two settings need different
+  vintages: scoring shipped before triggering did. Each option is disabled
+  and says so on an Echo whose firmware cannot do it, rather than appearing
+  to work.
 
 ---
 

@@ -23,6 +23,47 @@ usable comparisons.
 import collections
 import time
 
+# ── owwOnDevice modes ────────────────────────────────────────────────────────
+#
+# Mirrors device/internal/config/config.go. Both ends normalise independently
+# and both fall back to "off" for anything unrecognised, because neither can
+# assume the other is the careful one: an old device must not guess at a mode
+# it cannot honour, and a controller must not push a mode a device will
+# silently reinterpret.
+MODE_OFF = "off"
+MODE_SHADOW = "shadow"
+MODE_ON = "on"
+MODES = (MODE_OFF, MODE_SHADOW, MODE_ON)
+
+# How long a device-reported wake may wait to be acted on, measured from the
+# crossing instant rather than from arrival — the report carries its own age,
+# so a slow link shows up as an old wake rather than a fresh one.
+#
+# The bound is about usefulness, not tidiness. A wake several seconds stale
+# means the person has already finished speaking, so starting a turn captures
+# the tail of an utterance at best and answers into silence at worst. 4s is
+# generous against the ~80ms it normally waits (the wake listener consumes it
+# on the next mic frame) and still inside the window where the audio the user
+# spoke is worth having.
+#
+# It doubles as the instrument for whether the trigger message needs more
+# slack: control-plane RTT excursions of 1.1-2.6s are measured and unexplained
+# on this fleet, and a wake dropped here logs the age that killed it.
+MAX_PENDING_WAKE_S = 4.0
+
+
+def normalise_mode(v) -> str:
+    """
+    Map a stored or pushed owwOnDevice value onto a known mode.
+
+    Unknown values become "off" rather than being guessed at, for the reason
+    the device gives: the two plausible readings of an unrecognised mode are
+    "score silently" and "start triggering turns", and one of those is a live
+    behaviour change nobody asked for.
+    """
+    s = str(v or "").strip().lower()
+    return s if s in MODES else MODE_OFF
+
 # How far apart the device's crossing and the controller's detection may be and
 # still be considered the same utterance.
 #
@@ -130,3 +171,113 @@ class ShadowTracker:
     def pending(self) -> int:
         """How many unmatched crossings are held. Diagnostics only."""
         return len(self._crossings)
+
+
+class PendingWake:
+    """
+    Holds the one device-reported wake waiting to become a turn.
+
+    A slot rather than a queue, deliberately. Two crossings arriving before
+    either is consumed is one utterance the device scored twice (its refractory
+    period makes that rare but not impossible) or a person repeating themselves
+    because nothing happened — and in both cases the RIGHT answer is one turn
+    on the most recent wake, not a queue that starts a second turn the moment
+    the first ends.
+    """
+
+    def __init__(self):
+        self._wake = None
+
+    def offer(self, score, threshold, age_ms, at_now: float | None = None) -> bool:
+        """
+        Record a wake the device is asking us to act on. Returns acceptance.
+
+        Malformed reports are dropped rather than coerced, the same rule
+        record_cross follows: a score that will not parse means the message is
+        not what we think it is, and a turn is a worse thing to invent than a
+        data point.
+        """
+        try:
+            score = float(score)
+            age_s = float(age_ms or 0) / 1000.0
+        except (TypeError, ValueError):
+            return False
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            # A missing threshold is survivable — it is recorded against the
+            # turn, not used to decide anything — so this alone must not cost
+            # the user their wake.
+            threshold = None
+        age_s = max(0.0, min(age_s, MAX_AGE_S))
+        at = (at_now if at_now is not None else now()) - age_s
+        self._wake = {"at": at, "score": round(score, 4),
+                      "threshold": round(threshold, 4) if threshold is not None else None}
+        return True
+
+    def take(self, at_now: float | None = None):
+        """
+        Consume the pending wake, or None if there is none or it is too old.
+
+        Always clears the slot, including on expiry: a wake that was too stale
+        to act on this time will not have got any fresher by the next frame,
+        and leaving it in place would fire a turn at some arbitrary later
+        moment — the exact failure this bound exists to prevent.
+
+        Returns (wake, age_s) where wake is None on expiry, so the caller can
+        log an age that is otherwise gone.
+        """
+        wake, self._wake = self._wake, None
+        if wake is None:
+            return None, None
+        age_s = (at_now if at_now is not None else now()) - wake["at"]
+        if age_s > MAX_PENDING_WAKE_S:
+            return None, age_s
+        return wake, age_s
+
+    def peek(self) -> bool:
+        """Whether a wake is waiting. Diagnostics only — does not consume."""
+        return self._wake is not None
+
+
+def effective_mode(configured, trigger_capable: bool) -> str:
+    """
+    The mode actually in force, given what the device can do.
+
+    "on" against firmware that cannot trigger degrades to "shadow", never to
+    "on": the controller would otherwise stop acting on its own detections
+    while waiting for device wakes that the firmware has no code to send, and
+    the device would be deaf. That is the wrong answer rather than the old
+    behaviour, and the whole point of gating on capability is to not produce
+    one. Shadow keeps the device scoring, which is what the user asked for as
+    far as this firmware can deliver it.
+
+    The dashboard refuses to offer "on" to such a device in the first place, so
+    reaching this normally means firmware was rolled back under a config that
+    was valid when it was set.
+    """
+    mode = normalise_mode(configured)
+    if mode == MODE_ON and not trigger_capable:
+        return MODE_SHADOW
+    return mode
+
+
+def decide_wake_source(mode: str, dev_wake, ctrl_hit: bool) -> str:
+    """
+    Who, if anyone, gets to start a turn: "device", "controller" or "none".
+
+    A pure function with a test rather than three conditions inline in the wake
+    listener, because the loop it lives in cannot be exercised without
+    openwakeword and a real utterance — the same reasoning that moved the
+    button gesture and the device-link auth decision out of their call sites.
+
+    In "on" mode the controller keeps scoring but never triggers. That is not
+    an oversight: its score still records whether it agreed, which is the
+    comparison that justified shipping on-device wake in the first place, and
+    it is what leaves barge-in working unchanged, since barge is scored
+    controller-side over the turn's own audio and has nothing to do with this.
+    """
+    if normalise_mode(mode) == MODE_ON:
+        return "device" if dev_wake else "none"
+    # off / shadow: the device may be scoring, but only the controller acts.
+    return "controller" if ctrl_hit else "none"

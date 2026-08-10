@@ -59,6 +59,7 @@ import em_pki
 import em_player
 import em_recordings
 import em_scenes
+import em_shadow
 import em_support
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
@@ -808,6 +809,15 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
+    if "owwOnDevice" in effective:
+        # Resolved against the CAPABILITY, not taken at face value: "on"
+        # against firmware that cannot trigger would stop this controller
+        # acting on its own detections while waiting for wakes the device has
+        # no code to send, leaving it deaf. em_shadow.effective_mode degrades
+        # that to shadow.
+        live.oww_on_device = em_shadow.effective_mode(
+            effective["owwOnDevice"], live.oww_trigger_capable
+        )
     if "eqBands" in effective:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
@@ -4001,6 +4011,10 @@ def _merge_device(row) -> dict:
         # scoring: a toggle that silently does nothing on old firmware is worse
         # than no toggle, because it looks like the feature is broken.
         "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
+        # Separate from shadow: firmware in the field scores and reports
+        # without being able to act on it, and offering those "on" produces a
+        # device that never answers.
+        "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,

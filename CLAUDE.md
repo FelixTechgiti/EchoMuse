@@ -359,11 +359,65 @@ with no way for the user to tell which they had.
 
 ## On-device wake word (shadow mode)
 
-The Echo can run the wake model itself. `owwOnDevice` = `off` (default) or
-`shadow`; a third mode letting the device *trigger* turns is deliberately not
-implemented, and an unknown value normalises to `off` rather than being guessed
-at — the two plausible guesses are "score silently" and "start triggering", and
-one of those is a live behaviour change on a device that cannot honour it.
+The Echo can run the wake model itself. `owwOnDevice` = `off` (default),
+`shadow` or `on`; an unknown value normalises to `off` at BOTH ends rather than
+being guessed at — the two plausible guesses are "score silently" and "start
+triggering", and one of those is a live behaviour change on a device that
+cannot honour it. Neither end may assume the other is the careful one.
+
+**`on` is gated on the `oww_trigger` capability, which is separate from
+`oww_shadow` on purpose.** Shadow shipped first, so there is firmware in the
+field that scores and reports without being able to act on it; offering those
+`on` produces a device that scores perfectly and never answers.
+`em_shadow.effective_mode` degrades `on` to `shadow` when the capability is
+absent — never to `on`, which would leave the controller waiting for wakes the
+firmware has no code to send while no longer acting on its own. That is a wrong
+answer rather than the old behaviour, which is the line the whole capability
+rule is drawn along.
+
+### `on` — the device decides, the controller keeps watching
+
+The device sends `oww_wake` (score, the threshold it actually cleared, and how
+long AGO — never a timestamp) instead of `oww_shadow_cross`. It lands in
+`Device.pending_wake` and the wake listener acts on it on its next mic frame
+(~80ms), because that is where turn setup lives: capture routing, beam lock and
+arbitration have to happen together, and driving them from the control-plane
+handler would be a second copy of the most delicate sequence in the controller.
+`em_shadow.decide_wake_source` is the decision, pure and tested, for the reason
+`em_button.decide` and `em_linkauth.decide` are.
+
+- **The controller keeps scoring, and its detections stop triggering.** Its
+  score still records whether it agreed (`turns.ctrl_wake_score` /
+  `ctrl_wake_delta_ms`, schema v17) — the comparison that justified shipping
+  this, with the roles inverted, and the only place a *controller* miss can be
+  seen at all. Without it, turning a device `on` would silently end the
+  measurement: every turn would show a device score with nothing to compare
+  against, which reads as perfect agreement rather than as no data.
+- **It is also what leaves barge-in alone.** Barge is scored controller-side
+  over the turn's own audio (`_barge_watcher`) and is untouched by this.
+- **`last_wake_mono` is the CROSSING instant, not arrival.** Using arrival
+  would fold the network hop into every comparison and every arbitration
+  decision, which this fleet's measured 1.1–2.6s RTT excursions make certain
+  to matter.
+- **Mute is checked on the device** (`onWakeCrossing`), not only controller-
+  side. The existing `mic_start` refusal plus the hardware ADC mute already
+  make a muted wake harmless, but "harmless" still means the ring lights up and
+  HA runs a pipeline because a muted device thought it heard something. The
+  crossing is still *reported* — it is real data about the detector.
+- **A pending wake expires** (`MAX_PENDING_WAKE_S`, 4s, measured from the
+  crossing). A wake that stale means the person has finished speaking, so
+  acting on it answers into silence; expiry logs the age, which is the
+  instrument for whether the trigger needs more slack.
+- The trigger label is `wakeword-dev(score)`, which still matches every
+  existing reader's `wakeword` prefix — including `_persist_turn`'s shadow
+  block.
+
+**Arbitration is NOT yet corrected for this.** `_wake_arbiter.claim` still
+compares arrival order, so on a multi-device fleet a device can lose a 700ms
+window because its claim was late and the wrong room answers. The fix is to
+compare RTT-corrected times, never revoke a granted claim (that cuts a turn
+already speaking), and hold the window longer than it is measured. Single-device
+use is unaffected — solo fleets skip the window entirely.
 
 **Shadow mode scores and reports; it never acts.** It exists to answer whether
 on-device detection is good enough to trust, by comparing both detectors on the
