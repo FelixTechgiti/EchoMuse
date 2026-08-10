@@ -52,6 +52,57 @@ def test_dashboard_bundle_is_cache_busted():
         "cache-bust on the bundle's mtime, not on a version string"
 
 
+def test_dashboard_paths_are_ingress_safe():
+    """
+    As a Home Assistant add-on, the dashboard is mounted below a generated
+    path (Ingress), not at the site root — an absolute "/static/..." or
+    "/api/..." reference bypasses that path straight to the root and 404s.
+    Every asset/API reference must therefore be relative, resolved against
+    the <base href> em_api.py injects for the add-on case.
+
+    Source-level because starting an aiohttp app + browser is outside what
+    this suite does elsewhere (see test_dashboard_bundle_is_cache_busted).
+    """
+    static = CONTROLLER / "static"
+    index = (static / "index.html").read_text()
+    dashboard = (static / "dashboard.html").read_text()
+    jsx = (static / "dashboard.jsx").read_text()
+    api = (CONTROLLER / "em_api.py").read_text()
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    for name, html in (("index.html", index), ("dashboard.html", dashboard)):
+        assert 'href="/static/' not in html, f"{name} has an absolute /static href"
+        assert 'src="/static/' not in html, f"{name} has an absolute /static src"
+        assert "url('/static/" not in html, f"{name} has an absolute /static url()"
+
+    assert "'/api/" not in index, \
+        "index.html must fetch relative api/... paths, not /api/..."
+    assert "location.replace('/dashboard')" not in index, \
+        "index.html must redirect to a relative dashboard path"
+
+    assert "function ingressPath(path)" in jsx, \
+        "dashboard.jsx must relativize absolute paths for ingress"
+    assert "function ingressWebSocketUrl(path)" in jsx, \
+        "dashboard.jsx must build ingress-relative WebSocket URLs"
+    assert "document.baseURI" in jsx, \
+        "the WebSocket URL must resolve against the injected <base href>"
+    assert "fetch(ingressPath(path)" in jsx, \
+        "the shared API helpers must route through ingressPath"
+    assert "location.replace('/')" not in jsx, \
+        "an absolute root redirect bypasses the ingress path"
+
+    assert '"static/dashboard.js"' in api, \
+        "the cache-bust replace must target the relative asset URL"
+    assert 'web.HTTPFound(".")' in api, \
+        "/setup must redirect relatively, or it bounces out of the ingress path"
+    assert "_with_ingress_base" in api, \
+        "index.html and dashboard.html must get a <base href> injected"
+    assert 'request.headers.get("X-Ingress-Path"' in api, \
+        "the base path must come from Home Assistant's ingress header"
+    assert "ECHOMUSE_HOME_ASSISTANT_INGRESS" in config, \
+        "config.yaml must set the env var that gates ingress-only mode"
+
+
 def test_release_notes_survive_the_whole_relay():
     """
     Release notes have to make it through four places to be useful: captured

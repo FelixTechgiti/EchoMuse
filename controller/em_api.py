@@ -33,6 +33,7 @@ state with persisted DB state without coupling to a global.
 
 import asyncio
 import hashlib
+import html as _html
 import json
 import logging
 import os
@@ -103,6 +104,14 @@ def sample_cpu() -> None:
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Set when running as a Home Assistant add-on (config.yaml's `environment`
+# block) — gates the ingress-only middleware below. Unset for every other
+# deployment (docker-compose, bare python), which keeps serving the
+# dashboard directly exactly as before.
+INGRESS_ONLY = os.environ.get("ECHOMUSE_HOME_ASSISTANT_INGRESS") == "true"
+# Home Assistant Supervisor's ingress reverse proxy always calls in from this
+# fixed address on the internal hassio Docker network.
+INGRESS_GATEWAY_IP = "172.30.32.2"
 # List endpoint, not /releases/latest: device firmware releases (v* tags with
 # a `server` asset) share the repo with controller releases (controller-v*
 # tags, GHCR image only). /releases/latest returns whichever was published
@@ -240,7 +249,7 @@ async def create_app() -> web.Application:
     Routes are registered here. The app is not started — the caller
     creates an AppRunner and TCPSite.
     """
-    app = web.Application(middlewares=[_error_middleware])
+    app = web.Application(middlewares=[_ingress_only_middleware, _error_middleware])
 
     # Static / setup
     app.router.add_get("/",           _serve_spa)
@@ -333,6 +342,20 @@ async def create_runner(devices_ref: dict, shell_pending_ref: dict,
 # ─── Middleware ───────────────────────────────────────────────────────────────
 
 @web.middleware
+async def _ingress_only_middleware(request: web.Request, handler):
+    """
+    As a Home Assistant add-on, the dashboard/API must only be reachable
+    through the authenticated ingress gateway — the add-on has no other
+    auth in front of it on the LAN otherwise. No-op (INGRESS_ONLY unset)
+    for every deployment that isn't the add-on.
+    """
+    if INGRESS_ONLY and request.remote != INGRESS_GATEWAY_IP:
+        log.warning("Rejected non-ingress request from %s", request.remote)
+        raise web.HTTPForbidden(text="Home Assistant Ingress is required")
+    return await handler(request)
+
+
+@web.middleware
 async def _error_middleware(request: web.Request, handler):
     """
     Catch unhandled exceptions and return a consistent error shape.
@@ -353,6 +376,19 @@ async def _error_middleware(request: web.Request, handler):
 
 # ─── Static / setup ───────────────────────────────────────────────────────────
 
+def _with_ingress_base(page: str, request: web.Request) -> str:
+    """
+    Inject a <base href> so the page's relative asset/API paths resolve
+    under Home Assistant's generated ingress path (e.g.
+    /api/hassio_ingress/<token>/) instead of the site root. A no-op string
+    (base_path "/") outside ingress, where the page is already at root.
+    """
+    ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
+    base_path = f"{ingress_path}/" if ingress_path else "/"
+    base_tag = f'<base href="{_html.escape(base_path, quote=True)}">'
+    return page.replace("<head>", f"<head>\n  {base_tag}", 1)
+
+
 async def _serve_spa(request: web.Request) -> web.Response:
     """Serve index.html for all SPA routes."""
     index = STATIC_DIR / "index.html"
@@ -361,7 +397,11 @@ async def _serve_spa(request: web.Request) -> web.Response:
             status=503,
             text="Dashboard not built — static/index.html not found",
         )
-    return web.FileResponse(index)
+    return web.Response(
+        text=_with_ingress_base(index.read_text(encoding="utf-8"), request),
+        content_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 async def _serve_dashboard(request: web.Request) -> web.Response:
@@ -385,22 +425,24 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     dashboard = STATIC_DIR / "dashboard.html"
     if not dashboard.exists():
         return web.Response(status=503, text="dashboard.html not found in static/")
-    html = dashboard.read_text(encoding="utf-8")
+    page = _with_ingress_base(dashboard.read_text(encoding="utf-8"), request)
     bundle = STATIC_DIR / "dashboard.js"
     if bundle.exists():
-        html = html.replace(
-            "/static/dashboard.js",
-            f"/static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+        page = page.replace(
+            "static/dashboard.js",
+            f"static/dashboard.js?v={int(bundle.stat().st_mtime)}",
         )
     return web.Response(
-        text=html,
+        text=page,
         content_type="text/html",
         headers={"Cache-Control": "no-cache"},
     )
 
 
 async def _redirect_root(request: web.Request) -> web.Response:
-    raise web.HTTPFound("/")
+    # A relative Location preserves Home Assistant's generated ingress path
+    # instead of bouncing the browser to the site root.
+    raise web.HTTPFound(".")
 
 
 async def _get_setup_state(request: web.Request) -> web.Response:

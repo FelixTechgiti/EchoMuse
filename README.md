@@ -117,7 +117,17 @@ curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller
 docker compose -f docker-compose.deploy.yml up -d
 ```
 
-Dashboard at `http://<SERVER_IP>:8768`. From there the **provisioning
+### Or, as a Home Assistant add-on
+
+If Home Assistant runs the Supervisor (HA OS, or Supervised), install this
+repository as an add-on repository and add "EchoMuse" from the Add-on Store
+— no separate Docker host needed.
+
+[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fwilbowes%2FEchoMuse)
+
+Open the dashboard — `http://<SERVER_IP>:8768` for the Docker install, or the
+add-on's **Open Web UI** button / sidebar panel for the add-on install. From
+there the **provisioning
 wizard** takes a stock Dot the rest of the way over USB: root, debloat,
 WiFi, firmware, TLS credentials and the on-device wake word assets. It ends
 by rebooting the Dot, which then finds the controller itself and appears as
