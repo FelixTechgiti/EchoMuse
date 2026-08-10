@@ -1,0 +1,79 @@
+version: 2
+
+# Four ecosystems, because the controller image is assembled from all four and
+# a gap in any one of them is invisible: Python wheels, the Debian base image,
+# the device's Go modules, and the actions this repo's own workflows run.
+#
+# Everything is GROUPED into one PR per ecosystem per week. Ungrouped, this
+# config produces a dozen individual PRs against a repo maintained by one
+# person, and a review queue nobody can clear is the same as no scanning at
+# all — worse, because it looks like coverage.
+#
+# Note what Dependabot structurally cannot see here, so nobody reads a green
+# board as "everything is covered":
+#   - openwakeword is installed in the Dockerfile with --no-deps, not from
+#     requirements.txt, so its pin is invisible to the pip ecosystem below.
+#   - SpeexDSP is vendored C source in device/internal/aec/ with no package
+#     metadata at all.
+#   - ONNX Runtime is dlopen'd on the device, pinned by AAR sha256 in the
+#     asset path rather than by any manifest.
+# Those three are tracked by reading the pins, which is a human job.
+
+updates:
+  # ── Controller Python dependencies ──────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /controller
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    # Major bumps of these two are not routine maintenance and should not
+    # arrive as a weekly PR: numpy majors have broken openwakeword's array
+    # handling before, and an onnxruntime major changes inference behaviour
+    # on every device at once. Both want a deliberate upgrade with a wake
+    # word test behind it.
+    ignore:
+      - dependency-name: numpy
+        update-types: ["version-update:semver-major"]
+      - dependency-name: onnxruntime
+        update-types: ["version-update:semver-major"]
+
+  # ── Controller base image ───────────────────────────────────────────────
+  # python:3.12-slim is where ffmpeg, curl and the whole Debian layer come
+  # from — the majority of what any image scan reports.
+  - package-ecosystem: docker
+    directory: /controller
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+
+  # ── Device Go modules ───────────────────────────────────────────────────
+  # The GoTinyAlsa replace directive points at a submodule path, which
+  # Dependabot skips; that fork is tracked by hand because it carries a fix
+  # not yet merged upstream (see CLAUDE.md).
+  - package-ecosystem: gomod
+    directory: /device
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  # ── GitHub Actions ──────────────────────────────────────────────────────
+  # Workflow actions run with repository credentials, so a stale pinned
+  # action is a supply chain exposure in its own right, not just tidiness.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]

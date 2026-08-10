@@ -79,3 +79,50 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── Supply chain ────────────────────────────────────────────────────
+      #
+      # The image is what users actually run, and it is the only place the
+      # full dependency set exists: requirements.txt leaves four packages
+      # unpinned, openwakeword is installed with --no-deps, and the Debian
+      # base contributes ffmpeg and curl. So the SBOM is generated from the
+      # built image, never from requirements.txt.
+      #
+      # amd64 only. The two architectures install the same wheels from the
+      # same base image, and scanning the arm64 variant under QEMU costs
+      # runner minutes to restate the answer.
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.version }}
+          format: cyclonedx
+          output: sbom-controller-${{ steps.version.outputs.version }}.cdx.json
+
+      # Attached to the workflow run rather than to a Release, because
+      # controller tags deliberately create no GitHub Release — the OTA
+      # poller reads the releases list looking for device firmware, and a
+      # controller release appearing there would be offered to devices.
+      # Retention is long: the useful question is "what was in the version I
+      # am running", which is asked months after the release, not days.
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-controller-${{ steps.version.outputs.version }}
+          path: sbom-controller-${{ steps.version.outputs.version }}.cdx.json
+          retention-days: 365
+
+      # Report-only, and it must stay that way in THIS workflow: the image
+      # has already been pushed by the time this runs, so failing here would
+      # mark a release red without unpublishing anything — the worst of both
+      # (a red tick and a live image). Gating belongs before the push or in
+      # the scheduled scan, not here.
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.version }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
