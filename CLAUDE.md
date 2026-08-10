@@ -721,6 +721,23 @@ information, and the mismatch must be caught while the device is still
 running happily on its current slot. A failed verification must never reach
 the `ln -sf`; `tests/test_deploy.py` pins that ordering.
 
+**A transfer must never delete its destination before sending.** For firmware
+the destination IS the rollback slot, so an opening `rm -f {dest}` meant every
+failed OTA left a good active slot beside an empty partner — and a later
+crash-loop then flips the symlink onto nothing. It also contradicted the
+message the user was shown, which promised the slot was left untouched. The
+`.part` discipline protects `dest` from a *corrupt* transfer; it cannot
+protect it from being removed before the transfer starts (#121).
+
+**A failed transfer names the STAGE it reached** (`TransferResult`, truthy so
+existing call sites are unchanged). One message covered five outcomes, and the
+two furthest apart — "arrived corrupt" and "no byte was ever sent" — read
+identically; #121 was the second reported in the language of the first, three
+Dots failing 15s after starting, which is far too fast to have attempted 10MB.
+Note a device shell that answers nothing must report as a **link** problem,
+never as "no base64 decoder": one is worth retrying, the other is a property
+of the device that retrying cannot change.
+
 Three things not to undo:
 - Verification rides the **same shell session** as the transfer, and the md5
   tool is detected alongside the base64 decoder in the round trip that was
