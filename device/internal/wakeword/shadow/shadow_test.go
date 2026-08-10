@@ -158,7 +158,7 @@ func TestCrossingFiresOncePerUtterance(t *testing.T) {
 		crosses []float32
 	)
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(score float32, at time.Time) {
+	s := NewScorer(inf, 0.5, func(score, _ float32, at time.Time) {
 		mu.Lock()
 		crosses = append(crosses, score)
 		mu.Unlock()
@@ -200,7 +200,7 @@ func TestBelowThresholdDoesNotCross(t *testing.T) {
 	var fired int
 	var mu sync.Mutex
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -323,7 +323,7 @@ func TestBargeThresholdAppliesOnlyWhileSpeaking(t *testing.T) {
 	var crosses int
 
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
 		mu.Lock()
 		crosses++
 		mu.Unlock()
@@ -371,7 +371,7 @@ func TestBargeThresholdIgnoredWhenUnset(t *testing.T) {
 	inf := &fakeInferer{}
 	var fired int
 	var mu sync.Mutex
-	s := NewScorer(inf, 0.5, func(float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -395,7 +395,7 @@ func TestBargeThresholdNeverRaisesTheBar(t *testing.T) {
 	inf := &fakeInferer{}
 	var fired int
 	var mu sync.Mutex
-	s := NewScorer(inf, 0.3, func(float32, time.Time) {
+	s := NewScorer(inf, 0.3, func(float32, float32, time.Time) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -461,5 +461,64 @@ func TestTheProducerGapIsMeasuredForBothEntryPoints(t *testing.T) {
 
 	if got := s.maxGapMs.Load(); got < 20 {
 		t.Fatalf("gap across Push -> PushBytes should be ~25ms, got %dms", got)
+	}
+}
+
+// TestCrossingReportsTheThresholdItCleared pins the value the controller
+// records against the turn. During playback the bar drops to the barge-in
+// threshold, and reporting the nominal one instead is what once produced rows
+// claiming a wake had fired below its own threshold — self-contradictory data
+// that made every barge-in look like an on-device miss.
+//
+// Reported from the scorer rather than re-derived by the callback because only
+// the scorer knows: the bar depends on whether the speaker was streaming at the
+// instant the frame was SCORED, and playback can end before the callback runs.
+func TestCrossingReportsTheThresholdItCleared(t *testing.T) {
+	var speaking bool
+	var mu sync.Mutex
+	var got []float32
+
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(_, threshold float32, _ time.Time) {
+		mu.Lock()
+		got = append(got, threshold)
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetBargeThreshold(0.10, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return speaking
+	})
+
+	// Idle: a strong score clears the normal bar, and must say so.
+	inf.set(0.9, 0)
+	pushAll(t, s, wakeword.FeatWindow+2)
+	waitFor(t, "an idle crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 1
+	})
+	mu.Lock()
+	if got[0] != 0.5 {
+		t.Errorf("idle crossing reported threshold %v, want 0.5", got[0])
+	}
+	// Speaking: a weak score clears only the barge bar, and must report THAT.
+	speaking = true
+	mu.Unlock()
+	inf.set(0.2, 0)
+	// Past the refractory period, or the second crossing is suppressed.
+	time.Sleep(DefaultRefractory + 50*time.Millisecond)
+	pushAll(t, s, 3)
+	waitFor(t, "a barge crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if got[1] != 0.10 {
+		t.Errorf("barge crossing reported threshold %v, want 0.10 — the bar it "+
+			"actually cleared, not the nominal one", got[1])
 	}
 }

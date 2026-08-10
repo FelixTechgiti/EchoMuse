@@ -87,6 +87,26 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the on-device toggle on the capability"
 
 
+def test_triggering_is_a_separate_capability_from_scoring():
+    """
+    Shadow shipped first, so there is firmware in the field that scores the
+    wake word and reports it while having no code to act on it. Gating "on"
+    behind oww_shadow alone would offer those devices a mode that leaves them
+    scoring perfectly and never answering — the "I enabled it and nothing
+    happened" the capability rule exists to prevent.
+    """
+    caps = device_capabilities()
+    assert "oww_trigger" in caps, "firmware no longer announces oww_trigger"
+    assert "oww_shadow" in caps, \
+        "oww_trigger must not replace oww_shadow — shadow is still a mode"
+    assert "oww_trigger_capable" in CONTROLLER.read_text(), \
+        "em_controller must expose the trigger capability as a property"
+    assert "owwTriggerCapable" in API.read_text(), \
+        "/api/devices must surface the trigger capability"
+    assert "owwTriggerCapable" in (ROOT / "controller" / "static" / "dashboard.jsx").read_text(), \
+        "the dashboard must gate the 'On device' option on the capability"
+
+
 def test_capabilities_reported_before_the_server_exists_are_not_lost():
     """
     A device registers BEFORE its ESPHome server is created — the listener

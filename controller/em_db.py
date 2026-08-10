@@ -653,6 +653,29 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '16' WHERE key = 'schema_version';
     """,
+
+    # ── v17 — the comparison, from the other side ───────────────────────────
+    #
+    # With owwOnDevice="on" the DEVICE triggers the turn, so dev_wake_score is
+    # no longer the side that can be missing — this controller's is. These
+    # record whether it agreed, matched the same way and against the same
+    # clock, so the agreement figure that justified shipping on-device wake
+    # keeps being answerable once the roles are swapped.
+    #
+    # Without them, turning a device "on" would silently end the measurement:
+    # every turn would show a device score and nothing to compare it against,
+    # which reads as perfect agreement rather than as no data.
+    #
+    # NULL means the controller did not detect this utterance within the match
+    # window — a controller miss, which is the interesting direction and the
+    # one that argues on-device wake is worth having. NULL on a
+    # controller-triggered turn just means the column does not apply.
+    """
+    ALTER TABLE turns ADD COLUMN ctrl_wake_score REAL;
+    ALTER TABLE turns ADD COLUMN ctrl_wake_delta_ms INTEGER;
+
+    UPDATE system_config SET value = '17' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1530,6 +1553,10 @@ _TURN_COLUMNS = {
     # v15 — the threshold the device was scoring against, so a non-crossing can
     # be judged rather than assumed to be a miss.
     "dev_threshold":     "dev_threshold",
+    # v17 — the inverse comparison, populated only on device-triggered turns:
+    # did THIS controller detect the same utterance, and how far apart.
+    "ctrl_wake_score":    "ctrl_wake_score",
+    "ctrl_wake_delta_ms": "ctrl_wake_delta_ms",
     # v12 — filename of the saved utterance WAV, written by set_turn_audio
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.

@@ -739,8 +739,16 @@ func capabilities() []string {
 	// with voice at the ALSA write, so the controller can duck instead of
 	// pausing. Without it the controller must keep the pause/resume path —
 	// a device that cannot mix would simply never play the 0x04 stream.
+	//
+	// "oww_trigger": this firmware can act on its own wake detection, not
+	// just report it. It is separate from "oww_shadow" on purpose — shadow
+	// shipped first and there are devices in the field announcing it that
+	// cannot trigger, so offering them owwOnDevice="on" would produce a
+	// device that scores, stays silent, and looks broken. Announcing a
+	// capability the firmware has, rather than inferring one from a version
+	// string, is the rule the whole registration follows.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "button_hold", "audio_mix"}
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -871,6 +879,30 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 		"type":  "oww_shadow_cross",
 		"score": score,
 		"ageMs": ageMs,
+	})
+}
+
+// SendOwwWake asks the controller to start a voice turn, because on-device
+// scoring crossed the wake threshold and owwOnDevice is "on".
+//
+// The difference from SendOwwShadowCross is only what the controller does with
+// it, but the difference matters enough to be its own message type: a crossing
+// is a measurement and may be dropped freely, while this one starts a turn and
+// a receiver must be able to tell the two apart without consulting the config
+// it thinks the device has. The threshold rides along because the controller
+// records the bar a wake actually cleared, and during barge-in that is the
+// lower one.
+//
+// ageMs is how long ago the crossing happened on the device's monotonic clock,
+// for the same reason as shadow crossings: an Echo's wall clock is unreliable
+// before NTP. The controller needs it to compare claims across devices without
+// network delay deciding which room answers.
+func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":      "oww_wake",
+		"score":     score,
+		"threshold": threshold,
+		"ageMs":     ageMs,
 	})
 }
 

@@ -13,8 +13,12 @@
 // the microphone tells you nothing and costs a working device.
 //
 // Scoring is otherwise identical to the controller's: the same models, the same
-// streaming buffers, the same threshold. Nothing here triggers a turn, touches
-// the LEDs, or sends audio — it counts, and it reports crossings.
+// streaming buffers, the same threshold. Nothing HERE triggers a turn, touches
+// the LEDs, or sends audio — it counts, and it reports crossings. Whether a
+// crossing goes on to start a turn is owwOnDevice's business and is decided by
+// the callback, which is why this package kept its name and its rule after
+// on-device triggering shipped: the scorer is the same instrument either way,
+// and it must stay unable to damage the audio path in both.
 package shadow
 
 import (
@@ -97,7 +101,7 @@ type Scorer struct {
 	bargeThreshold float32
 	speakerActive  func() bool
 	refract        time.Duration
-	onCross        func(score float32, at time.Time)
+	onCross        func(score, threshold float32, at time.Time)
 
 	ch   chan []int16
 	done chan struct{}
@@ -135,7 +139,13 @@ type Scorer struct {
 // NewScorer starts a scorer. onCross is called from the scorer goroutine when
 // the score reaches threshold, so it must not block — the controller-bound
 // send it wraps is buffered for that reason.
-func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score float32, at time.Time)) *Scorer {
+//
+// It receives the threshold actually crossed, which during playback is the
+// lower barge-in bar. Reported from here rather than re-derived by the caller
+// because this is the only place that knows: the bar depends on whether the
+// speaker was streaming at the instant the frame was SCORED, and by the time a
+// callback asks, playback may have ended.
+func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, threshold float32, at time.Time)) *Scorer {
 	s := &Scorer{
 		det:       wakeword.New(inf),
 		threshold: threshold,
@@ -342,7 +352,7 @@ func (s *Scorer) run() {
 		s.mu.Unlock()
 
 		if crossed && s.onCross != nil {
-			s.onCross(score, now)
+			s.onCross(score, threshold, now)
 		}
 	}
 }

@@ -291,7 +291,7 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
-		applyShadowConfig(dataClient, controlClient, pcmSpeaker)
+		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -879,12 +879,12 @@ var shadowState struct {
 // rather than on every config push, and the device carries on with
 // controller-side wake word exactly as before.
 func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
-	spk *speaker.PcmSpeaker) {
+	spk *speaker.PcmSpeaker, srv *server.Server) {
 	snap := config.Get().Snapshot()
 	mode, model := snap.OwwOnDevice, snap.OwwModel
 	threshold := float32(snap.OwwThreshold)
 
-	if mode != config.OnDeviceShadow {
+	if mode == config.OnDeviceOff {
 		if dc.ShadowScorer() != nil {
 			dc.SetShadowScorer(nil)
 			log.Printf("[shadow] on-device wake word disabled")
@@ -893,7 +893,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		return
 	}
 
-	// Already running for this model: thresholds can change live.
+	// Already running for this model: thresholds and the mode change live.
 	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
 		sc.SetThreshold(threshold)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
@@ -901,11 +901,19 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		} else {
 			sc.SetBargeThreshold(0, nil)
 		}
+		if shadowState.mode != mode {
+			shadowState.mode = mode
+			log.Printf("[shadow] mode now %q (%s)", mode, actsOnCrossings(mode))
+		}
 		return
 	}
 
-	sc, err := shadow.Open(model, threshold, func(score float32, at time.Time) {
-		cc.SendOwwShadowCross(score, time.Since(at).Milliseconds())
+	// The mode is read at CROSSING time, not baked in here, so flipping
+	// between "shadow" and "on" costs nothing: the scorer is identical in
+	// both and rebuilding it would reload a 12MB runtime and open a fresh
+	// ~1.28s not-ready window every time someone changed their mind.
+	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
+		onWakeCrossing(cc, srv, score, crossed, at)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -924,8 +932,51 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	}
 	dc.SetShadowScorer(sc)
 	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
-	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — reporting only, not triggering",
-		sc.Info(), threshold)
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — %s",
+		sc.Info(), threshold, actsOnCrossings(mode))
+}
+
+// actsOnCrossings describes what a crossing will DO, for the log line. The
+// distinction is the whole difference between the two live modes and is not
+// otherwise visible on the device.
+func actsOnCrossings(mode string) string {
+	if mode == config.OnDeviceOn {
+		return "triggering turns"
+	}
+	return "reporting only, not triggering"
+}
+
+// onWakeCrossing is what a threshold crossing does, decided fresh each time
+// from the current config rather than at scorer-construction time.
+//
+// Mute is checked HERE, on the device, and that placement is deliberate. Mute
+// is device-sovereign: the device already refuses every mic_start while muted
+// and the ADC is muted in hardware, so a wake sent while muted could at worst
+// start a turn that captures silence. But "at worst" still means the ring
+// lights up and HA runs a pipeline because a muted device thought it heard
+// something, and there is nothing on the device connecting the two for the
+// person watching it happen. The controller-side check stays as well — this is
+// the same belt-and-braces as the button path, not a replacement for it.
+// crossed is the bar this score actually cleared — the lower barge-in one
+// during playback. The controller records it against the turn, and recording
+// the nominal threshold instead is what once made every barge-in look like a
+// wake that had fired below its own bar.
+func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
+	score, crossed float32, at time.Time) {
+	ageMs := time.Since(at).Milliseconds()
+	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
+		cc.SendOwwShadowCross(score, ageMs)
+		return
+	}
+	if srv != nil && srv.IsMuted() {
+		// Still reported, because a crossing while muted is real data about
+		// the detector and shadow mode would have recorded it. It just does
+		// not become a turn.
+		cc.SendOwwShadowCross(score, ageMs)
+		log.Printf("[shadow] wake %.3f suppressed — muted", score)
+		return
+	}
+	cc.SendOwwWake(score, crossed, ageMs)
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {
