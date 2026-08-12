@@ -92,7 +92,7 @@ jobs:
       # same base image, and scanning the arm64 variant under QEMU costs
       # runner minutes to restate the answer.
       - name: Generate SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: image
           image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.version }}
@@ -118,7 +118,7 @@ jobs:
       # (a red tick and a live image). Gating belongs before the push or in
       # the scheduled scan, not here.
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: image
           image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.version }}
