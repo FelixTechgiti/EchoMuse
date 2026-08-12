@@ -678,10 +678,16 @@ Two experiments left, in order:
 
 1. **Diff a stock unit's state against ours, plug in and audio playing** —
    `tinymix`, `/sys/kernel/debug/mtksocaudio`, `mtksocanaaudio`,
-   `regmap/2-0018`, `dmesg | grep accdet`, and `h2w` (if stock reads `2`
-   where we read `1`, detection itself differs between the stacks). Same
-   driver, same hardware, different userspace. A control the HAL sets on
-   insert and we leave alone would be the fix.
+   `regmap/2-0018` and `dmesg | grep accdet`. Same driver, same hardware,
+   different userspace. A control the HAL sets on insert and we leave
+   alone would be the fix.
+
+   **`h2w` is NOT the difference** — a stock unit reads `1`
+   (`Headset_plug_in`) for the same cable that reads `1` on ours. The
+   kernel sees identical state on both stacks, so detection is not where
+   this diverges; the divergence is entirely in what userspace does in
+   response. That makes the fix more likely to be an action the HAL takes
+   on insert than a fact it knows.
 2. **`/proc/interrupts` sampled across several cycles** with a plug in. A
    metronome has a source; an IRQ that ticks only on the beat names it.
 
