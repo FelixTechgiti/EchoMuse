@@ -656,21 +656,33 @@ Two traps for whoever picks this up:
   channel is 16 batches (2.56s) deep, so a stall of that goroutine looks
   the same. The growing clock deficit does show audio is genuinely lost.
 
-Next step is **not** more register diffing. Three experiments, in order of
-what they can settle:
+**ANSWERED 2026-08-12: the hardware is fine and this is ours.** The same
+external speaker and cable, plugged into a **stock unlocked Dot still
+running Alexa**, works correctly. Two EchoMuse devices fail (Office, and
+#141's reporter on their own hardware); one stock device works. The common
+factor is our software.
 
-1. **A stock Dot with Alexa still on it.** On stock, Amazon's audio HAL
-   owns the codec and coordinates with accdet on jack transitions; we
-   `stop media`, take `pcm23p` and drive the codec ourselves, so accdet
-   fires and the HAL is not there to respond. A retry that never completes
-   would look exactly like a 102.3s metronome. If a stock Dot plays out
-   the jack cleanly for 20 minutes, the hardware is fine and this is ours.
-   Reading `dmesg | grep accdet` on a stock unit under load is the
-   gold-standard comparison — same driver, same hardware, different
-   userspace.
-2. **The same headphones in a second EchoMuse Dot** — separates one worn
-   connector from the design.
-3. **`/proc/interrupts` sampled across several cycles** with a plug in. A
+That also retires the worn-connector theory, which never had support —
+#141 already meant a single bad connector would require two independent
+units to fail identically. Do not spend time on a second-EchoMuse-device
+comparison; it can only restate what #141 already says.
+
+The live hypothesis is therefore the HAL: on stock, Amazon's audio HAL and
+mediaserver own the codec and coordinate with accdet on jack transitions.
+We `stop media`, take `pcm23p` and drive the codec ourselves, so accdet
+fires and the thing meant to respond is not there — and a retry that never
+completes looks exactly like a 102.3s metronome. Note `stop media` does
+NOT stick (mediaserver restarts); what we hold is the PCM.
+
+Two experiments left, in order:
+
+1. **Diff a stock unit's state against ours, plug in and audio playing** —
+   `tinymix`, `/sys/kernel/debug/mtksocaudio`, `mtksocanaaudio`,
+   `regmap/2-0018`, `dmesg | grep accdet`, and `h2w` (if stock reads `2`
+   where we read `1`, detection itself differs between the stacks). Same
+   driver, same hardware, different userspace. A control the HAL sets on
+   insert and we leave alone would be the fix.
+2. **`/proc/interrupts` sampled across several cycles** with a plug in. A
    metronome has a source; an IRQ that ticks only on the beat names it.
 
 **Stereo is not supported and the device end is not the blocker.** ALSA is
