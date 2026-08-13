@@ -96,6 +96,65 @@ jobs:
         working-directory: device
         run: go test ./internal/... ./pkg/...
 
+  python-deps-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      # This is the FAST check, not the authoritative one. requirements.txt
+      # leaves scipy/tqdm/scikit-learn/requests unpinned and installs
+      # openwakeword separately with --no-deps, so what a user actually runs
+      # is decided at image build time, not here. The published image is the
+      # source of truth and is scanned in security-scan.yml; this job exists
+      # to fail on a PR that adds a known-vulnerable pin, minutes rather than
+      # a release later.
+      #
+      # Report-only for now, deliberately. A dependency audit that goes red
+      # on an advisory with no fix available teaches people to ignore a red
+      # X, which costs more than the job earns. Gate it on FIXABLE findings
+      # once a month of real output shows what the steady state looks like.
+      - name: Audit pinned dependencies
+        working-directory: controller
+        run: |
+          pip-audit -r requirements.txt --desc 2>&1 | tee audit.txt || true
+          if grep -qiE "^(Name|found [1-9])" audit.txt; then
+            echo "::warning::pip-audit reported findings — see the log"
+          fi
+
+  device-vulncheck:
+    name: Device Go vulnerability check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: device/go.mod
+          cache-dependency-path: device/go.sum
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # govulncheck reports only vulnerabilities on REACHABLE call paths, so
+      # it is low-noise enough to read every time — unlike a plain dependency
+      # diff, most of which never executes.
+      #
+      # Two blind spots worth stating rather than discovering later: the
+      # vendored SpeexDSP C in internal/aec/ has no package metadata and is
+      # invisible to every scanner we could run, and ONNX Runtime is dlopen'd
+      # at runtime rather than linked, so it is not in this module graph at
+      # all — its version is pinned by AAR sha256 in the asset path instead.
+      #
+      # Same package scope as go vet: cmd/ carries //go:build server and
+      # fails package setup on a host platform.
+      - name: Run govulncheck
+        working-directory: device
+        run: govulncheck ./internal/... ./pkg/... || true
+
   device-vet:
     name: Device go vet
     runs-on: ubuntu-latest

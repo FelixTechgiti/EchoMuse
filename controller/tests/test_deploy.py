@@ -825,6 +825,75 @@ def test_ota_checks_free_space_before_writing_anything():
     )
 
 
+def test_a_transfer_never_deletes_the_destination_before_sending():
+    """
+    For firmware the destination IS the rollback slot, so deleting it up front
+    means a transfer that fails early leaves the device with a good active
+    slot and an empty partner — and a later crash-loop flips the symlink onto
+    nothing. Three Dots hit exactly that in #121, while being told the slot
+    had been left untouched.
+
+    The `.part` discipline only protects `dest` from a CORRUPT transfer. It
+    cannot protect it from being removed before the transfer starts.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _fn_body(src, "_stream_file_to_device")
+    code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
+
+    assert "rm -f {dest}" not in code, (
+        "deleting dest before sending destroys the rollback slot on any "
+        "transfer that fails early"
+    )
+    # The .part cleanup on a bad md5 must survive — that one is load-bearing.
+    assert "rm -f {landing}" in code or "rm -f {landing};" in code, (
+        "a failed verification must still remove the .part"
+    )
+
+
+def test_a_failed_transfer_says_which_stage_it_failed_at():
+    """
+    One message covered five outcomes, and the two furthest apart are "the
+    bytes arrived corrupt" and "no byte was ever sent". #121 was the second
+    reported in the language of the first, and only the controller's own
+    stdout could tell them apart — which is not something a user can produce
+    mid-update.
+
+    A device shell that answers nothing must NOT read as "no base64 decoder":
+    one is a link problem worth retrying, the other is a property of the
+    device that retrying cannot change.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+
+    assert "class TransferResult" in src and "__bool__" in src, (
+        "the result must stay truthy so `if not await ...` call sites keep "
+        "their meaning"
+    )
+
+    fn = _fn_body(src, "_stream_file_to_device")
+    for stage in ("shell", "decoder", "send", "verify", "corrupt"):
+        assert f'_transfer_failed("{stage}"' in fn, (
+            f"the {stage} failure must be distinguishable from the others"
+        )
+
+    assert "if DETECT_MARKER not in detect_buf" in fn, (
+        "a silent shell must report as a link problem, not a missing decoder"
+    )
+
+    # The OTA message must carry the stage through rather than re-flattening it.
+    ota = src[src.index("_stream_binary_to_slot(live, binary"):]
+    ota = ota[:ota.index("_monitor_reconnect")]
+    assert "{ok}" in ota, (
+        "the update failure message must name the stage the transfer reached"
+    )
+    # Comments stripped first, for the reason the free-space test gives: the
+    # old wording is worth naming in a comment, and a test that reads its own
+    # explanation as the bug can only be silenced by deleting the explanation.
+    ota_code = "\n".join(l for l in ota.splitlines() if not l.lstrip().startswith("#"))
+    assert "failed or did not verify" not in ota_code, (
+        "the flattened message is what made #121 unreadable"
+    )
+
+
 def test_tested_firmware_build_matches_the_docs():
     """
     The wizard warns when a device is on a FireOS build other than the one

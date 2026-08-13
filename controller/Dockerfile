@@ -12,10 +12,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # GPU=1 swaps the CPU onnxruntime from requirements.txt for the CUDA build
 # (both provide the same `onnxruntime` import, so they can't coexist).
 # Local docker-compose.yml sets it; the published GHCR image is CPU-only.
+#
+# The two packages DO NOT share a version line, so this pin cannot be kept
+# in lockstep with requirements.txt by matching the string. onnxruntime
+# publishes 1.20.1 and no 1.20.2; onnxruntime-gpu publishes 1.20.0 and
+# 1.20.2 and no longer publishes 1.20.1 — it was there when this was
+# written and has since gone. The failure only ever surfaces on a fresh
+# local GPU build (the published image is CPU-only and never runs this
+# line), which is why it sat here unnoticed until 2026-08-10.
 ARG GPU=0
 RUN if [ "$GPU" = "1" ]; then \
       pip uninstall -y onnxruntime && \
-      pip install --no-cache-dir onnxruntime-gpu==1.20.1; \
+      pip install --no-cache-dir onnxruntime-gpu==1.20.2; \
     fi
 # Install openwakeword without deps — tflite-runtime has no Python 3.12
 # x86_64 build; onnxruntime handles inference instead
@@ -69,6 +77,7 @@ COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
+COPY em_turnclock.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
@@ -103,7 +112,7 @@ RUN mkdir -p /app/models/oww_runtime && \
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
-RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm /tmp/esbuild.tar.gz
+RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
 # Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment

@@ -342,6 +342,20 @@ class Device:
         # consumed once by the turn record it belongs to.
         self.last_wake_mono = None  # float | None
 
+        # owwOnDevice, normalised. "on" hands the wake DECISION to the device:
+        # its crossing lands in pending_wake and the wake listener acts on it
+        # instead of on its own score. Default off, and set from config on
+        # every push, so a device whose config has never arrived behaves
+        # exactly as it always did.
+        self.oww_on_device: str = em_shadow.MODE_OFF
+        self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
+        # This controller's own crossings while the DEVICE is triggering —
+        # the comparison from the other side. Kept in "on" mode because the
+        # question that justified on-device wake ("do the two agree?") is
+        # still worth answering once the roles are swapped, and this is the
+        # only place a controller miss can be seen at all.
+        self.ctrl_shadow: em_shadow.ShadowTracker = em_shadow.ShadowTracker()
+
         # Per-room noise floor estimate (normalized RMS, 0..1), tracked from
         # the continuous wake stream in wake_word_listener. Measurement only —
         # never applied to the audio (see 2026-07-06 architecture discussion:
@@ -588,6 +602,21 @@ class Device:
         drives whether a missing per-turn score is a real miss.
         """
         return "oww_shadow" in (self.capabilities or [])
+
+    @property
+    def oww_trigger_capable(self) -> bool:
+        """
+        Whether this firmware can ACT on its own wake detection.
+
+        Separate from oww_shadow_capable because shadow shipped first: there
+        are devices in the field that score the wake word and report it, and
+        cannot start a turn from it. Offering those owwOnDevice="on" produces a
+        device that scores perfectly, never answers, and looks broken — the
+        exact "I enabled it and nothing happened" the capability rule exists to
+        prevent, so "on" is gated on this and shown disabled with the reason
+        otherwise.
+        """
+        return "oww_trigger" in (self.capabilities or [])
 
     async def send_led_anim(self, anim: dict):
         """
@@ -1841,15 +1870,60 @@ async def wake_word_listener(device: Device):
                             ),
                         )
 
-                if score >= eff_threshold:
+                # Who gets to start a turn. In "on" mode the device decides and
+                # this controller's own crossing is demoted to a measurement —
+                # see em_shadow.decide_wake_source for why it keeps scoring at
+                # all. In every other mode this is exactly the old condition.
+                ctrl_hit = score >= eff_threshold
+                dev_wake, dev_age = device.pending_wake.take()
+                if dev_wake is None and dev_age is not None:
+                    # Expired before anything could act on it. Worth a warning
+                    # rather than a debug line: it is a wake the user spoke and
+                    # did not get, and the age is the only evidence of why.
+                    log.warning(
+                        f"[{device.device_id}] on-device wake dropped — "
+                        f"{dev_age:.1f}s old (limit "
+                        f"{em_shadow.MAX_PENDING_WAKE_S:.1f}s)"
+                    )
+                source = em_shadow.decide_wake_source(
+                    device.oww_on_device, dev_wake, ctrl_hit
+                )
+                if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
+                    # "on" mode, and this controller heard it too. Recorded for
+                    # the comparison and nothing else — the device is driving.
+                    #
+                    # Recorded whoever WON, which is the whole point. Gating
+                    # this on source == "none" lost the crossing whenever the
+                    # device's wake and ours landed on the same iteration — and
+                    # the turn then drains mic_queue, so there is no second
+                    # chance — writing a NULL that reads as "the controller
+                    # missed it" when the controller had in fact scored it
+                    # identically. Two of the first three trial turns agreed to
+                    # four decimal places and the third recorded a miss for
+                    # exactly this reason (2026-08-10). A comparison that is
+                    # wrong only in the direction that flatters the feature is
+                    # the worst kind.
+                    device.ctrl_shadow.record_cross(score, 0)
+                    device.ctrl_shadow.active = True
+
+                if source != "none":
+                    if source == "device":
+                        score      = dev_wake["score"]
+                        # The bar the DEVICE cleared, which during playback is
+                        # the lower barge-in one. Falls back to ours when the
+                        # device did not report one, rather than recording a
+                        # threshold the wake was never judged against.
+                        if dev_wake["threshold"] is not None:
+                            eff_threshold = dev_wake["threshold"]
                     log.info(
                         f"[{device.device_id}] Wake word detected "
-                        f"(score={score:.3f}, threshold={eff_threshold:.3f}, "
+                        f"(source={source}, score={score:.3f}, "
+                        f"threshold={eff_threshold:.3f}, "
                         f"rms={rms:.4f}, floor={device.noise_floor:.4f})"
                     )
                     db.log_device(
                         device.device_id, "info", "device",
-                        f"Wake word detected (score={score:.3f})"
+                        f"Wake word detected (score={score:.3f}, {source})"
                     )
                     if not device.voice_lock.locked():
                         # P0-1: do NOT send mic_stop/mic_start_turn.
@@ -1878,7 +1952,16 @@ async def wake_word_listener(device: Device):
                         # event loop's clock) — reaching for time.monotonic()
                         # here raised NameError on the first wake detection and
                         # killed the listener for the rest of the process.
-                        device.last_wake_mono = em_shadow.now()
+                        #
+                        # For a device-triggered wake this is the CROSSING
+                        # instant, not now: the device reported how long ago it
+                        # fired, and using arrival time instead would fold the
+                        # network hop into every comparison and every
+                        # arbitration decision — the one thing this fleet's
+                        # 1.1-2.6s RTT excursions make certain to matter.
+                        device.last_wake_mono = (
+                            dev_wake["at"] if source == "device" else em_shadow.now()
+                        )
                         device.last_wake = {
                             "model":       model_key,
                             "score":       round(float(score), 4),
@@ -1946,7 +2029,13 @@ async def wake_word_listener(device: Device):
                             )
                             continue
 
-                        await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})", is_wakeword=True)
+                        # "wakeword-dev" rather than a separate field: every
+                        # reader of trigger already matches on the "wakeword"
+                        # prefix (including _persist_turn's shadow block), so
+                        # this distinguishes the two sources in the Activity
+                        # tab and in queries without any of them changing.
+                        label = "wakeword-dev" if source == "device" else "wakeword"
+                        await _run_voice_locked(device, trigger_label=f"{label}({score:.3f})", is_wakeword=True)
                         # Back to ch6 omni for wake listening. Belt-and-braces
                         # for turns that never restarted the stream (no-TTS
                         # outcomes: error, no-speech, cancel) — a lock left
@@ -2287,6 +2376,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             config.get("buttonSingleTapEvent", False)
         )
         device.button_multi_tap_ms = int(config.get("buttonMultiTapMs", 0))
+        # Resolved against the capability — see em_shadow.effective_mode for
+        # why "on" against firmware that cannot trigger must become shadow
+        # rather than being honoured.
+        device.oww_on_device = em_shadow.effective_mode(
+            config.get("owwOnDevice"), device.oww_trigger_capable
+        )
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         device.led_scene     = em_scenes.resolve(config)
@@ -2655,6 +2750,44 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         f"score={msg.get('score')} age={msg.get('ageMs')}ms "
                         f"(shadow — not triggering)"
                     )
+
+                elif msg_type == "oww_wake":
+                    # On-device scoring crossed the bar AND owwOnDevice is
+                    # "on", so the device is asking for a turn rather than
+                    # reporting a measurement. Parked here; the wake listener
+                    # picks it up on its next frame (~80ms) because that is
+                    # where the turn setup lives — capture routing, beam lock
+                    # and arbitration all have to happen together, and doing
+                    # them from the control plane would be a second copy of
+                    # the most delicate sequence in the controller.
+                    #
+                    # Also recorded as a crossing, so a device-triggered turn
+                    # carries the same dev_* comparison fields as a
+                    # controller-triggered one and the Activity tab does not
+                    # have to special-case which side fired.
+                    device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
+                    if device.oww_on_device != em_shadow.MODE_ON:
+                        # Firmware triggering while the controller thinks it
+                        # should not: a config push in flight, or a rollback
+                        # to a mode this device no longer has. Logged rather
+                        # than obeyed — the controller's view of the mode is
+                        # the one the dashboard shows.
+                        log.warning(
+                            f"[{device_id}] oww_wake ignored — mode is "
+                            f"{device.oww_on_device!r}, not 'on'"
+                        )
+                    elif device.pending_wake.offer(
+                        msg.get("score"), msg.get("threshold"), msg.get("ageMs")
+                    ):
+                        log.info(
+                            f"[{device_id}] on-device wake: "
+                            f"score={msg.get('score')} age={msg.get('ageMs')}ms "
+                            f"(device triggered)"
+                        )
+                    else:
+                        log.warning(
+                            f"[{device_id}] malformed oww_wake dropped: {msg!r}"
+                        )
 
                 elif msg_type == "ble_adverts":
                     # BLE proxy data path — batched adverts from the

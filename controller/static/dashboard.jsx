@@ -351,6 +351,38 @@ function Toggle({ label, sub, value, onChange }) {
   );
 }
 
+// A segmented choice, for settings with more than two states. Written as
+// buttons rather than a native <select> so the unavailable options stay
+// VISIBLE and disabled: the capability rule is that a device lacking a feature
+// shows the control with the reason, and a native select would hide the option
+// entirely, which reads as the feature not existing at all.
+function Select({ label, sub, value, options, onChange }) {
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ marginBottom: 7, minWidth: 0 }}>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+        {options.map(o => (
+          <button
+            key={o.value}
+            className={'em-pill em-pill--small' + (o.value === value ? ' em-pill--accent' : '')}
+            disabled={!!o.disabled}
+            style={{ flex: 1, minWidth: 0 }}
+            onClick={() => { if (!o.disabled) onChange(o.value); }}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+      {sub && (
+        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 7 }}>
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── EQ frequency response curve ─────────────────────────────────────────────
 
 function EqCurve({ bands, fs = 22050 }) {
@@ -1751,6 +1783,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 disabled={!isAdmin}
                 sections={sections}
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
+                triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 onScopeChange={(id, local) => {
@@ -4857,9 +4890,17 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
   );
 }
 
+// Mirrors em_shadow.normalise_mode: an unrecognised stored value renders as
+// "Controller" rather than leaving every segment unselected, which would look
+// like a control that had lost its value.
+function onDeviceMode(config) {
+  const v = String(config.owwOnDevice ?? 'off').toLowerCase();
+  return ['off', 'shadow', 'on'].includes(v) ? v : 'off';
+}
+
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
-                            holdCapable = true }) {
+                            holdCapable = true, triggerCapable = true }) {
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5102,23 +5143,39 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={{ marginTop: 16, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — speech-over-TTS scores low, ~0.10 is typical with AEC" value={config.bargeInThreshold ?? 0.10} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
-              {/* owwOnDevice is off|shadow, so a toggle is the honest control
-                  today. A third mode (letting the device trigger turns itself)
-                  would need a select instead — and a rename of this label. */}
-              {/* Offered only when the device says it can do it. Capability,
-                  not firmware version: a toggle that silently does nothing on
-                  older firmware reads as a broken feature. */}
-              <Toggle
-                label="Score on device (shadow)"
-                sub={shadowCapable
-                  ? 'the Echo also runs the wake model itself and reports what it would have heard — compares in Activity; needs the runtime installed, costs ~0.5 of a core'
-                  : 'needs newer firmware on this Echo — it also runs the wake model locally and reports what it would have heard'}
-                value={(config.owwOnDevice ?? 'off') === 'shadow'}
-                onChange={shadowCapable
-                  ? (v => set('owwOnDevice', v ? 'shadow' : 'off'))
-                  : (() => {})}/>
+              {/* Three modes, so a select rather than a toggle. Each option is
+                  offered only when the device says it can do it — capability,
+                  not firmware version, because a control that silently does
+                  nothing reads as a broken feature rather than an unsupported
+                  one. "Trigger" needs oww_trigger on top of oww_shadow: shadow
+                  shipped first and there is firmware in the field that scores
+                  and reports without being able to act on it. */}
+              <Select
+                label="Wake word detection"
+                sub={!shadowCapable
+                  ? 'needs newer firmware on this Echo — the controller listens for now'
+                  : (config.owwOnDevice ?? 'off') === 'on'
+                    ? 'the Echo decides — no network hop before it hears you, and it keeps working through a controller restart. The controller still scores alongside it, so Activity shows whether they agreed'
+                    : (config.owwOnDevice ?? 'off') === 'shadow'
+                      ? 'the Echo scores alongside the controller and reports what it would have heard, without acting on it — compare in Activity before trusting it'
+                      : 'the controller listens; the Echo just streams audio'}
+                value={onDeviceMode(config)}
+                options={[
+                  { value: 'off',    label: 'Controller' },
+                  { value: 'shadow', label: 'Both (compare)', disabled: !shadowCapable },
+                  // Needs the runtime + models installed as well as the
+                  // capability, which the Updates tab does — hence the hint
+                  // rather than a hard block we cannot verify from here.
+                  { value: 'on',     label: 'On device',      disabled: !triggerCapable },
+                ]}
+                onChange={v => set('owwOnDevice', v)}/>
+              {(config.owwOnDevice ?? 'off') !== 'off' && shadowCapable && (
+                <div className="em-label" style={{ marginTop: 6, color: 'var(--muted)' }}>
+                  Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
+                </div>
+              )}
             </div>
           </div>
         </div>

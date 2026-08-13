@@ -60,6 +60,7 @@ import em_pki
 import em_player
 import em_recordings
 import em_scenes
+import em_shadow
 import em_support
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
@@ -850,6 +851,15 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
+    if "owwOnDevice" in effective:
+        # Resolved against the CAPABILITY, not taken at face value: "on"
+        # against firmware that cannot trigger would stop this controller
+        # acting on its own detections while waiting for wakes the device has
+        # no code to send, leaving it deaf. em_shadow.effective_mode degrades
+        # that to shadow.
+        live.oww_on_device = em_shadow.effective_mode(
+            effective["owwOnDevice"], live.oww_trigger_capable
+        )
     if "eqBands" in effective:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
@@ -1482,9 +1492,12 @@ async def _run_update(device_id: str, release: dict,
         # reaches the symlink flip below (#76).
         ok = await _stream_binary_to_slot(live, binary, inactive_slot)
         if not ok:
+            # Name the stage. "failed or did not verify" covered everything
+            # from a shell that never opened to a corrupt payload, and #121
+            # was the former reported in the language of the latter.
             await _update_failed(device_id,
-                                 f"Binary transfer to {inactive_slot} failed "
-                                 f"or did not verify — slot left untouched")
+                                 f"Binary transfer to {inactive_slot} failed: "
+                                 f"{ok} — {inactive_slot} left untouched")
             return
 
         # Brief pause so device can cleanly close the transfer shell before
@@ -1759,7 +1772,7 @@ async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
         await _release_shell_ws(device_id, live)
 
 
-async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
+async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> "TransferResult":
     """
     Transfer a firmware binary to /data/local/bin/{slot}.
 
@@ -1773,9 +1786,61 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
                                         require_verify=True)
 
 
+class TransferResult:
+    """
+    The outcome of a device file transfer, carrying the STAGE it stopped at.
+
+    Truthy on success, so every existing `if not await _stream_file_to_device(
+    ...)` call site keeps working unchanged.
+
+    The stage exists because one message covered five different outcomes, and
+    the two that matter most are at opposite ends: "the bytes arrived corrupt"
+    and "we never opened a shell, so no byte was ever sent". #121 reported the
+    second and read as the first — three Dots failing with `failed or did not
+    verify`, fifteen seconds after starting, which is far too fast to have
+    attempted a 10MB payload. Nothing short of the controller's own stdout
+    could tell them apart, and a user cannot be asked for that mid-update.
+    """
+
+    __slots__ = ("ok", "stage", "detail")
+
+    def __init__(self, ok: bool, stage: str = "ok", detail: str = ""):
+        self.ok     = ok
+        self.stage  = stage
+        self.detail = detail
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def __str__(self) -> str:
+        return self.detail or self.stage
+
+
+# Stage detail text. Phrased for someone reading a device log who is deciding
+# what to try next, so each one says whether any data left the controller —
+# that is the difference between "retry, the link was bad" and "the payload or
+# the device is wrong".
+_TRANSFER_STAGES = {
+    "shell":   "could not open a shell session on the device — no data was sent",
+    "decoder": "no base64 decoder found on the device — no data was sent",
+    "md5tool": "device has no md5 tool, refusing to send unverified",
+    "send":    "timed out part-way through sending",
+    "verify":  "sent, but timed out waiting for md5 verification",
+    "corrupt": "arrived corrupt — md5 did not match what was sent",
+    "error":   "transfer error",
+}
+
+
+def _transfer_failed(stage: str, extra: str = "") -> TransferResult:
+    detail = _TRANSFER_STAGES.get(stage, stage)
+    if extra:
+        detail = f"{detail} ({extra})"
+    return TransferResult(False, stage, detail)
+
+
 async def _stream_file_to_device(live, data: bytes, dest: str,
                                  mode: str = "755",
-                                 require_verify: bool = False) -> bool:
+                                 require_verify: bool = False) -> TransferResult:
     """
     Transfer a file to `dest` on the device via shell heredoc (default mode 755).
 
@@ -1803,11 +1868,23 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
     DETECT_MARKER = "__DETECT_DONE__"
 
     try:
-        ws = await _get_device_shell_ws(live)
+        try:
+            ws = await _get_device_shell_ws(live)
+        except Exception as e:
+            log.error(f"[api] Could not open a shell to {device_id} for "
+                      f"{dest}: {e}")
+            return _transfer_failed("shell", str(e))
 
-        # Remove any previous attempt
-        await ws.send(f"rm -f {dest}\n")
-        await asyncio.sleep(0.2)
+        # `dest` is NOT deleted here, and must not be. This used to open with
+        # `rm -f {dest}` to clear a previous attempt, which for firmware means
+        # deleting /data/local/bin/server_<inactive> — THE ROLLBACK SLOT —
+        # before a single byte of the replacement had been sent. Every failed
+        # OTA therefore left the device with a good active slot and an empty
+        # partner, so a later crash-loop would flip the symlink onto nothing.
+        # It also contradicted the message the user was shown, which promised
+        # the slot was left untouched (#121). Nothing needs the delete: the
+        # heredoc writes with `>`, which truncates, and a verified transfer
+        # arrives by `mv` over whatever was there.
 
         # ── Detect available base64 decoder ──────────────────────────────────
         # Try busybox first (Magisk provides it), then python3/python.
@@ -1848,9 +1925,22 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
                           "'import sys,base64; "
                           "sys.stdout.write(base64.b64decode(sys.stdin.read()))'")
         else:
+            # Two very different things reach here. DETECT_MARKER present means
+            # the device answered and genuinely has no decoder — a property of
+            # that device, which retrying will not change. Absent means the
+            # round trip produced nothing in 15s, i.e. the shell plane is not
+            # carrying output, which is a link problem and IS worth retrying.
+            # Reporting both as "no base64 decoder" sent #121 looking at the
+            # wrong half.
+            if DETECT_MARKER not in detect_buf:
+                log.error(f"[api] Shell produced no output in 15s while probing "
+                          f"{device_id} for a decoder — link problem, not a "
+                          f"missing tool. Output so far: {detect_buf!r}")
+                return _transfer_failed(
+                    "shell", "device shell produced no output within 15s")
             log.error(f"[api] No base64 decoder found on device. "
                       f"Detection output: {detect_buf!r}")
-            return False
+            return _transfer_failed("decoder")
 
         log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
 
@@ -1863,7 +1953,7 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
             if require_verify:
                 log.error(f"[api] No md5 tool on device — refusing to transfer "
                           f"{dest} unverified. Detection output: {detect_buf!r}")
-                return False
+                return _transfer_failed("md5tool")
             log.warning(f"[api] No md5 tool on device — {dest} will be "
                         f"transferred WITHOUT verification")
 
@@ -1912,11 +2002,11 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
 
         if not transferred:
             log.error(f"[api] Transfer to {dest} timed out waiting for TRANSFER_OK")
-            return False
+            return _transfer_failed("send")
 
         if md5_cmd is None:
             log.info(f"[api] Transfer to {dest} confirmed (unverified)")
-            return True
+            return TransferResult(True, "unverified")
 
         # ── Verify, then promote ─────────────────────────────────────────────
         # Same shell session, so this is a round trip on an open socket rather
@@ -1943,23 +2033,24 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
                 if "VERIFY_OK" in verify_buf:
                     log.info(f"[api] Transfer to {dest} confirmed "
                              f"({len(data):,} bytes, md5 {want})")
-                    return True
+                    return TransferResult(True)
                 if "VERIFY_BAD" in verify_buf:
                     got = verify_buf.split("VERIFY_BAD:")[-1].strip().split()
                     log.error(f"[api] Transfer to {dest} CORRUPT — md5 {want} "
                               f"expected, device reported {got[0] if got else '(none)'}. "
                               f"{dest} left untouched.")
-                    return False
+                    return _transfer_failed("corrupt",
+                                            f"device reported {got[0] if got else '(none)'}")
             except asyncio.TimeoutError:
                 continue
 
         log.error(f"[api] Transfer to {dest} timed out waiting for md5 verification "
                   f"— {dest} left untouched")
-        return False
+        return _transfer_failed("verify")
 
     except Exception as e:
         log.error(f"[api] File transfer to {dest} failed: {e}")
-        return False
+        return _transfer_failed("error", str(e))
     finally:
         await _release_shell_ws(device_id, live)
 
@@ -1996,9 +2087,10 @@ async def _sync_start_script(live, device_id: str) -> None:
     await _push_log_event(device_id, "info", "controller",
                           "start_server.sh out of date — syncing canonical version")
     tmp = path + ".new"
-    if not await _stream_file_to_device(live, script, tmp):
+    res = await _stream_file_to_device(live, script, tmp)
+    if not res:
         await _push_log_event(device_id, "warn", "controller",
-                              "start_server.sh sync failed (transfer) — continuing OTA")
+                              f"start_server.sh sync failed: {res} — continuing OTA")
         return
     await asyncio.sleep(1.0)
 
@@ -2079,7 +2171,8 @@ async def _sync_debloat(live, device_id: str) -> None:
             await _push_log_event(device_id, "info", "controller",
                                   "debloat script out of date — syncing canonical version")
             tmp = DEBLOAT_SCRIPT_PATH + ".new"
-            if await _stream_file_to_device(live, script, tmp):
+            pushed = await _stream_file_to_device(live, script, tmp)
+            if pushed:
                 await asyncio.sleep(1.0)
                 res = await _shell_run(live,
                     f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
@@ -2095,7 +2188,7 @@ async def _sync_debloat(live, device_id: str) -> None:
                     f"debloat script sync failed ({res.strip() or 'no output'})")
             else:
                 await _push_log_event(device_id, "warn", "controller",
-                                      "debloat script sync failed (transfer)")
+                                      f"debloat script sync failed: {pushed}")
             await asyncio.sleep(1.0)
 
     # ── half 2: the pm-hide list ─────────────────────────────────────────────
@@ -2108,9 +2201,10 @@ async def _sync_debloat(live, device_id: str) -> None:
     # thirty-third package.
     listing = ("\n".join(pkgs) + "\n").encode()
     remote_list = "/data/local/tmp/em_debloat_pkgs.txt"
-    if not await _stream_file_to_device(live, listing, remote_list, mode="644"):
+    pushed = await _stream_file_to_device(live, listing, remote_list, mode="644")
+    if not pushed:
         await _push_log_event(device_id, "warn", "controller",
-                              "debloat hide-list sync failed (transfer)")
+                              f"debloat hide-list sync failed: {pushed}")
         return
     await asyncio.sleep(1.0)
 
@@ -2590,7 +2684,7 @@ async def _run_secure_link(device_id: str) -> None:
                 live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
         if not ok:
             await _push_log_event(device_id, "error", "controller",
-                                  "Secure link: credential transfer failed")
+                                  f"Secure link: credential transfer failed: {ok}")
             return
 
         await _push_log_event(
@@ -3275,9 +3369,10 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
 
         dest = em_oww_assets.device_path(asset.name)
         part = f"{dest}.part"
-        if not await _stream_file_to_device(live, data, part, mode="644"):
-            await say("error", f"{asset.name} transfer failed")
-            return {"ok": False, "error": f"{asset.name}: transfer failed"}
+        pushed = await _stream_file_to_device(live, data, part, mode="644")
+        if not pushed:
+            await say("error", f"{asset.name} transfer failed: {pushed}")
+            return {"ok": False, "error": f"{asset.name}: {pushed}"}
 
         res = await _shell_run(live, (
             f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
@@ -3958,6 +4053,10 @@ def _merge_device(row) -> dict:
         # scoring: a toggle that silently does nothing on old firmware is worse
         # than no toggle, because it looks like the feature is broken.
         "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
+        # Separate from shadow: firmware in the field scores and reports
+        # without being able to act on it, and offering those "on" produces a
+        # device that never answers.
+        "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,

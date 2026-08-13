@@ -59,14 +59,20 @@ DEFAULT_DEVICE_CONFIG = {
     # internally), so this can be tuned without retuning vadThreshold.
     "micGainDb":        24,
     # AEC (speexdsp, device-side, whole mic path incl. wake stream).
-    # Default OFF — enable per-deployment and check the [aec] att= logs.
+    # Default ON, and coupled to bargeInEnabled below: with barge-in the mic
+    # streams throughout playback, and AEC is the only thing stopping the
+    # device waking on its own TTS. Turning one on without the other is the
+    # self-trigger case the barge threshold reasoning assumes away, so if
+    # this goes back to False, bargeInEnabled must go with it.
+    # ~14dB attenuation per response, held across turns since v2.7.8; check
+    # the [aec] att= logs when tuning.
     # aecDelayMs: 0, measured on hardware 2026-07-08 — the mic side reads
     # 160ms ALSA batches, which eats most of the speaker's write-to-ear
     # latency; the filter tail absorbs the remainder. (The original 250
     # guess made the echo arrive *before* its reference — non-causal, zero
     # cancellation.) aecTailMs is the adaptive filter length (residual
     # delay + room reverb). Device clamps: delay 0–1000, tail 50–500.
-    "aecEnabled":       False,
+    "aecEnabled":       True,
     "aecDelayMs":       0,
     "aecTailMs":        300,
     "startupVolume":    85,
@@ -99,18 +105,43 @@ DEFAULT_DEVICE_CONFIG = {
     # delay is only acceptable once a tap is an event rather than speech.
     # 300ms is a reasonable starting point.
     "buttonMultiTapMs": 0,
-    "owwThreshold":     0.3,
+    # owwThreshold: 0.5 — openwakeword's own recommended default, and what
+    # this fleet independently converged on. It was 0.3, which is measurably
+    # too sensitive: of 519 fleet-hours that recorded a near miss while
+    # running 0.5, 212 peaked at >= 0.3, clustered hard against the ceiling
+    # (0.4992, 0.4987, 0.4971, ...). Every one of those would have fired a
+    # spurious turn on a default install — ring up, HA pipeline run, most
+    # likely ending no_speech. Lower it per device if a custom wake model
+    # trades recall for false positives (see oww_forge/README.md).
+    "owwThreshold":     0.5,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
     # on — with barge-in the mic streams through playback, and AEC is what
-    # stops the device hearing itself. bargeInThreshold is used as-is,
+    # stops the device hearing itself — so aecEnabled above defaults on with
+    # it, and the two move together. bargeInThreshold is used as-is,
     # deliberately BELOW the normal wake threshold: the echo at the mic is
     # ~25dB louder than the person talking over it, so speech-over-TTS wake
     # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
     # self-echo scores only 0.004 (0.055 worst-case unconverged) — there is
     # no self-trigger risk down to ~0.08.
-    "bargeInEnabled":   False,
-    "bargeInThreshold": 0.10,
+    #
+    # That 0.004 is STALE and the margin is wider than it says: v2.7.8 made
+    # the filter hold convergence across turns, so self-echo measures
+    # 0.002–0.003. 0.10 sat awkwardly close to real speech-over-TTS scores,
+    # which is the wrong way to be wrong — barge-in that never fires is
+    # undiagnosable from the outside ("it just ignores me"), while barge-in
+    # that fires too eagerly is self-evident and adjustable. 0.05 is the
+    # dashboard slider floor, so the only way to tune from here is UP, which
+    # is the direction the visible failure asks for.
+    #
+    # Watch one interaction: the beamformer locks a different mic per turn
+    # and each has its own echo path, so AEC re-converges per turn (per-
+    # channel filter states are the unbuilt fix) — and the one measured
+    # self-echo figure above 0.05 is that unconverged case at 0.055. The
+    # symptom would be a device cutting its own response short. This fleet
+    # runs 0.05 with beamforming and AEC both on and does not do that.
+    "bargeInEnabled":   True,
+    "bargeInThreshold": 0.05,
     # How far music is attenuated while a voice turn plays OVER it, on
     # firmware that can mix the two planes (the "audio_mix" capability).
     # Ducking replaces pausing there: the music feed runs 4s ahead of
@@ -130,17 +161,25 @@ DEFAULT_DEVICE_CONFIG = {
     # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
     # 2026-07-05 review). 16kHz-native, applied controller-side, only to
     # the wake-word detection path — cannot affect STT audio since STT
-    # never sees it. Defaults False: needs the
-    # speexdsp-ns pip package confirmed installable in the Docker build
-    # (see review Q1 fix sequence) before enabling fleet-wide; flip on and
-    # A/B test wake rate in a noisy room once confirmed.
+    # never sees it. Defaults False, but no longer for the original reason:
+    # the packaging blocker cleared (pinned speexdsp-ns==0.1.2 in
+    # requirements.txt, imports cleanly in the image), so the noisy-room
+    # A/B this is waiting on is now actually runnable. Off until someone
+    # runs it — not off because it cannot be turned on.
     "owwSpeexNs":       False,
     # nsAsr: DTLN noise suppression (em_ns.py), controller-side, applied
     # ONLY to the turn audio streamed to HA's STT — the wake stream and
     # all noise-floor measurement stay raw. Helps steady noise (fan, AC,
     # hum) at marginal SNR; does little against competing speech (TV) —
-    # that's the beamformer's job. Default off pending A/B validation
-    # (2026-07-12); models are vendored into the Docker image, so if the
+    # that's the beamformer's job. Default off, and the A/B that was
+    # "pending" has since run with a result that is NOT yet reconciled: with
+    # NS on, recordings showed 8-15% of samples at exact digital zero at a
+    # healthy signal level (the gate chewing speech); with it off, 0.3%.
+    # That is a candidate cause of the choppy-audio reports (#137). This
+    # fleet nonetheless runs it on, with one device explicitly overriding to
+    # off — so treat "on" as unvalidated rather than recommended until
+    # someone listens to a pair of recordings and decides.
+    # Models are vendored into the Docker image, so if the
     # files are missing (bare-metal without NS_MODEL_DIR) the flag
     # degrades to raw streaming with a warning.
     "nsAsr":            False,
@@ -160,13 +199,21 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
-    # beamformingEnabled: False — ch6 (centre/omni) for all audio.
-    # beamforming=True was routing OWW audio through a perimeter mic selected
-    # every 32ms frame, injecting channel-splice discontinuities. The SNR
-    # difference between ch6 and the "best" perimeter mic at conversational
-    # distance is negligible; the downside (wrong-mic locks, discontinuities)
-    # is real. Off = ch6 for everything, consistent with what makes OWW work.
-    "beamformingEnabled": False,
+    # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
+    # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
+    # unlocked is always ch6 and the wake path never locks, so the wake
+    # stream is ch6 either way (beamformer.go). It cannot splice wake audio.
+    #
+    # This was False, on a comment describing the every-32ms reselection that
+    # be2f16d (v2.6.3 P0-2) had already fixed in the same commit. The real
+    # reason recorded there was that onset discrimination was unreliable at
+    # <=1.5m, "re-enable once P0-3/P0-4 are addressed" — P0-3 closed
+    # 2026-07-12 (DTLN) and v2.7.2's lock-back selection fixed the decayed-
+    # spike picks that caused most of the wrong-lock risk. Nobody went back.
+    # Meanwhile this fleet has run True since the 2026-07-20 config restore
+    # with no reported regression, so True is the value with field evidence
+    # behind it and False is the one that has not been run in months.
+    "beamformingEnabled": True,
     "beamAngle":        -1,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
@@ -652,6 +699,29 @@ MIGRATIONS: list[str] = [
     ALTER TABLE wake_counters ADD COLUMN dev_max_gap_ms   INTEGER NOT NULL DEFAULT 0;
 
     UPDATE system_config SET value = '16' WHERE key = 'schema_version';
+    """,
+
+    # ── v17 — the comparison, from the other side ───────────────────────────
+    #
+    # With owwOnDevice="on" the DEVICE triggers the turn, so dev_wake_score is
+    # no longer the side that can be missing — this controller's is. These
+    # record whether it agreed, matched the same way and against the same
+    # clock, so the agreement figure that justified shipping on-device wake
+    # keeps being answerable once the roles are swapped.
+    #
+    # Without them, turning a device "on" would silently end the measurement:
+    # every turn would show a device score and nothing to compare it against,
+    # which reads as perfect agreement rather than as no data.
+    #
+    # NULL means the controller did not detect this utterance within the match
+    # window — a controller miss, which is the interesting direction and the
+    # one that argues on-device wake is worth having. NULL on a
+    # controller-triggered turn just means the column does not apply.
+    """
+    ALTER TABLE turns ADD COLUMN ctrl_wake_score REAL;
+    ALTER TABLE turns ADD COLUMN ctrl_wake_delta_ms INTEGER;
+
+    UPDATE system_config SET value = '17' WHERE key = 'schema_version';
     """,
 ]
 
@@ -1530,6 +1600,10 @@ _TURN_COLUMNS = {
     # v15 — the threshold the device was scoring against, so a non-crossing can
     # be judged rather than assumed to be a miss.
     "dev_threshold":     "dev_threshold",
+    # v17 — the inverse comparison, populated only on device-triggered turns:
+    # did THIS controller detect the same utterance, and how far apart.
+    "ctrl_wake_score":    "ctrl_wake_score",
+    "ctrl_wake_delta_ms": "ctrl_wake_delta_ms",
     # v12 — filename of the saved utterance WAV, written by set_turn_audio
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.

@@ -71,6 +71,7 @@ import em_ns
 import em_recordings
 import em_oww_models
 import em_player
+import em_turnclock
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -1078,9 +1079,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # the old device VAD default, for the floor-not-yet-warmed case).
         # This is the noise floor as *measurement*: the threshold adapts per
         # room, the audio itself is untouched.
-        NO_SPEECH_TIMEOUT = 5.0
+        # The decision lives in em_turnclock so it can be tested — see there
+        # for why the window is measured from the first real frame and not
+        # from turn start (#139).
         speech_seen = False
-        first_real_frame_seen = False
+        listening_since = None      # monotonic; set when the first real frame lands
         turn_start = time.monotonic()
 
         def _is_speech(chunk: bytes) -> bool:
@@ -1124,10 +1127,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     speech_seen = True
                     log.debug(f"[{self._log_name}] Speech detected (HA VAD start) — no-speech timeout disarmed")
 
-                if not speech_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
+                give_up, why = em_turnclock.no_speech_verdict(
+                    now=time.monotonic(), turn_start=turn_start,
+                    listening_since=listening_since, speech_seen=speech_seen,
+                )
+                if give_up:
                     log.info(
-                        f"[{self._log_name}] No speech within {NO_SPEECH_TIMEOUT}s — "
-                        f"closing HA pipeline quietly (controller-side no-speech timeout)"
+                        f"[{self._log_name}] {why} — closing HA pipeline "
+                        f"quietly (controller-side no-speech timeout)"
                     )
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                     self._no_speech_timeout = True
@@ -1198,8 +1205,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     log.debug(f"[{self._log_name}] Preroll discard: skipped frame ({preroll_remaining} remaining)")
                     continue
 
-                if not first_real_frame_seen:
-                    first_real_frame_seen = True
+                if listening_since is None:
+                    # Starts the no-speech window. Until this lands we are
+                    # waiting on the link, not on the user.
+                    listening_since = time.monotonic()
                     log.debug(f"[{self._log_name}] First real audio frame received")
                     if self._trace:
                         self._trace.t_first_frame_ms = self._trace.elapsed_ms()
@@ -1875,6 +1884,23 @@ async def _persist_turn(device, turn_record: dict) -> None:
                 f"{turn_record.get('wake_score')} vs device "
                 f"{dev_score if dev_score is not None else 'MISS'}"
                 + (f" ({dev_delta:+d}ms)" if dev_delta is not None else "")
+            )
+        # owwOnDevice="on" inverts the question. The device triggered this
+        # turn, so the side that can be missing is OURS: a NULL here is a wake
+        # this controller did not hear, which is the direction that argues
+        # on-device scoring is worth its ~38% of a core. Only recorded when the
+        # device actually drove the turn — on a controller-triggered turn the
+        # column does not apply, and writing our own score into it would make
+        # every row agree with itself.
+        if str(turn_record.get("trigger", "")).startswith("wakeword-dev"):
+            ctrl_score, ctrl_delta = device.ctrl_shadow.match(wake_mono)
+            turn_record["ctrl_wake_score"]    = ctrl_score
+            turn_record["ctrl_wake_delta_ms"] = ctrl_delta
+            log.info(
+                f"[{device.device_id}] wake comparison: device "
+                f"{turn_record.get('wake_score')} vs controller "
+                f"{ctrl_score if ctrl_score is not None else 'MISS'}"
+                + (f" ({ctrl_delta:+d}ms)" if ctrl_delta is not None else "")
             )
 
     # Surface the outcome to the turn loop's ring cleanup. Without this

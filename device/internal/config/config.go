@@ -45,12 +45,20 @@ type Device struct {
 	// reasoning as the LED meter response curve — not something to discover
 	// via a firmware OTA per attempt.
 	DuckDb float64
-	// OwwOnDevice selects on-device wake word scoring: "off" or "shadow".
-	// Shadow mode scores the wake stream locally and reports what it would
-	// have detected, without acting on it, so device and controller can be
-	// compared on the same audio. "on" — letting the device trigger turns
-	// itself — is deliberately not implemented yet and is rejected as
-	// unknown rather than silently treated as shadow.
+	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
+	// "on".
+	//
+	// Shadow scores the wake stream locally and reports what it would have
+	// detected, without acting on it, so device and controller can be
+	// compared on the same audio. "on" additionally lets the device TRIGGER
+	// the turn: the crossing is sent as an oww_wake message and the
+	// controller starts the turn on the device's word rather than its own.
+	//
+	// The controller keeps scoring in "on" mode — its detections no longer
+	// trigger, but they still record whether it agreed, so the comparison
+	// that justified shipping this keeps running with the roles inverted.
+	// It is also what keeps barge-in working unchanged, since that is
+	// scored controller-side over the turn's own audio.
 	OwwOnDevice string
 
 	// ADC gain — applied via tinymix when config is pushed
@@ -122,10 +130,10 @@ func (d *Device) loadDefaults() {
 	d.VadSpeechMs = envInt("VAD_SPEECH_MS", 80)
 	d.VadSilenceMs = envInt("VAD_SILENCE_MS", 600)
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
-	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.3)
+	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
-	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.10)
+	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
@@ -134,7 +142,10 @@ func (d *Device) loadDefaults() {
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
 	agcEnabled := envBool("AGC_ENABLED", true)
 	d.AgcEnabled = &agcEnabled
-	aecEnabled := envBool("AEC_ENABLED", false)
+	// true to match em_db.DEFAULT_DEVICE_CONFIG, which now defaults AEC on
+	// because barge-in does. The controller's value reaches us on the first
+	// config push either way; this only governs the window before it.
+	aecEnabled := envBool("AEC_ENABLED", true)
 	d.AecEnabled = &aecEnabled
 	d.AecDelayMs = envInt("AEC_DELAY_MS", 0)
 	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
@@ -315,17 +326,25 @@ func clampMicGainDb(db int) int {
 const (
 	OnDeviceOff    = "off"
 	OnDeviceShadow = "shadow"
+	OnDeviceOn     = "on"
 )
 
 // normaliseOnDevice maps a pushed value onto a known mode. Anything
-// unrecognised — including a future "on" that this firmware does not implement
-// — becomes "off": an older device receiving a mode it cannot honour must not
-// guess, because the two plausible guesses are "score but do nothing" and
-// "start triggering turns", and one of those is a live behaviour change.
+// unrecognised becomes "off": a device receiving a mode it cannot honour must
+// not guess, because the two plausible guesses are "score but do nothing" and
+// "start triggering turns", and one of those is a live behaviour change on a
+// device that cannot deliver it.
+//
+// That rule is why firmware predating "on" is safe to leave in the field: it
+// normalises the value away and keeps scoring in shadow. The controller does
+// not rely on that — it gates the setting on the oww_trigger capability — but
+// the device must not depend on the controller being careful.
 func normaliseOnDevice(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case OnDeviceShadow:
 		return OnDeviceShadow
+	case OnDeviceOn:
+		return OnDeviceOn
 	case "", OnDeviceOff:
 		return OnDeviceOff
 	default:

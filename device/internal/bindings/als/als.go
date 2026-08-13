@@ -1,18 +1,40 @@
 // Package als reads the Echo Dot's ambient light sensor.
 //
-// The Dot carries an ams TSL2540 on i2c, which Amazon's Android layer does
-// not expose AT ALL: `dumpsys sensorservice` reports an empty sensor list,
-// there is nothing under /sys/class/sensors or /sys/bus/iio, and no ALS input
-// device. It is visible only on the raw i2c bus — the same shape as the mute
-// LED sitting on a different GPIO than the vendor HAL believed.
+// Our Dots carry an ams TSL2540 on i2c, which Amazon's Android layer does not
+// expose AT ALL: `dumpsys sensorservice` reports an empty sensor list, there
+// is nothing under /sys/class/sensors, and no ALS input device. It is visible
+// only on the raw i2c bus — the same shape as the mute LED sitting on a
+// different GPIO than the vendor HAL believed.
 //
 // Verified on hardware: covering the sensor by hand takes it from 309 lux to
 // 0 and back to 308 within a second, with both raw channels tracking.
 //
-// There is a SECOND ALS on the bus (tsl2584tsv at 0x29) whose sysfs directory
-// carries nothing beyond name/modalias — enumerated but not driven, so it is
-// unusable without writing a driver. The 2540 is the one with a real
-// interface, hence matching that name specifically rather than "tsl".
+// THE BUS LISTING IS NOT A HARDWARE INVENTORY. Both ALS names are registered
+// by Amazon's board file, so /sys/bus/i2c/devices/ shows a tsl2540 at 0x39
+// and a tsl2584tsv at 0x29 on EVERY unit regardless of what is soldered on
+// (`modalias` reads `i2c:tsl2540` — static kernel data, not a chip talking).
+// Which one actually answers differs by production batch, and reading the
+// listing as an inventory produced a confident wrong diagnosis on #90.
+//
+// The boot log is the real inventory, because both drivers probe on every
+// unit and record what replied. On ours:
+//
+//	tsl258x 0-0029: i2c_smbus_write_bytes() to cmd reg failed in taos_probe(), err = -6
+//	tsl2540 0-0039: tsl2540_probe: device id:e4 ... 'tsl2540 rev. 0x61' detected
+//	tsl2540 0-0039: Probe ok.
+//
+// So the 2584 is NOT FITTED here (-6 is ENXIO — nothing acknowledges at
+// 0x29), and on the G090LF096 batch it is the 2584 that is present and the
+// 2540 that goes unanswered, surfacing through IIO as
+// /sys/bus/iio/devices/iio:device0 instead of on the i2c bus. That is a
+// second-sourced part, not a driver fault: matching `tsl2540` specifically is
+// right for the hardware it names, and reaching the other batch means reading
+// the IIO sensor too, not loosening this match to a "tsl" prefix.
+//
+// Do NOT try to force the driver on via /sys/bus/i2c/drivers/tsl2540/unbind.
+// It succeeds and leaves every als_* attribute in place; the next read enters
+// a show() handler whose driver data is gone and hangs the device hard enough
+// to need a power cycle. Attribute presence does not prove a driver is bound.
 //
 // This is its own package because two callers need it at different moments:
 // the register message needs to know whether the sensor EXISTS, to declare
@@ -48,12 +70,17 @@ var i2cGlob = "/sys/bus/i2c/devices/*/name"
 const (
 	// StatusOK — sensor found and readable.
 	StatusOK = "ok"
-	// StatusNoChip — no tsl2540 on the bus at all. Strongly suggests a
-	// hardware revision without the part, in which case nothing here is
-	// broken and the honest answer is to say the device has no sensor.
+	// StatusNoChip — the bus does not even list a tsl2540. Since the name
+	// is registered by the board file on every unit, this means an
+	// unfamiliar kernel rather than a missing part, and has not been seen
+	// in the field.
 	StatusNoChip = "no_chip"
-	// StatusNoAttribute — the chip is on the bus but exposes no als_lux, so
-	// the driver has not bound. Unlike no_chip this is potentially fixable.
+	// StatusNoAttribute — the name is listed but no als_lux appeared, so the
+	// driver's probe found nothing to talk to. This is the ordinary reading
+	// for a batch that was fitted the OTHER ALS (#90) — the Detail text
+	// calls it an unbound driver, which reads as our fault and is not; it is
+	// corrected alongside the IIO fallback rather than on its own, so the
+	// wording changes once, with the behaviour it describes.
 	StatusNoAttribute = "no_attribute"
 	// StatusUnknown — the bus could not be enumerated. Distinct from
 	// "nothing found", which is a positive result.
@@ -145,8 +172,9 @@ func resolve() string {
 		}
 		nameMatched = true
 		p := filepath.Join(filepath.Dir(n), "als_lux")
-		// A matching name is not enough — the 2584 on this same bus has
-		// a name and no readable attributes at all.
+		// A matching name is not enough: the name is board-file data and
+		// is present whether or not the chip is, so als_lux existing is
+		// what separates a fitted sensor from a declared one.
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
