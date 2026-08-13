@@ -52,6 +52,112 @@ def test_dashboard_bundle_is_cache_busted():
         "cache-bust on the bundle's mtime, not on a version string"
 
 
+def test_dashboard_paths_are_ingress_safe():
+    """
+    As a Home Assistant add-on, the dashboard is mounted below a generated
+    path (Ingress), not at the site root — an absolute "/static/..." or
+    "/api/..." reference bypasses that path straight to the root and 404s.
+    Every asset/API reference must therefore be relative, resolved against
+    the <base href> em_api.py injects for the add-on case.
+
+    Source-level because starting an aiohttp app + browser is outside what
+    this suite does elsewhere (see test_dashboard_bundle_is_cache_busted).
+    """
+    static = CONTROLLER / "static"
+    index = (static / "index.html").read_text()
+    dashboard = (static / "dashboard.html").read_text()
+    jsx = (static / "dashboard.jsx").read_text()
+    api = (CONTROLLER / "em_api.py").read_text()
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    for name, html in (("index.html", index), ("dashboard.html", dashboard)):
+        assert 'href="/static/' not in html, f"{name} has an absolute /static href"
+        assert 'src="/static/' not in html, f"{name} has an absolute /static src"
+        assert "url('/static/" not in html, f"{name} has an absolute /static url()"
+
+    assert "'/api/" not in index, \
+        "index.html must fetch relative api/... paths, not /api/..."
+    assert "location.replace('/dashboard')" not in index, \
+        "index.html must redirect to a relative dashboard path"
+
+    assert "function ingressPath(path)" in jsx, \
+        "dashboard.jsx must relativize absolute paths for ingress"
+    assert "function ingressWebSocketUrl(path)" in jsx, \
+        "dashboard.jsx must build ingress-relative WebSocket URLs"
+    assert "document.baseURI" in jsx, \
+        "the WebSocket URL must resolve against the injected <base href>"
+    assert "fetch(ingressPath(path)" in jsx, \
+        "the shared API helpers must route through ingressPath"
+    assert "location.replace('/')" not in jsx, \
+        "an absolute root redirect bypasses the ingress path"
+
+    assert '"static/dashboard.js"' in api, \
+        "the cache-bust replace must target the relative asset URL"
+    assert 'web.HTTPFound(".")' in api, \
+        "/setup must redirect relatively, or it bounces out of the ingress path"
+    assert "_with_ingress_base" in api, \
+        "index.html and dashboard.html must get a <base href> injected"
+    assert 'request.headers.get("X-Ingress-Path"' in api, \
+        "the base path must come from Home Assistant's ingress header"
+    assert "ECHOMUSE_HOME_ASSISTANT_INGRESS" in config, \
+        "config.yaml must set the env var that gates ingress-only mode"
+
+
+def test_addon_default_threshold_matches_the_controller():
+    """
+    A fresh add-on install is the ONLY case where a shipped default is
+    visible — an existing deployment stores every key already, so
+    DEFAULT_DEVICE_CONFIG never gets consulted. That makes config.yaml's
+    copy of the wake threshold the one users actually meet, and a stale
+    one silently ships the value the default was changed away from.
+
+    Shipped as 0.3 while em_db said 0.5 (#144), which is exactly the drift
+    this pins. Parsed rather than imported: CI installs pytest/numpy/scipy
+    only, so there is no yaml module here.
+    """
+    import sys
+    sys.path.insert(0, str(CONTROLLER))
+    from em_db import DEFAULT_DEVICE_CONFIG
+
+    config = (CONTROLLER / "config.yaml").read_text()
+    match = re.search(r"^\s*oww_threshold:\s*([0-9.]+)", config, re.M)
+    assert match, "config.yaml has no oww_threshold option"
+    assert float(match.group(1)) == DEFAULT_DEVICE_CONFIG["owwThreshold"], (
+        f"config.yaml ships oww_threshold {match.group(1)} but "
+        f"em_db.DEFAULT_DEVICE_CONFIG says "
+        f"{DEFAULT_DEVICE_CONFIG['owwThreshold']} — a fresh add-on install "
+        f"would get the stale value"
+    )
+
+
+def test_addon_image_is_published_not_built_on_the_user_machine():
+    """
+    Without an `image:` key Supervisor builds the Dockerfile on whatever
+    the user runs Home Assistant on — an onnxruntime/ffmpeg build on a Pi —
+    and cannot pass EM_CONTROLLER_VERSION, so the controller reports "dev"
+    and the update notice goes quiet. The arch list must also stay within
+    what controller-release.yml actually publishes.
+    """
+    config = (CONTROLLER / "config.yaml").read_text()
+    assert re.search(r"^image:\s*\S+", config, re.M), \
+        "config.yaml must pull the published image, not build on the user's machine"
+
+    workflow = (CONTROLLER.parent / ".github/workflows/controller-release.yml").read_text()
+    platforms = re.search(r"platforms:\s*(\S+)", workflow)
+    assert platforms, "controller-release.yml no longer declares platforms"
+    published = platforms.group(1)
+    arch_block = re.search(r"^arch:\n((?:\s+-\s*\w+\n)+)", config, re.M)
+    assert arch_block, "config.yaml has no arch list"
+    declared = set(re.findall(r"-\s*(\w+)", arch_block.group(1)))
+    # Home Assistant's arch names vs Docker's platform names.
+    equivalent = {"aarch64": "linux/arm64", "amd64": "linux/amd64"}
+    for arch in declared:
+        assert equivalent.get(arch) in published, (
+            f"config.yaml offers {arch} but controller-release.yml only "
+            f"publishes {published} — that install would find no image"
+        )
+
+
 def test_release_notes_survive_the_whole_relay():
     """
     Release notes have to make it through four places to be useful: captured
