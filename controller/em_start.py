@@ -20,9 +20,12 @@ from pathlib import Path
 OPTIONS_PATH = Path("/data/options.json")
 
 # config.yaml's `options` keys map to env vars by uppercasing — kept as an
-# explicit table rather than a blanket `.upper()` so a renamed or removed
-# add-on option fails loudly here instead of silently reaching
-# em_controller.py under the wrong name.
+# explicit table rather than a blanket `.upper()`, so a renamed or removed
+# add-on option is caught here rather than silently reaching em_controller.py
+# under a name it does not read. options.json is generated from config.yaml's
+# own schema, so a key missing from this table means those two files have
+# drifted — a packaging bug, and one whose only other symptom is a setting
+# that quietly does nothing.
 OPTION_ENV_VARS = {
     "server_host": "SERVER_HOST",
     "server_ip": "SERVER_IP",
@@ -40,6 +43,11 @@ if OPTIONS_PATH.is_file():
     for key, value in options.items():
         env_key = OPTION_ENV_VARS.get(key)
         if env_key is None:
+            # Warn rather than exit: the add-on failing to boot over one
+            # stray key would be a worse outcome than the setting being
+            # ignored, and this line names it in the add-on log either way.
+            print(f"em_start: no env var mapped for add-on option {key!r} —"
+                  " config.yaml and OPTION_ENV_VARS have drifted", flush=True)
             continue
         if value == "":
             # An unfilled required field (server_ip has no sane default) —

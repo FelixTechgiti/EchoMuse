@@ -1,5 +1,17 @@
 name: "EchoMuse"
-version: "1.0.1"
+# Tracks the published controller image tag, which controller-release.yml
+# derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
+# both together: Supervisor pulls `image:version`, so a version with no
+# matching tag on GHCR fails to install.
+version: "2.18.0"
+# Pull the published multi-arch image rather than building on the user's
+# machine. Without this Supervisor builds from this directory's Dockerfile,
+# which compiles onnxruntime and ffmpeg on whatever the user runs Home
+# Assistant on — long and failure-prone on a Pi, and it cannot pass the
+# EM_CONTROLLER_VERSION build arg, so the controller reports "dev" and the
+# update notice goes quiet. controller-release.yml already publishes
+# linux/amd64 and linux/arm64, matching the arch list below.
+image: "ghcr.io/wilbowes/echomuse-controller"
 slug: "controller"
 description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
 url: "https://github.com/wilbowes/EchoMuse"
@@ -28,7 +40,10 @@ options:
   mdns_name: "echomuse"
   esphome_project_version: "2.0.0"
   oww_model: "hey_jarvis"
-  oww_threshold: 0.3
+  # Keep in step with em_db.DEFAULT_DEVICE_CONFIG["owwThreshold"] — a fresh
+  # add-on install is precisely the case that default exists for, and
+  # test_addon_default_threshold_matches_the_controller pins the pair.
+  oww_threshold: 0.5
   require_device_tls: false
   device_approval: "strict"
 schema:
