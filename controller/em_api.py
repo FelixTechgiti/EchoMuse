@@ -2716,6 +2716,13 @@ async def _get_system_status(request: web.Request) -> web.Response:
 
     return _ok({
         "controller_version": CONTROLLER_VERSION,
+        # True when running as a Home Assistant add-on behind Supervisor's
+        # ingress proxy. Presentation only — the dashboard is the same
+        # dashboard either way, with the same features, and nothing should
+        # be gated on this. It exists so the SPA can stop drawing chrome
+        # Home Assistant already draws (its own panel header and title) and
+        # can avoid offering a theme toggle that fights HA's theme.
+        "ha_ingress": INGRESS_ONLY,
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
