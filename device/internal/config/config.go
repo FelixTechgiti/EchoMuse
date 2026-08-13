@@ -130,10 +130,10 @@ func (d *Device) loadDefaults() {
 	d.VadSpeechMs = envInt("VAD_SPEECH_MS", 80)
 	d.VadSilenceMs = envInt("VAD_SILENCE_MS", 600)
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
-	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.3)
+	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
-	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.10)
+	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
@@ -142,7 +142,10 @@ func (d *Device) loadDefaults() {
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
 	agcEnabled := envBool("AGC_ENABLED", true)
 	d.AgcEnabled = &agcEnabled
-	aecEnabled := envBool("AEC_ENABLED", false)
+	// true to match em_db.DEFAULT_DEVICE_CONFIG, which now defaults AEC on
+	// because barge-in does. The controller's value reaches us on the first
+	// config push either way; this only governs the window before it.
+	aecEnabled := envBool("AEC_ENABLED", true)
 	d.AecEnabled = &aecEnabled
 	d.AecDelayMs = envInt("AEC_DELAY_MS", 0)
 	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
