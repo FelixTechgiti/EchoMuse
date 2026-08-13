@@ -552,3 +552,49 @@ link** button on its Status tab. A device with credentials connects
 encrypted from its next reconnect; the Status tab's **Link** row shows
 which mode each device is using. Once the whole fleet shows `wss (TLS)`,
 set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
+
+## What leaves your network
+
+EchoMuse has **no telemetry**. There is no usage reporting, no analytics, no
+crash reporting and no install counter. Nothing reports which features you
+use, how many devices you have, or that you installed it at all. This is a
+deliberate decision rather than an omission: the project exists to take a
+cloud voice assistant off your network, and quietly adding a ping home would
+undo the reason to run it.
+
+A consequence worth stating plainly: **nobody, including the maintainers, can
+tell how many people use EchoMuse.** Adoption is guessed at from GitHub stars
+and release download counts, which is the trade being made.
+
+### The one outbound connection
+
+The controller contacts `api.github.com` once an hour to ask what the newest
+release is, so the dashboard can tell you an update is available and show its
+notes. When you choose to update a device, the firmware binary is downloaded
+from `github.com` at that moment.
+
+That is the whole of it. The request carries no identifiers — it is an
+ordinary unauthenticated API call — but like any request it does reveal your
+public IP to GitHub, the same exposure as a `git clone` or opening the repo
+in a browser.
+
+Set `update_check_interval` (seconds, default `3600`) in the system config to
+change how often it runs. A long interval, say `86400`, reduces it to once a
+day. Note that `0` does **not** disable checking — it currently makes the
+poll loop spin without pausing, which is worse than leaving it alone.
+
+### What never leaves
+
+- **Voice audio and transcripts.** Mic audio goes from the device to your
+  controller and on to your Home Assistant, over your LAN. What happens next
+  is whatever your Assist pipeline does — if you have configured HA to use a
+  cloud speech-to-text service, HA sends it there. EchoMuse itself sends it
+  nowhere but HA.
+- **Saved utterance recordings** (`saveUtterances`, off by default) — written
+  to disk beside the database and never uploaded.
+- **Device serials, WiFi credentials, network names and your fleet's
+  configuration.** These live only in the controller's database.
+- **Support bundles** are built only when you ask for one, and sharing the
+  file is your decision. They deliberately exclude speech, transcripts,
+  network names and account names — see
+  [support-bundle.md](support-bundle.md).
