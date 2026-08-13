@@ -13,6 +13,14 @@ function ingressPath(path) {
   return path.startsWith('/') ? `.${path}` : path;
 }
 
+// True when the page is being served through Home Assistant's ingress
+// gateway. Read off the injected <base href> rather than /api/system/status's
+// ha_ingress, so it is available synchronously and to code with no API token
+// — the WebUSB check runs before any of that.
+function isIngress() {
+  return document.baseURI.includes('/hassio_ingress/');
+}
+
 function ingressWebSocketUrl(path) {
   const url = new URL(ingressPath(path), document.baseURI);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2289,10 +2297,27 @@ const _ADB = (() => {
     // ready Client.  logFn is optional — wizard passes addLog.
     static async requestDevice(logFn = () => {}) {
       if (!navigator.usb) {
+        // Name the origin. Chrome's insecure-origin allowlist is per-origin
+        // and matches on scheme, host and port exactly, so someone who has
+        // already allowlisted the standalone dashboard gets no benefit here
+        // and has no way to tell why — the add-on's page is served from
+        // Home Assistant's origin, not the controller's.
+        const origin = window.location.origin;
         throw new Error(
-          'WebUSB not available — requires a secure context (HTTPS or localhost). ' +
-          'Access the dashboard at http://localhost:8768, or enable ' +
-          'chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
+          `WebUSB not available — requires a secure context (HTTPS or localhost). ` +
+          `This page is on ${origin}. ` +
+          (isIngress()
+            // Under the add-on there is no localhost route to offer:
+            // _ingress_only_middleware rejects anything that is not the
+            // Supervisor gateway, so suggesting a direct port would send
+            // the user to a 403.
+            ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to ` +
+              `chrome://flags/#unsafely-treat-insecure-origin-as-secure and ` +
+              `relaunch the browser. An allowlist entry for the controller's ` +
+              `own address does not cover this one.`
+            : `Open the dashboard at http://localhost:8768, or add exactly ` +
+              `${origin} to chrome://flags/#unsafely-treat-insecure-origin-as-secure ` +
+              `and relaunch the browser.`)
         );
       }
 

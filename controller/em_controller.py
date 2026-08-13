@@ -68,6 +68,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_pki
+import em_hostip
 import em_linkauth
 import em_eq
 import em_scenes
@@ -128,7 +129,10 @@ SERVER_TLS_PORT = int(os.environ.get("SERVER_TLS_PORT", "8770"))
 # working during the rollout.
 REQUIRE_DEVICE_TLS = os.environ.get("REQUIRE_DEVICE_TLS", "0") == "1"
 API_PORT     = int(os.environ.get("API_PORT", "8768"))
-SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
+# The address devices are told to dial. Detected from the routing table when
+# unset — never a literal, which used to send every unconfigured deployment
+# to a developer's own machine. See em_hostip.
+SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
 
