@@ -47,7 +47,39 @@ configuration, even a remote terminal — happens over WiFi from the dashboard.
 
 ## Step 2 — Start the controller
 
-On your always-on computer, using the prebuilt image (nothing to compile):
+Two ways, and they run the same software. If you already have Home
+Assistant, the add-on is less work; otherwise use Docker on any
+always-on machine.
+
+<details open>
+<summary><b>As a Home Assistant add-on</b></summary>
+
+Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
+`https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
+store. The README has a one-click badge for adding the repository.
+
+The dashboard appears as a **sidebar panel** — it is reached through Home
+Assistant, so there is no extra port to open and no second address to
+remember. It is *only* reachable that way: the add-on refuses connections
+that do not arrive through Home Assistant.
+
+Settings that would go in `.env` are add-on options instead (Configuration
+tab). Leave `server_ip` empty unless the controller picks the wrong
+address — see [When something doesn't work](#when-something-doesnt-work).
+
+Your data lives in the add-on's own storage and survives updates.
+
+**If you have devices from a previous controller**, they hold that
+controller's certificate authority and will refuse to trust a new one.
+Copy the old `data/tls/` directory (all four files) into the add-on's
+data directory before connecting them, or they cannot connect at all.
+
+</details>
+
+<details>
+<summary><b>With Docker, on any always-on computer</b></summary>
+
+Using the prebuilt image (nothing to compile):
 
 ```bash
 mkdir echomuse && cd echomuse
@@ -76,6 +108,8 @@ build arg — or just use the prebuilt image above, which is CPU-only.
 
 </details>
 
+</details>
+
 That's it. The controller is now running two things:
 
 - a **dashboard** at `http://<SERVER_IP>:8768` — your control panel
@@ -84,12 +118,15 @@ That's it. The controller is now running two things:
 
 ## Step 3 — Create your admin account
 
-Open `http://<SERVER_IP>:8768` in a browser. On a fresh install you'll see
-the Echo graphic with a **pulsing amber ring** and a setup form.
+Open the dashboard: the **EchoMuse panel** in Home Assistant's sidebar if
+you installed the add-on, or `http://<SERVER_IP>:8768` if you're running
+Docker. On a fresh install you'll see the Echo graphic with a **pulsing
+amber ring** and a setup form.
 
 It asks for a **setup token** — this is a one-time code printed in the
 controller's logs, so that only you (the person who can read the server's
-logs) can claim the controller. Get it with:
+logs) can claim the controller. Find it in the add-on's **Log** tab, or
+with Docker:
 
 ```bash
 docker logs echomuse-controller

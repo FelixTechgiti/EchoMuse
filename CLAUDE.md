@@ -105,7 +105,7 @@ Two guards sit in front of that, both tested by reintroducing the bug:
 Device firmware and controller are versioned independently from the same repo:
 
 - **Device**: plain `v*` tags (e.g. `v2.7.6`) → `release.yml` → GitHub Release with the `server` binary asset. The tag is embedded in the binary and compared against `firmware_ver` by OTA — don't change this scheme.
-- **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, amd64). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
+- **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, **multi-arch: linux/amd64 + linux/arm64** — it said amd64 here until 2026-08-13, long after arm64 shipped). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
 
@@ -137,6 +137,60 @@ Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
 - `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
+
+### Home Assistant add-on
+
+The controller also ships as a Home Assistant Supervisor add-on
+(`controller/config.yaml` + `repository.yaml` at the repo root, from #122).
+Supervisor clones the **default branch**, so add-on files only take effect
+once they are on `main` — a branch cannot be installed.
+
+**The add-on and the standalone container are both first-class, and neither
+may gain or lose capability relative to the other.** A setting reachable in
+one and not the other is a divergence that silently invalidates
+documentation and support answers depending on how someone installed. Every
+`.env` variable therefore needs a matching add-on option (`options` +
+`schema` + `translations/en.yaml`, plus `em_start.py`'s `OPTION_ENV_VARS`)
+or a stated reason it is fixed. Two are deliberately fixed: `DB_PATH`
+(pinned to `/data/…` so it cannot point somewhere that does not survive a
+restart) and `API_PORT` (must equal `ingress_port`). `SERVER_TLS_PORT` and
+`SERVER_PORT` are unreconciled gaps — #163.
+
+**`config.yaml`'s `version:` pins the image Supervisor pulls**, so it names
+an artifact that must exist AND must contain the add-on code. Shipping it
+pinned to `2.18.0` — an image built before the add-on existed — started a
+controller with no ingress support at all, which presented as two unrelated
+faults: the dashboard answering the LAN with 200 instead of 403, and the
+panel throwing `JSON.parse ... column 4` because the old bundle's absolute
+`/api` paths reached Home Assistant, which answers `404: Not Found` as plain
+text. `controller-release.yml` now refuses to build when the tag and the pin
+disagree; there is nothing else that catches it, since it fails no test and
+fails no release.
+
+**Ingress.** `em_start.py` bridges `/data/options.json` into the env vars
+`em_controller.py` already reads and execs into it, so the controller stays
+unaware of Home Assistant. `em_api` injects a `<base href>` from the
+`X-Ingress-Path` header and `dashboard.jsx` routes every fetch through
+`ingressPath()`; absolute paths bypass the base and hit HA instead.
+`_ingress_only_middleware` rejects anything whose `request.remote` is not
+Supervisor's gateway `172.30.32.2` — **verified on hardware 2026-08-13**,
+including under `host_network: true`, where the container shares the host
+netns and the assumption looked shaky. That gate is the add-on's only
+network protection, since host networking exposes 8768 on the LAN.
+`/api/system/status` reports `ha_ingress` for presentation only: the
+dashboard does provisioning, OTA, the shell and turn history, none of which
+HA offers, so **nothing is gated on it**.
+
+**Migrating an existing fleet is not just a config change.** The device
+picks `wss` from the mDNS `tls_port` TXT record, NOT from
+`REQUIRE_DEVICE_TLS` (`internal/client/control.go`) — so a device holding
+an old CA meeting a controller with a freshly generated one dials wss,
+fails verification and cannot connect, and `require_device_tls: false` does
+not help. Copy the old `data/tls/` (all four files — the server cert must
+match the CA) into the add-on's `/data/tls/`. The devices then verify,
+arrive at a controller whose DB does not know them, and are allowed through
+because `em_linkauth` **ignores** a token for a device with nothing on
+record; they appear as pending and are approved onto fresh config.
 
 ### Voice backend
 
