@@ -38,6 +38,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The Home Assistant add-on pulls a PUBLISHED image, pinned by
+      # controller/config.yaml's `version:` — so that file names an image
+      # that has to exist and has to contain the add-on code. Getting it
+      # wrong is not caught by any test and does not fail the release; it
+      # fails on the user's Home Assistant, by silently running whichever
+      # older controller that tag points at. That happened on the first
+      # install: config.yaml pinned 2.18.0, an image built before the
+      # add-on existed, so Supervisor started a controller with no ingress
+      # support — the dashboard answered the LAN with no gate, and the
+      # panel's absolute /api paths hit Home Assistant instead of the
+      # add-on. Both symptoms, one stale pin.
+      #
+      # Checked here rather than in the test suite because this is the only
+      # moment the two can be compared: the tag being released IS the image
+      # tag, and CI on a branch has neither.
+      - name: Add-on version matches the tag
+        run: |
+          want="${GITHUB_REF_NAME#controller-v}"
+          got="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' controller/config.yaml)"
+          if [ "$want" != "$got" ]; then
+            echo "::error::controller/config.yaml pins version '$got' but this release is '$want'."
+            echo "The add-on would pull ghcr.io/.../echomuse-controller:$got — not what is being released here."
+            exit 1
+          fi
+          echo "add-on pins $got, matching the tag"
+
       - name: Set up QEMU
         # arm64 is cross-built on an amd64 runner, so the emulation layer has
         # to be registered before buildx can target that platform at all.
