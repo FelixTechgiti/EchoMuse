@@ -11,3 +11,12 @@ scratchpad/
 # DTLN NS models (vendored into the Docker image at build time; bare-metal
 # dev drops them here or points NS_MODEL_DIR elsewhere)
 controller/models/
+
+# SQLite databases and their sidecars. controller/data/ is already ignored,
+# but DB_PATH defaults to controller/echomuse.db, so a bare-metal run writes
+# a live database there — and merely READING any database creates -wal/-shm
+# beside it, which a `git add -A` then sweeps up. A committed live DB would
+# carry fleet config, device serials, turn history and transcripts.
+*.db
+*.db-wal
+*.db-shm
