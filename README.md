@@ -52,6 +52,13 @@ hear the answer through the Dot's speaker. The hardware you already own
   capture quality and tune gain by ear rather than by inference.
 - **Encrypted device link** — TLS with a controller-generated CA plus
   per-device tokens; the wizard installs credentials automatically.
+- **No phone-home** — there is no telemetry, no analytics and no install
+  counter. Nobody, including us, can tell how many people run EchoMuse or
+  which features they use, and that is deliberate. The controller's only
+  outbound connection is an hourly check to GitHub's API for a newer
+  release, so the dashboard can tell you one exists — the same exposure as
+  a `git clone`, and how often it happens is yours to set
+  ([docs/configuration.md](docs/configuration.md#what-leaves-your-network)).
 
 The 7-mic array, LED ring, buttons, and speaker are all driven natively:
 onset-ratio beamforming, +24dB pre-truncation mic gain (the stock capture
