@@ -1039,3 +1039,112 @@ def test_bundle_live_state_carries_ambient_light_status():
         "em_api's live_state must include ambient_light_status so support "
         "bundles can answer why a device reports no light sensor"
     )
+
+
+def test_ingress_login_passes_the_real_deployment_flag_and_peer_address():
+    """
+    The ingress login endpoint must hand em_ingressauth.decide the LIVE
+    INGRESS_ONLY value and the LIVE peer address — not a literal.
+
+    Hardcoding either turns the decision function into theatre: `True` makes
+    the standalone container honour an attacker-supplied X-Remote-User-Id,
+    which is an unauthenticated admin session on a dashboard that proxies a
+    root shell to every device. The decision itself is tested in
+    test_ingressauth.py; this pins that it is actually consulted with real
+    inputs.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    call = re.search(
+        r"em_ingressauth\.decide\((.*?)\)\s*\n", src, re.S)
+    assert call, "em_api no longer calls em_ingressauth.decide"
+    args = call.group(1)
+
+    assert "ingress_only=INGRESS_ONLY" in args, (
+        "ingress_only must be the module's INGRESS_ONLY, never a literal")
+    assert "remote=request.remote" in args, (
+        "remote must be the live peer address, never a literal")
+    for literal in ("ingress_only=True", "remote=em_ingressauth.INGRESS_GATEWAY_IP"):
+        assert literal not in args, f"{literal} defeats the check entirely"
+
+
+def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
+    """
+    X-Remote-User-* may be read in exactly one place. A second reader is a
+    second chance to forget that the headers are only meaningful behind
+    Supervisor's gateway — Supervisor strips client copies, nothing else does.
+    """
+    # Match the READ, not the mention — em_ingressauth names these headers in
+    # prose explaining where they come from and why they can be trusted,
+    # which is documentation rather than a second trust boundary.
+    readers = []
+    for path in CONTROLLER.glob("*.py"):
+        text = path.read_text()
+        if re.search(r'headers(?:\.get\(|\[)\s*["\']X-Remote-User', text):
+            readers.append(path.name)
+    assert readers == ["em_api.py"], (
+        f"X-Remote-User headers read in {readers} — expected em_api.py only")
+
+
+def test_addon_panel_stays_admin_only():
+    """
+    panel_admin gates the sidebar entry for a dashboard that proxies a root
+    shell. It is Supervisor's default, pinned here so a future edit to
+    config.yaml has to be deliberate.
+    """
+    cfg = (CONTROLLER / "config.yaml").read_text()
+    assert re.search(r"^panel_admin:\s*true\s*$", cfg, re.M), (
+        "config.yaml must set panel_admin: true explicitly")
+
+
+def test_recordings_and_transcripts_are_admin_only():
+    """
+    Utterance audio and STT text are the most sensitive things the controller
+    stores — recognisable speech from inside someone's home, and the reason
+    saveUtterances defaults off.
+
+    Under the add-on every Home Assistant user in the household can reach the
+    dashboard (HA's ingress view sets requires_auth=False and panel_admin only
+    hides the sidebar entry), so "read-only" stopped being a synonym for
+    "someone the operator trusts with the recordings".
+
+    Enforced server-side, not in the dashboard: /api/devices/{id}/turns is a
+    plain GET with a session token, so a UI-only rule protects nothing from
+    anyone who opens the network tab.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+
+    audio = re.search(
+        r"(@auth\.require_\w+)\s*\nasync def _get_turn_audio\b", src)
+    assert audio, "_get_turn_audio not found"
+    assert audio.group(1) == "@auth.require_admin", (
+        "the utterance audio route must be admin-only")
+
+    turns = re.search(
+        r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
+        src, re.S)
+    assert turns and "_redact_turns_for" in turns.group(0), (
+        "_get_device_turns must strip transcripts for non-admin sessions")
+
+    redact = re.search(r"def _redact_turns_for\(.*?\n(?=\n@|\ndef |\nasync def )",
+                       src, re.S)
+    assert redact and '"stt_text"' in redact.group(0), (
+        "_redact_turns_for must remove stt_text")
+
+
+def test_role_changes_refuse_to_strand_the_install():
+    """
+    PATCH /api/users/{id} must refuse to demote the last admin. On the
+    standalone container local accounts are the only auth, so an install with
+    no admin has no way back in — and the endpoint that creates that state is
+    the one an admin reaches for while tidying up.
+
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    handler = re.search(
+        r"async def _patch_user\b.*?\n(?=\n@|\ndef |\nasync def )", src, re.S)
+    assert handler, "_patch_user not found"
+    body = handler.group(0)
+
+    assert "admin_count" in body, "must count admins before demoting one"
+    assert "last_admin" in body, "must refuse to remove the final admin"
+

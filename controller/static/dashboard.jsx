@@ -13,6 +13,14 @@ function ingressPath(path) {
   return path.startsWith('/') ? `.${path}` : path;
 }
 
+// True when the page is being served through Home Assistant's ingress
+// gateway. Read off the injected <base href> rather than /api/system/status's
+// ha_ingress, so it is available synchronously and to code with no API token
+// — the WebUSB check runs before any of that.
+function isIngress() {
+  return document.baseURI.includes('/hassio_ingress/');
+}
+
 function ingressWebSocketUrl(path) {
   const url = new URL(ingressPath(path), document.baseURI);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -766,7 +774,7 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
 
@@ -830,7 +838,10 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
     urlsRef.current = {};
   }, []);
 
-  const anyAudio = turns.some(t => t.audio_file);
+  // Recordings and transcripts are admin-only — the server enforces it
+  // (require_admin on the audio route, stt_text stripped from /turns);
+  // this just avoids offering controls that would 404.
+  const anyAudio = isAdmin && turns.some(t => t.audio_file);
 
   const ok = turns.filter(t => t.outcome === 'ok');
   const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
@@ -907,7 +918,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                     The slot is reserved even when a turn has no recording so
                     the columns stay aligned as the retention window rolls. */}
                 <span style={{ width: 34, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                  {t.audio_file && !gone.has(t.turn_id) && (<>
+                  {isAdmin && t.audio_file && !gone.has(t.turn_id) && (<>
                     <button onClick={() => toggleAudio(t)}
                       title={playing === t.turn_id ? 'Stop' : 'Play the mic audio for this turn'}
                       style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: playing === t.turn_id ? 'var(--warn)' : 'var(--text2)' }}>
@@ -1731,6 +1742,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     nearMisses={device.owwNearMisses}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.dot}
+                    isAdmin={isAdmin}
                   />
                 </Panel>
               </div>
@@ -2289,10 +2301,27 @@ const _ADB = (() => {
     // ready Client.  logFn is optional — wizard passes addLog.
     static async requestDevice(logFn = () => {}) {
       if (!navigator.usb) {
+        // Name the origin. Chrome's insecure-origin allowlist is per-origin
+        // and matches on scheme, host and port exactly, so someone who has
+        // already allowlisted the standalone dashboard gets no benefit here
+        // and has no way to tell why — the add-on's page is served from
+        // Home Assistant's origin, not the controller's.
+        const origin = window.location.origin;
         throw new Error(
-          'WebUSB not available — requires a secure context (HTTPS or localhost). ' +
-          'Access the dashboard at http://localhost:8768, or enable ' +
-          'chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
+          `WebUSB not available — requires a secure context (HTTPS or localhost). ` +
+          `This page is on ${origin}. ` +
+          (isIngress()
+            // Under the add-on there is no localhost route to offer:
+            // _ingress_only_middleware rejects anything that is not the
+            // Supervisor gateway, so suggesting a direct port would send
+            // the user to a 403.
+            ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to ` +
+              `chrome://flags/#unsafely-treat-insecure-origin-as-secure and ` +
+              `relaunch the browser. An allowlist entry for the controller's ` +
+              `own address does not cover this one.`
+            : `Open the dashboard at http://localhost:8768, or add exactly ` +
+              `${origin} to chrome://flags/#unsafely-treat-insecure-origin-as-secure ` +
+              `and relaunch the browser.`)
         );
       }
 
@@ -5694,6 +5723,9 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('em_token'));
   const [role, setRole] = useState(() => localStorage.getItem('em_role'));
+  // How this session was obtained — 'ingress' when Home Assistant
+  // authenticated us, otherwise a password. Set by the landing page.
+  const authVia = localStorage.getItem('em_auth_via');
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
@@ -5721,6 +5753,7 @@ function App() {
     API.token = null;
     localStorage.removeItem('em_token');
     localStorage.removeItem('em_role');
+    localStorage.removeItem('em_auth_via');
     // The landing page owns sign-in — green-ring login form.
     location.replace('.');
   }
@@ -5854,7 +5887,15 @@ function App() {
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
           <ThemeToggle/>
           <IconButton onClick={() => setShowSettings(true)} label="Settings">⚙</IconButton>
-          <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          {/* No sign-out on a Home Assistant session: HA owns it, so signing
+              out would land on the landing page and be re-authenticated
+              immediately — a button that visibly does nothing. Keyed on how
+              this session was obtained, not on whether the page is under
+              ingress: someone who fell back to the password form (Supervisor
+              forwarded no user) can and should still sign out. */}
+          {authVia !== 'ingress' && (
+            <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          )}
         </div>
       </div>
 

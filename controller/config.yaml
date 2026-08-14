@@ -6,11 +6,19 @@ name: "EchoMuse"
 version: "2.19.0"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
-# which compiles onnxruntime and ffmpeg on whatever the user runs Home
-# Assistant on — long and failure-prone on a Pi, and it cannot pass the
-# EM_CONTROLLER_VERSION build arg, so the controller reports "dev" and the
-# update notice goes quiet. controller-release.yml already publishes
-# linux/amd64 and linux/arm64, matching the arch list below.
+# which downloads a few hundred MB on whatever the user runs Home Assistant
+# on and cannot pass the EM_CONTROLLER_VERSION build arg — so the controller
+# reports "dev" and the update notice goes quiet. controller-release.yml
+# already publishes linux/amd64 and linux/arm64, matching the arch list below.
+#
+# The build does NOT compile anything, contrary to what this comment claimed
+# until 2026-08-14: ffmpeg is apt, and onnxruntime, speexdsp-ns, scipy and
+# scikit-learn all resolve to prebuilt wheels on this base image — see
+# controller-release.yml, which relies on exactly that for its arm64 build.
+# The distinction matters because a local build is the only way to test
+# add-on changes before they reach main (Supervisor clones the default
+# branch), and "it compiles onnxruntime" made that loop look far more
+# expensive than it is. tools/make_dev_addon.sh packages one.
 image: "ghcr.io/wilbowes/echomuse-controller"
 slug: "controller"
 description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
@@ -26,6 +34,14 @@ arch:
 host_network: true
 ingress: true
 ingress_port: 8768
+# Admin-only sidebar entry. This is Supervisor's default, set explicitly
+# because the dashboard authenticates whoever Home Assistant forwards
+# (em_ingressauth) and proxies a root shell to every device — so a change to
+# that default must not quietly widen who can reach it. Note it governs the
+# menu entry; EchoMuse does not assume it gates the ingress URL, which is
+# why only the FIRST Home Assistant user becomes admin and the rest are
+# read-only until promoted.
+panel_admin: true
 panel_icon: mdi:microphone-message
 panel_title: EchoMuse
 environment:

@@ -67,6 +67,7 @@ from zeroconf import ServiceInfo
 
 import em_db as db
 import em_api as api
+import em_hostip
 import em_ns
 import em_recordings
 import em_oww_models
@@ -185,7 +186,7 @@ log = logging.getLogger("echomuse.esphome")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
+SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 

@@ -8,9 +8,11 @@ configuration:
   server_ip:
     name: Controller LAN IP address
     description: >-
-      The LAN IP address of this Home Assistant host. Echo devices use this
-      address to connect to the controller, so it must be reachable from
-      them. Required — the controller cannot advertise itself without it.
+      The LAN IP address of this Home Assistant host. Echo devices are told
+      to connect here, so it must be reachable from them. Leave empty to
+      detect it automatically, which is correct unless this host has more
+      than one network interface and devices are on a specific one. The
+      address in use is logged at startup.
   mdns_name:
     name: mDNS service name
     description: >-
