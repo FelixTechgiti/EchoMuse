@@ -1073,10 +1073,14 @@ def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
     second chance to forget that the headers are only meaningful behind
     Supervisor's gateway — Supervisor strips client copies, nothing else does.
     """
+    # Match the READ, not the mention — em_ingressauth and em_haadmin both
+    # name these headers in prose explaining where they come from and why
+    # they can be trusted, which is documentation rather than a second
+    # trust boundary.
     readers = []
     for path in CONTROLLER.glob("*.py"):
         text = path.read_text()
-        if "X-Remote-User" in text and path.name != "em_ingressauth.py":
+        if re.search(r'headers(?:\.get\(|\[)\s*["\']X-Remote-User', text):
             readers.append(path.name)
     assert readers == ["em_api.py"], (
         f"X-Remote-User headers read in {readers} — expected em_api.py only")
@@ -1148,6 +1152,6 @@ def test_role_changes_refuse_to_strand_the_install():
 
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
-    assert "em_haadmin.is_admin" in body, (
+    assert "em_haadmin.lookup_available" in body, (
         "must check whether Home Assistant governs the account")
     assert "governed_by_home_assistant" in body

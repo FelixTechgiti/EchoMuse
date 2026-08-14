@@ -8,11 +8,24 @@ ingress view sets requires_auth=False and leans on the session token, so
 the dashboard is therefore not evidence of being an HA admin, and the only
 way to find out is to ask Home Assistant.
 
-We ask over Supervisor's Home Assistant WebSocket proxy using the add-on's
-SUPERVISOR_TOKEN, and read `group_ids` off the matching user. This needs
-`homeassistant_api: true` in config.yaml — a real privilege for the add-on,
-taken deliberately so that household members who are not HA admins get a
-read-only dashboard instead of a root shell to every device.
+We ask Supervisor's own `GET /auth/list`, which returns each Home Assistant
+user's `group_ids`. That is gated by `auth_api: true` — access to the user
+backend and nothing else. The obvious route is Home Assistant's
+`config/auth/list` over Supervisor's WebSocket proxy, but that needs
+`homeassistant_api: true`, which grants the whole Home Assistant API to read
+one boolean. Take the narrow permission.
+
+The cost of the narrow route is that /auth/list returns **no user id** —
+only username, name, is_owner, is_active, local_only and group_ids. So the
+match is by USERNAME, against `X-Remote-User-Name`.
+
+That is safe here and is not the thing we refuse to do elsewhere. Accounts
+are still keyed on the immutable HA user id (users.ha_user_id); only this
+lookup matches by name, and both sides of it — the forwarded header and the
+list — are read from Home Assistant at the same moment, so they agree by
+construction. A rename makes the lookup MISS, which answers unknown and
+leaves the stored role alone. It cannot attach one person's admin status to
+another's account.
 
 Every failure answers **None** — unavailable, not "not an admin" and not
 "an admin". The caller (em_ingressauth.role_for) treats None as unknown and
@@ -28,7 +41,6 @@ lookup would put a WebSocket round trip in front of the dashboard opening.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -36,8 +48,8 @@ from typing import Optional
 
 log = logging.getLogger("echomuse.haadmin")
 
-# Supervisor's in-container proxy to Home Assistant's WebSocket API.
-WS_URL = "ws://supervisor/core/websocket"
+# Supervisor's own user-backend endpoint. Requires `auth_api: true`.
+AUTH_LIST_URL = "http://supervisor/auth/list"
 
 # HA's built-in admin group. A user is an admin iff they are in it.
 ADMIN_GROUP = "system-admin"
@@ -83,12 +95,20 @@ def is_admin_cached(ha_user_id: str) -> Optional[bool]:
     return value
 
 
-async def is_admin(ha_user_id: str) -> Optional[bool]:
+async def is_admin(username: Optional[str]) -> Optional[bool]:
     """
     True/False if Home Assistant answered, None if we could not find out.
 
-    None is never an assertion about the user — only about the lookup.
+    Takes the HA USERNAME (X-Remote-User-Name), because Supervisor's
+    /auth/list carries no user id. None is never an assertion about the
+    user — only about the lookup.
     """
+    if not username:
+        # Supervisor sets the name header only when the HA user record has
+        # one. Nothing to match on, so nothing is known.
+        return None
+
+    ha_user_id = username
     cached = is_admin_cached(ha_user_id)
     if cached is not None:
         return cached
@@ -127,51 +147,57 @@ async def is_admin(ha_user_id: str) -> Optional[bool]:
     now = time.monotonic()
     found: Optional[bool] = None
     for user in users:
-        uid = user.get("id")
-        if not uid:
+        name = user.get("username")
+        if not name:
             continue
-        admin = ADMIN_GROUP in (user.get("group_ids") or [])
-        _cache[uid] = (now, admin)
-        if uid == ha_user_id:
+        # is_owner is an admin too — the owner is not necessarily listed in
+        # the admin group, and treating them as read-only would lock the
+        # person who set Home Assistant up out of their own controller.
+        admin = (ADMIN_GROUP in (user.get("group_ids") or [])
+                 or bool(user.get("is_owner")))
+        _cache[name] = (now, admin)
+        if name == ha_user_id:
             found = admin
 
     if found is None:
-        # Authenticated by Supervisor but absent from the user list. Do not
-        # guess in either direction.
-        log.warning("[haadmin] Home Assistant user not in the list; "
-                    "leaving admin status unknown")
+        # Authenticated by Supervisor but absent from the list — a rename
+        # between the header being stamped and this call, or a provider that
+        # issues no username. Do not guess in either direction.
+        log.warning("[haadmin] Home Assistant user %r not in the list; "
+                    "leaving admin status unknown", ha_user_id)
     return found
 
 
 async def _fetch_users(token: str) -> Optional[list[dict]]:
     """
-    Open Supervisor's HA WebSocket proxy, authenticate, and return the user
-    list. Imports aiohttp lazily so this module stays importable (and
-    testable) without it.
+    GET Supervisor's /auth/list and return the user records. Imports aiohttp
+    lazily so this module stays importable (and testable) without it.
     """
     import aiohttp
 
+    headers = {"Authorization": f"Bearer {token}"}
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(WS_URL, heartbeat=None) as ws:
-            # HA sends auth_required, then we authenticate, then auth_ok.
-            await ws.receive_json()
-            await ws.send_json({"type": "auth", "access_token": token})
-            reply = await ws.receive_json()
-            if reply.get("type") != "auth_ok":
-                log.warning("[haadmin] Home Assistant rejected the add-on "
-                            "token: %s", reply.get("type"))
+        async with session.get(AUTH_LIST_URL, headers=headers) as resp:
+            if resp.status == 403:
+                # auth_api is not granted. Distinguished from a transport
+                # failure because retrying cannot fix it — it is a property
+                # of how the add-on is configured.
+                log.warning("[haadmin] Supervisor refused /auth/list — the "
+                            "add-on needs auth_api: true. Roles will fall "
+                            "back to the stored value.")
                 return None
+            if resp.status != 200:
+                log.warning("[haadmin] /auth/list returned HTTP %s", resp.status)
+                return None
+            body = await resp.json()
 
-            await ws.send_json({"id": 1, "type": "config/auth/list"})
-            while True:
-                msg = await ws.receive_json()
-                if msg.get("id") != 1:
-                    continue
-                if not msg.get("success", False):
-                    log.warning("[haadmin] config/auth/list refused: %s",
-                                msg.get("error"))
-                    return None
-                return msg.get("result") or []
+    # Supervisor wraps results as {"result": "ok", "data": {...}}.
+    data = body.get("data") if isinstance(body, dict) else None
+    if isinstance(data, dict):
+        return data.get("users") or []
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def invalidate() -> None:
@@ -179,3 +205,24 @@ def invalidate() -> None:
     global _failed_at
     _cache.clear()
     _failed_at = None
+
+
+def lookup_available() -> bool:
+    """
+    Can Home Assistant currently be asked about roles at all?
+
+    Used to decide whether a manual role change would survive: if HA governs
+    roles, login_via_ingress re-derives on every login and would revert it.
+
+    Deliberately coarse — it does not check a specific user. The per-user
+    answer needs the HA username, and the EchoMuse username is not reliably
+    it (collisions are suffixed). Being coarse over-refuses in one narrow
+    case: a renamed user whose lookup would have missed. That refusal points
+    the operator at Home Assistant, which is the right advice regardless, so
+    the conservative direction costs nothing.
+    """
+    if _token() is None:
+        return False
+    if _failed_at is not None and time.monotonic() - _failed_at < FAILURE_TTL_S:
+        return False
+    return True

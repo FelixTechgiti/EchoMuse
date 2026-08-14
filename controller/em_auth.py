@@ -173,7 +173,7 @@ async def login_via_ingress(identity) -> tuple[str, str]:
     # every login so that promoting or demoting someone in Home Assistant
     # takes effect here without an EchoMuse-side edit; cached, so an ordinary
     # reload does not pay for it.
-    ha_is_admin = await em_haadmin.is_admin(identity.user_id)
+    ha_is_admin = await em_haadmin.is_admin(identity.username)
 
     if user is None:
         existing = await loop.run_in_executor(None, db.user_count)

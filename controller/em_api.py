@@ -547,14 +547,11 @@ async def _patch_user(request: web.Request) -> web.Response:
                 "last_admin",
                 "This is the only admin — promote someone else first", 409)
 
-    if user["ha_user_id"]:
-        governed = await em_haadmin.is_admin(user["ha_user_id"])
-        if governed is not None:
-            return _error(
-                "governed_by_home_assistant",
-                "Home Assistant decides this account's role — change it "
-                "there (Settings → People) and it applies on their next "
-                "sign-in", 409)
+    if user["ha_user_id"] and em_haadmin.lookup_available():
+        return _error(
+            "governed_by_home_assistant",
+            "Home Assistant decides this account's role — change it there "
+            "(Settings → People) and it applies on their next sign-in", 409)
 
     await loop.run_in_executor(None, db.set_user_role, user_id, role)
     log.info(f"[api] {request['user']['username']} set "

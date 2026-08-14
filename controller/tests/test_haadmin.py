@@ -62,7 +62,7 @@ def test_a_user_missing_from_the_list_is_unknown(monkeypatch):
     monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
 
     async def users(_token):
-        return [{"id": "someone-else", "group_ids": ["system-admin"]}]
+        return [{"username": "someone-else", "group_ids": ["system-admin"]}]
 
     monkeypatch.setattr(ha, "_fetch_users", users)
     assert _run(ha.is_admin("abc")) is None
@@ -80,24 +80,24 @@ def _with_users(monkeypatch, rows):
 
 
 def test_admin_group_membership_is_the_test(monkeypatch):
-    _with_users(monkeypatch, [{"id": "abc", "group_ids": ["system-admin"]}])
+    _with_users(monkeypatch, [{"username": "abc", "group_ids": ["system-admin"]}])
     assert _run(ha.is_admin("abc")) is True
 
 
 def test_a_user_group_member_is_not_an_admin(monkeypatch):
-    _with_users(monkeypatch, [{"id": "abc", "group_ids": ["system-users"]}])
+    _with_users(monkeypatch, [{"username": "abc", "group_ids": ["system-users"]}])
     assert _run(ha.is_admin("abc")) is False
 
 
 def test_no_groups_at_all_is_not_an_admin(monkeypatch):
-    _with_users(monkeypatch, [{"id": "abc"}])
+    _with_users(monkeypatch, [{"username": "abc"}])
     assert _run(ha.is_admin("abc")) is False
 
 
 def test_a_similarly_named_group_does_not_grant_admin(monkeypatch):
     # Exact membership only — no prefix matching anywhere.
-    _with_users(monkeypatch, [{"id": "abc", "group_ids": ["system-admins",
-                                                          "not-system-admin"]}])
+    _with_users(monkeypatch, [{"username": "abc", "group_ids": ["system-admins",
+                                                                "not-system-admin"]}])
     assert _run(ha.is_admin("abc")) is False
 
 
@@ -109,7 +109,7 @@ def test_the_answer_is_cached(monkeypatch):
 
     async def users(_token):
         calls.append(1)
-        return [{"id": "abc", "group_ids": ["system-admin"]}]
+        return [{"username": "abc", "group_ids": ["system-admin"]}]
 
     monkeypatch.setattr(ha, "_fetch_users", users)
     assert _run(ha.is_admin("abc")) is True
@@ -125,8 +125,8 @@ def test_one_lookup_caches_every_user_it_saw(monkeypatch):
     async def users(_token):
         calls.append(1)
         return [
-            {"id": "abc", "group_ids": ["system-admin"]},
-            {"id": "def", "group_ids": ["system-users"]},
+            {"username": "abc", "group_ids": ["system-admin"]},
+            {"username": "def", "group_ids": ["system-users"]},
         ]
 
     monkeypatch.setattr(ha, "_fetch_users", users)
@@ -185,7 +185,7 @@ def test_the_suppression_expires_quickly(monkeypatch):
 
     async def users(_token):
         calls.append(1)
-        return [{"id": "abc", "group_ids": ["system-admin"]}]
+        return [{"username": "abc", "group_ids": ["system-admin"]}]
 
     ha._failed_at = 0.0
     monkeypatch.setattr(ha, "_fetch_users", users)
@@ -203,3 +203,49 @@ def test_a_successful_lookup_clears_the_suppression(monkeypatch):
     assert _run(ha.is_admin("abc")) is None
     ha.invalidate()
     assert ha._failed_at is None
+
+
+# ── The narrow permission ─────────────────────────────────────────────────────
+
+def test_no_username_is_unknown(monkeypatch):
+    # Supervisor sets X-Remote-User-Name only when the HA record has one.
+    # Supervisor's /auth/list carries no user id, so with no name there is
+    # nothing to match on — which is not the same as not being an admin.
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    assert _run(ha.is_admin(None)) is None
+    assert _run(ha.is_admin("")) is None
+
+
+def test_the_owner_counts_as_an_admin(monkeypatch):
+    # The owner is not necessarily in the admin group, and treating them as
+    # read-only would lock the person who set Home Assistant up out of their
+    # own controller.
+    _with_users(monkeypatch, [{"username": "abc", "is_owner": True,
+                               "group_ids": ["system-users"]}])
+    assert _run(ha.is_admin("abc")) is True
+
+
+def test_it_uses_supervisors_auth_list_not_the_full_ha_api():
+    # The whole point of the narrow permission: config/auth/list over the HA
+    # WebSocket proxy would need homeassistant_api — the entire Home
+    # Assistant API to read one boolean.
+    import inspect
+    assert ha.AUTH_LIST_URL == "http://supervisor/auth/list"
+    # The module docstring names homeassistant_api to explain why it is NOT
+    # used, so check the code path rather than the prose.
+    code = inspect.getsource(ha._fetch_users)
+    assert "core/websocket" not in code
+    assert "ws_connect" not in code
+    assert "AUTH_LIST_URL" in code
+
+
+def test_lookup_available_is_false_without_a_token(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    assert ha.lookup_available() is False
+
+
+def test_lookup_available_is_false_during_a_recent_failure(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    assert ha.lookup_available() is True
+    ha._failed_at = ha.time.monotonic()
+    assert ha.lookup_available() is False

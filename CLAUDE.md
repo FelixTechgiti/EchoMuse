@@ -210,10 +210,21 @@ is read-only.** Supervisor does NOT forward admin status — only the id and
 names — and HA core's ingress view sets `requires_auth=False` and leans on the
 session token, so `panel_admin` hides the sidebar entry rather than gating the
 URL. **Reaching this dashboard is therefore not evidence of being an HA
-admin**, which is why the status has to be looked up: `em_haadmin` reads
-`config/auth/list` over Supervisor's HA WebSocket proxy (hence
-`homeassistant_api: true` in `config.yaml`, taken for this one purpose) and
-checks `system-admin` group membership. It is re-checked on every login, so
+admin**, which is why the status has to be looked up: `em_haadmin` reads Supervisor's
+own `GET /auth/list` and checks `system-admin` membership (or `is_owner` — the
+owner is not necessarily in that group, and reading them as read-only would
+lock out whoever set HA up). That needs **`auth_api: true`**, access to the
+user backend and nothing else — NOT `homeassistant_api`, which HA's own
+`config/auth/list` over the WebSocket proxy would need and which grants the
+entire Home Assistant API to read one boolean.
+
+`/auth/list` returns **no user id** — only username, name, is_owner,
+is_active, local_only, group_ids — so this lookup matches by **username**.
+That is safe and is not the thing keyed on elsewhere: accounts are still
+keyed on the immutable HA user id, and both sides of this match are read from
+HA at the same moment, so a rename makes the lookup MISS (→ unknown → stored
+role stands) rather than attaching one person's admin status to another's
+account. It is re-checked on every login, so
 promoting or demoting someone in HA takes effect here with no edit on this
 side; results cache for `CACHE_TTL_S`.
 
