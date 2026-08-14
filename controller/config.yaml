@@ -26,6 +26,14 @@ arch:
 host_network: true
 ingress: true
 ingress_port: 8768
+# Admin-only sidebar entry. This is Supervisor's default, set explicitly
+# because the dashboard authenticates whoever Home Assistant forwards
+# (em_ingressauth) and proxies a root shell to every device — so a change to
+# that default must not quietly widen who can reach it. Note it governs the
+# menu entry; EchoMuse does not assume it gates the ingress URL, which is
+# why only the FIRST Home Assistant user becomes admin and the rest are
+# read-only until promoted.
+panel_admin: true
 panel_icon: mdi:microphone-message
 panel_title: EchoMuse
 environment:

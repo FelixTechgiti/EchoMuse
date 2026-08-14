@@ -1039,3 +1039,55 @@ def test_bundle_live_state_carries_ambient_light_status():
         "em_api's live_state must include ambient_light_status so support "
         "bundles can answer why a device reports no light sensor"
     )
+
+
+def test_ingress_login_passes_the_real_deployment_flag_and_peer_address():
+    """
+    The ingress login endpoint must hand em_ingressauth.decide the LIVE
+    INGRESS_ONLY value and the LIVE peer address — not a literal.
+
+    Hardcoding either turns the decision function into theatre: `True` makes
+    the standalone container honour an attacker-supplied X-Remote-User-Id,
+    which is an unauthenticated admin session on a dashboard that proxies a
+    root shell to every device. The decision itself is tested in
+    test_ingressauth.py; this pins that it is actually consulted with real
+    inputs.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    call = re.search(
+        r"em_ingressauth\.decide\((.*?)\)\s*\n", src, re.S)
+    assert call, "em_api no longer calls em_ingressauth.decide"
+    args = call.group(1)
+
+    assert "ingress_only=INGRESS_ONLY" in args, (
+        "ingress_only must be the module's INGRESS_ONLY, never a literal")
+    assert "remote=request.remote" in args, (
+        "remote must be the live peer address, never a literal")
+    for literal in ("ingress_only=True", "remote=em_ingressauth.INGRESS_GATEWAY_IP"):
+        assert literal not in args, f"{literal} defeats the check entirely"
+
+
+def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
+    """
+    X-Remote-User-* may be read in exactly one place. A second reader is a
+    second chance to forget that the headers are only meaningful behind
+    Supervisor's gateway — Supervisor strips client copies, nothing else does.
+    """
+    readers = []
+    for path in CONTROLLER.glob("*.py"):
+        text = path.read_text()
+        if "X-Remote-User" in text and path.name != "em_ingressauth.py":
+            readers.append(path.name)
+    assert readers == ["em_api.py"], (
+        f"X-Remote-User headers read in {readers} — expected em_api.py only")
+
+
+def test_addon_panel_stays_admin_only():
+    """
+    panel_admin gates the sidebar entry for a dashboard that proxies a root
+    shell. It is Supervisor's default, pinned here so a future edit to
+    config.yaml has to be deliberate.
+    """
+    cfg = (CONTROLLER / "config.yaml").read_text()
+    assert re.search(r"^panel_admin:\s*true\s*$", cfg, re.M), (
+        "config.yaml must set panel_admin: true explicitly")

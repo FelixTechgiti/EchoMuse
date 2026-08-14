@@ -181,6 +181,43 @@ network protection, since host networking exposes 8768 on the LAN.
 dashboard does provisioning, OTA, the shell and turn history, none of which
 HA offers, so **nothing is gated on it**.
 
+**Auth under ingress: Home Assistant has already done it.** Supervisor
+forwards the authenticated user as `X-Remote-User-Id` (plus optional name
+headers) and **strips any client-supplied copies** before proxying, so on a
+genuine ingress request those values are proof of an HA session. `POST
+/api/auth/ingress` mints an EchoMuse session from them and the landing page
+tries it before rendering any form, which also removes the bootstrap-token
+step under the add-on — the first HA user through the door becomes admin,
+exactly as the token holder does on the container.
+
+The decision is `em_ingressauth.decide`, pure and tested, for the reason
+`em_linkauth.decide` is: **two conditions, never one.** The header only means
+something when `INGRESS_ONLY` **and** the peer is Supervisor's gateway. On the
+standalone container that same header is attacker-supplied, so honouring it
+there is an unauthenticated admin session on a dashboard that proxies a root
+shell. `tests/test_deploy.py` pins that the call site passes the live
+`INGRESS_ONLY` and `request.remote` rather than literals, and that nothing
+else in the tree reads those headers.
+
+Users are keyed on the **HA user id, never the name** (schema v18,
+`users.ha_user_id`) — names are editable in HA, and keying on one would hand a
+renamed user a fresh account, or hand somebody else's account to whoever took
+the old name. These rows carry a password sentinel that no bcrypt check can
+match, so they can never be used on the password form. **Only the FIRST HA
+user becomes admin; the rest are read-only** (`em_ingressauth.role_for`),
+because `panel_admin` is documented as governing the sidebar *menu entry* —
+which is not the same claim as gating the ingress URL — and auto-promoting
+every household member to a root shell is not a mistake worth risking.
+`panel_admin: true` is set explicitly in `config.yaml` so a default change
+cannot widen it silently. There is no **Sign out** control under ingress: HA
+owns the session, so it would re-authenticate immediately and read as a broken
+button.
+
+Note HA display names contain spaces, unlike every local username, and they
+now reach the user table — `em_support`'s account redaction already covers
+them because it reads that table rather than matching a pattern, and a test
+pins it.
+
 **Migrating an existing fleet is not just a config change.** The device
 picks `wss` from the mDNS `tls_port` TXT record, NOT from
 `REQUIRE_DEVICE_TLS` (`internal/client/control.go`) — so a device holding

@@ -431,10 +431,13 @@
       }
     });
 
+    const isIngress = () => document.baseURI.includes('/hassio_ingress/');
+
     // ── Landing state machine ──
     // 1. Valid stored session → straight to /dashboard.
-    // 2. Setup pending → amber ring + create-admin form.
-    // 3. Configured → green ring + login form.
+    // 2. Home Assistant already authenticated us → straight to /dashboard.
+    // 3. Setup pending → amber ring + create-admin form.
+    // 4. Configured → green ring + login form.
     async function init() {
       const token = localStorage.getItem('em_token');
       if (token) {
@@ -447,14 +450,34 @@
         localStorage.removeItem('em_role');
       }
 
+      // Under the add-on, Home Assistant has already authenticated this
+      // person and Supervisor forwards who they are — asking for a second
+      // password would be a lock on a door that is already locked. Tried
+      // after the stored session so an ordinary reload does not mint a new
+      // one every time. A 401 is the normal answer off-ingress and simply
+      // falls through to the forms below.
+      try {
+        const d = await post('api/auth/ingress', {});
+        setLcd('Signed in via Home Assistant', GREEN);
+        setRing(GREEN);
+        enterDashboard(d.token, d.role);
+        return;
+      } catch {}
+
       try {
         const r = await fetch('api/system/setup-state');
         const d = await r.json();
         if (d.needs_setup) {
           setRing(AMBER);
           setLcd('First-run setup', AMBER);
-          hint.innerHTML = 'The setup token is in the controller logs:<br/>' +
-                           '<code>docker logs echomuse-controller</code>';
+          // Reaching this under ingress means Supervisor sent no user with
+          // the session, so naming the container log would be wrong advice
+          // on the one deployment that has no container log to read.
+          hint.innerHTML = isIngress()
+            ? 'Home Assistant did not identify you to this add-on. ' +
+              'Reload the panel, or use the setup token from the add-on log.'
+            : 'The setup token is in the controller logs:<br/>' +
+              '<code>docker logs echomuse-controller</code>';
           show('form-setup');
           document.getElementById('su-token').focus();
         } else {

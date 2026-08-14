@@ -5879,7 +5879,13 @@ function App() {
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
           <ThemeToggle/>
           <IconButton onClick={() => setShowSettings(true)} label="Settings">⚙</IconButton>
-          <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          {/* No sign-out under ingress: Home Assistant owns the session, so
+              signing out would land on the landing page and be re-authenticated
+              immediately — a button that visibly does nothing. Sign out of
+              Home Assistant instead. */}
+          {!isIngress() && (
+            <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          )}
         </div>
       </div>
 

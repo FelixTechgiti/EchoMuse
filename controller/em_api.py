@@ -54,6 +54,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_ingressauth
 import em_oww_assets
 import em_oww_models
 import em_pki
@@ -266,6 +267,9 @@ async def create_app() -> web.Application:
 
     # Auth
     app.router.add_post("/api/auth/login",           _post_login)
+    # Public: decides for itself whether the request is a genuine ingress
+    # request. Requiring a session here would defeat the purpose.
+    app.router.add_post("/api/auth/ingress",          _post_ingress_login)
     app.router.add_post("/api/auth/logout",          _post_logout)
     app.router.add_get("/api/auth/me",               _get_me)
     app.router.add_post("/api/auth/change-password", _post_change_password)
@@ -471,6 +475,37 @@ async def _post_setup(request: web.Request) -> web.Response:
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
+
+async def _post_ingress_login(request: web.Request) -> web.Response:
+    """
+    POST /api/auth/ingress — authenticate as the Home Assistant user that
+    Supervisor forwarded. → {token, role} or 401.
+
+    Home Assistant has already authenticated this person; a second EchoMuse
+    password would be a lock on a door that is already locked. Supervisor
+    strips client-supplied copies of these headers before proxying, so their
+    presence on a request that genuinely came from the gateway is proof of
+    an authenticated HA session.
+
+    Whether it *did* come from the gateway is em_ingressauth.decide's
+    judgement, made from the deployment mode and the peer address together.
+    A 401 here is not a failure — it is the ordinary answer everywhere that
+    is not the add-on, and the dashboard falls back to the login form.
+    """
+    identity = em_ingressauth.decide(
+        ingress_only=INGRESS_ONLY,
+        remote=request.remote,
+        user_id=request.headers.get("X-Remote-User-Id"),
+        username=request.headers.get("X-Remote-User-Name"),
+        display_name=request.headers.get("X-Remote-User-Display-Name"),
+    )
+    if identity is None:
+        return _error("not_authenticated",
+                      "Home Assistant authentication is not available", 401)
+
+    token, role = await auth.login_via_ingress(identity)
+    return _ok({"token": token, "role": role, "via": "ingress"})
+
 
 async def _post_login(request: web.Request) -> web.Response:
     """POST /api/auth/login — {username, password} → {token, role}"""

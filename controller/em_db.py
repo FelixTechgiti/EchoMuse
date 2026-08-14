@@ -261,6 +261,11 @@ WAKE_COUNTER_RETENTION_DAYS = 180
 #   - SQLite ALTER TABLE only supports ADD COLUMN. Renaming or dropping
 #     columns requires a create-copy-drop migration.
 
+# Stored in password_hash for accounts authenticated by Home Assistant. Not a
+# valid bcrypt hash, so verify_password can only ever return False for it —
+# these accounts have no password and must not acquire one by accident.
+HA_USER_PASSWORD_SENTINEL = "!ha-authenticated-no-password"
+
 MIGRATIONS: list[str] = [
     # ── v1 — initial schema ──────────────────────────────────────────────────
     """
@@ -722,6 +727,29 @@ MIGRATIONS: list[str] = [
     ALTER TABLE turns ADD COLUMN ctrl_wake_delta_ms INTEGER;
 
     UPDATE system_config SET value = '17' WHERE key = 'schema_version';
+    """,
+
+    # ── v18 — Home Assistant identity on a user row ──────────────────────────
+    #
+    # Under the add-on, Home Assistant has already authenticated the person,
+    # so the dashboard authenticates them from Supervisor's forwarded user id
+    # rather than asking for a second password (em_ingressauth).
+    #
+    # Keyed on the HA user id, never the name: names are editable in Home
+    # Assistant, and keying on one would silently hand a renamed user a fresh
+    # account — or worse, hand somebody else's account to whoever took the
+    # old name.
+    #
+    # NULL for every ordinary account, which is what the standalone container
+    # has and keeps having. UNIQUE tolerates repeated NULLs in SQLite, so the
+    # constraint costs local accounts nothing.
+    """
+    ALTER TABLE users ADD COLUMN ha_user_id TEXT;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ha_user_id
+        ON users(ha_user_id) WHERE ha_user_id IS NOT NULL;
+
+    UPDATE system_config SET value = '18' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2056,6 +2084,48 @@ def create_user(username: str, password_hash: str, role: str = "readonly") -> in
             VALUES (?, ?, ?, ?)
             """,
             (username, password_hash, role, now),
+        )
+        return cur.lastrowid
+
+
+def get_user_by_ha_id(ha_user_id: str) -> Optional[sqlite3.Row]:
+    """Return the user linked to a Home Assistant user id, or None."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,)
+        ).fetchone()
+
+
+def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
+    """
+    Insert a user authenticated by Home Assistant and return its id.
+
+    These accounts have no password. The stored hash is a sentinel that no
+    bcrypt verification can match, so the account cannot be used on the
+    password login form even if the standalone container is later pointed at
+    the same database — em_auth.verify_password returns False for a
+    malformed hash rather than raising.
+
+    The username is made unique by suffixing, never by reusing an existing
+    row: two Home Assistant users may share a display name, and merging them
+    onto one account would silently give one person the other's session.
+    """
+    now = _now()
+    with _tx() as conn:
+        base = username
+        suffix = 1
+        while conn.execute(
+            "SELECT 1 FROM users WHERE username = ?", (base,)
+        ).fetchone() is not None:
+            suffix += 1
+            base = f"{username}-{suffix}"
+        cur = conn.execute(
+            """
+            INSERT INTO users (username, password_hash, role, created_at,
+                               ha_user_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (base, HA_USER_PASSWORD_SENTINEL, role, now, ha_user_id),
         )
         return cur.lastrowid
 
