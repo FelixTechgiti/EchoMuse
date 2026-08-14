@@ -120,7 +120,7 @@ ships as a prebuilt Docker image:
 mkdir echomuse && cd echomuse
 curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
 curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
-# Edit .env: set SERVER_IP to this machine's LAN IP
+# Optional: set SERVER_IP to this machine's LAN IP (detected if left empty)
 docker compose -f docker-compose.deploy.yml up -d
 ```
 

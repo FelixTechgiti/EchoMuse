@@ -533,7 +533,7 @@ These are set once, on the server, and need a controller restart to change:
 
 | Setting | What it is |
 |---|---|
-| `SERVER_IP` | The controller computer's LAN IP — what devices connect to. |
+| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
@@ -591,7 +591,11 @@ poll loop spin without pausing, which is worse than leaving it alone.
   cloud speech-to-text service, HA sends it there. EchoMuse itself sends it
   nowhere but HA.
 - **Saved utterance recordings** (`saveUtterances`, off by default) — written
-  to disk beside the database and never uploaded.
+  to disk beside the database and never uploaded. Playing or downloading them
+  is **admin-only**, as is seeing the transcript text of a turn: on the Home
+  Assistant add-on every household user can reach the dashboard, so read-only
+  accounts get turn timings, scores and outcomes without the speech. Enforced
+  on the server, not just hidden in the page.
 - **Device serials, WiFi credentials, network names and your fleet's
   configuration.** These live only in the controller's database.
 - **Support bundles** are built only when you ask for one, and sharing the

@@ -85,7 +85,8 @@ Using the prebuilt image (nothing to compile):
 mkdir echomuse && cd echomuse
 curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
 curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
-# Edit .env: set SERVER_IP to this computer's LAN IP address
+# Optional: set SERVER_IP in .env to this computer's LAN IP. Left empty it is
+# detected, and the address in use is printed at startup.
 docker compose -f docker-compose.deploy.yml up -d
 ```
 
@@ -98,7 +99,7 @@ To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker co
 git clone https://github.com/wilbowes/EchoMuse.git
 cd EchoMuse/controller
 cp .env.example .env
-# Edit .env: set SERVER_IP to this computer's LAN IP address
+# Optional: set SERVER_IP to this computer's LAN IP. Left empty it is detected.
 docker compose up -d --build
 ```
 
@@ -118,15 +119,19 @@ That's it. The controller is now running two things:
 
 ## Step 3 — Create your admin account
 
-Open the dashboard: the **EchoMuse panel** in Home Assistant's sidebar if
-you installed the add-on, or `http://<SERVER_IP>:8768` if you're running
-Docker. On a fresh install you'll see the Echo graphic with a **pulsing
-amber ring** and a setup form.
+**On the Home Assistant add-on** there is nothing to create. Open the
+**EchoMuse panel** in the sidebar and you are already signed in as your Home
+Assistant user — it has authenticated you, so a second password would be a
+lock on a door that is already locked. The first person to open the panel
+becomes the EchoMuse admin; anyone after that gets read-only access until an
+admin promotes them.
 
-It asks for a **setup token** — this is a one-time code printed in the
-controller's logs, so that only you (the person who can read the server's
-logs) can claim the controller. Find it in the add-on's **Log** tab, or
-with Docker:
+**With Docker**, open `http://<SERVER_IP>:8768`. On a fresh install you'll
+see the Echo graphic with a **pulsing amber ring** and a setup form.
+
+It asks for a **setup token** — a one-time code printed in the controller's
+logs, so that only you (the person who can read the server's logs) can claim
+the controller:
 
 ```bash
 docker logs echomuse-controller
