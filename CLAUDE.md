@@ -61,10 +61,10 @@ Tests only cover pure-Go logic — hardware-dependent code is not testable on th
 **Run controller tests (host):**
 ```bash
 cd controller
-python -m pytest tests/        # needs: pytest numpy scipy — not the full requirements.txt
+python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
 ```
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`, `em_hostip`, `em_ingressauth`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
@@ -242,6 +242,48 @@ Note HA display names contain spaces, unlike every local username, and they
 now reach the user table — `em_support`'s account redaction already covers
 them because it reads that table rather than matching a pattern, and a test
 pins it.
+
+**Release channels.** Home Assistant has no channel concept — one add-on is
+one version — so a channel is a **second add-on with its own slug**, opted
+into by installing it (the shape ESPHome uses). `controller/` is GA;
+`controller-ea/` is Early Access and is **generated** by
+`controller/tools/sync_channels.py`, never edited: everything but the add-on's
+identity and its own `version:` is copied verbatim, and
+`tests/test_channels.py` fails on drift (verified by reintroducing it). Two
+hand-maintained config files describing one program is #160's failure
+multiplied by every option, schema entry and permission.
+
+One publish path, channel taken from the tag: `controller-v2.20.0` →
+`:2.20.0` + `:latest`; `controller-ea-v2.20.0-ea.1` → `:2.20.0-ea.1` only.
+**EA never moves `:latest`** — that is what `docker-compose.deploy.yml` pulls,
+so an EA build touching it would push a prerelease to every standalone
+container on the next `docker compose pull`. The prefixes are distinct rather
+than one scheme with a suffix because `_fetch_controller_release` lists tags
+by **prefix match** on `controller-v`, which excludes `controller-ea-v*` from
+the dashboard's update notice for free.
+
+**Channels share no storage.** Each slug gets its own `/data`, so switching is
+a migration: a new database *and a newly generated CA*, and devices holding the
+old CA then dial `wss`, fail verification and cannot connect (they take `wss`
+from the mDNS `tls_port` record, so `require_device_tls: false` does not help).
+Copy the old `/data` — at minimum all four files in `tls/` — before starting
+the other channel. Isolation is deliberate: `MIGRATIONS` is append-only and
+forward-only, so a shared database would let EA upgrade the schema out from
+under GA, permanently.
+
+**`version.parse` does not order prereleases** — `2.20.0-ea.1` parses equal to
+`2.20.0`, so the dashboard's update notice cannot tell an EA build from the GA
+release of the same version. Advisory-only and Supervisor drives real updates,
+so it is a wrong banner rather than a wrong install. Fixing it needs care: git
+describe output (`2.19.0-3-gabc`) must keep parsing **equal** to its tag, so
+a real prerelease has to be distinguished from a describe suffix.
+
+**Testing add-on changes before they land.** Supervisor clones the **default
+branch**, so a branch cannot be installed. `controller/tools/make_dev_addon.sh`
+packages the working tree as a **local** add-on (dropped `image:`, distinct
+slug) that Supervisor builds from `/addons/<folder>` on the HA host. The build
+compiles nothing — ffmpeg is apt, onnxruntime/speexdsp-ns/scipy/scikit-learn
+are prebuilt wheels — so it costs minutes.
 
 **Migrating an existing fleet is not just a config change.** The device
 picks `wss` from the mDNS `tls_port` TXT record, NOT from

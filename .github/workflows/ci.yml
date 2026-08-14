@@ -18,7 +18,13 @@ jobs:
       # math, nothing that pulls in openwakeword/onnxruntime (which would
       # cost minutes of install for zero coverage).
       - name: Install test dependencies
-        run: pip install pytest numpy scipy
+        # pyyaml is for the add-on config parity tests (test_channels.py):
+        # config.yaml is genuinely YAML and hand-parsing it to compare
+        # options and schema would be fragile in exactly the way that test
+        # exists to prevent. Pure Python and dependency-free — nothing like
+        # pulling openwakeword or aiohttp in here, which is what the
+        # minimal-test-env rule is actually about.
+        run: pip install pytest numpy scipy pyyaml
       - name: Run pytest
         working-directory: controller
         run: python -m pytest tests/ -v

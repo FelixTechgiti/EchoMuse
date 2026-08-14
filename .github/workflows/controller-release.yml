@@ -22,10 +22,26 @@ name: Controller Release (Docker image)
 # nothing; it is emulated with QEMU, which costs time on the runner and
 # nothing at run time.
 
+# Two channels, one publish path — the image is identical, only the tag and
+# the add-on directory whose pin is checked differ:
+#   controller-v2.20.0        -> :2.20.0 + :latest   (GA,  controller/)
+#   controller-ea-v2.20.0-ea.1 -> :2.20.0-ea.1        (EA, controller-ea/)
+#
+# EA never moves :latest. That tag is what docker-compose.deploy.yml pulls,
+# so an EA build touching it would push a prerelease to every standalone
+# container on the next `docker compose pull` — users who never opted into
+# anything.
+#
+# The prefixes are deliberately distinct rather than one scheme with a
+# suffix: em_api._fetch_controller_release lists tags with a PREFIX match on
+# `controller-v`, so `controller-ea-v*` is excluded from the dashboard's
+# update notice for free, and GA users are never advised to install a
+# prerelease.
 on:
   push:
     tags:
       - 'controller-v*'
+      - 'controller-ea-v*'
 
 jobs:
   build-and-push:
@@ -38,8 +54,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Identify the channel
+        id: channel
+        run: |
+          case "$GITHUB_REF_NAME" in
+            controller-ea-v*)
+              echo "channel=ea"                                    >> "$GITHUB_OUTPUT"
+              echo "addon_dir=controller-ea"                       >> "$GITHUB_OUTPUT"
+              echo "image_tag=${GITHUB_REF_NAME#controller-ea-v}"  >> "$GITHUB_OUTPUT"
+              echo "version=${GITHUB_REF_NAME#controller-ea-}"     >> "$GITHUB_OUTPUT"
+              echo "latest=false"                                  >> "$GITHUB_OUTPUT"
+              ;;
+            controller-v*)
+              echo "channel=ga"                                    >> "$GITHUB_OUTPUT"
+              echo "addon_dir=controller"                          >> "$GITHUB_OUTPUT"
+              echo "image_tag=${GITHUB_REF_NAME#controller-v}"     >> "$GITHUB_OUTPUT"
+              echo "version=${GITHUB_REF_NAME#controller-}"        >> "$GITHUB_OUTPUT"
+              echo "latest=true"                                   >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::$GITHUB_REF_NAME matches no known channel"
+              exit 1
+              ;;
+          esac
+
       # The Home Assistant add-on pulls a PUBLISHED image, pinned by
-      # controller/config.yaml's `version:` — so that file names an image
+      # its config.yaml's `version:` — so that file names an image
       # that has to exist and has to contain the add-on code. Getting it
       # wrong is not caught by any test and does not fail the release; it
       # fails on the user's Home Assistant, by silently running whichever
@@ -55,14 +95,15 @@ jobs:
       # tag, and CI on a branch has neither.
       - name: Add-on version matches the tag
         run: |
-          want="${GITHUB_REF_NAME#controller-v}"
-          got="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' controller/config.yaml)"
+          dir="${{ steps.channel.outputs.addon_dir }}"
+          want="${{ steps.channel.outputs.image_tag }}"
+          got="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$dir/config.yaml")"
           if [ "$want" != "$got" ]; then
-            echo "::error::controller/config.yaml pins version '$got' but this release is '$want'."
+            echo "::error::$dir/config.yaml pins version '$got' but this release is '$want'."
             echo "The add-on would pull ghcr.io/.../echomuse-controller:$got — not what is being released here."
             exit 1
           fi
-          echo "add-on pins $got, matching the tag"
+          echo "$dir pins $got, matching the tag"
 
       - name: Set up QEMU
         # arm64 is cross-built on an amd64 runner, so the emulation layer has
@@ -85,13 +126,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/echomuse-controller
           tags: |
-            type=match,pattern=controller-v(.*),group=1
-            type=raw,value=latest
-
-      - name: Version string from tag
-        id: version
-        # controller-v2.8.0 → v2.8.0 (what the dashboard header displays)
-        run: echo "version=${GITHUB_REF_NAME#controller-}" >> "$GITHUB_OUTPUT"
+            type=raw,value=${{ steps.channel.outputs.image_tag }}
+            type=raw,value=latest,enable=${{ steps.channel.outputs.latest }}
 
       - name: Build and push
         id: build
@@ -101,7 +137,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
+            EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -141,7 +177,7 @@ jobs:
           scan-type: image
           image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
           format: cyclonedx
-          output: sbom-controller-${{ steps.version.outputs.version }}.cdx.json
+          output: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json
 
       # Attached to the workflow run rather than to a Release, because
       # controller tags deliberately create no GitHub Release — the OTA
@@ -156,8 +192,8 @@ jobs:
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-controller-${{ steps.version.outputs.version }}
-          path: sbom-controller-${{ steps.version.outputs.version }}.cdx.json
+          name: sbom-controller-${{ steps.channel.outputs.version }}
+          path: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json
           if-no-files-found: warn
           retention-days: 365
 
