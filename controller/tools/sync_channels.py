@@ -26,8 +26,16 @@ preserved from the existing file when there is one, and seeded from GA on
 first creation.
 
 Usage, from controller/:
-    tools/sync_channels.py            # write controller-ea/
-    tools/sync_channels.py --check    # exit 1 if the tree is out of date
+    tools/sync_channels.py                     # write controller-ea/
+    tools/sync_channels.py --check             # exit 1 if out of date
+    tools/sync_channels.py --set-version 2.20.0-ea.1
+
+`version:` is the one field a release moves, and the generated file says DO
+NOT EDIT — so moving it is a command rather than a hand-edit nobody is sure
+is allowed. It must match the tag being released: controller-release.yml
+refuses to build when the tag and the channel's pin disagree, which is the
+guard that exists because a stale pin once shipped an add-on whose image
+predated the add-on itself (#160).
 """
 
 from __future__ import annotations
@@ -198,6 +206,24 @@ def check(ch: Channel) -> list[str]:
 
 def main(argv: list[str]) -> int:
     channels = [EA]
+
+    if "--set-version" in argv:
+        i = argv.index("--set-version")
+        if i + 1 >= len(argv):
+            print("--set-version needs a value, e.g. 2.20.0-ea.1",
+                  file=sys.stderr)
+            return 2
+        wanted = argv[i + 1]
+        for ch in channels:
+            write(ch)  # ensure the file exists before rewriting its pin
+            path = ch.path / "config.yaml"
+            text = path.read_text(encoding="utf-8")
+            text = re.sub(r'^version:.*$', f'version: "{wanted}"', text,
+                          count=1, flags=re.M)
+            path.write_text(text, encoding="utf-8")
+            print(f"{ch.dirname} pinned to {wanted}")
+        return 0
+
     if "--check" in argv:
         problems = [p for ch in channels for p in check(ch)]
         if problems:
