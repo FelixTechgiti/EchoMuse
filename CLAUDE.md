@@ -61,10 +61,10 @@ Tests only cover pure-Go logic — hardware-dependent code is not testable on th
 **Run controller tests (host):**
 ```bash
 cd controller
-python -m pytest tests/        # needs: pytest numpy scipy — not the full requirements.txt
+python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
 ```
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`, `em_hostip`, `em_ingressauth`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
