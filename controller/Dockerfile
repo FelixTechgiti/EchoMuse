@@ -66,7 +66,6 @@ COPY em_support.py .
 COPY em_shadow.py .
 COPY em_ns.py .
 COPY em_pki.py .
-COPY em_haadmin.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .

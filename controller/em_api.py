@@ -54,7 +54,6 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
-import em_haadmin
 import em_ingressauth
 import em_oww_assets
 import em_oww_models
@@ -508,19 +507,14 @@ async def _patch_user(request: web.Request) -> web.Response:
     """
     PATCH /api/users/{id}  {role} — change a user's role. ADMIN ONLY.
 
-    Two refusals, and the second is the subtle one.
+    This is the ONLY way to promote someone, including accounts Home
+    Assistant created through ingress — roles are not mirrored from HA, so
+    nothing here is later overwritten by a login.
 
-    **Never leave the install with no admin.** On the standalone container
-    local accounts are the only auth, so there is no other way back in.
-
-    **A Home Assistant account's role belongs to Home Assistant** — but only
-    while we can actually ask. login_via_ingress re-derives the role on every
-    login *when the lookup answered*, so a manual change there would be
-    silently reverted on the user's next page load, which is worse than
-    refusing. When the lookup cannot answer (no homeassistant_api, older
-    Supervisor, HA down) it re-derives nothing, so a manual change persists
-    and is the only lever there is — and is allowed. The two rules compose:
-    whoever is authoritative is the only one who can change it.
+    One refusal: **never leave the install with no admin.** On the standalone
+    container local accounts are the only auth, so an install with no admin
+    has no way back in — and this endpoint is the one an admin reaches for
+    while tidying up.
     """
     body = await _json_body(request)
     role = _require_str(body, "role")
@@ -546,12 +540,6 @@ async def _patch_user(request: web.Request) -> web.Response:
             return _error(
                 "last_admin",
                 "This is the only admin — promote someone else first", 409)
-
-    if user["ha_user_id"] and em_haadmin.lookup_available():
-        return _error(
-            "governed_by_home_assistant",
-            "Home Assistant decides this account's role — change it there "
-            "(Settings → People) and it applies on their next sign-in", 409)
 
     await loop.run_in_executor(None, db.set_user_role, user_id, role)
     log.info(f"[api] {request['user']['username']} set "

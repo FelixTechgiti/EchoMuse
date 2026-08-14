@@ -46,45 +46,30 @@ class IngressIdentity(NamedTuple):
 VALID_ROLES = ("admin", "readonly")
 
 
-def role_for(
-    *,
-    existing_users: int,
-    configured_default: Optional[str],
-    ha_is_admin: Optional[bool] = None,
-) -> str:
+def role_for(*, existing_users: int, configured_default: Optional[str]) -> str:
     """
-    The role a Home Assistant user is given.
+    The role a newly-seen Home Assistant user is given.
 
-    Mirrors Home Assistant's own answer where we have it: an HA admin is an
-    EchoMuse admin, an HA non-admin is read-only. Supervisor does not forward
-    admin status — it sends only the user id and names — so `ha_is_admin`
-    comes from asking Home Assistant directly (em_haadmin), and is None
-    whenever that lookup was unavailable or failed.
+    The first user through the door is admin. That mirrors the standalone
+    container, where whoever holds the bootstrap token becomes the owner, and
+    it is what removes the bootstrap step under the add-on.
 
-    The first user through the door is admin regardless. That mirrors the
-    standalone container, where whoever holds the bootstrap token becomes the
-    owner, and it is what removes the bootstrap step under the add-on — it
-    must not depend on a network call to Home Assistant succeeding, or a
-    fresh install could lock itself out of its own dashboard.
-
-    Unknown admin status falls back to the configured default, which is
-    read-only. That is the safe direction: HA's ingress view sets
+    Everyone after that is read-only. Home Assistant's ingress view sets
     requires_auth=False and `panel_admin` only hides the sidebar entry, so
-    reaching this dashboard is not by itself evidence of being trusted with
-    a root shell to every device. Promotion is recoverable — make them an
-    admin in Home Assistant, or PATCH /api/users/{id} when Home Assistant
-    cannot be asked — whereas the reverse mistake is not recoverable by the
-    person who suffers it.
+    reaching this dashboard is NOT evidence of being trusted with a root
+    shell to every device. Promotion is recoverable (PATCH /api/users/{id});
+    the reverse mistake is not recoverable by the person who suffers it.
 
-    An unrecognised configured value falls back to read-only too — a typo in
-    a config row must never be the thing that grants admin.
+    Roles are deliberately NOT mirrored from Home Assistant. Supervisor
+    forwards no admin flag, so asking would mean taking `auth_api` — which
+    also grants resetting any Home Assistant password, with no verification.
+    Too steep for one boolean on a system with one operator. See issue #171.
+
+    An unrecognised configured value falls back to read-only — a typo in a
+    config row must never be the thing that grants admin.
     """
     if existing_users == 0:
         return "admin"
-    if ha_is_admin is True:
-        return "admin"
-    if ha_is_admin is False:
-        return "readonly"
     value = (configured_default or "").strip()
     return value if value in VALID_ROLES else "readonly"
 

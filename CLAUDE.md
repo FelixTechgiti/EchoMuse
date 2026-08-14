@@ -205,45 +205,24 @@ renamed user a fresh account, or hand somebody else's account to whoever took
 the old name. These rows carry a password sentinel that no bcrypt check can
 match, so they can never be used on the password form.
 
-**Roles mirror Home Assistant: an HA admin is an EchoMuse admin, everyone else
-is read-only.** Supervisor does NOT forward admin status — only the id and
-names — and HA core's ingress view sets `requires_auth=False` and leans on the
-session token, so `panel_admin` hides the sidebar entry rather than gating the
-URL. **Reaching this dashboard is therefore not evidence of being an HA
-admin**, which is why the status has to be looked up: `em_haadmin` reads Supervisor's
-own `GET /auth/list` and checks `system-admin` membership (or `is_owner` — the
-owner is not necessarily in that group, and reading them as read-only would
-lock out whoever set HA up). That needs **`auth_api: true`**, access to the
-user backend and nothing else — NOT `homeassistant_api`, which HA's own
-`config/auth/list` over the WebSocket proxy would need and which grants the
-entire Home Assistant API to read one boolean.
+**Roles are NOT mirrored from Home Assistant.** The first user through the
+door is admin; everyone after is read-only until promoted via
+`PATCH /api/users/{id}` (admin, and it refuses to demote the last admin —
+on the standalone container local accounts are the only auth, so there would
+be no way back in). Nothing overwrites a role on a later login, which is what
+makes a promotion stick.
 
-`/auth/list` returns **no user id** — only username, name, is_owner,
-is_active, local_only, group_ids — so this lookup matches by **username**.
-That is safe and is not the thing keyed on elsewhere: accounts are still
-keyed on the immutable HA user id, and both sides of this match are read from
-HA at the same moment, so a rename makes the lookup MISS (→ unknown → stored
-role stands) rather than attaching one person's admin status to another's
-account. It is re-checked on every login, so
-promoting or demoting someone in HA takes effect here with no edit on this
-side; results cache for `CACHE_TTL_S`.
-
-Roles are changed in **Home Assistant**, not here. `PATCH /api/users/{id}`
-(admin) exists but **refuses while the HA lookup can answer**, because
-`login_via_ingress` re-derives on every login and would revert the change on
-the user's next page load — silently, which is worse than refusing. It is
-allowed precisely when the lookup cannot answer, which is when it is the only
-lever there is. It also refuses to demote the last admin: on the standalone
-container local accounts are the only auth, so there is no other way back in.
-
-**Every lookup failure is `None` — unknown, never an assertion about the
-user.** "Not an admin" would demote a working admin the moment HA restarts;
-"an admin" would hand a household member a root shell. On unknown, a new user
-takes the configured default (read-only) and an existing user **keeps their
-stored role**. The FIRST user is admin regardless of any of this, so a fresh
-install cannot lock itself out of its own dashboard when the lookup is
-unavailable. `panel_admin: true` is also set explicitly so a change to
-Supervisor's default cannot widen access silently.
+Mirroring was built and then removed on 2026-08-14, deliberately. Supervisor
+forwards **no admin flag** — only the user id and names — and HA core's
+ingress view sets `requires_auth=False` and leans on the session token, so
+`panel_admin` hides the sidebar entry rather than gating the URL: **reaching
+this dashboard is not evidence of being an HA admin.** Asking HA therefore
+needs a permission, and both routes are too expensive for one boolean.
+`homeassistant_api` grants the entire HA API; `auth_api` looks narrow but its
+`/auth` set includes **`POST /auth/reset`, which sets any Home Assistant
+user's password with no verification**. On a single-operator system that is a
+steep price for automation the `PATCH` endpoint already covers. Revisit under
+#171 if real multi-user demand appears.
 
 **Recordings and transcripts are admin-only** — `_get_turn_audio` is
 `require_admin` and `_redact_turns_for` strips `stt_text` from `/turns` for

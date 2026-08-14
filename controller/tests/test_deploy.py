@@ -1073,10 +1073,9 @@ def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
     second chance to forget that the headers are only meaningful behind
     Supervisor's gateway — Supervisor strips client copies, nothing else does.
     """
-    # Match the READ, not the mention — em_ingressauth and em_haadmin both
-    # name these headers in prose explaining where they come from and why
-    # they can be trusted, which is documentation rather than a second
-    # trust boundary.
+    # Match the READ, not the mention — em_ingressauth names these headers in
+    # prose explaining where they come from and why they can be trusted,
+    # which is documentation rather than a second trust boundary.
     readers = []
     for path in CONTROLLER.glob("*.py"):
         text = path.read_text()
@@ -1139,10 +1138,6 @@ def test_role_changes_refuse_to_strand_the_install():
     no admin has no way back in — and the endpoint that creates that state is
     the one an admin reaches for while tidying up.
 
-    It must also refuse while Home Assistant governs the account, because
-    login_via_ingress re-derives the role on every login and would revert the
-    change on the user's next page load. Silently reverting is worse than
-    refusing: the operator sees it work and finds it undone later.
     """
     src = (CONTROLLER / "em_api.py").read_text()
     handler = re.search(
@@ -1152,6 +1147,4 @@ def test_role_changes_refuse_to_strand_the_install():
 
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
-    assert "em_haadmin.lookup_available" in body, (
-        "must check whether Home Assistant governs the account")
-    assert "governed_by_home_assistant" in body
+

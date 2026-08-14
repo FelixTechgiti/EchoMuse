@@ -37,7 +37,6 @@ import bcrypt
 from aiohttp import web
 
 import em_db as db
-import em_haadmin
 import em_ingressauth
 
 log = logging.getLogger("echomuse.auth")
@@ -146,41 +145,31 @@ async def login_via_ingress(identity) -> tuple[str, str]:
     deliberately does not re-check, so there is exactly one place where that
     judgement is made rather than two that can disagree.
 
-    Role assignment mirrors Home Assistant: an HA admin is an EchoMuse
-    admin, an HA non-admin is read-only. Supervisor does not forward admin
-    status, so it is looked up (em_haadmin) and re-checked on every login,
-    which is what makes promoting or demoting somebody in Home Assistant take
-    effect here without an edit on this side.
+    The first user through the door becomes admin — matching the standalone
+    container, where whoever holds the bootstrap token becomes the owner.
+    Everyone after that is read-only until an admin promotes them
+    (PATCH /api/users/{id}).
 
-    The first user through the door is admin regardless — matching the
-    standalone container, where whoever holds the bootstrap token becomes the
-    owner — so a fresh install cannot lock itself out of its own dashboard if
-    the lookup is unavailable. When the lookup fails for anyone else, the
-    stored role stands: an unreachable Home Assistant must not demote a
-    working admin, nor promote anybody.
+    Roles are NOT mirrored from Home Assistant. Supervisor forwards no admin
+    flag, so knowing whether someone is an HA admin means asking Supervisor's
+    /auth endpoints — and that permission also grants the ability to reset
+    any Home Assistant user's password with no verification. That is a steep
+    price for one boolean on a system with one operator, so the role is ours
+    to manage. See issue #171 if multi-user demand makes it worth revisiting.
 
-    That "stored role stands" is also what makes PATCH /api/users/{id} work:
-    it refuses while Home Assistant can be asked (the change would be
-    reverted here on the next login, which is worse than refusing) and is
-    allowed when it cannot, which is exactly when it is the only lever.
+    An existing user's role is left alone on every subsequent login, which is
+    what makes a manual promotion stick.
     """
     loop = asyncio.get_event_loop()
 
     user = await loop.run_in_executor(
         None, db.get_user_by_ha_id, identity.user_id)
 
-    # Home Assistant's own answer, or None if we could not reach it. Asked on
-    # every login so that promoting or demoting someone in Home Assistant
-    # takes effect here without an EchoMuse-side edit; cached, so an ordinary
-    # reload does not pay for it.
-    ha_is_admin = await em_haadmin.is_admin(identity.username)
-
     if user is None:
         existing = await loop.run_in_executor(None, db.user_count)
         role = em_ingressauth.role_for(
             existing_users=existing,
             configured_default=db.get_config("ingress_default_role", "readonly"),
-            ha_is_admin=ha_is_admin,
         )
         user_id = await loop.run_in_executor(
             None, db.create_ha_user, identity.user_id, identity.username, role)
@@ -189,25 +178,6 @@ async def login_via_ingress(identity) -> tuple[str, str]:
             f"[auth] Home Assistant user provisioned: "
             f"{user['username']} ({role})"
         )
-    elif ha_is_admin is not None:
-        # Re-derive rather than trust the stored role, but only when Home
-        # Assistant actually answered — an unreachable HA must never demote
-        # somebody. existing_users is passed as non-zero because this user
-        # already exists, so the first-user rule cannot re-fire and silently
-        # re-promote a demoted account.
-        desired = em_ingressauth.role_for(
-            existing_users=1,
-            configured_default=db.get_config("ingress_default_role", "readonly"),
-            ha_is_admin=ha_is_admin,
-        )
-        if desired != user["role"]:
-            await loop.run_in_executor(
-                None, db.set_user_role, user["id"], desired)
-            log.info(
-                f"[auth] {user['username']}: role now {desired} "
-                f"(Home Assistant admin={ha_is_admin})"
-            )
-            user = await loop.run_in_executor(None, db.get_user_by_id, user["id"])
 
     token = generate_token()
     expiry_days = int(db.get_config("session_expiry_days", "30") or 30)
