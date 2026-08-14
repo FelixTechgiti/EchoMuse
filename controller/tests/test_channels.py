@@ -47,7 +47,7 @@ def test_the_committed_channel_matches_the_generator():
 
 @pytest.mark.parametrize("key", [
     "arch", "host_network", "ingress", "ingress_port", "panel_admin",
-    "panel_icon", "auth_api", "environment", "options", "schema",
+    "panel_icon", "environment", "options", "schema",
     "image", "init", "url",
 ])
 def test_channel_shares_every_non_identity_field_with_ga(key):

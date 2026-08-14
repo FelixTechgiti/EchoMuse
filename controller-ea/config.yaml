@@ -56,18 +56,6 @@ ingress_port: 8768
 # why only the FIRST Home Assistant user becomes admin and the rest are
 # read-only until promoted.
 panel_admin: true
-# Access to Home Assistant's USER BACKEND only — Supervisor's GET /auth/list,
-# which returns each user's group_ids. Needed for one thing: an HA admin
-# becomes an EchoMuse admin and everyone else is read-only. Supervisor
-# forwards the ingress user's id and name but no admin flag, and HA's ingress
-# view does not gate on admin at all (panel_admin only hides the sidebar
-# entry), so without this the dashboard cannot tell a household member from
-# an administrator and would have to treat everyone as one or the other.
-#
-# NOT homeassistant_api. Home Assistant's own config/auth/list over
-# Supervisor's WebSocket proxy is the obvious route and needs that instead —
-# the entire Home Assistant API, to read one boolean. See em_haadmin.py.
-auth_api: true
 panel_icon: mdi:microphone-message
 panel_title: EchoMuse EA
 environment:
