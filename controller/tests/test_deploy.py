@@ -1126,3 +1126,28 @@ def test_recordings_and_transcripts_are_admin_only():
                        src, re.S)
     assert redact and '"stt_text"' in redact.group(0), (
         "_redact_turns_for must remove stt_text")
+
+
+def test_role_changes_refuse_to_strand_the_install():
+    """
+    PATCH /api/users/{id} must refuse to demote the last admin. On the
+    standalone container local accounts are the only auth, so an install with
+    no admin has no way back in — and the endpoint that creates that state is
+    the one an admin reaches for while tidying up.
+
+    It must also refuse while Home Assistant governs the account, because
+    login_via_ingress re-derives the role on every login and would revert the
+    change on the user's next page load. Silently reverting is worse than
+    refusing: the operator sees it work and finds it undone later.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    handler = re.search(
+        r"async def _patch_user\b.*?\n(?=\n@|\ndef |\nasync def )", src, re.S)
+    assert handler, "_patch_user not found"
+    body = handler.group(0)
+
+    assert "admin_count" in body, "must count admins before demoting one"
+    assert "last_admin" in body, "must refuse to remove the final admin"
+    assert "em_haadmin.is_admin" in body, (
+        "must check whether Home Assistant governs the account")
+    assert "governed_by_home_assistant" in body

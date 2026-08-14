@@ -2164,6 +2164,16 @@ def get_all_users() -> list[sqlite3.Row]:
     return _q("SELECT * FROM users ORDER BY created_at ASC")
 
 
+def admin_count() -> int:
+    """
+    Number of admin users. The guard against a role change that leaves the
+    install with nobody who can undo it — on the standalone container there
+    is no other way back in, since local accounts are the only auth.
+    """
+    row = _q("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+    return row[0]["n"] if row else 0
+
+
 def user_count() -> int:
     """Return the total number of users. Used for first-run bootstrap check."""
     row = _q1("SELECT COUNT(*) AS n FROM users")

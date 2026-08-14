@@ -71,8 +71,10 @@ def role_for(
     read-only. That is the safe direction: HA's ingress view sets
     requires_auth=False and `panel_admin` only hides the sidebar entry, so
     reaching this dashboard is not by itself evidence of being trusted with
-    a root shell to every device. An admin can promote in one click; the
-    reverse mistake is not recoverable by the person who suffers it.
+    a root shell to every device. Promotion is recoverable — make them an
+    admin in Home Assistant, or PATCH /api/users/{id} when Home Assistant
+    cannot be asked — whereas the reverse mistake is not recoverable by the
+    person who suffers it.
 
     An unrecognised configured value falls back to read-only too — a typo in
     a config row must never be the thing that grants admin.

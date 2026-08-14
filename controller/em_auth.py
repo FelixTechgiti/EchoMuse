@@ -158,6 +158,11 @@ async def login_via_ingress(identity) -> tuple[str, str]:
     the lookup is unavailable. When the lookup fails for anyone else, the
     stored role stands: an unreachable Home Assistant must not demote a
     working admin, nor promote anybody.
+
+    That "stored role stands" is also what makes PATCH /api/users/{id} work:
+    it refuses while Home Assistant can be asked (the change would be
+    reverted here on the next login, which is worse than refusing) and is
+    allowed when it cannot, which is exactly when it is the only lever.
     """
     loop = asyncio.get_event_loop()
 

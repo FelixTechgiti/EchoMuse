@@ -79,3 +79,27 @@ def test_detect_returns_an_address_or_none_but_never_raises():
     # would be an unhandled crash instead of the actionable ServerIPError.
     result = em_hostip.detect()
     assert result is None or isinstance(result, str)
+
+
+# ── Container-bridge detection ────────────────────────────────────────────────
+
+def test_docker_bridge_addresses_are_flagged():
+    # A container without host networking detects its own bridge address and
+    # advertises it. The controller looks healthy and no device can reach it.
+    for addr in ("172.17.0.2", "172.18.0.5", "172.23.1.1"):
+        assert em_hostip.looks_containerised(addr), addr
+
+
+def test_ordinary_lan_addresses_are_not_flagged():
+    # A false warning on a working install teaches people to ignore warnings,
+    # which costs more than the one it would have caught.
+    for addr in ("10.10.1.81", "192.168.1.50", "172.16.4.2", "172.31.9.9",
+                 "172.1.1.1"):
+        assert not em_hostip.looks_containerised(addr), addr
+
+
+def test_the_warning_never_changes_the_answer():
+    # It is advisory. A containerised address is still what gets advertised,
+    # because refusing would break anyone deliberately running that way.
+    assert em_hostip.resolve("", "172.17.0.2") == ("172.17.0.2", "detected")
+    assert em_hostip.resolve("172.17.0.2", None) == ("172.17.0.2", "configured")

@@ -112,4 +112,29 @@ def server_ip(configured: str | None) -> str:
             "Set it explicitly if this host has more than one interface.",
             address,
         )
+        if looks_containerised(address):
+            # A detected address is more dangerous than a hardcoded one when
+            # it is wrong, because it looks authoritative. This is the shape
+            # that fails: a container without host networking detects its own
+            # bridge address, advertises it over mDNS, and every device dials
+            # somewhere unreachable — with the controller apparently healthy.
+            log.warning(
+                "SERVER_IP was detected as %s, which looks like a container "
+                "bridge address rather than a LAN address. Devices on the "
+                "network will not be able to reach it. Run with host "
+                "networking, or set SERVER_IP to this host's LAN address.",
+                address,
+            )
     return address
+
+
+# Docker's default bridge pool. Deliberately NOT the whole of 172.16/12 or
+# 10/8 — both are ordinary LAN ranges, and a false warning on a working
+# install is worse than no warning, because it teaches people to ignore it.
+_BRIDGE_NETS = ("172.17.", "172.18.", "172.19.", "172.20.",
+                "172.21.", "172.22.", "172.23.")
+
+
+def looks_containerised(address: str) -> bool:
+    """True if the address is in Docker's default bridge pool."""
+    return address.startswith(_BRIDGE_NETS)

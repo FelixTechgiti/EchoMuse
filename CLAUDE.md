@@ -217,6 +217,14 @@ checks `system-admin` group membership. It is re-checked on every login, so
 promoting or demoting someone in HA takes effect here with no edit on this
 side; results cache for `CACHE_TTL_S`.
 
+Roles are changed in **Home Assistant**, not here. `PATCH /api/users/{id}`
+(admin) exists but **refuses while the HA lookup can answer**, because
+`login_via_ingress` re-derives on every login and would revert the change on
+the user's next page load — silently, which is worse than refusing. It is
+allowed precisely when the lookup cannot answer, which is when it is the only
+lever there is. It also refuses to demote the last admin: on the standalone
+container local accounts are the only auth, so there is no other way back in.
+
 **Every lookup failure is `None` — unknown, never an assertion about the
 user.** "Not an admin" would demote a working admin the moment HA restarts;
 "an admin" would hand a household member a root shell. On unknown, a new user

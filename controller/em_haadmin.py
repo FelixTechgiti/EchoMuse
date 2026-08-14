@@ -52,7 +52,19 @@ CACHE_TTL_S = 120
 # fallback to the stored role.
 TIMEOUT_S = 5.0
 
+# How long a FAILURE suppresses retries. Caching a failure for CACHE_TTL_S
+# would extend a momentary Home Assistant restart into two minutes of
+# everyone being read-only; caching it for nothing means every dashboard
+# load pays TIMEOUT_S for as long as HA is down, which is how a restart
+# turns into a dashboard that feels broken. Short enough to recover within
+# seconds of HA coming back, long enough that a reload does not re-wait.
+FAILURE_TTL_S = 15
+
 _cache: dict[str, tuple[float, bool]] = {}
+# Set while a recent lookup failed — a single timestamp, not per user,
+# because the failures this guards against are "Home Assistant is not
+# answering", which is never about one account.
+_failed_at: float | None = None
 
 
 def _token() -> Optional[str]:
@@ -81,6 +93,16 @@ async def is_admin(ha_user_id: str) -> Optional[bool]:
     if cached is not None:
         return cached
 
+    global _failed_at
+    if _failed_at is not None:
+        if time.monotonic() - _failed_at < FAILURE_TTL_S:
+            # A recent lookup failed. Answer unknown immediately rather than
+            # waiting TIMEOUT_S again — during a Home Assistant restart this
+            # is the difference between a dashboard that loads and one that
+            # hangs for five seconds on every page.
+            return None
+        _failed_at = None
+
     token = _token()
     if token is None:
         # Not running as an add-on, or homeassistant_api is not granted.
@@ -91,12 +113,15 @@ async def is_admin(ha_user_id: str) -> Optional[bool]:
         users = await asyncio.wait_for(_fetch_users(token), TIMEOUT_S)
     except asyncio.TimeoutError:
         log.warning("[haadmin] Home Assistant did not answer in %ss", TIMEOUT_S)
+        _failed_at = time.monotonic()
         return None
     except Exception as e:
         log.warning("[haadmin] Could not read the Home Assistant user list: %s", e)
+        _failed_at = time.monotonic()
         return None
 
     if users is None:
+        _failed_at = time.monotonic()
         return None
 
     now = time.monotonic()
@@ -151,4 +176,6 @@ async def _fetch_users(token: str) -> Optional[list[dict]]:
 
 def invalidate() -> None:
     """Drop the cache. For tests and for an explicit re-check."""
+    global _failed_at
     _cache.clear()
+    _failed_at = None

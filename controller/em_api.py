@@ -54,6 +54,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_haadmin
 import em_ingressauth
 import em_oww_assets
 import em_oww_models
@@ -274,6 +275,12 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/auth/me",               _get_me)
     app.router.add_post("/api/auth/change-password", _post_change_password)
 
+    # Users — roles. There was no way to change one at all until 2026-08-14,
+    # which only became load-bearing when ingress started provisioning
+    # accounts the operator never created.
+    app.router.add_get("/api/users",        _get_users)
+    app.router.add_patch("/api/users/{id}", _patch_user)
+
     # Devices — order matters: specific paths before parameterised ones
     app.router.add_get("/api/devices",                    _get_devices)
     app.router.add_get("/api/devices/pending",            _get_pending)
@@ -475,6 +482,85 @@ async def _post_setup(request: web.Request) -> web.Response:
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
+
+@auth.require_admin
+async def _get_users(request: web.Request) -> web.Response:
+    """
+    GET /api/users — accounts and their roles. ADMIN ONLY.
+
+    Never returns password_hash. `ha_linked` says whether Home Assistant
+    governs this account's role, which is what makes a refused PATCH
+    explicable rather than arbitrary.
+    """
+    loop  = asyncio.get_event_loop()
+    users = await loop.run_in_executor(None, db.get_all_users)
+    return _ok([{
+        "id":         u["id"],
+        "username":   u["username"],
+        "role":       u["role"],
+        "ha_linked":  bool(u["ha_user_id"]),
+        "created_at": u["created_at"],
+    } for u in users])
+
+
+@auth.require_admin
+async def _patch_user(request: web.Request) -> web.Response:
+    """
+    PATCH /api/users/{id}  {role} — change a user's role. ADMIN ONLY.
+
+    Two refusals, and the second is the subtle one.
+
+    **Never leave the install with no admin.** On the standalone container
+    local accounts are the only auth, so there is no other way back in.
+
+    **A Home Assistant account's role belongs to Home Assistant** — but only
+    while we can actually ask. login_via_ingress re-derives the role on every
+    login *when the lookup answered*, so a manual change there would be
+    silently reverted on the user's next page load, which is worse than
+    refusing. When the lookup cannot answer (no homeassistant_api, older
+    Supervisor, HA down) it re-derives nothing, so a manual change persists
+    and is the only lever there is — and is allowed. The two rules compose:
+    whoever is authoritative is the only one who can change it.
+    """
+    body = await _json_body(request)
+    role = _require_str(body, "role")
+    if role not in ("admin", "readonly"):
+        return _error("bad_request", "role must be 'admin' or 'readonly'", 400)
+
+    try:
+        user_id = int(request.match_info["id"])
+    except ValueError:
+        return _error("bad_request", "user id must be numeric", 400)
+
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(None, db.get_user_by_id, user_id)
+    if user is None:
+        return _error("user_not_found", f"No user: {user_id}", 404)
+
+    if user["role"] == role:
+        return _ok({"id": user_id, "role": role, "changed": False})
+
+    if user["role"] == "admin":
+        admins = await loop.run_in_executor(None, db.admin_count)
+        if admins <= 1:
+            return _error(
+                "last_admin",
+                "This is the only admin — promote someone else first", 409)
+
+    if user["ha_user_id"]:
+        governed = await em_haadmin.is_admin(user["ha_user_id"])
+        if governed is not None:
+            return _error(
+                "governed_by_home_assistant",
+                "Home Assistant decides this account's role — change it "
+                "there (Settings → People) and it applies on their next "
+                "sign-in", 409)
+
+    await loop.run_in_executor(None, db.set_user_role, user_id, role)
+    log.info(f"[api] {request['user']['username']} set "
+             f"{user['username']} to {role}")
+    return _ok({"id": user_id, "role": role, "changed": True})
+
 
 async def _post_ingress_login(request: web.Request) -> web.Response:
     """

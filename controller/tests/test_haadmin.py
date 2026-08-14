@@ -142,9 +142,9 @@ def test_a_stale_entry_is_not_used(monkeypatch):
     assert ha.is_admin_cached("abc") is None
 
 
-def test_a_failure_is_not_cached(monkeypatch):
-    # Caching "unknown" would extend a momentary HA restart into minutes of
-    # everyone being read-only.
+def test_a_failure_is_not_cached_as_an_answer(monkeypatch):
+    # Caching "unknown" as if it were an answer would extend a momentary HA
+    # restart into CACHE_TTL_S of everyone being read-only.
     monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
 
     async def boom(_token):
@@ -153,3 +153,53 @@ def test_a_failure_is_not_cached(monkeypatch):
     monkeypatch.setattr(ha, "_fetch_users", boom)
     assert _run(ha.is_admin("abc")) is None
     assert ha.is_admin_cached("abc") is None
+
+
+def test_a_recent_failure_suppresses_the_retry(monkeypatch):
+    """
+    The login path waits TIMEOUT_S on a lookup. Without this, a Home
+    Assistant restart makes EVERY dashboard load hang for five seconds —
+    a controller that feels broken for the length of someone else's reboot.
+    """
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    calls = []
+
+    async def boom(_token):
+        calls.append(1)
+        raise ConnectionError
+
+    monkeypatch.setattr(ha, "_fetch_users", boom)
+    assert _run(ha.is_admin("abc")) is None
+    assert _run(ha.is_admin("abc")) is None
+    assert _run(ha.is_admin("other")) is None
+    assert len(calls) == 1, "a recent failure must not be retried per login"
+
+
+def test_the_suppression_expires_quickly(monkeypatch):
+    # It has to recover within seconds of HA coming back, or the cure is
+    # its own outage.
+    assert ha.FAILURE_TTL_S <= 30
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    monkeypatch.setattr(ha, "FAILURE_TTL_S", -1)
+    calls = []
+
+    async def users(_token):
+        calls.append(1)
+        return [{"id": "abc", "group_ids": ["system-admin"]}]
+
+    ha._failed_at = 0.0
+    monkeypatch.setattr(ha, "_fetch_users", users)
+    assert _run(ha.is_admin("abc")) is True
+    assert len(calls) == 1
+
+
+def test_a_successful_lookup_clears_the_suppression(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+
+    async def boom(_token):
+        raise ConnectionError
+
+    monkeypatch.setattr(ha, "_fetch_users", boom)
+    assert _run(ha.is_admin("abc")) is None
+    ha.invalidate()
+    assert ha._failed_at is None
