@@ -386,9 +386,16 @@
       return data;
     }
 
-    function enterDashboard(token, role) {
+    // `via` records how the session was obtained — 'ingress' when Home
+    // Assistant authenticated us, otherwise a password. The dashboard keys
+    // its Sign out control on this rather than on whether the page happens to
+    // be under ingress: those differ when Supervisor forwards no user and the
+    // person falls back to the password form, and hiding Sign out from them
+    // would be the broken-looking button the rule exists to prevent.
+    function enterDashboard(token, role, via) {
       localStorage.setItem('em_token', token);
       localStorage.setItem('em_role', role);
+      localStorage.setItem('em_auth_via', via || 'password');
       location.replace('dashboard');
     }
 
@@ -460,7 +467,7 @@
         const d = await post('api/auth/ingress', {});
         setLcd('Signed in via Home Assistant', GREEN);
         setRing(GREEN);
-        enterDashboard(d.token, d.role);
+        enterDashboard(d.token, d.role, 'ingress');
         return;
       } catch {}
 

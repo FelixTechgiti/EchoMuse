@@ -5719,6 +5719,9 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('em_token'));
   const [role, setRole] = useState(() => localStorage.getItem('em_role'));
+  // How this session was obtained — 'ingress' when Home Assistant
+  // authenticated us, otherwise a password. Set by the landing page.
+  const authVia = localStorage.getItem('em_auth_via');
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
@@ -5746,6 +5749,7 @@ function App() {
     API.token = null;
     localStorage.removeItem('em_token');
     localStorage.removeItem('em_role');
+    localStorage.removeItem('em_auth_via');
     // The landing page owns sign-in — green-ring login form.
     location.replace('.');
   }
@@ -5879,11 +5883,13 @@ function App() {
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
           <ThemeToggle/>
           <IconButton onClick={() => setShowSettings(true)} label="Settings">⚙</IconButton>
-          {/* No sign-out under ingress: Home Assistant owns the session, so
-              signing out would land on the landing page and be re-authenticated
-              immediately — a button that visibly does nothing. Sign out of
-              Home Assistant instead. */}
-          {!isIngress() && (
+          {/* No sign-out on a Home Assistant session: HA owns it, so signing
+              out would land on the landing page and be re-authenticated
+              immediately — a button that visibly does nothing. Keyed on how
+              this session was obtained, not on whether the page is under
+              ingress: someone who fell back to the password form (Supervisor
+              forwarded no user) can and should still sign out. */}
+          {authVia !== 'ingress' && (
             <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
           )}
         </div>
