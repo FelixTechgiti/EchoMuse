@@ -48,12 +48,13 @@ PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png")
 
 class Channel:
     def __init__(self, dirname: str, slug: str, name: str, panel_title: str,
-                 blurb: str):
+                 blurb: str, docs_banner: str):
         self.dirname = dirname
         self.slug = slug
         self.name = name
         self.panel_title = panel_title
         self.blurb = blurb
+        self.docs_banner = docs_banner
 
     @property
     def path(self) -> Path:
@@ -73,6 +74,31 @@ EA = Channel(
         "empty database and a new certificate authority, and existing "
         "devices will not connect until the stable add-on's /data is copied "
         "across."
+    ),
+    docs_banner=(
+        "# EchoMuse — Early Access\n"
+        "\n"
+        "This is the **Early Access** channel: the next controller release,\n"
+        "before it is general. It is the same program as the stable add-on\n"
+        "and the same settings; only the version differs.\n"
+        "\n"
+        "**Install this instead of the stable add-on, not alongside it.**\n"
+        "Both use host networking and the same ports (8767, 8768, 8770), so\n"
+        "whichever starts second will fail to bind.\n"
+        "\n"
+        "**Switching channels is a migration, not a toggle.** Home Assistant\n"
+        "add-ons do not share storage, so this starts with an empty database\n"
+        "and a newly generated certificate authority. Existing devices hold\n"
+        "the stable add-on's CA, and they take `wss` from the mDNS record\n"
+        "rather than from `require_device_tls` — so they will fail\n"
+        "verification and will not connect at all until you copy the stable\n"
+        "add-on's `/data` across, including all four files in `tls/`.\n"
+        "\n"
+        "Report anything you find against the EchoMuse repository, saying\n"
+        "which channel you are on.\n"
+        "\n"
+        "---\n"
+        "\n"
     ),
 )
 
@@ -122,7 +148,18 @@ def generate(ch: Channel) -> dict[str, str]:
     ga = (CONTROLLER / "config.yaml").read_text(encoding="utf-8")
     ga_version = _current_version(CONTROLLER / "config.yaml", "0.0.0")
     version = _current_version(ch.path / "config.yaml", ga_version)
-    return {"config.yaml": _render(ga, ch, version)}
+    out = {"config.yaml": _render(ga, ch, version)}
+
+    # DOCS.md is what Home Assistant renders on the Documentation tab.
+    # Without it that tab is empty — on the channel a user is most likely to
+    # want instructions for, since it is the one they went out of their way
+    # to install. Banner-prefixed rather than copied verbatim: the GA
+    # document describes the stable add-on, and the differences that matter
+    # here are the ones a channel introduces.
+    ga_docs = CONTROLLER / "DOCS.md"
+    if ga_docs.is_file():
+        out["DOCS.md"] = ch.docs_banner + ga_docs.read_text(encoding="utf-8")
+    return out
 
 
 def write(ch: Channel) -> None:

@@ -116,6 +116,22 @@ def test_channel_version_is_independent_of_ga():
     assert got == want, "sync_channels must preserve the channel's own version"
 
 
+def test_the_channel_has_a_documentation_tab():
+    """
+    Home Assistant renders DOCS.md on the Documentation tab. An empty tab is
+    worst on the channel someone went out of their way to install — and it
+    is where the migration warning has to live, since switching channels
+    leaves existing devices unable to connect at all.
+    """
+    docs = EA_PATH / "DOCS.md"
+    assert docs.is_file(), "controller-ea/DOCS.md is missing"
+    text = docs.read_text()
+    assert "Early Access" in text
+    # The two things that will actually bite someone who installs this.
+    assert "instead of the stable add-on" in text
+    assert "tls/" in text
+
+
 def test_generated_file_says_it_is_generated():
     # Someone WILL open this file to change a setting.
     text = (EA_PATH / "config.yaml").read_text()
