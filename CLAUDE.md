@@ -203,15 +203,42 @@ Users are keyed on the **HA user id, never the name** (schema v18,
 `users.ha_user_id`) — names are editable in HA, and keying on one would hand a
 renamed user a fresh account, or hand somebody else's account to whoever took
 the old name. These rows carry a password sentinel that no bcrypt check can
-match, so they can never be used on the password form. **Only the FIRST HA
-user becomes admin; the rest are read-only** (`em_ingressauth.role_for`),
-because `panel_admin` is documented as governing the sidebar *menu entry* —
-which is not the same claim as gating the ingress URL — and auto-promoting
-every household member to a root shell is not a mistake worth risking.
-`panel_admin: true` is set explicitly in `config.yaml` so a default change
-cannot widen it silently. There is no **Sign out** control under ingress: HA
-owns the session, so it would re-authenticate immediately and read as a broken
-button.
+match, so they can never be used on the password form.
+
+**Roles mirror Home Assistant: an HA admin is an EchoMuse admin, everyone else
+is read-only.** Supervisor does NOT forward admin status — only the id and
+names — and HA core's ingress view sets `requires_auth=False` and leans on the
+session token, so `panel_admin` hides the sidebar entry rather than gating the
+URL. **Reaching this dashboard is therefore not evidence of being an HA
+admin**, which is why the status has to be looked up: `em_haadmin` reads
+`config/auth/list` over Supervisor's HA WebSocket proxy (hence
+`homeassistant_api: true` in `config.yaml`, taken for this one purpose) and
+checks `system-admin` group membership. It is re-checked on every login, so
+promoting or demoting someone in HA takes effect here with no edit on this
+side; results cache for `CACHE_TTL_S`.
+
+**Every lookup failure is `None` — unknown, never an assertion about the
+user.** "Not an admin" would demote a working admin the moment HA restarts;
+"an admin" would hand a household member a root shell. On unknown, a new user
+takes the configured default (read-only) and an existing user **keeps their
+stored role**. The FIRST user is admin regardless of any of this, so a fresh
+install cannot lock itself out of its own dashboard when the lookup is
+unavailable. `panel_admin: true` is also set explicitly so a change to
+Supervisor's default cannot widen access silently.
+
+**Recordings and transcripts are admin-only** — `_get_turn_audio` is
+`require_admin` and `_redact_turns_for` strips `stt_text` from `/turns` for
+non-admin sessions. This is recognisable speech from inside someone's home,
+and once every household HA user can reach the dashboard, "read-only" stopped
+meaning "trusted with the recordings". Enforced **server-side**: `/turns` is a
+plain GET with a session token, so a dashboard-only rule protects nothing from
+anyone who opens the network tab. `tests/test_deploy.py` pins both.
+
+There is no **Sign out** control on a session obtained through ingress: HA owns
+it, so signing out would re-authenticate immediately and read as a broken
+button. Keyed on how the session was obtained (`em_auth_via`), not on whether
+the page is under ingress — those differ when Supervisor forwards no user and
+the person falls back to the password form, and they can sign out.
 
 Note HA display names contain spaces, unlike every local username, and they
 now reach the user table — `em_support`'s account redaction already covers

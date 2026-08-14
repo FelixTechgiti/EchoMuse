@@ -774,7 +774,7 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
 
@@ -838,7 +838,10 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
     urlsRef.current = {};
   }, []);
 
-  const anyAudio = turns.some(t => t.audio_file);
+  // Recordings and transcripts are admin-only — the server enforces it
+  // (require_admin on the audio route, stt_text stripped from /turns);
+  // this just avoids offering controls that would 404.
+  const anyAudio = isAdmin && turns.some(t => t.audio_file);
 
   const ok = turns.filter(t => t.outcome === 'ok');
   const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
@@ -915,7 +918,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                     The slot is reserved even when a turn has no recording so
                     the columns stay aligned as the retention window rolls. */}
                 <span style={{ width: 34, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                  {t.audio_file && !gone.has(t.turn_id) && (<>
+                  {isAdmin && t.audio_file && !gone.has(t.turn_id) && (<>
                     <button onClick={() => toggleAudio(t)}
                       title={playing === t.turn_id ? 'Stop' : 'Play the mic audio for this turn'}
                       style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: playing === t.turn_id ? 'var(--warn)' : 'var(--text2)' }}>
@@ -1739,6 +1742,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     nearMisses={device.owwNearMisses}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.dot}
+                    isAdmin={isAdmin}
                   />
                 </Panel>
               </div>

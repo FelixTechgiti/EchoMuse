@@ -583,13 +583,41 @@ async def _get_device_turns(request: web.Request) -> web.Response:
     turns = await loop.run_in_executor(
         None, lambda: db.get_turns(device_id, limit, since)
     )
-    return _ok(turns)
+    return _ok(_redact_turns_for(turns, request["user"]))
 
 
-@auth.require_auth
+def _redact_turns_for(turns: list, user: dict) -> list:
+    """
+    Remove transcripts for a non-admin session.
+
+    A transcript is the content of what someone said in their home — the
+    same class of data as the recording it came from, differing only in
+    format. Stripped HERE rather than hidden in the dashboard, because the
+    dashboard is not what protects it: /api/devices/{id}/turns is a plain
+    GET with a session token, so a UI-only rule protects nothing from
+    anyone who opens the network tab.
+
+    The rest of the row — timings, scores, outcome — is what the Activity
+    tab is for and stays visible, so read-only access keeps its diagnostic
+    value.
+    """
+    if user.get("role") == "admin":
+        return turns
+    return [{k: v for k, v in t.items() if k != "stt_text"} for t in turns]
+
+
+@auth.require_admin
 async def _get_turn_audio(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/turns/{turn}/audio — the saved mic audio for
-    one voice turn, as a downloadable WAV.
+    one voice turn, as a downloadable WAV. ADMIN ONLY.
+
+    This is recognisable speech recorded in someone's home — the most
+    sensitive thing the controller stores, and the reason saveUtterances is
+    off by default. Under the add-on every Home Assistant user in the
+    household can reach the dashboard (Supervisor's ingress view sets
+    requires_auth=False and panel_admin only hides the sidebar entry), so
+    read-only is no longer a synonym for "someone the operator trusts with
+    the recordings".
 
     Only turns captured while saveUtterances was on have one, and only the
     newest em_recordings.KEEP_PER_DEVICE per device survive — a turn row

@@ -1091,3 +1091,38 @@ def test_addon_panel_stays_admin_only():
     cfg = (CONTROLLER / "config.yaml").read_text()
     assert re.search(r"^panel_admin:\s*true\s*$", cfg, re.M), (
         "config.yaml must set panel_admin: true explicitly")
+
+
+def test_recordings_and_transcripts_are_admin_only():
+    """
+    Utterance audio and STT text are the most sensitive things the controller
+    stores — recognisable speech from inside someone's home, and the reason
+    saveUtterances defaults off.
+
+    Under the add-on every Home Assistant user in the household can reach the
+    dashboard (HA's ingress view sets requires_auth=False and panel_admin only
+    hides the sidebar entry), so "read-only" stopped being a synonym for
+    "someone the operator trusts with the recordings".
+
+    Enforced server-side, not in the dashboard: /api/devices/{id}/turns is a
+    plain GET with a session token, so a UI-only rule protects nothing from
+    anyone who opens the network tab.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+
+    audio = re.search(
+        r"(@auth\.require_\w+)\s*\nasync def _get_turn_audio\b", src)
+    assert audio, "_get_turn_audio not found"
+    assert audio.group(1) == "@auth.require_admin", (
+        "the utterance audio route must be admin-only")
+
+    turns = re.search(
+        r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
+        src, re.S)
+    assert turns and "_redact_turns_for" in turns.group(0), (
+        "_get_device_turns must strip transcripts for non-admin sessions")
+
+    redact = re.search(r"def _redact_turns_for\(.*?\n(?=\n@|\ndef |\nasync def )",
+                       src, re.S)
+    assert redact and '"stt_text"' in redact.group(0), (
+        "_redact_turns_for must remove stt_text")

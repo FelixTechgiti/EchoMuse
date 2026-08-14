@@ -2130,6 +2130,18 @@ def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
         return cur.lastrowid
 
 
+def set_user_role(user_id: int, role: str) -> None:
+    """
+    Set a user's role. Validated here as well as at the caller, because this
+    is the one write that can grant admin — em_ingressauth.role_for already
+    constrains its output, and a second gate costs nothing.
+    """
+    if role not in ("admin", "readonly"):
+        raise ValueError(f"unknown role: {role!r}")
+    with _tx() as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
 def update_user_password(user_id: int, new_hash: str) -> None:
     """
     Update the password hash for a user.

@@ -118,10 +118,44 @@ def test_first_user_is_admin_regardless_of_the_configured_default():
     assert ia.role_for(existing_users=0, configured_default="readonly") == "admin"
 
 
-def test_later_users_are_readonly_by_default():
-    # panel_admin governs the sidebar entry, not necessarily the ingress URL,
-    # and this dashboard proxies a root shell. Promotion is a deliberate act.
+def test_later_users_are_readonly_when_ha_admin_status_is_unknown():
+    # HA's ingress view does not gate on admin (requires_auth=False;
+    # panel_admin only hides the sidebar entry), so reaching the dashboard is
+    # not evidence of being trusted with a root shell to every device.
     assert ia.role_for(existing_users=1, configured_default=None) == "readonly"
+
+
+def test_home_assistant_admins_become_echomuse_admins():
+    assert ia.role_for(
+        existing_users=5, configured_default=None, ha_is_admin=True) == "admin"
+
+
+def test_home_assistant_non_admins_are_readonly():
+    assert ia.role_for(
+        existing_users=5, configured_default=None, ha_is_admin=False) == "readonly"
+
+
+def test_ha_non_admin_beats_a_permissive_configured_default():
+    # Home Assistant's answer is the authority. A configured default is only
+    # what to do when we could not get one.
+    assert ia.role_for(
+        existing_users=5, configured_default="admin",
+        ha_is_admin=False) == "readonly"
+
+
+def test_unknown_ha_status_falls_back_to_the_configured_default():
+    assert ia.role_for(
+        existing_users=5, configured_default="admin",
+        ha_is_admin=None) == "admin"
+
+
+def test_the_first_user_is_admin_even_if_home_assistant_says_otherwise():
+    # A fresh install must not be able to lock itself out of its own
+    # dashboard because a lookup was unavailable or answered no.
+    assert ia.role_for(
+        existing_users=0, configured_default=None, ha_is_admin=False) == "admin"
+    assert ia.role_for(
+        existing_users=0, configured_default=None, ha_is_admin=None) == "admin"
 
 
 def test_an_operator_can_opt_into_auto_admin():
@@ -137,5 +171,7 @@ def test_an_unrecognised_configured_role_falls_back_to_readonly():
 def test_role_for_only_ever_returns_a_known_role():
     for n in (0, 1, 99):
         for d in (None, "admin", "readonly", "nonsense"):
-            assert ia.role_for(
-                existing_users=n, configured_default=d) in ia.VALID_ROLES
+            for ha in (None, True, False):
+                assert ia.role_for(
+                    existing_users=n, configured_default=d,
+                    ha_is_admin=ha) in ia.VALID_ROLES
