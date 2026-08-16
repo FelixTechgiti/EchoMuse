@@ -688,6 +688,12 @@ function Shell({ deviceId, token, height = 320 }) {
     term.loadAddon(fit);
     term.open(containerRef.current);
     fit.fit();
+    // Take the caret straight away. Shell is mounted only while the Console
+    // tab is selected (see `tab === 'console'`), so this component existing
+    // IS the user asking for a terminal — there is nothing else on the tab
+    // that could reasonably want focus, and without it every visit starts
+    // with a click that does nothing except tell xterm you meant it.
+    term.focus();
 
     const sock = new WebSocket(ingressWebSocketUrl(`/api/devices/${deviceId}/shell?token=${token}`));
     sock.binaryType = 'arraybuffer';
