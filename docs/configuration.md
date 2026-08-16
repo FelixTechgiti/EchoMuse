@@ -121,6 +121,25 @@ It is also never inherited from the fleet, whatever the section's Fleet /
 Device switch says — otherwise a device would come back at another room's
 volume.
 
+**The top of the range changed in 2.20.0.** EchoMuse used to drive the
+codec's digital volume past the point where it can only clip — measured at
+65% distortion three button presses above the midpoint, and 89% at the
+maximum, with the output no longer getting any louder. Stock Alexa never
+touches that control, which is why EchoMuse sounded worse than stock when
+turned up. The range now stops at the codec's unity gain, so the loudest
+setting is quieter than it was and everything below it is cleaner.
+
+The percentage Home Assistant shows also moved: a device at the same
+physical level reads a higher number than before, because the scale no
+longer includes a stretch that only distorted. Nothing changed about how
+loud it actually is. If you have an automation with a volume threshold in
+it, check that threshold.
+
+The physical buttons step about 4dB per press across the audible range,
+rather than spending presses near the bottom of a scale where nothing is
+audible — silencing the device is the mute button's job. The cyan ring
+spans that same range, so a press always moves it.
+
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —
 whether or not the controller is reachable.
