@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.20.0-ea.3 — Early Access
+
+- **The device stops listening as soon as Home Assistant is done with a
+  turn.** Adding a device asks you to say the wake word twice; 2.20.0-ea.2
+  fixed the first step, and the second then arrived while the device was
+  still listening for the first, clearing only after a timeout. Home
+  Assistant was ready again 18 milliseconds after ending the first — the
+  wait was entirely ours.
+
 ## 2.20.0-ea.2 — Early Access
 
 - **Adding a device in Home Assistant now completes.** The voice satellite
