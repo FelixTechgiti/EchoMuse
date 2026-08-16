@@ -836,6 +836,12 @@ _OUTCOME_ANIM = {
     "tts_error":     "error_anim",
     "timeout":       "error_anim",
     "stream_timeout": "error_anim",
+    # Not an error — HA took the wake word and ended the run deliberately,
+    # which the satellite setup flow does on every prompt. Needs a cue
+    # because the turn is over in milliseconds: without one the ring lights
+    # and clears too fast to register, and a device that worked perfectly
+    # looks like it glitched.
+    "pipeline_refused": "ack_anim",
 }
 
 
