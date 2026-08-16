@@ -137,6 +137,18 @@ Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
 - `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
+- `DEBUG` — `1` raises the controller to DEBUG. Read **once at import**, so
+  a change needs a restart, and parsed as `== "1"` rather than a bare
+  truthiness test: every non-empty string is truthy in Python including the
+  `"0"` that `em_start.py` writes for a false add-on option, which would put
+  every add-on install at DEBUG with the toggle showing off. It is also an
+  add-on option (`debug`), because it went unreachable there until
+  2026-08-16 while being the first thing support asks for — the #163 class
+  of gap. `tests/test_deploy.py` walks all four things an option needs (a
+  default, a schema type, a translation, an `OPTION_ENV_VARS` line) in both
+  directions; the missing env mapping is the quiet one, since Supervisor
+  accepts, displays and stores the setting and `em_start` warns to a log
+  nobody reads.
 
 ### Home Assistant add-on
 
@@ -299,6 +311,56 @@ record; they appear as pending and are approved onto fresh config.
 ### Voice backend
 
 The controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`). Servers are created at startup for every approved device **and on demand** when a device approved after boot first connects (`_register_device_server` — idempotent on purpose: the startup loop and `device_connected()` race, first creation wins). HA naming: friendly name is `<label> Voice Assistant` (BT proxy: `<label> BT Proxy`); `project_name` carries `ESPHOME_DEVICE_MODEL` after the dot because HA displays that segment as the device Model, overriding DeviceInfo's `model` field. (A legacy `claracore` WebSocket backend was removed 2026-07-12 — ESPHome/HA is the only voice path.)
+
+**Entity names must NOT repeat the device label.** HA sets
+`_attr_has_entity_name = True` for every esphome entity and composes
+`<device name> <entity name>` itself, and our device name is already
+`<label> Voice Assistant` — so a label in the entity name renders twice
+("Lounge Voice Assistant Lounge"). It did, on every device and every entity,
+until 2026-08-16. The media player takes an **empty** name, which is HA's
+convention for a device's primary entity (`self._attr_name =
+static_info.name or None`) and renders as the device name alone.
+`tests/test_deploy.py` pins that no `ListEntities` name references
+`self.label`. Note fixing this changes only the displayed name: entity keys
+are untouched, so registry rows and **entity_ids survive** and automations
+keep working.
+
+**`wake_word_phrase` is not optional.** The pipeline start must name which
+wake word fired, and the string must be **identical** to the `wake_word` we
+advertise — HA matches it against the STATE of its wake-word select entity
+(`ww_state.state == wake_word_phrase`), whose options are those display
+names. Both therefore come from `em_oww_models.display_name`, one function,
+pinned by test. Send `""` for a button turn: aioesphomeapi maps empty back to
+`None`, which is how the protocol says "no wake word", and claiming one would
+be untrue. Sending nothing at all is what stalled HA's **voice satellite
+setup dialog** for the life of the feature — it arms an interceptor for the
+next wake word, and on `None` raises
+`AssistSatelliteError("No wake word phrase provided")` and ends the run in
+milliseconds. Every ordinary turn worked, so only the one flow that asks a
+device to prove it heard a wake word ever noticed.
+
+**A `RUN_END` with no preceding `RUN_START` is terminal; one after it is
+not.** HA's interception path emits `RUN_END` and returns without ever
+starting a pipeline, while a genuine run is `RUN_START` (measured 2ms before
+`STT_START`) … `RUN_END` (last, after `TTS_END`). That is the discriminator —
+structural, not a timing race — and it matters because HA *does* emit a
+premature `RUN_END` mid-turn, which must stay non-terminal or genuine turns
+get cut short. Without it the turn held the mic until our own timers expired
+(20s streaming cap, 5s no-speech) while HA re-armed 18ms later. The outcome
+is `pipeline_refused`, never `no_speech` — the audio was captured and
+streamed into a closed run, and `no_speech` is persisted, so it would put
+every HA-side refusal into the activity stats as a silent user.
+Note this makes turns end in **milliseconds**, so the ring needs an explicit
+`ack_anim` cue or it flashes and reads as a glitch; it previously stayed lit
+only because the turn was hung.
+
+**`VoiceAssistantSetConfiguration` is handled but not applied.** It is HA
+writing a wake-word choice back to us. We advertise one model with
+`max_active_wake_words=1`, so the dropdown offers our model plus "no wake
+word" and there is nothing to switch between; an empty list means "deafen
+this satellite", which is a real request we do not implement and log at
+warning rather than drop. Applying it, and offering a choice worth making,
+both wait on #112.
 
 ### HA entities beyond the voice satellite
 
