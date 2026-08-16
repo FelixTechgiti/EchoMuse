@@ -1066,11 +1066,20 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     device.cancel_event.set()
                     if in_playback:
                         await device.send_control({"type": "speaker_flush"})
+                        # HA's run is normally over by now (RUN_END follows
+                        # TTS_END, and we only reach playback at TTS_END), but
+                        # a barge in the first milliseconds of audio can beat
+                        # it. Serialise anyway — the interrupting turn is the
+                        # thing that pays if we lose that race.
+                        esphome.abort_ha_run(device.device_id)
                     else:
-                        # Nothing is playing — abort the in-flight HA
-                        # pipeline instead (local-only; a late HA result is
-                        # discarded on arrival).
-                        esphome.cancel_voice_turn(device.device_id)
+                        # Nothing is playing — HA is mid-pipeline, and an
+                        # interrupting turn is about to start on the same
+                        # connection. The protocol carries no run id, so the
+                        # old run MUST be aborted upstream first or its tail
+                        # events land on the new turn and kill it
+                        # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
+                        esphome.cancel_voice_turn(device.device_id, abort_ha=True)
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
