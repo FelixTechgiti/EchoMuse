@@ -331,19 +331,29 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   );
 }
 
-function Toggle({ label, sub, value, onChange }) {
+function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
   // wider than the grid column — which pushed the switch past the edge of
   // the config dialog. flexShrink: 0 keeps the switch at full size.
+  //
+  // `disabled` is honoured in the HANDLER, not only in the styling — the
+  // capability rule ("shown disabled with the reason, never a control that
+  // silently does nothing") is a claim about what a click does, and a switch
+  // that greys itself while still writing is worse than one that does
+  // nothing: the stored setting then disagrees with what the control shows.
+  // Slider has always taken the same prop; Toggle did not take it at all, so
+  // every caller that wanted it had to fake it by neutering `value` and
+  // `onChange` at the call site.
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, minWidth: 0, gap: 10 }}>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
         {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
       </div>
-      <div onClick={() => onChange(!value)} style={{
-        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative', flexShrink: 0,
+      <div onClick={() => { if (!disabled) onChange(!value); }} style={{
+        width: 36, height: 20, borderRadius: 10, cursor: disabled ? 'default' : 'pointer',
+        position: 'relative', flexShrink: 0, opacity: disabled ? 0.45 : 1,
         background: value ? 'var(--accent)' : 'var(--muted)',
         border: value ? '1px solid var(--accent-deep)' : '1px solid var(--muted)',
         transition: 'background 0.15s',
@@ -5346,13 +5356,16 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
         {subHeader('Action button', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          {/* Offered only when the device says it can measure a hold. */}
-          <Toggle label="Tap sends an event"
+          {/* Offered only when the device says it can measure a hold. The
+              value still reads through holdCapable so an incapable device
+              shows the switch off rather than showing a stored true it
+              cannot honour. */}
+          <Toggle label="Tap sends an event" disabled={!holdCapable}
             sub={holdCapable
               ? "tap fires the HA action-button event instead of starting a turn — hold still fires 'long'; the button can no longer cancel a response. A tap is easy to trigger by accident and the button is unauthenticated — bind destructive automations to 'long' instead"
               : 'needs newer firmware on this Echo — it has no action-button event for a tap to fire'}
             value={holdCapable && (config.buttonSingleTapEvent ?? false)}
-            onChange={holdCapable ? (v => set('buttonSingleTapEvent', v)) : (() => {})}/>
+            onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
         </div>
         {subHeader('Turn processing')}
