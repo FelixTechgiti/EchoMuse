@@ -729,6 +729,36 @@ verifies a device reproduces Python and reports the real CPU cost. It costs
 ~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
 **enable it on one device at a time**.
 
+**The scorer pointer must be re-read PER FRAME, never cached for a stream.**
+A config push replaces the scorer and **closes** the old one, so a mic stream
+holding the pointer it captured at `StartMic` is feeding a dead object. This
+cost two bugs in succession on 2026-08-16, and the second is the instructive
+one:
+
+- `Close()` used to close the channel `enqueue` sends on, so the next 80ms
+  frame panicked the process. It restarted in ~6s, opened a fresh mic stream,
+  picked up the new scorer, and worked — the crash was **accidentally
+  self-healing**.
+- Making `enqueue` drop silently removed the crash *and* the recovery. The new
+  scorer then received nothing and detection stayed dead until the next
+  `StartMic`, which only follows a voice turn, which cannot happen because the
+  wake word is dead.
+
+So `Close()` signals a dedicated `quit` channel and never closes `ch`, AND the
+push site re-reads `d.ShadowScorer()` per  frame. A mutex read per 80ms is
+nothing beside the inference it feeds. Both halves are needed; either alone
+leaves a device that goes deaf or panics. The comment that justified caching
+("a stream that began before the change keeps using the scorer it started
+with") described exactly what made it fatal.
+
+**A missing classifier silently deafens a device under `owwOnDevice=on`.**
+The device cannot score without the model, and the controller has stood down
+and no longer triggers on its behalf — so nothing fires, nothing warns, and
+the dashboard reports the device as healthy. That is a degradation to *no*
+behaviour, which the capability rule above exists to forbid;
+`em_shadow.effective_mode` already does the right thing for a missing
+`oww_trigger` capability and the missing-model case has no equivalent (#191).
+
 ### Asset distribution (`em_oww_assets.py`)
 
 Installing those files is automatic. `em_oww_assets` plans (pure, unit-tested);
@@ -756,6 +786,14 @@ enabled it and nothing happened" this removes.
   `parse_free_mb`, never an awk field index — busybox wraps a long filesystem
   name onto its own line, so `$4` is the *percentage* on these devices, which
   parsed as "unknown" and silently disabled the check.
+- **`TransferResult` is truthy-compatible so existing `if not …` call sites
+  keep working — which is exactly how a call site that treated it as a LIST
+  reached a release.** `_sync_oww_assets` assigned the per-file transfer
+  result over its own `pushed` accumulator, so the first file replaced the
+  list and the append raised `AttributeError`. Every classifier push 500'd,
+  and provisioning is the only other path that installs one, so a device
+  could never be given a wake word it had not been provisioned with. Pinned
+  by test.
 - `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
   against the firmware constants **by test**. Drift installs assets the device
   never looks for, and the only symptom is shadow mode silently never starting.
