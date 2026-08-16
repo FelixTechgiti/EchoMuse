@@ -3511,10 +3511,16 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
 
         dest = em_oww_assets.device_path(asset.name)
         part = f"{dest}.part"
-        pushed = await _stream_file_to_device(live, data, part, mode="644")
-        if not pushed:
-            await say("error", f"{asset.name} transfer failed: {pushed}")
-            return {"ok": False, "error": f"{asset.name}: {pushed}"}
+        # NOT `pushed` — that is the accumulator above, and assigning the
+        # transfer result to it shadowed the list on the first file, so the
+        # append below raised AttributeError and asset installation failed
+        # outright. TransferResult is truthy-compatible, which is what let
+        # this reach a release: every `if not …` call site kept working and
+        # only the one that treated it as a list broke.
+        sent = await _stream_file_to_device(live, data, part, mode="644")
+        if not sent:
+            await say("error", f"{asset.name} transfer failed: {sent}")
+            return {"ok": False, "error": f"{asset.name}: {sent}"}
 
         res = await _shell_run(live, (
             f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
