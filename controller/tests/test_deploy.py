@@ -1148,3 +1148,78 @@ def test_role_changes_refuse_to_strand_the_install():
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
 
+
+
+def test_addon_options_are_wired_end_to_end():
+    """
+    An add-on option needs four separate things to work: a default in
+    `options`, a type in `schema`, a translation, and a line in em_start.py's
+    OPTION_ENV_VARS. Miss one and it fails a different way each time, none of
+    them loud:
+
+      - no `schema` entry — Supervisor rejects the whole options block
+      - no translation      — the raw key renders as the field label
+      - no OPTION_ENV_VARS  — the setting is accepted, displayed, stored, and
+                              then ignored; em_start warns to the add-on log
+                              and starts anyway, which is the right call for
+                              boot resilience and means nobody sees it
+
+    The reverse direction matters too: an OPTION_ENV_VARS entry with no
+    option is a mapping for a setting Supervisor will never send.
+
+    Added with the `debug` option (2026-08-16). DEBUG had no add-on option at
+    all, so controller debug logging — the first thing support asks for — was
+    reachable on the container and not on the add-on.
+    """
+    import yaml
+
+    config = yaml.safe_load((CONTROLLER / "config.yaml").read_text())
+    translations = yaml.safe_load(
+        (CONTROLLER / "translations/en.yaml").read_text())
+
+    options = set(config["options"])
+    schema = set(config["schema"])
+    translated = set(translations["configuration"])
+
+    start = (CONTROLLER / "em_start.py").read_text()
+    block = re.search(r"OPTION_ENV_VARS\s*=\s*\{(.*?)\}", start, re.S)
+    assert block, "em_start.py no longer defines OPTION_ENV_VARS"
+    mapped = set(re.findall(r'"(\w+)"\s*:', block.group(1)))
+
+    assert not options - schema, \
+        f"options with no schema entry: {sorted(options - schema)}"
+    assert not schema - options, \
+        f"schema entries with no default: {sorted(schema - options)}"
+    assert not options - translated, \
+        f"options with no translation: {sorted(options - translated)}"
+    assert not options - mapped, (
+        f"options not in em_start.py's OPTION_ENV_VARS: "
+        f"{sorted(options - mapped)} — Supervisor would accept and store "
+        f"these and the controller would never see them")
+    assert not mapped - options, (
+        f"OPTION_ENV_VARS entries with no add-on option: "
+        f"{sorted(mapped - options)}")
+
+
+def test_debug_env_var_is_not_truthy_for_zero():
+    """
+    em_start.py renders a false bool option as the STRING "0", and every
+    non-empty string is truthy in Python. So a bare
+    `if os.environ.get("DEBUG")` puts every add-on install at DEBUG level
+    with the toggle showing off — the failure being verbose logs nobody
+    asked for, on the deployment least able to rotate them.
+
+    Pinned rather than assumed because the original line read exactly that
+    way, and the same shape is the obvious thing to write for the next
+    bool env var.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert not re.search(r'if\s+os\.environ\.get\(\s*"DEBUG"\s*\)\s*else', src), (
+        "DEBUG is being read as a bare truthiness test — the string \"0\" "
+        "that em_start.py writes for a false option is truthy")
+
+    match = re.search(r'^DEBUG\s*=\s*(.+)$', src, re.M)
+    assert match, "em_controller.py no longer defines a DEBUG flag"
+    assert '"0"' in match.group(1) and '"1"' in match.group(1), (
+        "DEBUG must default to \"0\" and test for \"1\", the convention "
+        "REQUIRE_DEVICE_TLS already uses")

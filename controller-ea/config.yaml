@@ -76,6 +76,7 @@ options:
   oww_threshold: 0.5
   require_device_tls: false
   device_approval: "strict"
+  debug: false
 schema:
   server_host: "str"
   server_ip: "str"
@@ -85,3 +86,4 @@ schema:
   oww_threshold: "float(0,1)"
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
+  debug: "bool"
