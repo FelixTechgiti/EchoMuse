@@ -1275,27 +1275,50 @@ def test_button_turns_claim_no_wake_word():
         "turns send \"\"")
 
 
-def test_ha_refusal_is_not_recorded_as_no_speech():
+def test_a_run_ha_never_started_ends_the_turn():
     """
-    HA closing the pipeline before it engages is not the user being silent —
-    the audio was captured and streamed into a run that had already ended.
-    Recording it as `no_speech` blames the user and pollutes the persisted
-    activity stats, the same mis-attribution em_turnclock exists to prevent.
+    Home Assistant's satellite setup intercepts a wake word by emitting
+    RUN_END and returning, without ever starting a pipeline. The controller
+    held the microphone anyway until its own timers expired — measured at
+    20.0s (streaming hard cap) and 5.2s (no-speech window) — while HA had
+    re-armed for the next wake word 18ms after ending the first. That is why
+    the setup flow's second "say it again" step landed on a device still
+    listening for the first.
 
-    The flag is recorded on RUN_END and read at give-up time rather than
-    acted on immediately, because a premature RUN_END before STT_START is a
-    real thing HA does mid-turn and ending the turn there would cut genuine
-    turns short.
+    The discriminator is RUN_START, not timing. Measured on hardware, a
+    genuine run is RUN_START (2ms before STT_START) … RUN_END (last, after
+    TTS_END); an interception is RUN_END alone. So a RUN_END with no
+    RUN_START cannot be the premature/duplicate RUN_END the other branch
+    exists for, because that one arrives MID-turn and a mid-turn RUN_END
+    follows the RUN_START that opened it.
+
+    Also: the outcome is `pipeline_refused`, not `no_speech`. The audio was
+    captured and streamed into a run that had already closed, and the outcome
+    is persisted — so `no_speech` would put every HA-side refusal into the
+    activity stats as a silent user.
     """
     src = (CONTROLLER / "em_esphome.py").read_text()
-    assert "_run_end_before_stt" in src, \
-        "no flag records an HA pipeline that ended before it engaged"
+
+    assert "VOICE_ASSISTANT_RUN_START" in src, (
+        "RUN_START must be handled — its absence is what identifies a "
+        "RUN_END that HA emitted without running a pipeline")
+    assert "_run_started" in src and "_ha_never_started" in src, \
+        "no state tracks whether HA ever started the run it just ended"
     assert '"pipeline_refused"' in src, \
-        "an HA-side refusal must get its own outcome, not no_speech"
+        "an HA run that never started must not be recorded as no_speech"
 
     handler = re.search(
         r"VOICE_ASSISTANT_RUN_END:(.*?)elif event_type", src, re.S)
     assert handler, "RUN_END handler not found"
-    assert "_tts_event.set()" not in handler.group(1).split("_run_end_before_stt")[1], (
-        "RUN_END before INTENT_END must stay non-terminal — recording the "
-        "refusal must not start ending turns early")
+    body = handler.group(1)
+
+    assert "if not self._run_started:" in body, (
+        "RUN_END must check whether a RUN_START was ever seen before "
+        "treating itself as terminal")
+
+    # The premature/duplicate branch must stay gated on INTENT_END — acting
+    # on a mid-turn RUN_END would cut genuine turns short.
+    premature = body.split("if not self._run_started:")[1]
+    assert "self._intent_ended or self._turn_cancelled" in premature, (
+        "a RUN_END that DID follow a RUN_START must stay non-terminal until "
+        "INTENT_END — this is the guard against cutting genuine turns")

@@ -322,7 +322,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
-        self._run_end_before_stt = False
+        self._run_started       = False
+        self._ha_never_started  = False
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn
         # after run_esphome_voice_turn returns to decide whether to re-trigger
@@ -693,8 +694,38 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             self._tts_audio_url = url
             self._tts_event.set()
 
+        elif event_type == ET.VOICE_ASSISTANT_RUN_START:
+            # First event of any genuine pipeline run — measured on hardware
+            # at 2ms before STT_START, with RUN_END last after TTS_END. Its
+            # ABSENCE is what identifies a RUN_END that HA emitted without
+            # running a pipeline at all: the wake-word interception the
+            # satellite setup flow uses returns straight after
+            # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
+            # RUN_START is ever sent. Structural, not a race on timing.
+            self._run_started = True
+
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
+
+            if not self._run_started:
+                # HA ended a run it never started. Terminal, and safe to act
+                # on: the premature RUN_END below is a real thing HA does
+                # MID-turn, and a mid-turn RUN_END by definition follows the
+                # RUN_START that opened it.
+                #
+                # Without this the turn held the microphone until our own
+                # timers expired — measured at 20.0s (the streaming hard cap)
+                # and 5.2s (the no-speech window) — while HA had re-armed for
+                # the next wake word 18ms after ending this one. That is what
+                # made the setup flow's second "say it again" step land on a
+                # device still listening for the first.
+                #
+                # Unblocking both waiters mirrors the ERROR path below, which
+                # is the established shape for "HA is done, stop feeding it".
+                self._ha_never_started = True
+                self._ha_vad_end.set()
+                self._tts_event.set()
+                return
             # HA can emit a RUN_END that isn't the turn's real terminal event —
             # confirmed in practice: a RUN_END arriving before STT_START, with
             # the genuine terminal RUN_END following ~5s later after TTS_END.
@@ -709,14 +740,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._intent_ended or self._turn_cancelled:
                 self._tts_event.set()
             else:
-                # Record that HA closed the run before it engaged at all — no
-                # VAD start, no STT. Recorded, NOT acted on: the premature
-                # RUN_END above is real and ending the turn here would cut
-                # genuine turns, so this only re-labels an outcome that was
-                # already going to be a give-up. See the _no_speech_timeout
-                # branch in run_esphome_voice_turn.
-                if not self._ha_vad_start.is_set():
-                    self._run_end_before_stt = True
                 log.debug(
                     f"[{self._log_name}] Ignoring RUN_END — INTENT_END not yet "
                     f"seen, treating as premature/duplicate rather than turn end"
@@ -843,7 +866,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url         = None
         self._tts_audio_data        = None
         self._intent_ended          = False
-        self._run_end_before_stt    = False
+        self._run_started           = False
+        self._ha_never_started      = False
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
@@ -911,6 +935,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace: trace.outcome = "cancelled"
                 return
 
+            if self._ha_never_started:
+                # HA ended the run without starting a pipeline — currently
+                # only the satellite setup flow's wake-word interception.
+                # Release the microphone now rather than waiting out a timer
+                # for speech nobody is listening to.
+                log.info(
+                    f"[{self._log_name}] HA ended the run without starting a "
+                    f"pipeline — releasing the turn"
+                )
+                if trace: trace.outcome = "pipeline_refused"
+                return
+
             if self._no_speech_timeout:
                 # Device gave up locally before any speech was detected —
                 # _stream_mic_audio already skipped sending end=True to HA,
@@ -918,22 +954,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # turn immediately rather than sitting on the 30s TTS wait
                 # for a response that was never requested.
                 #
-                # Unless HA had already closed the run without ever engaging,
-                # in which case "no_speech" blames the user for something they
-                # did not do: the audio was captured and streamed into a
-                # pipeline that was no longer listening. Same class of
-                # mis-attribution em_turnclock exists to avoid, and it is
-                # persisted, so every HA-side refusal would otherwise show up
-                # in the activity stats as a silent user.
-                if self._run_end_before_stt:
-                    log.info(
-                        f"[{self._log_name}] HA ended the pipeline before it "
-                        f"engaged — recording 'pipeline_refused', not "
-                        f"'no_speech' (audio was captured and streamed)"
-                    )
-                    if trace: trace.outcome = "pipeline_refused"
-                else:
-                    if trace: trace.outcome = "no_speech"
+                # A genuine no-speech turn. An HA run that never started is
+                # caught above by _ha_never_started, so reaching here means
+                # HA was listening and nobody spoke.
+                if trace: trace.outcome = "no_speech"
                 return
 
             # ── Wait for TTS response (or RUN_END / error / timeout) ──────
