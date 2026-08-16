@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.20.0-ea.5 — Early Access
+
+- **Volume above about three-quarters was distorting, and no longer is.**
+  EchoMuse was driving the codec's digital volume past the point where it
+  can only clip — measured at 65% distortion three button presses from the
+  midpoint, and 89% at the top. Stock Alexa never touches that control,
+  which is why it sounded worse than stock at high volume. Thanks to
+  @kdkavanagh, who measured it.
+
+  Two things you will notice. **The volume percentage shown in Home
+  Assistant will jump** — a device sitting at the same physical level now
+  reads higher, because the scale no longer includes a range that only
+  distorted. Nothing got louder or quieter. And **the top of the range is
+  quieter than it was**, because what used to be above it was a square
+  wave. Everything below is cleaner.
+
+  The physical buttons now step 4dB at a time across the audible range,
+  instead of spending presses in territory indistinguishable from silence,
+  and the volume ring spans that range so a press always moves it.
+- **Greyed-out switches no longer do the opposite of what they show.** A
+  disabled toggle could still be clicked, and stored the inverted value.
+  Thanks again to @kdkavanagh.
+
 ## 2.20.0-ea.4 — Early Access
 
 - **Entity names no longer repeat the device name.** Home Assistant already
