@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.20.0-ea.6 — Early Access
+
+- **Installing wake word models on a device works again.** Sending a wake
+  word model to an Echo failed with an internal error, every time. If you
+  changed a device's wake word to one it had not been given during setup, it
+  simply stopped responding — it had no model to listen with, and nothing
+  said so. Fixed, with a test so it cannot come back quietly.
+
 ## 2.20.0
 
 Everything since 2.19.0. Two changes need a moment of your attention — the
