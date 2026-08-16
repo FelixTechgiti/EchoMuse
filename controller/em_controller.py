@@ -83,8 +83,17 @@ import em_player
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
+# Any non-empty string is truthy in Python, so `os.environ.get("DEBUG")`
+# alone turned debug logging ON for DEBUG=0 — and em_start.py renders a
+# false add-on option as exactly that string, so an untouched "Debug
+# logging" toggle would have shipped every add-on install at DEBUG level.
+# Same `== "1"` convention as REQUIRE_DEVICE_TLS, widened to the word
+# spellings because DEBUG went undocumented for long enough that a
+# container user's .env may already say `true`.
+DEBUG = os.environ.get("DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
 logging.basicConfig(
-    level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
+    level=logging.DEBUG if DEBUG else logging.INFO,
     format=_LOG_FORMAT,
 )
 log = logging.getLogger("echomuse")

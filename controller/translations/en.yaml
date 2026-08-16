@@ -45,3 +45,9 @@ configuration:
     description: >-
       strict holds new devices for administrator approval. auto immediately
       approves new devices with a generated name.
+  debug:
+    name: Debug logging
+    description: >-
+      Log protocol-level detail for devices and the Home Assistant
+      connection. Verbose — turn it on to diagnose something, then off
+      again.
