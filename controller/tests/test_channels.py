@@ -137,3 +137,37 @@ def test_generated_file_says_it_is_generated():
     text = (EA_PATH / "config.yaml").read_text()
     assert "DO NOT EDIT" in text
     assert "sync_channels.py" in text
+
+
+def test_every_channel_documents_the_version_it_pins():
+    """
+    Supervisor shows an add-on's CHANGELOG.md when offering an update, and
+    says "No changelog found" when there is none — precisely when someone is
+    deciding whether to take it.
+
+    Two separate misses, both found on a real update (2026-08-16):
+
+      - controller-ea/ had NO changelog at all, because sync_channels.py's
+        PRESENTATION tuple listed the translations, icon and logo and not
+        this file. The generated channel therefore shipped without the one
+        thing the update dialog reads.
+      - GA 2.19.0 shipped with no entry of its own; the file jumped from
+        1.0.1 to an Early Access heading.
+
+    A release's notes also live in its tag annotation (the dashboard's own
+    update notice reads that), so it is easy to write them there, see them
+    rendered, and never notice Supervisor showing nothing.
+    """
+    for path in (CONTROLLER, CONTROLLER.parent / "controller-ea"):
+        config = yaml.safe_load((path / "config.yaml").read_text())
+        version = str(config["version"])
+
+        changelog = path / "CHANGELOG.md"
+        assert changelog.is_file(), (
+            f"{path.name}/CHANGELOG.md is missing — Supervisor's update "
+            f"dialog will read 'No changelog found'")
+
+        assert version in changelog.read_text(), (
+            f"{path.name}/CHANGELOG.md never mentions {version}, the version "
+            f"its config.yaml pins — an update to it shows notes for some "
+            f"other release")

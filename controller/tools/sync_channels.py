@@ -51,7 +51,8 @@ REPO = CONTROLLER.parent
 # Files a pull-only add-on needs. EA carries no build context at all — it
 # pulls the same published image as GA, differing only in which tag — so
 # there is no Dockerfile and no source here to fall out of step.
-PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png")
+PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png",
+                "CHANGELOG.md")
 
 
 class Channel:
