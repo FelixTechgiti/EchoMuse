@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.20.0-ea.4 — Early Access
+
+- **Entity names no longer repeat the device name.** Home Assistant already
+  puts the device name in front of every entity, and we were adding it again
+  — so a sensor read "Kitchen Voice Assistant Kitchen Ambient Light". Only
+  the displayed name changes: entity IDs stay as they are, so automations
+  keep working. If you renamed an entity yourself, your name is kept.
+- **The ring stays lit long enough to see.** Adding a device asks you to say
+  the wake word; since 2.20.0-ea.3 released the microphone immediately, the
+  ring lit and cleared too fast to register and looked like a glitch. It now
+  holds for a moment to show it heard you.
+
 ## 2.20.0-ea.3 — Early Access
 
 - **The device stops listening as soon as Home Assistant is done with a
