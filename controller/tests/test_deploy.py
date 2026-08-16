@@ -1355,3 +1355,32 @@ def test_entity_names_do_not_repeat_the_device_label():
         "prefixes the device name, so it renders twice")
     assert 'name=""' in body, \
         "the media player should take the device's own name"
+
+
+def test_asset_sync_does_not_shadow_its_accumulator():
+    """
+    _sync_oww_assets keeps a `pushed` list of installed asset names. Assigning
+    the per-file transfer result to that same name shadowed the list on the
+    FIRST file, so the append at the end of the loop raised
+    AttributeError: 'TransferResult' object has no attribute 'append'
+    and on-device wake word assets could not be installed at all.
+
+    It reached a release because TransferResult is deliberately truthy-
+    compatible so existing `if not …` call sites keep working — which is
+    exactly why the one call site that treated the result as a list was the
+    only thing that broke, and nothing else complained.
+
+    Found on hardware 2026-08-16: a device reporting "classifier model not
+    installed" while the dashboard offered to send it and returned 500.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _sync_oww_assets\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_sync_oww_assets not found"
+    body = fn.group(0)
+
+    assert "pushed = []" in body, "the accumulator is gone"
+    assert "pushed.append(" in body, "nothing accumulates installed names"
+    assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
+        "the transfer result must not be assigned to `pushed` — that shadows "
+        "the accumulator and the append raises AttributeError")
