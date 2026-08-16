@@ -1223,3 +1223,79 @@ def test_debug_env_var_is_not_truthy_for_zero():
     assert '"0"' in match.group(1) and '"1"' in match.group(1), (
         "DEBUG must default to \"0\" and test for \"1\", the convention "
         "REQUIRE_DEVICE_TLS already uses")
+def test_wake_word_phrase_is_sent_and_matches_what_we_advertise():
+    """
+    Home Assistant's voice satellite setup arms an interceptor for the next
+    wake word and reads `wake_word_phrase` off the pipeline start. On None it
+    raises AssistSatelliteError("No wake word phrase provided") and ends the
+    run in milliseconds — so every voice turn worked while the one flow that
+    asks a device to prove it heard a wake word could never complete, and the
+    only way past was Skip (confirmed on hardware 2026-08-16).
+
+    HA then matches that phrase against the STATE of its wake-word select
+    entity, whose options are the display names we advertise
+    (esphome/assist_satellite.py `ww_state.state == wake_word_phrase`). So the
+    phrase and the advertised name must come from ONE function or they drift
+    apart and HA silently matches neither.
+
+    Source-shape assertions: this suite does not import em_esphome, which
+    needs aiohttp and the protobufs.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+
+    start = re.search(r"api_pb2\.VoiceAssistantRequest\((.*?)\)\)", src, re.S)
+    assert start, "the pipeline-start VoiceAssistantRequest was not found"
+    assert "wake_word_phrase" in start.group(1), (
+        "VoiceAssistantRequest must carry wake_word_phrase — without it HA "
+        "refuses the run and the satellite setup dialog never advances")
+
+    advertised = re.search(r"api_pb2\.VoiceAssistantWakeWord\((.*?)\)", src, re.S)
+    assert advertised, "VoiceAssistantWakeWord advertisement not found"
+    assert "em_oww_models.display_name" in advertised.group(1), (
+        "the advertised wake_word must come from em_oww_models.display_name, "
+        "the same source as the phrase we send")
+
+    assert 'display_name(server.oww_model_id)' in src, (
+        "the phrase must be derived with display_name too — a second spelling "
+        "is how it drifts from what we advertised")
+
+
+def test_button_turns_claim_no_wake_word():
+    """
+    A button turn has no wake word, and saying otherwise tells HA something
+    untrue about how the turn started — it would also satisfy a setup-flow
+    interceptor with a wake word nobody spoke. aioesphomeapi maps "" back to
+    None, so an empty string is the protocol's way to say "none".
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    gate = re.search(r'wake_word_phrase\s*=\s*\((.*?)else ""', src, re.S)
+    assert gate, "the wake_word_phrase gate was not found"
+    assert 'trigger_label.startswith("wakeword")' in gate.group(1), (
+        "the phrase must be gated on the trigger being a wake word, so button "
+        "turns send \"\"")
+
+
+def test_ha_refusal_is_not_recorded_as_no_speech():
+    """
+    HA closing the pipeline before it engages is not the user being silent —
+    the audio was captured and streamed into a run that had already ended.
+    Recording it as `no_speech` blames the user and pollutes the persisted
+    activity stats, the same mis-attribution em_turnclock exists to prevent.
+
+    The flag is recorded on RUN_END and read at give-up time rather than
+    acted on immediately, because a premature RUN_END before STT_START is a
+    real thing HA does mid-turn and ending the turn there would cut genuine
+    turns short.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    assert "_run_end_before_stt" in src, \
+        "no flag records an HA pipeline that ended before it engaged"
+    assert '"pipeline_refused"' in src, \
+        "an HA-side refusal must get its own outcome, not no_speech"
+
+    handler = re.search(
+        r"VOICE_ASSISTANT_RUN_END:(.*?)elif event_type", src, re.S)
+    assert handler, "RUN_END handler not found"
+    assert "_tts_event.set()" not in handler.group(1).split("_run_end_before_stt")[1], (
+        "RUN_END before INTENT_END must stay non-terminal — recording the "
+        "refusal must not start ending turns early")

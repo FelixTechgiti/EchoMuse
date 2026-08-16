@@ -322,6 +322,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
+        self._run_end_before_stt = False
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn
         # after run_esphome_voice_turn returns to decide whether to re-trigger
@@ -479,13 +480,47 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 available_wake_words=[
                     api_pb2.VoiceAssistantWakeWord(
                         id=self.oww_model_id,
-                        wake_word=self.oww_model_id.replace("_", " "),
+                        wake_word=em_oww_models.display_name(self.oww_model_id),
                         trained_languages=["en"],
                     )
                 ],
                 active_wake_words=[self.oww_model_id],
                 max_active_wake_words=1,
             )
+            return
+
+        if isinstance(msg, api_pb2.VoiceAssistantSetConfiguration):
+            # HA writing a wake-word choice back to us (its select entity's
+            # async_select_option). Handled explicitly rather than falling into
+            # the generic "unhandled" debug, which made a user-visible control
+            # silently do nothing.
+            #
+            # We advertise ONE model with max_active_wake_words=1, so HA's
+            # dropdown offers exactly our model plus "no wake word" — there is
+            # nothing to switch between, and a request naming our own model is
+            # genuinely a no-op rather than an unimplemented one. Selecting our
+            # model back is therefore correct and silent.
+            #
+            # An EMPTY list means "no wake word", i.e. deafen this satellite.
+            # That is a real request we do not implement — wake detection is
+            # controller-side config, not an HA-owned setting — so it is logged
+            # at warning rather than accepted quietly. Honouring it, and
+            # offering a choice worth making, both wait on multi-model support
+            # (#112).
+            requested = list(msg.active_wake_words)
+            if requested == [self.oww_model_id]:
+                log.debug(
+                    f"[{self._log_name}] VoiceAssistantSetConfiguration: "
+                    f"{self.oww_model_id} already active — nothing to do"
+                )
+            else:
+                log.warning(
+                    f"[{self._log_name}] VoiceAssistantSetConfiguration asked "
+                    f"for active_wake_words={requested or '[] (no wake word)'} "
+                    f"— not applied; this device's wake word is set in the "
+                    f"EchoMuse dashboard and stays {self.oww_model_id}"
+                )
+            yield _HANDLED
             return
 
         if isinstance(msg, api_pb2.MediaPlayerCommandRequest):
@@ -674,6 +709,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._intent_ended or self._turn_cancelled:
                 self._tts_event.set()
             else:
+                # Record that HA closed the run before it engaged at all — no
+                # VAD start, no STT. Recorded, NOT acted on: the premature
+                # RUN_END above is real and ending the turn here would cut
+                # genuine turns, so this only re-labels an outcome that was
+                # already going to be a give-up. See the _no_speech_timeout
+                # branch in run_esphome_voice_turn.
+                if not self._ha_vad_start.is_set():
+                    self._run_end_before_stt = True
                 log.debug(
                     f"[{self._log_name}] Ignoring RUN_END — INTENT_END not yet "
                     f"seen, treating as premature/duplicate rather than turn end"
@@ -767,6 +810,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         post_turn_play,    # async callable(pcm_chunks) -> decoded byte count
         trace: "TurnTrace | None" = None,
         preroll_discard: int = VOICE_PREROLL_DISCARD,
+        wake_word_phrase: str = "",
     ) -> None:
         """
         Execute one voice turn over the live HA connection.
@@ -799,6 +843,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url         = None
         self._tts_audio_data        = None
         self._intent_ended          = False
+        self._run_end_before_stt    = False
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
@@ -817,10 +862,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         try:
             # ── Tell HA to start the Assist pipeline ──────────────────────
             # flags=0 → device detected wake word, skip HA-side wake word step.
+            #
+            # wake_word_phrase names WHICH wake word fired, and is empty for
+            # a button turn — where no wake word fired and claiming one would
+            # tell HA something untrue. aioesphomeapi maps "" back to None
+            # (client.py: `if wake_word_phrase == "": wake_word_phrase = None`),
+            # so an empty string is the correct way to say "no wake word",
+            # not a phrase that happens to be blank.
+            #
+            # Sending nothing at all is what stalled Home Assistant's voice
+            # satellite setup dialog: it arms an interceptor for the next wake
+            # word, reads this field, and on None raises
+            # AssistSatelliteError("No wake word phrase provided") and ends the
+            # run within milliseconds. Every turn worked, and the one flow that
+            # asks the device to prove it heard a wake word could never finish.
             self._send_one(api_pb2.VoiceAssistantRequest(
                 start=True,
                 conversation_id=self._conversation_id,
                 flags=VOICE_REQUEST_FLAGS_WAKE_WORD_DONE,
+                wake_word_phrase=wake_word_phrase,
             ))
 
             # ── Stream mic audio from device.voice_queue ──────────────────
@@ -857,7 +917,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # so there's no in-flight HA pipeline to wait on. Close the
                 # turn immediately rather than sitting on the 30s TTS wait
                 # for a response that was never requested.
-                if trace: trace.outcome = "no_speech"
+                #
+                # Unless HA had already closed the run without ever engaging,
+                # in which case "no_speech" blames the user for something they
+                # did not do: the audio was captured and streamed into a
+                # pipeline that was no longer listening. Same class of
+                # mis-attribution em_turnclock exists to avoid, and it is
+                # persisted, so every HA-side refusal would otherwise show up
+                # in the activity stats as a silent user.
+                if self._run_end_before_stt:
+                    log.info(
+                        f"[{self._log_name}] HA ended the pipeline before it "
+                        f"engaged — recording 'pipeline_refused', not "
+                        f"'no_speech' (audio was captured and streamed)"
+                    )
+                    if trace: trace.outcome = "pipeline_refused"
+                else:
+                    if trace: trace.outcome = "no_speech"
                 return
 
             # ── Wait for TTS response (or RUN_END / error / timeout) ──────
@@ -1990,12 +2066,23 @@ async def trigger_voice_turn(
         trigger=trigger_label, t0=time.monotonic(), wake_info=wake_info
     )
 
+    # Only a wake-word turn names a wake word. A button turn genuinely has
+    # none, and "" is how the protocol says so — aioesphomeapi turns it back
+    # into None. Keyed on the trigger label rather than on whether a model is
+    # configured, because a model is always configured; what varies is whether
+    # it fired. Covers "wakeword(0.522)" and the on-device "wakeword-dev(…)".
+    wake_word_phrase = (
+        em_oww_models.display_name(server.oww_model_id)
+        if trigger_label.startswith("wakeword") else ""
+    )
+
     await satellite.run_esphome_voice_turn(
         device=device,
         preroll_discard=preroll_discard,
         on_thinking=on_thinking,
         post_turn_play=post_turn_play,
         trace=trace,
+        wake_word_phrase=wake_word_phrase,
     )
 
     return satellite._continue_conversation
