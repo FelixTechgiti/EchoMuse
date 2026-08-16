@@ -417,7 +417,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield api_pb2.ListEntitiesMediaPlayerResponse(
                 object_id="media_player",
                 key=MEDIA_PLAYER_KEY,
-                name=self.label,
+                # Empty, not the label. HA sets _attr_has_entity_name = True
+                # for every esphome entity and composes "<device> <entity>"
+                # itself, so a label here is rendered TWICE — "Lounge Voice
+                # Assistant Lounge". An empty name is HA's own convention for
+                # the device's primary entity (entity.py:
+                # `self._attr_name = static_info.name or None`), which renders
+                # as the device name alone.
+                name="",
                 supports_pause=True,
                 feature_flags=MEDIA_PLAYER_FEATURES,
                 supported_formats=[
@@ -440,7 +447,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 yield api_pb2.ListEntitiesEventResponse(
                     object_id="action_button",
                     key=EVENT_KEY,
-                    name=f"{self.label} Action Button",
+                    name="Action Button",
                     device_class="button",
                     event_types=BUTTON_EVENT_TYPES,
                 )
@@ -450,7 +457,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 yield api_pb2.ListEntitiesSensorResponse(
                     object_id="ambient_light",
                     key=AMBIENT_LUX_KEY,
-                    name=f"{self.label} Ambient Light",
+                    name="Ambient Light",
                     unit_of_measurement="lx",
                     accuracy_decimals=0,
                     device_class="illuminance",

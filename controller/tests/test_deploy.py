@@ -1322,3 +1322,36 @@ def test_a_run_ha_never_started_ends_the_turn():
     assert "self._intent_ended or self._turn_cancelled" in premature, (
         "a RUN_END that DID follow a RUN_START must stay non-terminal until "
         "INTENT_END — this is the guard against cutting genuine turns")
+
+
+def test_entity_names_do_not_repeat_the_device_label():
+    """
+    Home Assistant sets `_attr_has_entity_name = True` for every esphome
+    entity and composes "<device name> <entity name>" itself. Our device name
+    is already "<label> Voice Assistant", so putting the label in the entity
+    name too renders it twice:
+
+        'EA Test Device 01 Voice Assistant EA Test Device 01 Ambient Light'
+        'Lounge Voice Assistant Lounge'
+
+    Observed on every device and every entity (2026-08-16). em_ble_proxy had
+    it right all along with a bare "BLE advertisements", which is what makes
+    this a slip rather than a misunderstanding.
+
+    An empty name is HA's convention for the device's primary entity —
+    `self._attr_name = static_info.name or None` in esphome/entity.py — and
+    renders as the device name alone, so the media player is deliberately
+    "" rather than a label.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+
+    block = re.search(r"ListEntitiesMediaPlayerResponse\((.*?)ListEntitiesDoneResponse",
+                      src, re.S)
+    assert block, "the ListEntities block was not found"
+    body = block.group(1)
+
+    assert "self.label" not in body, (
+        "an entity name must not include the device label — HA already "
+        "prefixes the device name, so it renders twice")
+    assert 'name=""' in body, \
+        "the media player should take the device's own name"
