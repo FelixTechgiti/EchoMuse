@@ -687,6 +687,18 @@ class Device:
         appeared only when the dashboard's 5s poll of /api/devices happened to
         land mid-playback, which for a typical ~2s response it usually did not.
 
+        WHEN each edge fires, and how true each is:
+
+        - **False is device truth.** The playback functions wait on the
+          device's own `playback_stats`, sent once its audio channel drains
+          after EOS, and clear the flag there.
+        - **True is still a controller-side ESTIMATE** — the first period put
+          on the wire. The device holds audio until roughly
+          SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
+          the tile leads the speaker by up to that much. Closing that gap needs
+          the DEVICE to report the moment it starts, which no released firmware
+          does; `playback_stats` is the only playback message it sends.
+
         Guarded rather than plain, because one caller is stream_speaker's
         finally, which is also reached when barge-in cancels the task
         mid-send: the flag assignment is synchronous and always happens, and a
@@ -696,6 +708,12 @@ class Device:
         if self.speaking == value:
             return
         self.speaking = value
+        if value:
+            # Mutually exclusive phases. Leaving `thinking` set meant the tile
+            # FELL BACK to Thinking the moment speaking cleared, instead of
+            # going quiet — which is what made an early clear look like the
+            # device had started thinking again mid-response.
+            self.thinking = False
         try:
             await _push_device_state(self)
         except BaseException:
@@ -719,7 +737,10 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
         finally:
-            await self._set_speaking(False)
+            # NOT where speaking clears — see _run_post_turn_playback. This
+            # returns when the last byte is written to the socket, which
+            # completes near-instantly however slow the link is; the device
+            # still has its whole buffer to play.
             # EOS must go out on EVERY exit, including task cancellation
             # (barge-in cancels this task mid-send): the device's barge-in
             # flush discards 0x02 frames until it sees this stream's 0x03 —
@@ -742,7 +763,6 @@ class Device:
         end of the response.
         """
         self.begin_data_stream()
-        await self._set_speaking(True)
         pending = bytearray()
         total_pcm = 0
         eq_seconds = 0.0
@@ -771,6 +791,7 @@ class Device:
                     if first_send_time is None:
                         first_send_time = asyncio.get_event_loop().time()
                         self.playback_send_t0 = first_send_time
+                        await self._set_speaking(True)
                         log.info(
                             f"[{self.device_id}] First streamed PCM period "
                             "sent to device"
@@ -785,6 +806,7 @@ class Device:
                 if first_send_time is None:
                     first_send_time = asyncio.get_event_loop().time()
                     self.playback_send_t0 = first_send_time
+                    await self._set_speaking(True)
                     log.info(
                         f"[{self.device_id}] First streamed PCM period "
                         "sent to device"
@@ -793,7 +815,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 send_seconds += asyncio.get_event_loop().time() - _t_send
         finally:
-            await self._set_speaking(False)
+            # NOT where speaking clears — see the note in stream_speaker.
             # One EOS terminates the complete response. Sending EOS per HTTP
             # chunk would make the device repeatedly prime and flush.
             try:
@@ -1227,6 +1249,14 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                     f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
                 )
 
+    # The real end of audio, not the end of the socket write. The device
+    # reports playback_stats once its audio channel drains after EOS, and
+    # everything above waits for exactly that — so this is the one place that
+    # knows the speaker has actually stopped. Clearing it in the stream task's
+    # finally instead dropped the tile out of Speaking seconds early (the write
+    # completes near-instantly), which is the same mistake the ring made until
+    # 2026-07-24.
+    await device._set_speaking(False)
     cancel_task.cancel()
     done_task.cancel()
 
@@ -1350,6 +1380,10 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             )
         return total_pcm
     finally:
+        # See _run_post_turn_playback: the end of audio is what the DEVICE
+        # reports, not when the last byte reached the socket. In the finally so
+        # a cancel or an error leaves the tile idle rather than stuck Speaking.
+        await device._set_speaking(False)
         for t in (cancel_task, done_task):
             t.cancel()
         if not stream_task.done():

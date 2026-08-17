@@ -1522,6 +1522,54 @@ def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
     )
 
 
+def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
+    """
+    The stream task returns when the last byte reaches the socket, which
+    completes near-instantly however slow the link is — the device still has
+    its whole buffer to play. Clearing the flag there dropped the tile out of
+    Speaking seconds early, and because `thinking` was still set it fell BACK
+    to Thinking mid-response before finally going idle.
+
+    Exactly the mistake the LED ring made until 2026-07-24, in the same file.
+    The playback functions wait on the device's playback_stats; they are the
+    only things that know the speaker has stopped.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    for fn_name in ("stream_speaker", "stream_speaker_chunks"):
+        fn = re.search(rf"async def {fn_name}\(.*?\n(?=    async def |    def )",
+                       src, re.S)
+        assert fn, f"{fn_name} not found"
+        assert "_set_speaking(False)" not in fn.group(0), (
+            f"{fn_name} clears speaking when the socket write finishes, not "
+            f"when the audio does"
+        )
+
+    for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
+        fn = re.search(rf"async def {fn_name}\(.*?\n(?=\nasync def |\ndef )",
+                       src, re.S)
+        assert fn, f"{fn_name} not found"
+        assert "_set_speaking(False)" in fn.group(0), (
+            f"{fn_name} waits for the device's playback_stats and must be what "
+            f"clears speaking"
+        )
+
+
+def test_speaking_and_thinking_are_mutually_exclusive():
+    """
+    Both flags reach the dashboard and `speaking` outranks `thinking`, so a
+    stale `thinking` is invisible until speaking clears — and then the tile
+    reads as if the device started thinking again mid-response.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S).group(0)
+    assert "self.thinking = False" in setter, (
+        "starting to speak must clear thinking, or the tile falls back to "
+        "Thinking when speaking ends"
+    )
+
+
 def test_the_speaking_push_cannot_fail_a_speaker_stream():
     """
     One caller is stream_speaker's finally, which is also reached when
