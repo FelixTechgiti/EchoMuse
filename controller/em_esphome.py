@@ -262,6 +262,12 @@ VOICE_ASSISTANT_FLAGS = int(
     | VoiceAssistantFeature.ANNOUNCE
 )
 
+# Whole-announcement cap: fetch plus playback. Sized to sit well under HA's
+# _ANNOUNCEMENT_TIMEOUT_SEC (5 minutes) so WE are the side that gives up and
+# replies, rather than leaving HA holding _is_announcing — every announcement
+# after that one fails SatelliteBusyError until it clears.
+ANNOUNCE_TIMEOUT_S = 120.0
+
 # VoiceAssistantRequest flags=0 means "device already detected wake word,
 # run Assist pipeline from STT onward — do not run HA-side wake word
 # detection on the audio stream."
@@ -613,27 +619,37 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         if isinstance(msg, api_pb2.VoiceAssistantAnnounceRequest):
             # HA-initiated announcement (setup wizard audio test, or TTS push).
-            # HA expects the satellite to transition MediaPlayerState to
-            # ANNOUNCING then back to IDLE around the announce, then send
-            # AnnounceFinished — the setup wizard checks this state machine
-            # to confirm the device can reach HA's audio endpoint.
-            # Audio fetch+play runs as a background task; state transitions
-            # are sent synchronously so the wizard doesn't time out.
+            #
+            # AnnounceFinished is HA's completion signal and it BLOCKS on it:
+            # assist_satellite.entity.async_internal_announce documents
+            # async_announce as "should block until the announcement is done
+            # playing", holds _is_announcing and the RESPONDING state for the
+            # duration, and raises SatelliteBusyError on a concurrent announce.
+            # The esphome side awaits it via
+            # send_voice_assistant_announcement_await_response.
+            #
+            # So it is sent when playback ACTUALLY finishes — see _run_announce.
+            # Answering it here used to return the service call while audio was
+            # still playing, drop the entity out of RESPONDING early, and let
+            # two chained announcements overlap on the device instead of
+            # queueing behind HA's own guard.
+            #
+            # The justification for answering early was that the setup wizard
+            # would otherwise time out. It would not: _ANNOUNCEMENT_TIMEOUT_SEC
+            # is 5 minutes, and the wizard's connection test does not wait on
+            # this message at all — it fires when the device fetches the
+            # CONNECTION_TEST_URL_BASE media id.
+            #
+            # ANNOUNCING goes out now, synchronously, because it describes the
+            # state we are entering rather than one we have reached.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._fetch_and_play_announce(msg.media_id))
+            asyncio.create_task(self._run_announce(msg.media_id))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.ANNOUNCING,
                 volume=self._current_volume,
                 muted=False,
             )
-            yield api_pb2.VoiceAssistantAnnounceFinished(success=True)
-            # Real state, not IDLE: an announcement over music pauses the
-            # session, so PAUSED is the truth here and resume_interrupted
-            # follows with PLAYING once the feed is back up. Asserting IDLE
-            # made the entity wrong for as long as it took the music to
-            # restart.
-            yield self._media_state_msg()
             return
 
         log.debug(
@@ -792,13 +808,48 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             muted=False,
         )
 
-    async def _fetch_and_play_announce(self, media_id: str) -> None:
+    async def _run_announce(self, media_id: str) -> None:
         """
-        Background task: fetch TTS audio from HA and play it on the device.
+        Background task: fetch TTS audio from HA, play it, then tell HA the
+        announcement is done.
 
-        Fired after VoiceAssistantAnnounceFinished is already sent, so HA's
-        setup wizard doesn't time out waiting for the response. Audio playback
-        happens asynchronously — if it fails, the wizard has already passed.
+        This owns HA's completion contract. AnnounceFinished is sent from the
+        finally, on every path — a reply that never arrives parks HA's
+        announce for _ANNOUNCEMENT_TIMEOUT_SEC (5 minutes) with _is_announcing
+        held, which makes every announcement after it fail SatelliteBusyError.
+        Not replying is strictly worse than replying with success=False.
+
+        ANNOUNCE_TIMEOUT_S bounds the whole thing well under HA's 5 minutes.
+        The playback wait is already bounded (audio_duration * 2 + 10s in
+        _run_post_turn_playback), so this only fires on a genuine wedge — but
+        "already bounded" is what the layer below always looks like.
+        """
+        ok = False
+        try:
+            if not media_id:
+                log.warning(f"[{self._log_name}] AnnounceRequest with no media_id")
+            else:
+                ok = await asyncio.wait_for(
+                    self._fetch_and_play_announce(media_id), ANNOUNCE_TIMEOUT_S
+                )
+        except (asyncio.TimeoutError, TimeoutError):
+            log.error(f"[{self._log_name}] Announce timed out after {ANNOUNCE_TIMEOUT_S}s")
+        except Exception as e:
+            log.error(f"[{self._log_name}] Announce fetch/play error: {e}")
+        finally:
+            if self._transport and not self._transport.is_closing():
+                self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=ok))
+                # Real state, not IDLE: an announcement over music pauses the
+                # session, so PAUSED is the truth here and resume_interrupted
+                # follows with PLAYING once the feed is back up. Asserting IDLE
+                # made the entity wrong for as long as it took the music to
+                # restart.
+                self._send_one(self._media_state_msg())
+
+    async def _fetch_and_play_announce(self, media_id: str) -> bool:
+        """
+        Fetch the announcement audio and play it. True if it reached the
+        speaker — that is what AnnounceFinished.success reports.
 
         During a voice turn, _on_announce is set by run_esphome_voice_turn()
         and takes priority — it routes audio to the device's speaker pipeline
@@ -817,23 +868,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         "no playback callback set" on freshly-established connections, not
         just stale reconnects, which ruled out a staleness-only explanation.
         """
-        if not media_id:
-            return
-        try:
-            pcm_bytes = await _fetch_tts_audio(media_id)
-            if not pcm_bytes:
-                return
+        pcm_bytes = await _fetch_tts_audio(media_id)
+        if not pcm_bytes:
+            log.warning(f"[{self._log_name}] Announce fetched no audio")
+            return False
 
-            play_cb = self._on_announce
-            if play_cb is None and self._owning_server is not None:
-                play_cb = self._owning_server._standalone_play
+        play_cb = self._on_announce
+        if play_cb is None and self._owning_server is not None:
+            play_cb = self._owning_server._standalone_play
 
-            if play_cb:
-                await play_cb(pcm_bytes)
-            else:
-                log.info(f"[{self._log_name}] Announce audio fetched ({len(pcm_bytes)}b) — no playback callback set (standalone announce)")
-        except Exception as e:
-            log.error(f"[{self._log_name}] Announce fetch/play error: {e}")
+        if play_cb is None:
+            log.info(
+                f"[{self._log_name}] Announce audio fetched ({len(pcm_bytes)}b) "
+                f"— no playback callback set (standalone announce)"
+            )
+            return False
+
+        await play_cb(pcm_bytes)
+        return True
 
     # ── Voice turn (outbound) ────────────────────────────────────────────
 
