@@ -30,11 +30,13 @@ adding it for.
 """
 
 import asyncio
+import re
 from pathlib import Path
 
 import em_announce
 
-ESPHOME_SRC = (Path(__file__).resolve().parents[1] / "em_esphome.py").read_text()
+CONTROLLER = Path(__file__).resolve().parents[1]
+ESPHOME_SRC = (CONTROLLER / "em_esphome.py").read_text()
 
 
 def fetch_returning(pcm):
@@ -230,6 +232,70 @@ def test_exactly_one_reply_per_announcement():
     assert len(replies.calls) == 1
 
 
+def test_a_play_callback_reporting_failure_is_not_a_success():
+    """
+    The device can cancel mid-playback — a mute, a button press — and then the
+    user did not hear the announcement. Reporting success for it is untrue, and
+    success is the one fact this reply carries.
+    """
+    replies = Replies()
+
+    async def cancelled(pcm):
+        return False
+
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=cancelled,
+            on_finished=replies,
+        )
+    )
+    assert replies.calls == [False]
+
+
+def test_a_play_callback_with_no_opinion_counts_as_played():
+    """
+    Most callbacks return None. Treating that as failure would report every
+    ordinary announcement as failed.
+    """
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=play_nothing,
+            on_finished=replies,
+        )
+    )
+    assert replies.calls == [True]
+
+
+# ── the other way HA announces ───────────────────────────────────────────────
+
+
+def test_play_media_announce_plays_without_replying():
+    """
+    HA has TWO announce paths and only one waits for a completion message.
+    `play_media` with announce=true is an ordinary media_player command;
+    sending AnnounceFinished for it answers a question nobody asked.
+    """
+    played = []
+
+    async def play(pcm):
+        played.append(len(pcm))
+
+    ok = asyncio.run(
+        em_announce.play_media(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=play,
+        )
+    )
+    assert ok is True
+    assert played == [200]
+
+
 def test_our_cap_sits_under_has():
     """
     HA's _ANNOUNCEMENT_TIMEOUT_SEC is 5 minutes. Ours must be comfortably
@@ -265,3 +331,36 @@ def test_announcing_state_is_still_sent_synchronously():
     handler = ESPHOME_SRC[ESPHOME_SRC.index("def handle_message"):]
     handler = handler[: handler.index("\n    def ", 10)]
     assert "MediaPlayerState.ANNOUNCING" in handler
+
+
+def test_both_announce_paths_resolve_the_callback_the_same_way():
+    """
+    Renaming the shared helper broke the play_media path and not the other,
+    because only one call site was checked — every play_media announce raised
+    AttributeError on a released build (2026-08-17). One resolver, used by
+    both, so there is nothing to miss next time.
+    """
+    src = ESPHOME_SRC
+    assert src.count("_announce_play_cb()") >= 2, (
+        "the two announce paths must share one callback resolver"
+    )
+    assert "_fetch_and_play_announce" not in src, (
+        "a caller still references the removed helper"
+    )
+
+
+def test_no_handler_dispatches_to_a_method_that_does_not_exist():
+    """
+    handle_message catches nothing: a missing attribute surfaces only as
+    'handle_message raised for MediaPlayerCommandRequest' in the log, at
+    runtime, on a device someone is using. Cheap to check statically.
+    """
+    src = ESPHOME_SRC
+    base = (CONTROLLER / "esphome" / "satellite_server.py").read_text()
+    defined = set(re.findall(r"^    (?:async )?def (_[a-z_]+)", src + base, re.M))
+    # Callables held as attributes rather than defined as methods — the
+    # turn-scoped callbacks. Assigned with aligned "=" so the spacing varies.
+    held = set(re.findall(r"self\.(_[a-z_]+)\s*[:=]", src))
+    called = set(re.findall(r"self\.(_[a-z_]+)\(", src))
+    missing = called - defined - held
+    assert not missing, f"dispatched to methods that do not exist: {sorted(missing)}"
