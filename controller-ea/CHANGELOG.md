@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.20.1-ea.1 — Early Access
+
+- **Talking over a response now works.** Saying the wake word while EchoMuse
+  was answering did stop it — and then nothing happened. Whatever you said
+  next was never heard: the interrupting turn ended a few milliseconds after
+  it began, before any audio was captured, so you had to wait and start again.
+  Home Assistant runs one voice pipeline at a time per device, and EchoMuse
+  was starting a second without telling it to stop the first; the old
+  pipeline's ending then arrived and closed the new turn. Fixed for both
+  cases — interrupting while it is thinking, and while it is speaking.
+
+  Note that interrupting is still a one-way door. If you say the wake word and
+  then stay quiet, the original answer is gone rather than resumed.
+
+- **Announcements now finish before Home Assistant is told they have.** The
+  `assist_satellite.announce` service returned the moment the request
+  arrived rather than when the audio stopped. An automation that plays two
+  announcements in a row could have them talk over each other on the device,
+  and the satellite dropped out of its "responding" state early. It now waits
+  for playback, and says whether the audio actually reached the speaker.
+
 ## 2.20.0-ea.6 — Early Access
 
 - **Installing wake word models on a device works again.** Sending a wake
