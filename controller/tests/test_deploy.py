@@ -1386,18 +1386,21 @@ def test_asset_sync_does_not_shadow_its_accumulator():
         "the accumulator and the append raises AttributeError")
 
 
-def test_a_model_change_stands_the_device_down_before_installing():
+def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
     """
-    Selecting a wake word a device does not have leaves it deaf under
-    owwOnDevice=on: it cannot score without the classifier, and the controller
-    has stood down and no longer triggers on its behalf. Nothing fires, nothing
-    warns, and the dashboard reports the device as healthy (#191).
+    A device cannot score a wake word whose classifier it does not have, and
+    under owwOnDevice=on the controller has stood down — so telling it to use
+    a model it lacks produced a device with NO wake word: nothing fired,
+    nothing warned, the dashboard reported it healthy (#191).
 
-    The ORDER is the guard, and it is invisible at the call site. Clearing the
-    flag first and installing afterwards means the controller keeps triggering
-    for the length of the push — merely the old behaviour. Installing first and
-    clearing on failure leaves a real deaf window on exactly the link that
-    makes a multi-megabyte shell-plane push slow.
+    The first fix stood the device down to controller-side scoring while the
+    model installed. That works, and it silently overrides a setting the user
+    chose — a posture change they did not ask for and cannot see. Holding the
+    key back instead means the device keeps listening for its CURRENT wake
+    word, on-device, throughout, and simply stays there if the install fails.
+
+    The hold-back is invisible at the call site: the config push looks
+    ordinary, and the whole guard is that one key was swapped out first.
     """
     src = (CONTROLLER / "em_api.py").read_text()
     fn = re.search(r"async def _apply_live_config\(.*?\n(?=\nasync def |\ndef )",
@@ -1405,22 +1408,68 @@ def test_a_model_change_stands_the_device_down_before_installing():
     assert fn, "_apply_live_config not found"
     body = fn.group(0)
 
-    down = body.find("live.oww_model_ready = False")
-    install = body.find("_ensure_oww_model")
-    assert down != -1, "a model change no longer stands the device down"
-    assert install != -1, "nothing installs the newly selected classifier"
-    assert down < install, (
-        "the device must be stood down BEFORE the install is spawned, or the "
-        "push happens while the device believes it is triggering"
+    hold = body.find("_hold_back_oww_model(live, effective)")
+    push = body.find('send_control({"type": "config"')
+    assert hold != -1, "the new model is no longer held back"
+    assert push != -1, "the config push is gone"
+    assert hold < push, (
+        "the model must be held back BEFORE the config is pushed, or the "
+        "device is told to use a model it does not have"
+    )
+    assert "_install_then_switch" in body, "nothing installs the pending model"
+
+
+def test_only_devices_that_score_locally_are_held_back():
+    """
+    With owwOnDevice=off the controller does the scoring and the file on the
+    device is irrelevant — holding the change back would delay it for no
+    reason. That is the common case and it stays instant.
+
+    Both the old and the new mode are consulted: enabling on-device scoring in
+    the same save that changes the wake word must not slip through on the
+    strength of the old mode being "off".
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"def _hold_back_oww_model\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_hold_back_oww_model not found"
+    body = fn.group(0)
+
+    assert "oww_shadow_capable" in body, (
+        "a device that cannot score locally must not be held back"
+    )
+    assert body.count("MODE_OFF") >= 2, (
+        "both the current and the incoming mode must be consulted"
+    )
+    assert 'effective.get("owwOnDevice"' in body, (
+        "the incoming mode is not read — a save that turns on-device scoring "
+        "on while changing the wake word would slip through"
     )
 
-    # The mode must be resolved against readiness, not just the capability.
-    assert re.search(r"effective_mode\(\s*effective\[.owwOnDevice.\],\s*"
-                     r"live\.oww_trigger_capable,\s*\n\s*getattr\(live, .oww_model_ready.",
-                     body), (
-        "owwOnDevice is resolved without model readiness — the stand-down "
-        "would be recorded and never acted on"
+
+def test_a_failed_install_leaves_the_device_on_its_old_wake_word():
+    """
+    The failure direction that matters. Switching anyway is what produced the
+    deaf device; standing the device down instead overrides the user's choice.
+    Staying put means the device keeps answering, on a wake word it can hear.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _install_then_switch\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_install_then_switch not found"
+    body = fn.group(0)
+
+    # The failure BRANCH itself, not the span up to the switch — that span
+    # contains other returns, which is how the first version of this test
+    # passed against a branch that fell straight through.
+    branch = re.search(r'\n    if not result\.get\("ok"\):\n(.*?)\n    (?=\S)',
+                       body, re.S)
+    assert branch, "the failure branch is gone"
+    assert re.search(r"^        return\s*$", branch.group(1), re.M), (
+        "a failed install must return, not fall through into switching the "
+        "device onto a model it does not have"
     )
+
 
 
 def test_both_effective_mode_call_sites_pass_readiness():

@@ -826,8 +826,32 @@ is a degradation to *no* behaviour, which the capability rule above exists to
 forbid. Selecting a wake word a device was never provisioned with is enough to
 produce it, and that is an ordinary dashboard action.
 
-`em_shadow.effective_mode` now takes `model_ready` alongside
-`trigger_capable`. A known-missing model degrades to **`off`, not `shadow`** —
+**The fix is install-before-switch, not a fallback.** A device is never told
+about a new `owwModel` until the classifier is on it
+(`em_api._hold_back_oww_model` swaps the key back to the current model, and
+`_install_then_switch` pushes the real config once the file has landed). The
+device keeps listening for its CURRENT wake word, on-device, throughout; if the
+install fails it simply stays there and says so loudly.
+
+The first attempt stood the device down to controller-side scoring while the
+model installed. That works and was rejected: it silently overrides a setting
+the user chose, and the dashboard goes on reporting `owwOnDevice: on` — the
+same "reports healthy while something else is true" shape the capability rule
+exists to forbid. Note there is no privacy difference between the two modes
+(the device streams the wake audio either way, and the controller scores it in
+`on` mode too — that is what `turns.ctrl_wake_score` records), but a silent
+override is a trust problem regardless.
+
+Only devices that actually score locally are held back — with
+`owwOnDevice=off` the file is irrelevant, so the change stays instant. Both the
+old and the incoming mode are consulted, or a save that enables on-device
+scoring while changing the wake word slips through on the old mode.
+
+`em_shadow.effective_mode` also takes `model_ready` alongside
+`trigger_capable`, as a **backstop** with no current writer: install-before-
+switch removed the case that set it, and its intended writer is the
+reconcile-on-connect pass designed in #191 — the first thing that will actually
+know what a device has. A known-missing model degrades to **`off`, not `shadow`** —
 shadow cannot score either, so degrading to it would be the wrong answer
 dressed as a fallback; only `off` puts the controller back in charge of
 triggering, which is the one arrangement that still answers the user. It
@@ -835,15 +859,13 @@ defaults **True**: absence of evidence is not evidence of absence, and standing
 every device down because the controller has not looked would be worse than the
 bug.
 
-The ORDER at the call site is the guard and is invisible there, so a test pins
-it: `_apply_live_config` stands the device down **first** and installs
-**after**, as a background task. Stand-down-first means the controller keeps
-triggering for the length of the push — merely the old behaviour.
-Install-first-and-clear-on-failure leaves a real deaf window on exactly the
-link that makes a multi-megabyte shell-plane push slow. Blocking the config
-save on that push would time out the request without making anything safer. A
-device with no `oww_shadow` capability is never stood down by this: the
-classifier is irrelevant to it.
+The hold-back is invisible at the call site — the config push looks entirely
+ordinary and the whole guard is that one key was swapped out first — so tests
+pin the ordering, the capability gate, and that a failed install returns rather
+than falling through into the switch. The install runs as a background task:
+blocking the config save on a multi-megabyte shell-plane push would time out
+the request without making anything safer, and nothing is degraded while it
+runs.
 
 The rest of #191 — installing all four stock classifiers, custom slots,
 reconcile-on-connect and a per-device Repair action — is designed on the issue
