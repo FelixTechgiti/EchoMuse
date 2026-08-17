@@ -275,16 +275,30 @@ Who decides you said the wake word. Three settings:
   its word.
 
 **Why you might want "On device".** The wake decision stops crossing your
-network. On a marginal link that is the difference between a Dot that
-responds instantly and one that lags unpredictably, and it keeps working
-through a controller restart. It does *not* reduce network traffic — the
-audio still streams, because the controller runs the rest of the turn.
+network, so it is not delayed by a bad moment on the link. On a marginal
+connection that is the difference between a Dot that responds promptly and
+one that lags unpredictably.
 
-The controller keeps listening alongside it, which is deliberate: it costs
-nothing extra (it was already scoring), it keeps the comparison in
-**Activity** running so you can see whether the two agree, and it leaves
-barge-in — interrupting a response by speaking over it — working exactly as
-before.
+Be clear about what it does **not** do:
+
+- **It does not reduce network traffic.** The audio still streams
+  continuously, because the controller runs the rest of the turn.
+- **It does not keep working without the controller.** The wake word is only
+  the first step; the turn itself needs the controller for Home Assistant,
+  the microphone stream and the spoken reply. A wake detected while the
+  controller is down lights the ring and goes nowhere.
+
+The controller keeps listening alongside it, which keeps the comparison in
+**Activity** running so you can see whether the two agree. That costs nothing
+*extra* — it is the same work the controller was already doing in
+**Controller** mode — but it is work that is no longer strictly needed once
+you trust the device, and on a busy Home Assistant machine you may prefer not
+to pay for it. **Both (compare)** is the mode built for measuring; consider
+dropping back to it when you want the numbers rather than leaving them
+running forever.
+
+Barge-in — interrupting a response by speaking over it — is scored by the
+controller in every mode and is unaffected by this setting.
 
 Each voice turn's row in **Activity** shows both scores side by side, and
 the per-device activity API returns an agreement summary (how often they
