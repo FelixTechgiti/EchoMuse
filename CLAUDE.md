@@ -818,13 +818,36 @@ leaves a device that goes deaf or panics. The comment that justified caching
 ("a stream that began before the change keeps using the scorer it started
 with") described exactly what made it fatal.
 
-**A missing classifier silently deafens a device under `owwOnDevice=on`.**
-The device cannot score without the model, and the controller has stood down
-and no longer triggers on its behalf — so nothing fires, nothing warns, and
-the dashboard reports the device as healthy. That is a degradation to *no*
-behaviour, which the capability rule above exists to forbid;
-`em_shadow.effective_mode` already does the right thing for a missing
-`oww_trigger` capability and the missing-model case has no equivalent (#191).
+**A missing classifier used to silently deafen a device under
+`owwOnDevice=on`.** The device cannot score without the model, and the
+controller has stood down and no longer triggers on its behalf — so nothing
+fired, nothing warned, and the dashboard reported the device as healthy. That
+is a degradation to *no* behaviour, which the capability rule above exists to
+forbid. Selecting a wake word a device was never provisioned with is enough to
+produce it, and that is an ordinary dashboard action.
+
+`em_shadow.effective_mode` now takes `model_ready` alongside
+`trigger_capable`. A known-missing model degrades to **`off`, not `shadow`** —
+shadow cannot score either, so degrading to it would be the wrong answer
+dressed as a fallback; only `off` puts the controller back in charge of
+triggering, which is the one arrangement that still answers the user. It
+defaults **True**: absence of evidence is not evidence of absence, and standing
+every device down because the controller has not looked would be worse than the
+bug.
+
+The ORDER at the call site is the guard and is invisible there, so a test pins
+it: `_apply_live_config` stands the device down **first** and installs
+**after**, as a background task. Stand-down-first means the controller keeps
+triggering for the length of the push — merely the old behaviour.
+Install-first-and-clear-on-failure leaves a real deaf window on exactly the
+link that makes a multi-megabyte shell-plane push slow. Blocking the config
+save on that push would time out the request without making anything safer. A
+device with no `oww_shadow` capability is never stood down by this: the
+classifier is irrelevant to it.
+
+The rest of #191 — installing all four stock classifiers, custom slots,
+reconcile-on-connect and a per-device Repair action — is designed on the issue
+and not yet built.
 
 ### Asset distribution (`em_oww_assets.py`)
 
@@ -1507,6 +1530,29 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
+
+## Dashboard device state
+
+`deviceState()` in `dashboard.jsx` ranks pending / offline / muted / speaking /
+thinking / listening / idle, and `_push_device_state` carries all of them. The
+trap is that **the flag and the push are separate things and drifted apart**:
+pushes existed for listening, thinking and turn end, but nothing pushed the
+`speaking` transition, so a turn read listening → thinking → idle and the tile
+never showed Speaking at all. It surfaced only when the dashboard's 5s poll of
+`/api/devices` happened to land mid-playback, which for a ~2s response usually
+did not — so it presented as "stuck on thinking", not "Speaking is broken".
+
+Setting the flag and pushing it are therefore **one operation**
+(`Device._set_speaking`), and a test pins that no other assignment to
+`self.speaking` exists — a new streaming path cannot reintroduce the gap by
+doing only half. The push is guarded with `except BaseException`, because one
+caller is `stream_speaker`'s `finally`, which is also reached when barge-in
+cancels the task mid-send; a plain `except Exception` does not catch the
+`CancelledError` that arises there, and a dashboard push is not worth failing a
+speaker stream over. The assignment is synchronous and always happens.
+
+Note `em_player` must **not** set `device.speaking` for music — it makes the
+wake loop drop frames, deafening the device for the length of a song.
 
 ## Dashboard styling and theming
 
