@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.20.1
+
+Everything from the 2.20.1 Early Access builds. All fixes — no new settings,
+no database migration, no firmware requirement, and nothing to do on your
+devices.
+
+### Interrupting a response now works
+
+Saying the wake word while EchoMuse was answering stopped it — and then
+nothing happened. Whatever you said next was never heard, so you had to wait
+and ask again. The interrupting turn was ending a few milliseconds after it
+began, before any audio reached it.
+
+Home Assistant runs one voice pipeline at a time for each device, and EchoMuse
+was starting a second one without telling it to stop the first; the abandoned
+pipeline's ending then arrived and closed the new turn. Fixed for both cases —
+interrupting while it is thinking, and while it is speaking.
+
+Interrupting is still a one-way door: say the wake word and then stay quiet,
+and the original answer is gone rather than resumed.
+
+### Announcements
+
+- **They now finish before Home Assistant is told they have.**
+  `assist_satellite.announce` returned the moment the request arrived rather
+  than when the audio stopped, so an automation playing two announcements in a
+  row could have them talk over each other, and the satellite dropped out of
+  its "responding" state early. An announcement now also reports whether the
+  audio actually reached the speaker.
+- **A cancelled voice turn no longer silences every announcement after it.**
+  Press the action button to stop a turn, or mute the device, and
+  announcements stopped playing there — no error, nothing in the dashboard,
+  and it stayed that way until a voice turn happened to run. With more than
+  one device this looked like announcements moving to the wrong device.
+  Long-standing, and only found by trying enough announcements in a row.
+
+### Wake words
+
+- **Changing a wake word installs it before switching the device onto it.**
+  If you picked a wake word a device had never been given, and that device was
+  doing its own wake word detection, it stopped answering entirely — it had no
+  model to listen with, and nothing said so while the dashboard showed the
+  device as healthy. The device now keeps listening for its current wake word
+  until the new model has arrived, then switches. If the model cannot be
+  installed it stays where it is and the device log says why.
+
+  Devices using controller-side detection are unaffected — the model file
+  means nothing to them, so the change stays immediate.
+
+  Note that changing a wake word briefly reconnects the device in Home
+  Assistant, which makes every entity for it flicker unavailable and back. If
+  you have an automation with a **state trigger** on one of them it will fire.
+  See the configuration guide under *Wake word model*.
+
+### Elsewhere
+
+- **The dashboard shows Speaking again.** A device tile sat on "Thinking" for
+  the whole spoken response. It now follows the device's own report that the
+  audio has stopped, rather than the moment the controller finished sending it
+  — which happens almost instantly and left several seconds of audio still to
+  play. The start of a response is still estimated and can lead the speaker by
+  about a second.
+- **Firmware is downloaded once per release, not once per device.** Updating
+  several devices, or setting up several through the provisioning wizard,
+  re-downloaded the same ~10MB every time. It is now kept beside your database
+  and checked against its fingerprint before use.
+- **A guide for moving from the Docker container to the Home Assistant
+  add-on**, in `docs/migrate-to-addon.md`. Read the part about `tls/` before
+  you start.
+
 ## 2.20.1-ea.5 — Early Access
 
 - **Changing a wake word now installs it before switching the device onto
