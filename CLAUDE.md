@@ -826,6 +826,23 @@ is a degradation to *no* behaviour, which the capability rule above exists to
 forbid. Selecting a wake word a device was never provisioned with is enough to
 produce it, and that is an ordinary dashboard action.
 
+**Bouncing the HA connection flaps EVERY entity for that device.**
+`update_oww_model` drops and remakes the connection so HA re-reads the wake
+word, and that is the only lever the protocol offers — HA calls
+`_update_satellite_config()` from `async_added_to_hass` and nowhere else. The
+cost is that the voice assistant, media player, event and sensor entities all
+go unavailable and back in the same instant.
+
+For the **event** entity that is user-visible and looks like a fault: HA's
+`EsphomeEvent._on_device_update` deliberately writes state on reconnect
+("Event entities should go available directly when the device comes online"),
+restoring the last event's timestamp. `_trigger_event` is NOT called, so HA
+does not think a new event happened — but a **state-triggered** automation sees
+`unavailable` → timestamp and fires. Reported 2026-08-17 as "changing the wake
+word triggers a long button press"; the controller had sent no event at all.
+The user-side fix is `not_from: [unavailable, unknown]`, documented in
+docs/configuration.md. Worth remembering before adding any new bounce.
+
 **The fix is install-before-switch, not a fallback.** A device is never told
 about a new `owwModel` until the classifier is on it
 (`em_api._hold_back_oww_model` swaps the key back to the current model, and

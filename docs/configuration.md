@@ -165,6 +165,39 @@ controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
 
+**If the device does its own wake word detection** (see *On-device wake
+word*), the model has to be copied onto it before it can listen for the new
+word. That happens automatically when you select it, and the device carries on
+answering to its **current** wake word until the new one has arrived — usually
+a few seconds. If the copy fails, the device stays on the word it already has
+and the device log says why. It is never left listening for a word it does not
+have.
+
+**Changing the wake word briefly reconnects the device in Home Assistant.**
+Home Assistant only reads a satellite's wake word configuration when it
+connects, so the controller drops and remakes that connection to make the new
+name show up. It takes a few milliseconds, but during it **every entity for
+that device goes unavailable and comes straight back** — the voice assistant,
+the media player, the action button, the ambient light sensor.
+
+That matters if you have an automation using a **state trigger** on any of
+them: coming back online is a state change, and the automation will fire. The
+action button's event entity is the one people hit, because a returning event
+entity restores its last event and looks exactly like the button being pressed
+again. Exclude the transition:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: event.your_device_action_button
+    not_from:
+      - unavailable
+      - unknown
+```
+
+Nothing is wrong with the device when this happens, and it only happens when
+you change the wake word.
+
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
 used to start two competing conversations. Now the **first device to hear
