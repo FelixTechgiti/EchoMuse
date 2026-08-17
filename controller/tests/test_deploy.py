@@ -1384,3 +1384,59 @@ def test_asset_sync_does_not_shadow_its_accumulator():
     assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
         "the transfer result must not be assigned to `pushed` — that shadows "
         "the accumulator and the append raises AttributeError")
+
+
+def test_a_model_change_stands_the_device_down_before_installing():
+    """
+    Selecting a wake word a device does not have leaves it deaf under
+    owwOnDevice=on: it cannot score without the classifier, and the controller
+    has stood down and no longer triggers on its behalf. Nothing fires, nothing
+    warns, and the dashboard reports the device as healthy (#191).
+
+    The ORDER is the guard, and it is invisible at the call site. Clearing the
+    flag first and installing afterwards means the controller keeps triggering
+    for the length of the push — merely the old behaviour. Installing first and
+    clearing on failure leaves a real deaf window on exactly the link that
+    makes a multi-megabyte shell-plane push slow.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _apply_live_config\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_apply_live_config not found"
+    body = fn.group(0)
+
+    down = body.find("live.oww_model_ready = False")
+    install = body.find("_ensure_oww_model")
+    assert down != -1, "a model change no longer stands the device down"
+    assert install != -1, "nothing installs the newly selected classifier"
+    assert down < install, (
+        "the device must be stood down BEFORE the install is spawned, or the "
+        "push happens while the device believes it is triggering"
+    )
+
+    # The mode must be resolved against readiness, not just the capability.
+    assert re.search(r"effective_mode\(\s*effective\[.owwOnDevice.\],\s*"
+                     r"live\.oww_trigger_capable,\s*\n\s*getattr\(live, .oww_model_ready.",
+                     body), (
+        "owwOnDevice is resolved without model readiness — the stand-down "
+        "would be recorded and never acted on"
+    )
+
+
+def test_both_effective_mode_call_sites_pass_readiness():
+    """
+    Config push and device registration both resolve the mode. A guard applied
+    to one and not the other is a device that is safe until it reconnects —
+    the same shape as the v7 stats-relay miss.
+    """
+    for name in ("em_api.py", "em_controller.py"):
+        src = (CONTROLLER / name).read_text()
+        # Non-greedy matching to the first ")" is wrong here: the argument
+        # itself contains one (`effective.get("owwOnDevice")`). Take a fixed
+        # window after each call instead — the call sites are three lines.
+        for m in re.finditer(r"effective_mode\(", src):
+            call = src[m.end():m.end() + 200]
+            assert "model_ready" in call or "oww_model_ready" in call, (
+                f"{name}: an effective_mode call omits model readiness — "
+                f"{call.splitlines()[0]!r}"
+            )
