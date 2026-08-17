@@ -1384,3 +1384,52 @@ def test_asset_sync_does_not_shadow_its_accumulator():
     assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
         "the transfer result must not be assigned to `pushed` — that shadows "
         "the accumulator and the append raises AttributeError")
+
+
+def test_an_announcement_clears_the_cancel_flag_before_playing():
+    """
+    cancel_event is set by a cancel — a button press during a turn, a mute —
+    and was ONLY ever cleared when the next VOICE TURN started. Nothing in the
+    announcement path cleared it, and _run_post_turn_playback checks it, so a
+    cancelled turn silently killed every subsequent announcement until a turn
+    happened to run.
+
+    Measured on Test Device 01, 2026-08-17: a turn cancelled at 12:02:32 left
+    seven announcements over the next three minutes logging "Cancelled during
+    playback" and playing nothing. Adding a second device made it look like a
+    routing bug — that device played fine, because its own flag was clear.
+
+    An announcement is a new action; nothing that set the flag earlier has any
+    claim on it.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    assert fn, "_standalone_play not found"
+    body = fn.group(0)
+
+    # The literal calls, not the prose: this function's comments name
+    # _run_post_turn_playback before either call happens.
+    clear = body.find("_d.cancel_event.clear()")
+    play = body.find("await _run_post_turn_playback(")
+    assert clear != -1, (
+        "an announcement no longer clears cancel_event — a cancelled turn "
+        "will silently kill every announcement that follows it"
+    )
+    assert clear < play, "the flag must be cleared BEFORE the audio is played"
+
+
+def test_an_announcement_reports_whether_it_actually_played():
+    """
+    The reply to HA carries one fact — did the user hear it. Something that
+    cancels mid-playback means they did not, and `return True` regardless
+    would make the reply decorative.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    body = fn.group(0)
+    assert "-> bool" in body, "_standalone_play must report whether it played"
+    assert re.search(r"return not .*cancel_event\.is_set\(\)", body), (
+        "the return value must reflect whether playback was cancelled"
+    )
