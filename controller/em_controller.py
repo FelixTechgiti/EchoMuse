@@ -2420,11 +2420,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await leds_off(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
-        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
+        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
             # stop it for the duration and put it back after. An active
             # media session pauses for the announcement and resumes.
+            #
+            # cancel_event is cleared first, exactly as a voice turn does.
+            # It is set by a cancel (a button press during a turn, a mute)
+            # and was ONLY ever cleared when the next voice turn started —
+            # so a cancelled turn left it set and _run_post_turn_playback
+            # then abandoned every subsequent announcement at "Cancelled
+            # during playback", silently, until a turn happened to run.
+            # Measured on Test Device 01 on 2026-08-17: a turn cancelled at
+            # 12:02:32 killed the next seven announcements over three
+            # minutes. An announcement is a new action and nothing that set
+            # that flag earlier has any claim on it.
+            _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
             try:
@@ -2432,6 +2444,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             finally:
                 await _d.mic_start()
                 await em_player.resume_interrupted(_d.device_id)
+            # Whether the audio actually reached the speaker. Something that
+            # cancelled mid-playback (a mute, a button) means the user did
+            # not hear it, and telling HA it finished successfully would be
+            # untrue — it is the one thing the announcement reply reports.
+            return not _d.cancel_event.is_set()
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         # Capabilities before the servers come up: they decide which HA

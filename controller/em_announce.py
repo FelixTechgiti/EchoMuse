@@ -64,7 +64,8 @@ async def run(
         if not media_id:
             log.warning(f"[{log_name}] AnnounceRequest with no media_id")
         else:
-            ok = await asyncio.wait_for(_fetch_and_play(media_id, fetch, play, log_name), timeout)
+            ok = await asyncio.wait_for(
+                play_media(media_id, fetch, play, log_name), timeout)
     except (asyncio.TimeoutError, TimeoutError):
         log.error(f"[{log_name}] Announce timed out after {timeout}s")
     except Exception as e:
@@ -74,12 +75,26 @@ async def run(
     return ok
 
 
-async def _fetch_and_play(
+async def play_media(
     media_id: str,
     fetch: Callable[[str], Awaitable[bytes]],
-    play: Optional[Callable[[bytes], Awaitable[None]]],
-    log_name: str,
+    play: Optional[Callable[[bytes], Awaitable[object]]],
+    log_name: str = "",
 ) -> bool:
+    """
+    Fetch and play, with no reply to anyone. True if the audio reached the
+    speaker.
+
+    Public because HA has TWO ways to announce and only one of them waits for
+    a completion message: `VoiceAssistantAnnounceRequest` (run(), above) and
+    `play_media` with announce=true, which is an ordinary media_player command.
+    Sending AnnounceFinished for the latter would answer a question nobody
+    asked.
+
+    A `play` callback returning False means the audio did not reach the
+    speaker — cancelled by a mute or a button mid-playback. None (the common
+    case) means it has no opinion and is taken as played.
+    """
     pcm_bytes = await fetch(media_id)
     if not pcm_bytes:
         log.warning(f"[{log_name}] Announce fetched no audio")
@@ -92,5 +107,4 @@ async def _fetch_and_play(
         )
         return False
 
-    await play(pcm_bytes)
-    return True
+    return await play(pcm_bytes) is not False
