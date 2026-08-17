@@ -354,6 +354,71 @@ Note this makes turns end in **milliseconds**, so the ring needs an explicit
 `ack_anim` cue or it flashes and reads as a glitch; it previously stayed lit
 only because the turn was hung.
 
+**The protocol has NO run identifier, and HA does not serialise runs.**
+`VoiceAssistantEventResponse` is an event type plus a name/value list and
+nothing else, so a client structurally cannot attribute an event to a run: the
+protocol assumes one pipeline run at a time per connection and **the satellite
+is what enforces that**. HA does not — `handle_pipeline_start` clears the audio
+queue and cancels `_tts_streaming_task`, then overwrites `_pipeline_task`
+*without cancelling the old one*, so a second start orphans the first run and
+leaves it emitting onto the same socket.
+
+Barge-in is the only place two runs overlap, and it was broken for the life of
+the feature: measured 2026-08-17, five barge-ins, five interrupting turns dead
+in 4-17ms with zero audio, because the aborted run's `RUN_END` landed ~4ms
+after the new turn started and the branch above read it as terminal. Two
+halves, both required:
+
+- **`VoiceAssistantRequest(start=False)` IS a server-side abort** —
+  aioesphomeapi maps it to `handle_stop(True)` → HA's `_abort_pipeline()`,
+  which queues the audio sentinel AND cancels `_pipeline_task`. `cancel_turn`
+  used to claim the protocol had no such mechanism, citing an
+  `ESPHOME_SPEC.md §7.4` that is not in this tree. It has one; we never sent
+  it. (`VoiceAssistantAudio(end=True)` → `handle_stop(False)` is the *graceful*
+  end, which is what VAD end already sends.)
+- **HA acknowledges an abort with no wire message at all**, so the barrier is
+  ordering, never a timeout: after an abort, discard every event until the next
+  `RUN_START`, which is necessarily ours. `em_runbarrier` holds that state.
+  Armed **only** by an abort and bounded to **one turn**, so the
+  `_ha_never_started` path above — a genuine `RUN_END` with no `RUN_START`,
+  which stalled the satellite setup dialog when it was missed — stays
+  untouched. `RUN_START` releases the barrier and is itself **delivered**, not
+  swallowed; eating it would leave `_run_started` False and re-arm the same bug
+  for the turn's own terminal `RUN_END`.
+
+**Announcements: HA has TWO paths and only one waits for a reply.**
+`VoiceAssistantAnnounceRequest` blocks —
+`assist_satellite.entity.async_internal_announce` holds `_is_announcing` and
+the RESPONDING state for the duration and raises `SatelliteBusyError` on a
+concurrent announce, and the esphome side awaits
+`send_voice_assistant_announcement_await_response`. `play_media` with
+`announce=true` is an ordinary media_player command and waits for nothing;
+sending `AnnounceFinished` there answers a question nobody asked. Both resolve
+their playback callback through **one** `_announce_play_cb`, because renaming
+the old shared helper updated one call site and not the other and shipped an
+`AttributeError` on every `play_media` announce (2.20.1-ea.1).
+
+So `AnnounceFinished` is sent when playback **actually finishes**, from a
+`finally` on every path, and `success` reports whether the audio reached the
+speaker. Answering early returns the service call while audio is still playing,
+drops the entity out of RESPONDING, and lets chained announcements overlap. Not
+answering at all is worse: it parks HA for `_ANNOUNCEMENT_TIMEOUT_SEC`
+(**5 minutes**) holding `_is_announcing`, after which every announcement fails.
+The old code answered synchronously and justified it as stopping the setup
+wizard timing out — it would not have: the wizard's connection test does not
+wait on this message, it fires when the device fetches
+`CONNECTION_TEST_URL_BASE`.
+
+**`cancel_event` must be cleared by anything that starts playing, not just a
+voice turn.** It is set by a cancel (a button press mid-turn, a mute) and was
+cleared *only* at voice-turn start, so a cancelled turn silently killed every
+subsequent **announcement** — `_run_post_turn_playback` checks the flag.
+Measured on Test Device 01: a turn cancelled at 12:02:32 left seven
+announcements over three minutes logging `Cancelled during playback` and
+playing nothing. With two devices it reads as a routing fault, because the
+other device is fine. An announcement is a new action and nothing that set that
+flag earlier has a claim on it.
+
 **`VoiceAssistantSetConfiguration` is handled but not applied.** It is HA
 writing a wake-word choice back to us. We advertise one model with
 `max_active_wake_words=1`, so the dropdown offers our model plus "no wake
@@ -482,7 +547,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 - **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist
 - **AEC** (`internal/aec/`) — speexdsp echo canceller (vendored C, SpeexDSP-1.2.1), whole mic path including the wake stream; far-end reference tapped at the speaker ALSA write (every period incl. silence), delayed by `aecDelayMs` — **keep 0**: the mic side's 160ms batch reads absorb the speaker's output latency, and higher values make the echo non-causal (zero cancellation). The mic ALSA ring is only 160ms deep, so >160ms capture stalls silently lose whole batches (~every 20–30s in steady state, load-correlated); an occupancy governor trims the resulting reference backlog **without resetting the filter** — the trim restores the alignment the filter converged against, and the reset that used to live there thrashed convergence to ≤5dB (the v2.7.8 fix). `[aec] att=`/`far:` telemetry logs ~1/s during playback; `[mic] clock/stall` lines track capture loss. `far:` carries `rms`, `mean` and `peak` — **rms alone cannot tell audio from a constant offset**, since both read high, and that ambiguity cost an evening on #117 where the device was writing rms≈4000 to a codec while every speaker stayed silent. `mean≈±rms` with a small peak-to-peak is a DC offset; `mean≈0` with peak well above rms is real audio and the fault is downstream. Note this tap sits after the (L+R)/2 downmix and 3:1 decimation, so DC survives intact but `peak` is mildly smoothed — read it as a floor. It reports only while `aecEnabled`, so a diagnosis that needs it must not have AEC turned off. Default off (`aecEnabled`); ~14dB per response, held across turns
-- **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003
+- **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see below
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
 
@@ -589,6 +654,8 @@ with no way for the user to tell which they had.
 | `em_tap_burst.py` | Coalesces a burst of action-button taps into one single/double/triple event. The window is restarted per tap and `enabled()` is re-checked at expiry, both correct. **The window is timed at the CONTROLLER, on arrival**, so the gap it measures is the real gap plus the RTT difference between the two taps — 26.4% of probes on this fleet exceed 200ms, which is why double/triple are unreliable below ~350ms (#115). The fix is a device-measured gap, the same reasoning as `heldMs` |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn |
+| `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see "Barge-in serialisation" below. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
+| `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
@@ -1200,6 +1267,29 @@ line-wrap reason documented in the asset section. An unreadable `df` reads as
 block updates on any device whose `df` we have not seen. Note binary growth
 is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
 v2.10.0 is 10.3MB.
+
+**The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
+the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
+a fleet update pulled it once per device and the provisioning wizard again per
+device set up; a published tag never changes what it points at. Two rules, both
+of which read as over-caution until they are not:
+
+- **md5 decides a hit, not the file existing.** A truncated download leaves a
+  file of plausible size, and the OTA's device-side verification *cannot* catch
+  it — that check confirms the device received what the controller SENT, so a
+  corrupt entry verifies perfectly all the way onto the device, where a corrupt
+  binary and a genuinely broken one produce the same observable (three fast
+  exits, a rollback).
+- **A cache failure is never an update failure.** Every path degrades to "use
+  the bytes we already have". This is the *opposite* of the DB-backup-before-
+  migration rule, deliberately: there refusing is the safe action, here it
+  costs the user the thing they asked for and protects nothing.
+
+Note `Path.with_suffix` is unusable for these names and the first version used
+it: a tag contains dots, so pathlib reads `server-v2.11.0` as stem
+`server-v2.11` with suffix `.0`, and `with_suffix(".md5")` silently writes a
+digest filename that never matches its payload — every read a miss, the cache
+doing nothing, and nothing saying so.
 
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 

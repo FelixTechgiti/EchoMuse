@@ -304,7 +304,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                               # standalone-announce path can read the live
                               # _standalone_play callback rather than a
                               # point-in-time copy taken at connect (see
-                              # _fetch_and_play_announce). Optional/typed
+                              # _announce_play_cb). Optional/typed
                               # loosely to avoid a circular import; may be
                               # None in tests or the reject-connection path.
     ) -> None:
@@ -375,7 +375,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
         self._on_thinking       = None   # async callable()
         self._on_stt_end        = None   # async callable(text: str)
-        self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _fetch_and_play_announce).
+        self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
     # ── Message handling ─────────────────────────────────────────────────
 
@@ -576,7 +576,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._fetch_and_play_announce(msg.media_url))
+                    asyncio.create_task(self._play_media_announce(msg.media_url))
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
                     asyncio.create_task(em_player.play(device_id, msg.media_url))
@@ -844,6 +844,34 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             muted=False,
         )
 
+    def _announce_play_cb(self):
+        """
+        Where announcement audio goes, resolved at call time.
+
+        """
+        cb = self._on_announce
+        if cb is None and self._owning_server is not None:
+            cb = self._owning_server._standalone_play
+        return cb
+
+    async def _play_media_announce(self, media_id: str) -> None:
+        """
+        play_media with announce=true — an ordinary media_player command.
+
+        Deliberately does NOT send VoiceAssistantAnnounceFinished: HA is not
+        waiting for one here, unlike VoiceAssistantAnnounceRequest. Two ways
+        to announce, one of which has a completion contract.
+        """
+        try:
+            await em_announce.play_media(
+                media_id,
+                fetch=_fetch_tts_audio,
+                play=self._announce_play_cb(),
+                log_name=self._log_name,
+            )
+        except Exception as e:
+            log.error(f"[{self._log_name}] play_media announce failed: {e}")
+
     async def _run_announce(self, media_id: str) -> None:
         """
         Background task: fetch TTS audio from HA, play it, then tell HA the
@@ -870,10 +898,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         "no playback callback set" on freshly-established connections, not
         just stale reconnects, which ruled out a staleness-only explanation.
         """
-        play_cb = self._on_announce
-        if play_cb is None and self._owning_server is not None:
-            play_cb = self._owning_server._standalone_play
-
         def reply(ok: bool) -> None:
             if not self._transport or self._transport.is_closing():
                 return
@@ -888,7 +912,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         await em_announce.run(
             media_id,
             fetch=_fetch_tts_audio,
-            play=play_cb,
+            play=self._announce_play_cb(),
             on_finished=reply,
             log_name=self._log_name,
         )

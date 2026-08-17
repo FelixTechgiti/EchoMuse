@@ -674,10 +674,37 @@ class Device:
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})
 
+    async def _set_speaking(self, value: bool) -> None:
+        """
+        Set the speaking flag AND tell the dashboard.
+
+        The single writer, because the flag and the push had drifted apart:
+        stream_speaker/stream_speaker_chunks set it, and nothing pushed the
+        transition. _push_device_state has always carried `speaking` and the
+        dashboard has always rendered it above `thinking` — but the only
+        pushes were at listening, thinking and turn end, so a turn read
+        listening -> thinking -> idle and **never showed Speaking at all**. It
+        appeared only when the dashboard's 5s poll of /api/devices happened to
+        land mid-playback, which for a typical ~2s response it usually did not.
+
+        Guarded rather than plain, because one caller is stream_speaker's
+        finally, which is also reached when barge-in cancels the task
+        mid-send: the flag assignment is synchronous and always happens, and a
+        push that cannot complete is not worth failing a speaker stream over —
+        turn end pushes the same state moments later.
+        """
+        if self.speaking == value:
+            return
+        self.speaking = value
+        try:
+            await _push_device_state(self)
+        except BaseException:
+            pass
+
     async def stream_speaker(self, pcm: bytes):
         """Stream resampled mono 48kHz PCM as 0x02 frames, then 0x03 EOS."""
         self.begin_data_stream()
-        self.speaking = True
+        await self._set_speaking(True)
         try:
             offset = 0
             while offset < len(pcm):
@@ -692,7 +719,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
         finally:
-            self.speaking = False
+            await self._set_speaking(False)
             # EOS must go out on EVERY exit, including task cancellation
             # (barge-in cancels this task mid-send): the device's barge-in
             # flush discards 0x02 frames until it sees this stream's 0x03 —
@@ -715,7 +742,7 @@ class Device:
         end of the response.
         """
         self.begin_data_stream()
-        self.speaking = True
+        await self._set_speaking(True)
         pending = bytearray()
         total_pcm = 0
         eq_seconds = 0.0
@@ -766,7 +793,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 send_seconds += asyncio.get_event_loop().time() - _t_send
         finally:
-            self.speaking = False
+            await self._set_speaking(False)
             # One EOS terminates the complete response. Sending EOS per HTTP
             # chunk would make the device repeatedly prime and flush.
             try:
@@ -2432,11 +2459,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await leds_off(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
-        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
+        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
             # stop it for the duration and put it back after. An active
             # media session pauses for the announcement and resumes.
+            #
+            # cancel_event is cleared first, exactly as a voice turn does.
+            # It is set by a cancel (a button press during a turn, a mute)
+            # and was ONLY ever cleared when the next voice turn started —
+            # so a cancelled turn left it set and _run_post_turn_playback
+            # then abandoned every subsequent announcement at "Cancelled
+            # during playback", silently, until a turn happened to run.
+            # Measured on Test Device 01 on 2026-08-17: a turn cancelled at
+            # 12:02:32 killed the next seven announcements over three
+            # minutes. An announcement is a new action and nothing that set
+            # that flag earlier has any claim on it.
+            _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
             try:
@@ -2444,6 +2483,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             finally:
                 await _d.mic_start()
                 await em_player.resume_interrupted(_d.device_id)
+            # Whether the audio actually reached the speaker. Something that
+            # cancelled mid-playback (a mute, a button) means the user did
+            # not hear it, and telling HA it finished successfully would be
+            # untrue — it is the one thing the announcement reply reports.
+            return not _d.cancel_event.is_set()
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         # Capabilities before the servers come up: they decide which HA

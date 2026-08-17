@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.20.1-ea.2 — Early Access
+
+Two announcement faults found while testing ea.1.
+
+- **A cancelled voice turn used to silence every announcement after it.**
+  Press the action button to stop a turn — or mute the device — and
+  announcements stopped playing on that device, with no error and nothing in
+  the dashboard to show for it. It stayed that way until a voice turn happened
+  to run. Long-standing; ea.1's announcement changes are simply what made
+  anyone try enough announcements in a row to find it. If you have more than
+  one device, this looked like announcements moving to the wrong device: the
+  others were fine, because only the cancelled one was affected.
+
+- **`media_player.play_media` with announce turned on failed outright in
+  ea.1.** A rename in that release missed this second announcement path, so
+  every call raised an internal error and nothing played.
+  `assist_satellite.announce` was unaffected.
+
+An announcement now also tells Home Assistant whether the audio actually
+reached the speaker, rather than always reporting success.
+
 ## 2.20.1-ea.1 — Early Access
 
 - **Talking over a response now works.** Saying the wake word while EchoMuse

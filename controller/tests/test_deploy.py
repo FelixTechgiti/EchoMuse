@@ -1440,3 +1440,102 @@ def test_both_effective_mode_call_sites_pass_readiness():
                 f"{name}: an effective_mode call omits model readiness — "
                 f"{call.splitlines()[0]!r}"
             )
+
+
+def test_an_announcement_clears_the_cancel_flag_before_playing():
+    """
+    cancel_event is set by a cancel — a button press during a turn, a mute —
+    and was ONLY ever cleared when the next VOICE TURN started. Nothing in the
+    announcement path cleared it, and _run_post_turn_playback checks it, so a
+    cancelled turn silently killed every subsequent announcement until a turn
+    happened to run.
+
+    Measured on Test Device 01, 2026-08-17: a turn cancelled at 12:02:32 left
+    seven announcements over the next three minutes logging "Cancelled during
+    playback" and playing nothing. Adding a second device made it look like a
+    routing bug — that device played fine, because its own flag was clear.
+
+    An announcement is a new action; nothing that set the flag earlier has any
+    claim on it.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    assert fn, "_standalone_play not found"
+    body = fn.group(0)
+
+    # The literal calls, not the prose: this function's comments name
+    # _run_post_turn_playback before either call happens.
+    clear = body.find("_d.cancel_event.clear()")
+    play = body.find("await _run_post_turn_playback(")
+    assert clear != -1, (
+        "an announcement no longer clears cancel_event — a cancelled turn "
+        "will silently kill every announcement that follows it"
+    )
+    assert clear < play, "the flag must be cleared BEFORE the audio is played"
+
+
+def test_an_announcement_reports_whether_it_actually_played():
+    """
+    The reply to HA carries one fact — did the user hear it. Something that
+    cancels mid-playback means they did not, and `return True` regardless
+    would make the reply decorative.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    body = fn.group(0)
+    assert "-> bool" in body, "_standalone_play must report whether it played"
+    assert re.search(r"return not .*cancel_event\.is_set\(\)", body), (
+        "the return value must reflect whether playback was cancelled"
+    )
+
+
+def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
+    """
+    The dashboard renders `speaking` above `thinking` and _push_device_state
+    has always carried it — but nothing pushed the transition. The only pushes
+    were at listening, thinking and turn end, so a turn read
+    listening -> thinking -> idle and never showed Speaking at all. It appeared
+    only when the dashboard's 5s poll of /api/devices happened to land
+    mid-playback, which for a ~2s response it usually did not.
+
+    Setting the flag and telling anyone about it are now one operation, so a
+    third streaming path cannot reintroduce the gap by doing only the first.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S)
+    assert setter, "_set_speaking not found"
+    assert "_push_device_state(self)" in setter.group(0), (
+        "the setter must push — that is the whole reason it exists"
+    )
+
+    # Every other write is a bug. __init__'s default and the setter's own
+    # assignment are the two legitimate ones.
+    writes = re.findall(r"self\.speaking\s*=\s*(?!=)", src)
+    assert len(writes) == 2, (
+        f"expected 2 assignments to self.speaking (the __init__ default and "
+        f"the setter), found {len(writes)} — a streaming path is setting the "
+        f"flag without pushing it"
+    )
+
+
+def test_the_speaking_push_cannot_fail_a_speaker_stream():
+    """
+    One caller is stream_speaker's finally, which is also reached when
+    barge-in cancels the task mid-send. A push that cannot complete there must
+    not take the stream down with it — turn end pushes the same state moments
+    later. The flag assignment is synchronous and happens either way.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S).group(0)
+    assign = setter.find("self.speaking = value")
+    push = setter.find("_push_device_state(self)")
+    assert assign < push, "the flag must be set before the push is attempted"
+    assert "except BaseException" in setter, (
+        "a bare `except Exception` does not catch the CancelledError this sees "
+        "during barge-in"
+    )
