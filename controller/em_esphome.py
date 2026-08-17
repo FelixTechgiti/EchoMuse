@@ -70,6 +70,7 @@ import em_api as api
 import em_hostip
 import em_ns
 import em_recordings
+import em_runbarrier
 import em_oww_models
 import em_player
 import em_turnclock
@@ -325,19 +326,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._intent_ended      = False
         self._run_started       = False
         self._ha_never_started  = False
-        # Barge-in run serialisation. The ESPHome voice protocol carries NO
-        # run identifier — VoiceAssistantEventResponse is event_type + data
-        # and nothing else — so it is designed for strictly one pipeline run
-        # at a time per connection, and the satellite is what enforces that.
-        # HA does not: handle_pipeline_start clears the audio queue and
-        # cancels _tts_streaming_task, then overwrites _pipeline_task WITHOUT
-        # cancelling the old one, so a second start orphans the first run and
-        # leaves it emitting events onto the same socket.
-        #
-        # _abort_pending is armed by cancel_turn(abort_ha=True) and handed to
-        # the next turn as _discard_until_run_start — see _handle_voice_event.
-        self._abort_pending          = False
-        self._discard_until_run_start = False
+        # Barge-in run serialisation — the protocol has no run id, so the
+        # satellite is what keeps two runs from overlapping on one connection.
+        # See em_runbarrier for the whole reasoning; it is a separate module
+        # because the test suite cannot import this one.
+        self._barrier = em_runbarrier.RunBarrier()
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn
         # after run_esphome_voice_turn returns to decide whether to re-trigger
@@ -668,7 +661,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         log.debug(f"[{self._log_name}] VoiceAssistantEvent type={event_type} data={data}")
 
-        if self._discard_until_run_start:
+        if self._barrier.active:
             # We aborted a run and started another. HA acknowledges an abort
             # with NO wire message at all (_abort_pipeline just cancels the
             # task), so the barrier has to be ordering rather than timing:
@@ -683,13 +676,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # below reads it as terminal. Every barge-in then ended
             # pipeline_refused with zero audio captured (measured 2026-08-17,
             # 5 of 5 attempts).
-            if event_type != ET.VOICE_ASSISTANT_RUN_START:
+            if self._barrier.discards(event_type == ET.VOICE_ASSISTANT_RUN_START):
                 log.debug(
                     f"[{self._log_name}] Discarding event {event_type} from the "
                     f"aborted run — waiting for our RUN_START"
                 )
                 return
-            self._discard_until_run_start = False
             log.debug(f"[{self._log_name}] Aborted run drained — our RUN_START seen")
 
         if event_type == ET.VOICE_ASSISTANT_STT_VAD_START:
@@ -916,13 +908,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._intent_ended          = False
         self._run_started           = False
         self._ha_never_started      = False
-        # Hand a pending abort to this turn: every event is discarded until
-        # our own RUN_START arrives. Deliberately NOT reset to False here —
-        # the arm is set during the PREVIOUS turn (at the barge) and has to
-        # survive this reset to reach the turn it protects. Bounded to
-        # exactly one turn: cleared unconditionally in the finally below.
-        self._discard_until_run_start = self._abort_pending
-        self._abort_pending           = False
+        # Takes ownership of an abort armed during the PREVIOUS turn (at the
+        # barge). Deliberately not a plain reset: the arm has to survive this
+        # block to reach the turn it protects.
+        self._barrier.begin_turn()
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
@@ -1093,7 +1082,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # the feed is actually up.
                 self._send_one(self._media_state_msg())
             self._turn_active    = False
-            self._discard_until_run_start = False
+            self._barrier.end_turn()
             self._on_thinking    = None
             self._on_announce    = None
             self._trace          = None
@@ -1492,7 +1481,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             self._send_one(api_pb2.VoiceAssistantRequest(start=False))
         # Armed even if the transport is gone: the barrier is cheap, and a
         # reconnect that replays events is exactly when it earns its keep.
-        self._abort_pending = True
+        self._barrier.abort()
 
 
 # ─── TTS audio fetch ─────────────────────────────────────────────────────────

@@ -17,254 +17,196 @@ audio captured, because the aborted run's RUN_END arrived ~4ms after the new
 turn started and the "HA ended a run it never started" branch read it as
 terminal.
 
-Two halves are pinned here, and both are needed:
+The state machine lives in `em_runbarrier` rather than in `em_esphome` for the
+reason `em_linkauth.decide` does: this suite cannot import `em_esphome` (it
+pulls in zeroconf, aiohttp and the database), so logic that lives there has no
+coverage. Both of this machine's failure modes are silent — swallow too little
+and the interrupting turn dies, swallow too much and the satellite goes deaf —
+which is exactly the shape that should not be sitting untested inside a big
+async method.
 
-  * the abort actually reaches HA — `VoiceAssistantRequest(start=False)`,
-    which aioesphomeapi maps to `handle_stop(True)` → `_abort_pipeline()`;
-  * the new turn discards the old run's tail until its own RUN_START.
-
-The second half must NOT swallow the setup-flow's genuine
-RUN_END-without-RUN_START, which is a real thing HA does and which
-`_ha_never_started` exists to catch — so the barrier is armed only by an
-abort, and only for one turn.
+The wiring in `em_esphome` is pinned separately, against the source.
 """
 
 import re
 from pathlib import Path
 
-import em_esphome
-from esphome.vendor import api_pb2
-from esphome.vendor.api_pb2 import VoiceAssistantEvent as ET
+from em_runbarrier import RunBarrier
 
-ESPHOME_SRC = Path(em_esphome.__file__).read_text()
-
-
-class FakeTransport:
-    def __init__(self, closing=False):
-        self._closing = closing
-
-    def is_closing(self):
-        return self._closing
+ESPHOME_SRC = (Path(__file__).resolve().parents[1] / "em_esphome.py").read_text()
+CONTROLLER_SRC = (Path(__file__).resolve().parents[1] / "em_controller.py").read_text()
 
 
-def make_satellite():
+# ── The barrier ──────────────────────────────────────────────────────────────
+
+
+def test_an_untouched_barrier_discards_nothing():
     """
-    A satellite with just enough state to drive _handle_voice_event and
-    cancel_turn. Built without __init__ deliberately: the real constructor
-    wants a server, a transport and a device registry, none of which this
-    behaviour touches.
+    The overwhelmingly common case: no barge, no abort, every event delivered.
     """
-    sat = object.__new__(em_esphome.EchoMuseSatellite)
-    sat._log_name = "test"
-    sat._transport = FakeTransport()
-    sat.sent = []
-    sat._send_one = sat.sent.append
-    # Per-turn state, as run_esphome_voice_turn's reset block leaves it.
-    sat._turn_active = True
-    sat._turn_cancelled = False
-    sat._intent_ended = False
-    sat._run_started = False
-    sat._ha_never_started = False
-    sat._continue_conversation = False
-    sat._abort_pending = False
-    sat._discard_until_run_start = False
-    sat._trace = None
-    sat._on_thinking = None
-    sat._on_stt_end = None
-    sat._tts_audio_url = None
-    import asyncio
-
-    sat._tts_event = asyncio.Event()
-    sat._ha_vad_end = asyncio.Event()
-    sat._ha_vad_start = asyncio.Event()
-    return sat
+    b = RunBarrier()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is False
+    assert b.discards(is_run_start=True) is False
 
 
-def event(event_type, **data):
-    return api_pb2.VoiceAssistantEventResponse(
-        event_type=event_type,
-        data=[api_pb2.VoiceAssistantEventData(name=k, value=v) for k, v in data.items()],
+def test_an_abort_arms_the_NEXT_turn_not_the_current_one():
+    """
+    The abort happens during the turn being abandoned, and that turn still has
+    tearing-down of its own to do. It is the turn AFTER it that must not see
+    the old run's tail.
+    """
+    b = RunBarrier()
+    b.begin_turn()
+    b.abort()
+    assert b.discards(is_run_start=False) is False, "armed the turn doing the aborting"
+    b.end_turn()
+
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is True
+
+
+def test_the_stale_tail_is_discarded_until_run_start():
+    """
+    The measured failure. RUN_END, STT_VAD_END and the orphan's eventual ERROR
+    all arrived on the new turn; each one alone is enough to kill it.
+    """
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is True   # stale RUN_END
+    assert b.discards(is_run_start=False) is True   # stale STT_VAD_END
+    assert b.discards(is_run_start=False) is True   # stale ERROR
+
+
+def test_run_start_releases_the_barrier_and_is_itself_delivered():
+    """
+    RUN_START is the release AND a real event. Swallowing it would leave
+    `_run_started` False and re-arm the very bug this fixes, for the turn's
+    own terminal RUN_END.
+    """
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    assert b.discards(is_run_start=True) is False
+    assert b.active is False
+
+
+def test_everything_after_run_start_is_delivered():
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    b.discards(is_run_start=False)                  # stale, dropped
+    b.discards(is_run_start=True)                   # ours, releases
+    assert b.discards(is_run_start=False) is False
+    assert b.discards(is_run_start=False) is False
+
+
+def test_the_barrier_does_not_outlive_its_turn():
+    """
+    If HA never sends the RUN_START we are waiting for — connection dropped,
+    pipeline failed to start — the barrier must come down when the turn ends.
+    Events are dispatched whether or not a turn is in progress, so a barrier
+    left standing discards them indefinitely.
+
+    `begin_turn` would also clear it, but only once another turn starts; that
+    is not a bound, because the turn that would clear it is one whose events
+    are being discarded.
+    """
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is True
+    b.end_turn()                                    # RUN_START never came
+    assert b.active is False
+    assert b.discards(is_run_start=False) is False
+
+
+def test_the_barrier_is_bounded_to_one_turn():
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is True
+    b.end_turn()
+
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is False
+
+
+def test_an_arm_is_consumed_not_merely_read():
+    """
+    One abort protects exactly one turn. Leaving `armed` set would re-arm
+    every subsequent turn off a single barge.
+    """
+    b = RunBarrier()
+    b.abort()
+    b.begin_turn()
+    assert b.armed is False
+    b.discards(is_run_start=True)
+    b.end_turn()
+
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is False
+
+
+def test_two_aborts_before_a_turn_still_protect_one_turn():
+    b = RunBarrier()
+    b.abort()
+    b.abort()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is True
+    b.end_turn()
+    b.begin_turn()
+    assert b.discards(is_run_start=False) is False
+
+
+# ── The wiring, pinned against the source ────────────────────────────────────
+
+
+def test_the_abort_actually_reaches_ha():
+    """
+    `VoiceAssistantRequest(start=False)` is the one message that reaches into
+    HA's in-flight pipeline: aioesphomeapi maps it to `handle_stop(True)` ->
+    `_abort_pipeline()`, which queues the audio sentinel AND cancels
+    `_pipeline_task`. cancel_turn's old docstring claimed no such mechanism
+    existed, citing an ESPHOME_SPEC.md §7.4 that is not in the tree.
+    """
+    assert "VoiceAssistantRequest(start=False)" in ESPHOME_SRC, (
+        "nothing aborts HA's pipeline — the old run keeps emitting onto the "
+        "connection the interrupting turn is using"
     )
 
 
-# ── The abort reaches HA ─────────────────────────────────────────────────────
-
-
-def test_abort_sends_start_false():
+def test_the_satellite_hands_the_arm_over_at_turn_start_and_drops_it_at_end():
     """
-    The one message that reaches into HA's in-flight pipeline. Without it the
-    old run is merely ignored locally and carries on emitting.
+    Both calls are load-bearing and neither is obviously necessary at the call
+    site, which is how one of them would get tidied away.
     """
-    sat = make_satellite()
-    sat.abort_ha_run()
-    assert len(sat.sent) == 1
-    msg = sat.sent[0]
-    assert isinstance(msg, api_pb2.VoiceAssistantRequest)
-    assert msg.start is False
+    assert "self._barrier.begin_turn()" in ESPHOME_SRC
+    assert "self._barrier.end_turn()" in ESPHOME_SRC
 
 
-def test_local_only_cancel_sends_nothing():
+def test_the_event_handler_consults_the_barrier_before_anything_else():
     """
-    The default stays local-only — a button cancel with no turn behind it must
-    not abort a pipeline HA is about to answer from.
+    The gate has to sit above the dispatch, not inside a branch — a stale
+    STT_VAD_END is as fatal to the interrupting turn as a stale RUN_END, and
+    listing event types to guard would go stale the next time one is added.
     """
-    sat = make_satellite()
-    sat.cancel_turn()
-    assert sat.sent == []
-    assert sat._turn_cancelled is True
-    assert sat._abort_pending is False
-
-
-def test_cancel_with_abort_sends_start_false_and_arms():
-    sat = make_satellite()
-    sat.cancel_turn(abort_ha=True)
-    assert any(
-        isinstance(m, api_pb2.VoiceAssistantRequest) and m.start is False
-        for m in sat.sent
-    )
-    assert sat._turn_cancelled is True
-    assert sat._abort_pending is True
-
-
-def test_abort_arms_even_when_the_transport_is_gone():
-    """
-    A closed transport means the abort could not be sent, which is exactly
-    when a reconnect might replay events at us. Arming is free; not arming
-    trades a cheap barrier for the failure it exists to prevent.
-    """
-    sat = make_satellite()
-    sat._transport = FakeTransport(closing=True)
-    sat.abort_ha_run()
-    assert sat.sent == []
-    assert sat._abort_pending is True
-
-
-def test_abort_is_a_no_op_on_an_inactive_turn():
-    sat = make_satellite()
-    sat._turn_active = False
-    sat.cancel_turn(abort_ha=True)
-    assert sat.sent == []
-    assert sat._abort_pending is False
-
-
-# ── The barrier: discard the aborted run's tail ──────────────────────────────
-
-
-def test_stale_run_end_does_not_end_the_new_turn():
-    """
-    The measured failure, reproduced: the aborted run's RUN_END lands a few ms
-    after the interrupting turn starts. Before the barrier this set
-    _ha_never_started and the turn reported pipeline_refused with no audio.
-    """
-    sat = make_satellite()
-    sat._discard_until_run_start = True
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_END))
-    assert sat._ha_never_started is False
-    assert sat._tts_event.is_set() is False
-
-
-def test_stale_vad_end_does_not_stop_the_new_turns_mic():
-    """
-    The same second of the same log also showed a stale STT_VAD_END landing on
-    the new turn, which stops mic streaming — so the interrupting turn would
-    have captured nothing even if it had survived the RUN_END.
-    """
-    sat = make_satellite()
-    sat._discard_until_run_start = True
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_STT_VAD_END))
-    assert sat._ha_vad_end.is_set() is False
-
-
-def test_stale_error_does_not_reach_the_new_turn():
-    """
-    The orphaned run's real ending arrived ~470ms later as
-    stt-no-text-recognized. On the new turn that unblocks both waiters.
-    """
-    sat = make_satellite()
-    sat._discard_until_run_start = True
-    sat._handle_voice_event(
-        event(ET.VOICE_ASSISTANT_ERROR, code="stt-no-text-recognized")
-    )
-    assert sat._tts_event.is_set() is False
-    assert sat._ha_vad_end.is_set() is False
-
-
-def test_run_start_drops_the_barrier_and_is_itself_processed():
-    """
-    RUN_START is the barrier's release AND a real event — swallowing it would
-    leave _run_started False and re-arm the very bug this fixes for the
-    turn's own terminal RUN_END.
-    """
-    sat = make_satellite()
-    sat._discard_until_run_start = True
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_START))
-    assert sat._discard_until_run_start is False
-    assert sat._run_started is True
-
-
-def test_events_after_run_start_are_processed_normally():
-    sat = make_satellite()
-    sat._discard_until_run_start = True
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_END))       # stale
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_START))     # ours
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_INTENT_END))
-    assert sat._intent_ended is True
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_END))       # ours, terminal
-    assert sat._tts_event.is_set() is True
-
-
-# ── What the barrier must not break ──────────────────────────────────────────
-
-
-def test_unarmed_run_end_without_run_start_is_still_terminal():
-    """
-    HA's wake-word interception (the voice satellite setup dialog) emits
-    RUN_END having never started a pipeline. That is genuinely terminal and
-    holding the mic through it is what stalled the setup flow for the life of
-    the feature. The barrier is armed only by an abort, so this path is
-    untouched.
-    """
-    sat = make_satellite()
-    assert sat._discard_until_run_start is False
-    sat._handle_voice_event(event(ET.VOICE_ASSISTANT_RUN_END))
-    assert sat._ha_never_started is True
-    assert sat._tts_event.is_set() is True
-
-
-# ── Handoff and lifetime, pinned against the source ──────────────────────────
-
-
-def test_turn_reset_hands_the_arm_over_rather_than_clearing_it():
-    """
-    The arm is set during the PREVIOUS turn (at the barge) and has to survive
-    the next turn's reset block to reach the turn it protects. Resetting it to
-    False alongside its neighbours is the obvious tidy-up and would silently
-    restore the bug, with every test above still passing.
-    """
-    m = re.search(
-        r"self\._discard_until_run_start = self\._abort_pending\s*\n"
-        r"\s*self\._abort_pending\s*= False",
-        ESPHOME_SRC,
-    )
-    assert m, (
-        "run_esphome_voice_turn must hand _abort_pending to "
-        "_discard_until_run_start, not clear it"
-    )
-    assert "self._discard_until_run_start = False\n" in ESPHOME_SRC, (
-        "the barrier must be cleared when the turn ends — it is bounded to "
-        "exactly one turn, or a lost RUN_START deafens the satellite forever"
+    handler = ESPHOME_SRC[ESPHOME_SRC.index("def _handle_voice_event"):]
+    gate = handler.index("self._barrier")
+    first_dispatch = handler.index("if event_type ==")
+    assert gate < first_dispatch, (
+        "the barrier must gate every event, not selected ones"
     )
 
 
-def test_barge_during_thinking_aborts_upstream():
+def test_barge_serialises_in_both_phases():
     """
-    em_controller's barge watcher: the thinking branch starts another turn on
-    this connection, so it must abort HA's run first. The playback branch must
-    serialise too — RUN_END follows TTS_END and a barge in the first
-    milliseconds of audio can beat it.
+    Thinking starts another turn on this connection, so HA's run must be
+    aborted first. Playback must serialise too: RUN_END follows TTS_END, so a
+    barge in the first milliseconds of audio can beat it.
     """
-    src = (Path(em_esphome.__file__).parent / "em_controller.py").read_text()
-    watcher = src[src.index("async def _barge_watcher") :]
+    watcher = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _barge_watcher"):]
     watcher = watcher[: watcher.index("\nasync def ", 10)]
     assert "abort_ha=True" in watcher, (
         "barge during thinking must abort HA's pipeline before the "
@@ -273,3 +215,16 @@ def test_barge_during_thinking_aborts_upstream():
     assert "abort_ha_run" in watcher, (
         "barge during playback must serialise against the interrupting turn"
     )
+
+
+def test_the_unarmed_run_end_path_is_still_there():
+    """
+    HA's wake-word interception emits RUN_END having never started a pipeline.
+    That is genuinely terminal, and missing it stalled the voice satellite
+    setup dialog for the life of the feature. The barrier is armed only by an
+    abort, so this path must survive untouched.
+    """
+    assert re.search(r"if not self\._run_started:", ESPHOME_SRC), (
+        "the RUN_END-without-RUN_START discriminator is gone"
+    )
+    assert "self._ha_never_started = True" in ESPHOME_SRC
