@@ -54,6 +54,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_firmware
 import em_ingressauth
 import em_oww_assets
 import em_oww_models
@@ -1530,7 +1531,7 @@ async def _run_update(device_id: str, release: dict,
             await _push_log_event(device_id, "info", "controller",
                                   f"Using uploaded binary ({len(binary):,} bytes)")
         else:
-            binary = await _fetch_binary(release["url"])
+            binary = await _fetch_binary(release["url"], release.get("version", ""))
             if binary is None:
                 await _update_failed(device_id,
                                      "Failed to fetch binary from GitHub")
@@ -2622,7 +2623,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     if release is None:
         return _error("no_release", "No release information available", 404)
 
-    binary = await _fetch_binary(release["url"])
+    binary = await _fetch_binary(release["url"], release.get("version", ""))
     if binary is None:
         return _error("fetch_failed", "Could not download binary from GitHub", 502)
 
@@ -3900,8 +3901,27 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     )
 
 
-async def _fetch_binary(download_url: str) -> Optional[bytes]:
-    """Download the binary from a GitHub release asset URL."""
+async def _fetch_binary(download_url: str,
+                        version: str = "") -> Optional[bytes]:
+    """
+    The release binary, from disk if we already have it.
+
+    A published tag never changes what it points at, so the download is worth
+    doing once per release rather than once per device — a fleet update used to
+    pull the same ~10MB for every Dot, and the provisioning wizard again for
+    every device it set up.
+
+    `version` is optional so a caller with only a URL still works; it simply
+    does not get the cache. Nothing here can fail an update: a cache miss, an
+    unwritable directory or a corrupt entry all end in an ordinary download.
+    """
+    if version:
+        cached = await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.read, version
+        )
+        if cached is not None:
+            return cached
+
     log.info(f"[api] Fetching binary: {download_url}")
     try:
         async with aiohttp.ClientSession() as session:
@@ -3912,10 +3932,18 @@ async def _fetch_binary(download_url: str) -> Optional[bytes]:
                 if resp.status != 200:
                     log.error(f"[api] Binary download failed: HTTP {resp.status}")
                     return None
-                return await resp.read()
+                data = await resp.read()
     except Exception as e:
         log.error(f"[api] Binary download exception: {e}")
         return None
+
+    if version and data:
+        # Off the event loop: hashing and writing 10MB blocks it for long
+        # enough to delay speaker frames, and this runs during an OTA.
+        await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.write, version, data
+        )
+    return data
 
 
 # ─── Periodic background tasks ────────────────────────────────────────────────
