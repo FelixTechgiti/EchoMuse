@@ -212,6 +212,16 @@ voice much. Raise it if responses ever cut themselves off. (During the
 silent *thinking* pause the normal wake sensitivity applies instead —
 nothing is playing, so the low barge threshold isn't needed there.)
 
+**What happens after you interrupt.** The device stops talking and listens
+straight away — say the wake word and your new command in one breath and it
+hears both, without waiting for a second prompt. This only started working
+properly in 2.20.1: before that the interrupt cut the response off but the
+command that followed was never picked up, so you had to wait and ask again.
+
+**Interrupting cannot be taken back.** If you say the wake word and then stay
+quiet, the original answer is gone rather than resumed — Home Assistant has no
+way to restart a reply it has already abandoned. The turn just ends quietly.
+
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
 commands are untouched). Worth trying in rooms with constant background
