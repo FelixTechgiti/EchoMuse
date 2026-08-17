@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.20.1-ea.4 — Early Access
+
+- **The dashboard's Speaking state now follows the device.** In ea.3 the tile
+  showed Speaking slightly early, dropped back to Thinking while the device
+  was still talking, then went idle. It was following when the controller
+  finished *sending* audio, which happens almost instantly — the device still
+  had several seconds of it left to play. It now waits for the device to
+  report that the audio has actually stopped.
+
+  The start of a response is still estimated and can lead the speaker by about
+  a second: the device deliberately holds audio until it has enough buffered,
+  and it only tells the controller when playback *ends*. Reporting the start
+  too needs a firmware change.
+
 ## 2.20.1-ea.3 — Early Access
 
 - **Changing a device's wake word can no longer leave it deaf.** If you picked
