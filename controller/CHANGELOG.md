@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.20.1-ea.3 — Early Access
+
+- **Changing a device's wake word can no longer leave it deaf.** If you picked
+  a wake word a device had never been given, and that device was doing its own
+  wake word detection, it stopped answering entirely — it had no model to
+  listen with, and the controller had already stepped back from listening on
+  its behalf. Nothing said so, and the dashboard showed the device as healthy.
+  The controller now keeps listening for that device while it installs the
+  model, and stays listening if the install fails.
+
+- **The dashboard shows Speaking again.** A device tile sat on "Thinking" for
+  the whole spoken response. The tile was only ever told about listening,
+  thinking and the end of the turn, so it never heard about the bit in
+  between.
+
+- **Firmware is downloaded once per release, not once per device.** Updating
+  several devices, or setting up several through the wizard, re-downloaded the
+  same ~10MB every time. It is now kept on disk beside your database and
+  checked against its fingerprint before use.
+
 ## 2.20.1-ea.2 — Early Access
 
 Two announcement faults found while testing ea.1.
