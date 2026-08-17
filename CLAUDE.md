@@ -1268,6 +1268,29 @@ block updates on any device whose `df` we have not seen. Note binary growth
 is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
 v2.10.0 is 10.3MB.
 
+**The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
+the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
+a fleet update pulled it once per device and the provisioning wizard again per
+device set up; a published tag never changes what it points at. Two rules, both
+of which read as over-caution until they are not:
+
+- **md5 decides a hit, not the file existing.** A truncated download leaves a
+  file of plausible size, and the OTA's device-side verification *cannot* catch
+  it — that check confirms the device received what the controller SENT, so a
+  corrupt entry verifies perfectly all the way onto the device, where a corrupt
+  binary and a genuinely broken one produce the same observable (three fast
+  exits, a rollback).
+- **A cache failure is never an update failure.** Every path degrades to "use
+  the bytes we already have". This is the *opposite* of the DB-backup-before-
+  migration rule, deliberately: there refusing is the safe action, here it
+  costs the user the thing they asked for and protects nothing.
+
+Note `Path.with_suffix` is unusable for these names and the first version used
+it: a tag contains dots, so pathlib reads `server-v2.11.0` as stem
+`server-v2.11` with suffix `.0`, and `with_suffix(".md5")` silently writes a
+digest filename that never matches its payload — every read a miss, the cache
+doing nothing, and nothing saying so.
+
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
