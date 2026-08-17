@@ -357,6 +357,17 @@ class Device:
         # every push, so a device whose config has never arrived behaves
         # exactly as it always did.
         self.oww_on_device: str = em_shadow.MODE_OFF
+        # Whether this device is believed to HAVE the classifier it is
+        # configured to use. False stands it down to controller-side wake
+        # (em_shadow.effective_mode), because a device cannot score a model it
+        # does not have and "on" means nobody else is triggering for it —
+        # which is silent, and looks healthy (#191).
+        #
+        # Optimistic by default: absence of evidence is not evidence of
+        # absence, and standing every device down on a fresh controller would
+        # be a worse bug than the one this prevents. It is set False only when
+        # the model CHANGES, and cleared once the push has landed.
+        self.oww_model_ready: bool = True
         self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
         # This controller's own crossings while the DEVICE is triggering —
         # the comparison from the other side. Kept in "on" mode because the
@@ -2431,7 +2442,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.
         device.oww_on_device = em_shadow.effective_mode(
-            config.get("owwOnDevice"), device.oww_trigger_capable
+            config.get("owwOnDevice"), device.oww_trigger_capable,
+            device.oww_model_ready,
         )
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
