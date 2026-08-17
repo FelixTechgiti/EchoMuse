@@ -105,11 +105,10 @@ jobs:
           fi
           echo "$dir pins $got, matching the tag"
 
-      - name: Set up QEMU
-        # arm64 is cross-built on an amd64 runner, so the emulation layer has
-        # to be registered before buildx can target that platform at all.
-        uses: docker/setup-qemu-action@v3
-
+      # No QEMU: nothing here EXECUTES. The application layers were
+      # cross-built under emulation by the main build; this workflow only adds
+      # a layer that sets an environment variable, which needs no RUN and so
+      # no emulation for either architecture.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -120,6 +119,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Locate the image built on main
+        id: version
+        run: |
+          echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Which tags this release writes. Taken from the CHANNEL step, not from
+      # the ref directly: EA must never move :latest — that is what
+      # docker-compose.deploy.yml pulls, so an EA release touching it would put
+      # a prerelease on every standalone container at the next `compose pull`.
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -129,19 +137,59 @@ jobs:
             type=raw,value=${{ steps.channel.outputs.image_tag }}
             type=raw,value=latest,enable=${{ steps.channel.outputs.latest }}
 
-      - name: Build and push
+      # PROMOTE, never rebuild.
+      #
+      # Every application layer released here is the one controller-build.yml
+      # published from main and scanned. A rebuild could not promise that: it
+      # resolves floating base layers and unpinned wheels again, so what
+      # shipped was never quite what CI examined. (One layer IS added at
+      # release — see the version stamp below — and it contains no files.)
+      #
+      # It also removes the window this replaced. Building on the tag left a
+      # gap in which controller/config.yaml pinned an image the registry did
+      # not have, and a Home Assistant install in that window failed with
+      # "unknown error": 2.19.0, and again on 2.20.1 where it measured 13m24s
+      # between the pin landing on main and the image existing. Reusing the
+      # published layers takes seconds.
+      - name: Check the image exists for this commit
+        run: |
+          src="ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}"
+          if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
+            echo "::error::No image published for this commit ($src)."
+            echo "The main build has not run or did not finish for the commit being tagged."
+            echo "Run the 'Controller Build (main)' workflow on this commit, wait for it, then retag."
+            exit 1
+          fi
+          echo "found $src"
+
+      # NOT imagetools create, and not a rebuild either.
+      #
+      # imagetools would be the obvious promote — it writes a manifest
+      # reference and takes seconds — but it cannot change an environment
+      # variable, and EM_CONTROLLER_VERSION is baked at build time. The main
+      # build has no tag to bake, so it uses controller/config.yaml's version,
+      # which is the GA pin. Promoting that same image as an EA release would
+      # ship a controller reporting the GA version: the dashboard header, the
+      # ESPHome project version and every support bundle would name the wrong
+      # build, and the update notice would compare against it.
+      #
+      # So the release adds one layer that sets the real version. Every
+      # application layer is still exactly what main built and scanned; only
+      # the environment differs, which is the one thing that legitimately
+      # cannot be known before the tag exists.
+      - name: Stamp the version and push the release tags
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: controller
+          context: .
+          file: .github/version-stamp.Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
+            BASE=ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
             EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # ── Supply chain ────────────────────────────────────────────────────
       #
