@@ -961,32 +961,24 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     the EFFECTIVE config, never a request body: with per-section scoping a
     body is partial by design, and a device must always be sent the whole
     resolved picture.
+
+    One key is held back: a NEW `owwModel` is not sent to a device that scores
+    locally until the classifier is actually on it — see _hold_back_oww_model.
     """
+    effective, pending_model = _hold_back_oww_model(live, effective)
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:
         live.oww_threshold = float(effective["owwThreshold"])
     if "owwModel" in effective:
-        model_changed = live.oww_model != effective["owwModel"]
         live.oww_model = effective["owwModel"]
         # Refresh HA's wake-word dropdown (lazy import — em_esphome imports
         # em_api at module level).
         import em_esphome
         em_esphome.update_oww_model(device_id, effective["owwModel"])
-        if model_changed:
-            # A device cannot score a wake word whose classifier it does not
-            # have, and under owwOnDevice=on the controller has stood down —
-            # so the device goes deaf, silently, and the dashboard still
-            # reports it healthy (#191). Selecting a model the device was
-            # never provisioned with is an ordinary dashboard action.
-            #
-            # Stand the device down FIRST and install afterwards, rather than
-            # blocking this request on a multi-megabyte shell-plane push. The
-            # pessimistic order is the safe one: while the push runs the
-            # controller keeps triggering, which is merely the old behaviour,
-            # whereas the optimistic order leaves a real deaf window on
-            # exactly the link that makes pushes slow.
-            live.oww_model_ready = False
-            asyncio.create_task(_ensure_oww_model(device_id))
+    if pending_model:
+        # The device is still on its previous wake word, still scoring
+        # locally, still answering. Install, then switch.
+        asyncio.create_task(_install_then_switch(device_id, pending_model))
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
@@ -3481,30 +3473,75 @@ def _oww_wanted_models(device_id: str) -> list[str]:
     return [model] if model else []
 
 
-async def _ensure_oww_model(device_id: str) -> None:
+def _hold_back_oww_model(live, effective: dict):
     """
-    Install the classifier a device has just been switched to, then let it
-    score again.
+    Keep a NEW wake word off a device until it has the model for it.
 
-    Runs as a background task: the push is a multi-megabyte shell-plane
-    transfer over a link measured at 5-7% packet loss, and blocking the config
-    save on it would time out the request rather than make anything safer.
+    Returns (config_to_send, pending_model). `pending_model` is the model the
+    device should end up on once the classifier is installed, or None when the
+    change can go straight through.
 
-    `oww_model_ready` was set False before this was spawned, so the device is
-    already standing on controller-side wake word. That ordering is the point:
-    the window this covers is the one where the device believes it should be
-    triggering and has no model to do it with.
+    A device cannot score a wake word whose classifier it does not have. Under
+    `owwOnDevice=on` the controller has stood down and no longer triggers on
+    its behalf, so telling the device to use a model it lacks produced a device
+    with NO wake word: nothing fired, nothing warned, and the dashboard
+    reported it healthy (#191). Selecting a wake word a device was never
+    provisioned with is an ordinary dashboard action.
+
+    So the device is never told about the new model until the file is there.
+    It keeps listening for its CURRENT wake word, on-device, the whole time —
+    no silent fall back to controller-side scoring, which is a posture the user
+    did not ask for and would not see. If the install fails, the device simply
+    stays where it was.
+
+    Only devices that actually score locally are held back. With
+    `owwOnDevice=off` the controller does the scoring and the file on the
+    device is irrelevant, so the change applies immediately — which is the
+    common case, and it stays instant.
+
+    Both the old and the NEW mode are consulted: turning on-device scoring on
+    in the same save that changes the wake word would otherwise slip through
+    on the strength of the old mode being "off".
+    """
+    new_model = (effective.get("owwModel") or "").strip()
+    if not new_model or new_model == live.oww_model:
+        return effective, None
+    if not live.oww_shadow_capable:
+        return effective, None
+
+    was_local = live.oww_on_device != em_shadow.MODE_OFF
+    now_local = em_shadow.normalise_mode(
+        effective.get("owwOnDevice", live.oww_on_device)
+    ) != em_shadow.MODE_OFF
+    if not (was_local or now_local):
+        return effective, None
+
+    held = dict(effective)
+    held["owwModel"] = live.oww_model
+    return held, new_model
+
+
+async def _install_then_switch(device_id: str, model: str) -> None:
+    """
+    Install a wake word classifier, then move the device onto it.
+
+    Background task: the push is a multi-megabyte shell-plane transfer over a
+    link measured at 5-7% packet loss, and blocking the config save on it would
+    time out the request without making anything safer. Nothing is degraded
+    while it runs — the device is still on its previous wake word and still
+    scoring locally.
+
+    The sync is idempotent, so a device that already has the model completes in
+    an md5 compare and the switch is effectively immediate.
     """
     live = _devices.get(device_id)
     if live is None:
         return
 
-    if not live.oww_shadow_capable:
-        # The device never scores locally, so the classifier is irrelevant to
-        # it and its absence must not stand anything down.
-        live.oww_model_ready = True
-        return
-
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Installing wake word model {model} before switching to it"
+    )
     try:
         result = await _sync_oww_assets(live, device_id)
     except Exception as e:
@@ -3514,29 +3551,40 @@ async def _ensure_oww_model(device_id: str) -> None:
     if live is None:
         return
 
-    if result.get("ok"):
-        live.oww_model_ready = True
-        log.info(f"[api] [{device_id}] wake word model installed — "
-                 f"on-device scoring restored")
-    else:
-        # Left standing down deliberately. The device keeps answering, on the
-        # controller's own detections; what it loses is on-device scoring,
-        # which it could not have done anyway.
+    if not result.get("ok"):
+        # Deliberately leaves the device where it was: on a wake word it can
+        # actually hear. The controller is scoring the NEW model (fleet config
+        # decides that), so the two disagree until this is resolved — worth
+        # saying loudly, and better than a device that hears nothing.
         await _push_log_event(
             device_id, "error", "controller",
-            f"Wake word model could not be installed ({result.get('error')}) — "
-            f"this device is using controller-side wake word detection"
+            f"Could not install wake word model {model} "
+            f"({result.get('error')}) — this device is still using "
+            f"{live.oww_model}"
         )
-        log.error(f"[api] [{device_id}] wake word model install failed: "
-                  f"{result.get('error')} — staying on controller-side wake")
+        log.error(f"[api] [{device_id}] wake word switch to {model} abandoned: "
+                  f"{result.get('error')} — device left on {live.oww_model}")
+        return
 
     effective = await asyncio.get_event_loop().run_in_executor(
         None, db.get_effective_device_config, device_id
     )
-    live.oww_on_device = em_shadow.effective_mode(
-        effective.get("owwOnDevice"), live.oww_trigger_capable,
-        live.oww_model_ready,
+    if (effective.get("owwModel") or "").strip() != model:
+        # Changed again while the push was running; that save owns the
+        # outcome and has its own install task.
+        log.info(f"[api] [{device_id}] wake word changed again during install "
+                 f"— dropping the switch to {model}")
+        return
+
+    await live.send_control({"type": "config", **effective})
+    live.oww_model = model
+    import em_esphome
+    em_esphome.update_oww_model(device_id, model)
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Wake word model {model} installed — device switched"
     )
+    log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
 async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:

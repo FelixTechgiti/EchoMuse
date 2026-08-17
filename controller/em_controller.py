@@ -365,8 +365,16 @@ class Device:
         #
         # Optimistic by default: absence of evidence is not evidence of
         # absence, and standing every device down on a fresh controller would
-        # be a worse bug than the one this prevents. It is set False only when
-        # the model CHANGES, and cleared once the push has landed.
+        # be a worse bug than the one this prevents.
+        #
+        # A BACKSTOP, not the primary mechanism. Config changes are handled by
+        # install-before-switch (em_api._hold_back_oww_model): a device is
+        # never told to use a model it does not have, so it cannot be deafened
+        # by an ordinary wake-word change. This covers the causes a config
+        # change cannot see — a file deleted underneath us, a device
+        # reprovisioned behind our back — and its writer is the
+        # reconcile-on-connect pass designed in #191, which is the first thing
+        # that will actually KNOW what a device has.
         self.oww_model_ready: bool = True
         self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
         # This controller's own crossings while the DEVICE is triggering —
