@@ -70,6 +70,7 @@ import em_api as api
 import em_hostip
 import em_ns
 import em_recordings
+import em_runbarrier
 import em_oww_models
 import em_player
 import em_turnclock
@@ -325,6 +326,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._intent_ended      = False
         self._run_started       = False
         self._ha_never_started  = False
+        # Barge-in run serialisation — the protocol has no run id, so the
+        # satellite is what keeps two runs from overlapping on one connection.
+        # See em_runbarrier for the whole reasoning; it is a separate module
+        # because the test suite cannot import this one.
+        self._barrier = em_runbarrier.RunBarrier()
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn
         # after run_esphome_voice_turn returns to decide whether to re-trigger
@@ -655,6 +661,29 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         log.debug(f"[{self._log_name}] VoiceAssistantEvent type={event_type} data={data}")
 
+        if self._barrier.active:
+            # We aborted a run and started another. HA acknowledges an abort
+            # with NO wire message at all (_abort_pipeline just cancels the
+            # task), so the barrier has to be ordering rather than timing:
+            # discard everything until the next RUN_START, which is
+            # necessarily ours — HA emits RUN_START only when it creates a
+            # pipeline, we created exactly one more, and the connection is
+            # processed in order.
+            #
+            # Without it the aborted run's tail lands on the new turn: its
+            # RUN_END arrives ~4ms after we start, _run_started is False for
+            # the new turn, and the "HA ended a run it never started" branch
+            # below reads it as terminal. Every barge-in then ended
+            # pipeline_refused with zero audio captured (measured 2026-08-17,
+            # 5 of 5 attempts).
+            if self._barrier.discards(event_type == ET.VOICE_ASSISTANT_RUN_START):
+                log.debug(
+                    f"[{self._log_name}] Discarding event {event_type} from the "
+                    f"aborted run — waiting for our RUN_START"
+                )
+                return
+            log.debug(f"[{self._log_name}] Aborted run drained — our RUN_START seen")
+
         if event_type == ET.VOICE_ASSISTANT_STT_VAD_START:
             # HA's model-driven VAD heard speech begin — authoritative
             # counterpart to the controller's SNR-relative check in
@@ -879,6 +908,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._intent_ended          = False
         self._run_started           = False
         self._ha_never_started      = False
+        # Takes ownership of an abort armed during the PREVIOUS turn (at the
+        # barge). Deliberately not a plain reset: the arm has to survive this
+        # block to reach the turn it protects.
+        self._barrier.begin_turn()
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
@@ -1049,6 +1082,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # the feed is actually up.
                 self._send_one(self._media_state_msg())
             self._turn_active    = False
+            self._barrier.end_turn()
             self._on_thinking    = None
             self._on_announce    = None
             self._trace          = None
@@ -1398,20 +1432,56 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if self._transport and not self._transport.is_closing():
             self._transport.close()
 
-    def cancel_turn(self) -> None:
+    def cancel_turn(self, abort_ha: bool = False) -> None:
         """
-        Cancel an in-flight voice turn — local only, no upstream signal.
+        Cancel an in-flight voice turn.
 
-        Per ESPHOME_SPEC.md §7.4: the ESPHome protocol has no server-side
-        abort mechanism. cancel_turn() stops local state only; any in-flight
-        HA pipeline generation is left to complete and its result discarded
-        on arrival — the cancel is local-only; nothing reaches into HA's
-        in-flight pipeline.
+        abort_ha=False is local-only: HA's pipeline is left to complete and
+        its result discarded on arrival. Correct when nothing follows this
+        turn, or when HA has already finished (a barge during PLAYBACK — the
+        run ended at RUN_END and only our speaker is still busy).
+
+        abort_ha=True additionally sends VoiceAssistantRequest(start=False).
+        aioesphomeapi maps that to handle_stop(True) → HA's _abort_pipeline(),
+        which queues the audio-stream sentinel AND cancels _pipeline_task. It
+        is required before starting another turn on this connection, because
+        the protocol has no run id and HA does not serialise runs itself.
+
+        (An earlier docstring here claimed the protocol has no server-side
+        abort, citing an ESPHOME_SPEC.md §7.4 that no longer exists in the
+        tree. It does have one; we simply never sent it.)
         """
-        if self._turn_active:
+        if not self._turn_active:
+            return
+        if abort_ha:
+            self.abort_ha_run()
+            log.info(f"[{self._log_name}] Turn cancelled (HA pipeline aborted)")
+        else:
             log.info(f"[{self._log_name}] Turn cancelled (local only)")
-            self._turn_cancelled = True
-            self._tts_event.set()  # unblock any waiting coroutine
+        self._turn_cancelled = True
+        self._tts_event.set()  # unblock any waiting coroutine
+
+    def abort_ha_run(self) -> None:
+        """
+        Abort HA's pipeline and arm the run barrier, without touching local
+        turn state.
+
+        Split out of cancel_turn because a barge during PLAYBACK must not mark
+        the turn cancelled — the response was delivered and the trace outcome
+        should say so — but still has to serialise against the interrupting
+        turn. HA's RUN_END lands after TTS_END, so it is usually consumed by
+        the still-active turn before the barge; "usually" is not a guarantee,
+        and the cost of losing that race is the whole interrupting turn.
+
+        Aborting an already-finished pipeline is harmless: _abort_pipeline
+        cancels a completed task (a no-op) and queues a sentinel into a queue
+        that handle_pipeline_start drains before the next run.
+        """
+        if self._transport and not self._transport.is_closing():
+            self._send_one(api_pb2.VoiceAssistantRequest(start=False))
+        # Armed even if the transport is gone: the barrier is cheap, and a
+        # reconnect that replays events is exactly when it earns its keep.
+        self._barrier.abort()
 
 
 # ─── TTS audio fetch ─────────────────────────────────────────────────────────
@@ -2123,12 +2193,16 @@ async def trigger_voice_turn(
     return satellite._continue_conversation
 
 
-def cancel_voice_turn(device_id: str) -> None:
+def cancel_voice_turn(device_id: str, abort_ha: bool = False) -> None:
     """
     Cancel an in-flight ESPHome voice turn for a device.
 
-    Local-only per ESPHOME_SPEC.md §7.4 — does not signal HA.
-    Called from em_controller.handle_button_event() when voice_lock is held.
+    abort_ha=True also aborts HA's pipeline — pass it whenever another turn
+    is going to start on this connection (barge-in during thinking). See
+    EchoMuseSatellite.cancel_turn.
+
+    Called from em_controller.handle_button_event() when voice_lock is held,
+    and from _barge_watcher.
     """
     server = get_server(device_id)
     if server is None:
@@ -2136,7 +2210,25 @@ def cancel_voice_turn(device_id: str) -> None:
     satellite = server.get_satellite()
     if satellite is None:
         return
-    satellite.cancel_turn()
+    satellite.cancel_turn(abort_ha=abort_ha)
+
+
+def abort_ha_run(device_id: str) -> None:
+    """
+    Abort HA's in-flight pipeline without cancelling the local turn.
+
+    For a barge during playback: the response was delivered, so the turn is
+    not "cancelled", but an interrupting turn is about to start on the same
+    connection and the protocol serialises runs at the satellite or not at
+    all. See EchoMuseSatellite.abort_ha_run.
+    """
+    server = get_server(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite.abort_ha_run()
 
 
 async def push_media_state(device_id: str, state: str) -> None:
