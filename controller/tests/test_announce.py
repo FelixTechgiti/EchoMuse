@@ -8,60 +8,33 @@ as "should block until the announcement is done playing", holds
 integration implements that by awaiting our reply
 (`send_voice_assistant_announcement_await_response`).
 
-We used to answer it synchronously, before a byte had played. So the
-`assist_satellite.announce` service returned early, the entity left RESPONDING
-early, and two chained announcements overlapped on the device instead of
-queueing behind HA's own guard.
+We used to answer it synchronously in the message handler, before a byte had
+played. So the `assist_satellite.announce` service returned early, the entity
+left RESPONDING early, and two chained announcements overlapped on the device
+instead of queueing behind HA's own guard.
 
 The justification in the code was that the setup wizard would otherwise time
 out. It would not: `_ANNOUNCEMENT_TIMEOUT_SEC` is 5 minutes, and the wizard's
 connection test does not wait on this message at all — it fires when the device
 fetches the `CONNECTION_TEST_URL_BASE` media id.
 
-Both directions matter and both are pinned here: the reply must not come early,
-and it must always come. A reply that never arrives is worse than a late one —
-it parks HA for five minutes with `_is_announcing` held, and every announcement
-after it fails.
+Both directions are pinned here, because they pull against each other and the
+code reads fine either way: the reply must not come early, and it must always
+come.
 
-Async tests run through asyncio.run(), the idiom the rest of this suite uses —
-pytest-asyncio is not in the test environment and this is not worth adding it
-for.
+The sequencing lives in `em_announce` rather than `em_esphome` so this suite can
+reach it — the suite does not import `em_esphome` (zeroconf, aiohttp, the
+database). Async tests run through `asyncio.run()`, the idiom the rest of the
+suite uses; pytest-asyncio is not in the test environment and this is not worth
+adding it for.
 """
 
 import asyncio
+from pathlib import Path
 
-import em_esphome
-from esphome.vendor import api_pb2
+import em_announce
 
-
-class FakeTransport:
-    def __init__(self, closing=False):
-        self._closing = closing
-
-    def is_closing(self):
-        return self._closing
-
-
-def make_satellite():
-    sat = object.__new__(em_esphome.EchoMuseSatellite)
-    sat._log_name = "test"
-    sat._transport = FakeTransport()
-    sat.sent = []
-    sat._send_one = sat.sent.append
-    sat._on_announce = None
-    sat._owning_server = None
-    # _current_volume is a property on the real class; the state message is
-    # stubbed instead so this test says nothing about volume reporting.
-    sat._media_state_msg = lambda: api_pb2.MediaPlayerStateResponse(
-        key=1, state=0, volume=0.5, muted=False
-    )
-    return sat
-
-
-def finished(sat):
-    return [
-        m for m in sat.sent if isinstance(m, api_pb2.VoiceAssistantAnnounceFinished)
-    ]
+ESPHOME_SRC = (Path(__file__).resolve().parents[1] / "em_esphome.py").read_text()
 
 
 def fetch_returning(pcm):
@@ -78,16 +51,29 @@ def fetch_raising(exc):
     return _fetch
 
 
+async def play_nothing(pcm):
+    return None
+
+
+class Replies:
+    """Records what was reported to HA, and when."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, ok):
+        self.calls.append(ok)
+
+
 # ── The reply lands after playback, not before ───────────────────────────────
 
 
-def test_finished_is_not_sent_until_playback_completes(monkeypatch):
+def test_the_reply_waits_for_playback_to_finish():
     """
-    The whole point. While the audio is playing HA must still be blocked, so
-    that a second announcement queues rather than talking over the first.
+    The whole point. While the audio is playing HA must still be blocked, so a
+    second announcement queues rather than talking over the first.
     """
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b"\x00\x00" * 100))
-    sat = make_satellite()
+    replies = Replies()
     playing = asyncio.Event()
     release = asyncio.Event()
 
@@ -95,112 +81,153 @@ def test_finished_is_not_sent_until_playback_completes(monkeypatch):
         playing.set()
         await release.wait()
 
-    sat._on_announce = slow_play
-
     async def main():
-        task = asyncio.create_task(sat._run_announce("http://ha/x.flac"))
+        task = asyncio.create_task(
+            em_announce.run(
+                "http://ha/x.flac",
+                fetch=fetch_returning(b"\x00\x00" * 100),
+                play=slow_play,
+                on_finished=replies,
+            )
+        )
         await playing.wait()
-        early = finished(sat)
+        during = list(replies.calls)
         release.set()
         await task
-        return early
+        return during
 
-    early = asyncio.run(main())
-    assert early == [], "AnnounceFinished sent while audio was still playing"
-    assert len(finished(sat)) == 1
-    assert finished(sat)[0].success is True
+    during = asyncio.run(main())
+    assert during == [], "reported finished while the audio was still playing"
+    assert replies.calls == [True]
 
 
-def test_media_state_follows_the_finished_reply(monkeypatch):
-    """
-    Ordering, not just presence: HA reads the state after the announcement is
-    over, and an announcement over music resolves to PAUSED there rather than
-    a hardcoded IDLE.
-    """
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b"\x00\x00" * 100))
-    sat = make_satellite()
-
-    async def play(pcm):
-        return None
-
-    sat._on_announce = play
-
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    kinds = [type(m).__name__ for m in sat.sent]
-    assert kinds.index("VoiceAssistantAnnounceFinished") < kinds.index(
-        "MediaPlayerStateResponse"
+def test_success_is_reported_when_the_audio_reached_the_speaker():
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=play_nothing,
+            on_finished=replies,
+        )
     )
+    assert replies.calls == [True]
 
 
 # ── The reply always comes ───────────────────────────────────────────────────
 
 
-def test_fetch_failure_still_replies(monkeypatch):
+def test_a_fetch_failure_still_replies():
     """
     Not replying parks HA for five minutes holding _is_announcing, after which
     every announcement fails SatelliteBusyError. success=False is strictly
     better than silence.
     """
-    monkeypatch.setattr(
-        em_esphome, "_fetch_tts_audio", fetch_raising(RuntimeError("ha unreachable"))
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_raising(RuntimeError("ha unreachable")),
+            play=play_nothing,
+            on_finished=replies,
+        )
     )
-    sat = make_satellite()
-
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    assert len(finished(sat)) == 1
-    assert finished(sat)[0].success is False
+    assert replies.calls == [False]
 
 
-def test_empty_media_id_still_replies():
-    sat = make_satellite()
-    asyncio.run(sat._run_announce(""))
-    assert len(finished(sat)) == 1
-    assert finished(sat)[0].success is False
+def test_a_failing_playback_still_replies():
+    replies = Replies()
+
+    async def boom(pcm):
+        raise RuntimeError("device gone")
+
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=boom,
+            on_finished=replies,
+        )
+    )
+    assert replies.calls == [False]
 
 
-def test_no_playback_callback_reports_failure(monkeypatch):
+def test_an_empty_media_id_still_replies():
+    replies = Replies()
+    asyncio.run(
+        em_announce.run("", fetch=fetch_returning(b""), play=play_nothing, on_finished=replies)
+    )
+    assert replies.calls == [False]
+
+
+def test_no_playback_callback_is_not_a_success():
     """
-    Audio fetched but nothing to play it on (device not connected) is not a
-    successful announcement, and HA should not be told it was.
+    Audio fetched but nothing to play it on — the physical device is not
+    connected. HA should not be told the announcement happened.
     """
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b"\x00\x00" * 100))
-    sat = make_satellite()
-
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    assert finished(sat)[0].success is False
-
-
-def test_empty_audio_reports_failure(monkeypatch):
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b""))
-    sat = make_satellite()
-
-    async def play(pcm):
-        return None
-
-    sat._on_announce = play
-
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    assert finished(sat)[0].success is False
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=None,
+            on_finished=replies,
+        )
+    )
+    assert replies.calls == [False]
 
 
-def test_a_wedged_playback_gives_up_and_replies(monkeypatch):
+def test_empty_audio_is_not_a_success():
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b""),
+            play=play_nothing,
+            on_finished=replies,
+        )
+    )
+    assert replies.calls == [False]
+
+
+def test_a_wedged_playback_gives_up_and_replies():
     """
     Our cap has to fire before HA's, or HA is the one left holding the
     announcement. The layer below is already bounded; this is the guard for
     when it isn't.
     """
-    monkeypatch.setattr(em_esphome, "ANNOUNCE_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b"\x00\x00" * 100))
-    sat = make_satellite()
+    replies = Replies()
 
     async def wedged(pcm):
         await asyncio.sleep(30)
 
-    sat._on_announce = wedged
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=wedged,
+            on_finished=replies,
+            timeout=0.05,
+        )
+    )
+    assert replies.calls == [False]
 
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    assert len(finished(sat)) == 1
-    assert finished(sat)[0].success is False
+
+def test_exactly_one_reply_per_announcement():
+    """
+    A second AnnounceFinished has no run to belong to — HA pairs it with
+    whatever it is waiting for next.
+    """
+    replies = Replies()
+    asyncio.run(
+        em_announce.run(
+            "http://ha/x.flac",
+            fetch=fetch_returning(b"\x00\x00" * 100),
+            play=play_nothing,
+            on_finished=replies,
+        )
+    )
+    assert len(replies.calls) == 1
 
 
 def test_our_cap_sits_under_has():
@@ -208,18 +235,33 @@ def test_our_cap_sits_under_has():
     HA's _ANNOUNCEMENT_TIMEOUT_SEC is 5 minutes. Ours must be comfortably
     below it — the point of a cap here is to be the side that gives up first.
     """
-    assert em_esphome.ANNOUNCE_TIMEOUT_S < 300
+    assert em_announce.ANNOUNCE_TIMEOUT_S < 300
 
 
-def test_a_closed_transport_does_not_raise(monkeypatch):
+# ── The wiring, pinned against the source ────────────────────────────────────
+
+
+def test_the_handler_does_not_answer_the_announce_itself():
     """
-    The device or HA can go away mid-announcement. Nothing to reply to, and a
-    background task that raises here would be logged as an unhandled exception
-    rather than anything actionable.
+    The bug, in the shape it took: AnnounceFinished constructed in the
+    message handler, so HA was answered before the background task had
+    fetched anything. Everything else here would still pass with that
+    restored.
     """
-    monkeypatch.setattr(em_esphome, "_fetch_tts_audio", fetch_returning(b"\x00\x00" * 100))
-    sat = make_satellite()
-    sat._transport = FakeTransport(closing=True)
+    handler = ESPHOME_SRC[ESPHOME_SRC.index("def handle_message"):]
+    handler = handler[: handler.index("\n    def ", 10)]
+    assert "VoiceAssistantAnnounceFinished" not in handler, (
+        "the announce is answered in the message handler again — HA is told "
+        "the announcement finished before any audio has played"
+    )
 
-    asyncio.run(sat._run_announce("http://ha/x.flac"))
-    assert sat.sent == []
+
+def test_announcing_state_is_still_sent_synchronously():
+    """
+    ANNOUNCING describes the state we are ENTERING, unlike the completion
+    reply, so it belongs in the handler. Moving it out would leave the entity
+    idle for the length of the announcement.
+    """
+    handler = ESPHOME_SRC[ESPHOME_SRC.index("def handle_message"):]
+    handler = handler[: handler.index("\n    def ", 10)]
+    assert "MediaPlayerState.ANNOUNCING" in handler

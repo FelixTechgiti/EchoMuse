@@ -80,6 +80,7 @@ COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
 COPY em_turnclock.py .
+COPY em_announce.py .
 COPY em_volume.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)

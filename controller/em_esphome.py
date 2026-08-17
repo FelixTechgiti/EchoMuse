@@ -69,6 +69,7 @@ import em_db as db
 import em_api as api
 import em_hostip
 import em_ns
+import em_announce
 import em_recordings
 import em_oww_models
 import em_player
@@ -261,12 +262,6 @@ VOICE_ASSISTANT_FLAGS = int(
     | VoiceAssistantFeature.API_AUDIO
     | VoiceAssistantFeature.ANNOUNCE
 )
-
-# Whole-announcement cap: fetch plus playback. Sized to sit well under HA's
-# _ANNOUNCEMENT_TIMEOUT_SEC (5 minutes) so WE are the side that gives up and
-# replies, rather than leaving HA holding _is_announcing — every announcement
-# after that one fails SatelliteBusyError until it clears.
-ANNOUNCE_TIMEOUT_S = 120.0
 
 # VoiceAssistantRequest flags=0 means "device already detected wake word,
 # run Assist pipeline from STT onward — do not run HA-side wake word
@@ -813,43 +808,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         Background task: fetch TTS audio from HA, play it, then tell HA the
         announcement is done.
 
-        This owns HA's completion contract. AnnounceFinished is sent from the
-        finally, on every path — a reply that never arrives parks HA's
-        announce for _ANNOUNCEMENT_TIMEOUT_SEC (5 minutes) with _is_announcing
-        held, which makes every announcement after it fail SatelliteBusyError.
-        Not replying is strictly worse than replying with success=False.
-
-        ANNOUNCE_TIMEOUT_S bounds the whole thing well under HA's 5 minutes.
-        The playback wait is already bounded (audio_duration * 2 + 10s in
-        _run_post_turn_playback), so this only fires on a genuine wedge — but
-        "already bounded" is what the layer below always looks like.
-        """
-        ok = False
-        try:
-            if not media_id:
-                log.warning(f"[{self._log_name}] AnnounceRequest with no media_id")
-            else:
-                ok = await asyncio.wait_for(
-                    self._fetch_and_play_announce(media_id), ANNOUNCE_TIMEOUT_S
-                )
-        except (asyncio.TimeoutError, TimeoutError):
-            log.error(f"[{self._log_name}] Announce timed out after {ANNOUNCE_TIMEOUT_S}s")
-        except Exception as e:
-            log.error(f"[{self._log_name}] Announce fetch/play error: {e}")
-        finally:
-            if self._transport and not self._transport.is_closing():
-                self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=ok))
-                # Real state, not IDLE: an announcement over music pauses the
-                # session, so PAUSED is the truth here and resume_interrupted
-                # follows with PLAYING once the feed is back up. Asserting IDLE
-                # made the entity wrong for as long as it took the music to
-                # restart.
-                self._send_one(self._media_state_msg())
-
-    async def _fetch_and_play_announce(self, media_id: str) -> bool:
-        """
-        Fetch the announcement audio and play it. True if it reached the
-        speaker — that is what AnnounceFinished.success reports.
+        The sequencing rules and their reasons live in em_announce, which is
+        importable by the test suite. This is the adapter: it resolves the
+        playback callback and decides whether the reply can still be written.
 
         During a voice turn, _on_announce is set by run_esphome_voice_turn()
         and takes priority — it routes audio to the device's speaker pipeline
@@ -868,24 +829,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         "no playback callback set" on freshly-established connections, not
         just stale reconnects, which ruled out a staleness-only explanation.
         """
-        pcm_bytes = await _fetch_tts_audio(media_id)
-        if not pcm_bytes:
-            log.warning(f"[{self._log_name}] Announce fetched no audio")
-            return False
-
         play_cb = self._on_announce
         if play_cb is None and self._owning_server is not None:
             play_cb = self._owning_server._standalone_play
 
-        if play_cb is None:
-            log.info(
-                f"[{self._log_name}] Announce audio fetched ({len(pcm_bytes)}b) "
-                f"— no playback callback set (standalone announce)"
-            )
-            return False
+        def reply(ok: bool) -> None:
+            if not self._transport or self._transport.is_closing():
+                return
+            self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=ok))
+            # Real state, not IDLE: an announcement over music pauses the
+            # session, so PAUSED is the truth here and resume_interrupted
+            # follows with PLAYING once the feed is back up. Asserting IDLE
+            # made the entity wrong for as long as it took the music to
+            # restart.
+            self._send_one(self._media_state_msg())
 
-        await play_cb(pcm_bytes)
-        return True
+        await em_announce.run(
+            media_id,
+            fetch=_fetch_tts_audio,
+            play=play_cb,
+            on_finished=reply,
+            log_name=self._log_name,
+        )
 
     # ── Voice turn (outbound) ────────────────────────────────────────────
 
