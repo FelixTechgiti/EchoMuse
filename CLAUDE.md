@@ -1545,7 +1545,24 @@ did not — so it presented as "stuck on thinking", not "Speaking is broken".
 Setting the flag and pushing it are therefore **one operation**
 (`Device._set_speaking`), and a test pins that no other assignment to
 `self.speaking` exists — a new streaming path cannot reintroduce the gap by
-doing only half. The push is guarded with `except BaseException`, because one
+doing only half.
+
+**Which edge is truth, and which is a guess.** `False` is the DEVICE's — the
+playback functions wait on its `playback_stats` (sent once the audio channel
+drains after EOS) and clear the flag there. Clearing it in the stream task's
+`finally` instead drops the tile out of Speaking **seconds** early, because
+that returns when the last byte reaches the socket and a socket write completes
+near-instantly however slow the link is; the device still has its whole buffer
+to play. That is the same mistake the LED ring made until 2026-07-24, in the
+same file. `True` is still a controller-side **estimate** — the first period on
+the wire — and leads the speaker by up to `SPEAKER_PRIME_SECONDS`, because the
+device holds audio until primed. Closing that needs the device to report the
+start; `playback_stats` is the only playback message the firmware sends (#203).
+
+**`speaking` and `thinking` are mutually exclusive and starting to speak clears
+`thinking`.** Both reach the dashboard and `speaking` outranks `thinking`, so a
+stale `thinking` is invisible until speaking clears — and then the tile reads
+as if the device started thinking again mid-response. The push is guarded with `except BaseException`, because one
 caller is `stream_speaker`'s `finally`, which is also reached when barge-in
 cancels the task mid-send; a plain `except Exception` does not catch the
 `CancelledError` that arises there, and a dashboard push is not worth failing a
