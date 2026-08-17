@@ -663,10 +663,37 @@ class Device:
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})
 
+    async def _set_speaking(self, value: bool) -> None:
+        """
+        Set the speaking flag AND tell the dashboard.
+
+        The single writer, because the flag and the push had drifted apart:
+        stream_speaker/stream_speaker_chunks set it, and nothing pushed the
+        transition. _push_device_state has always carried `speaking` and the
+        dashboard has always rendered it above `thinking` — but the only
+        pushes were at listening, thinking and turn end, so a turn read
+        listening -> thinking -> idle and **never showed Speaking at all**. It
+        appeared only when the dashboard's 5s poll of /api/devices happened to
+        land mid-playback, which for a typical ~2s response it usually did not.
+
+        Guarded rather than plain, because one caller is stream_speaker's
+        finally, which is also reached when barge-in cancels the task
+        mid-send: the flag assignment is synchronous and always happens, and a
+        push that cannot complete is not worth failing a speaker stream over —
+        turn end pushes the same state moments later.
+        """
+        if self.speaking == value:
+            return
+        self.speaking = value
+        try:
+            await _push_device_state(self)
+        except BaseException:
+            pass
+
     async def stream_speaker(self, pcm: bytes):
         """Stream resampled mono 48kHz PCM as 0x02 frames, then 0x03 EOS."""
         self.begin_data_stream()
-        self.speaking = True
+        await self._set_speaking(True)
         try:
             offset = 0
             while offset < len(pcm):
@@ -681,7 +708,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
         finally:
-            self.speaking = False
+            await self._set_speaking(False)
             # EOS must go out on EVERY exit, including task cancellation
             # (barge-in cancels this task mid-send): the device's barge-in
             # flush discards 0x02 frames until it sees this stream's 0x03 —
@@ -704,7 +731,7 @@ class Device:
         end of the response.
         """
         self.begin_data_stream()
-        self.speaking = True
+        await self._set_speaking(True)
         pending = bytearray()
         total_pcm = 0
         eq_seconds = 0.0
@@ -755,7 +782,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 send_seconds += asyncio.get_event_loop().time() - _t_send
         finally:
-            self.speaking = False
+            await self._set_speaking(False)
             # One EOS terminates the complete response. Sending EOS per HTTP
             # chunk would make the device repeatedly prime and flush.
             try:

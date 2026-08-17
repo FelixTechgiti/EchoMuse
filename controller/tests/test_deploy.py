@@ -1433,3 +1433,53 @@ def test_an_announcement_reports_whether_it_actually_played():
     assert re.search(r"return not .*cancel_event\.is_set\(\)", body), (
         "the return value must reflect whether playback was cancelled"
     )
+
+
+def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
+    """
+    The dashboard renders `speaking` above `thinking` and _push_device_state
+    has always carried it — but nothing pushed the transition. The only pushes
+    were at listening, thinking and turn end, so a turn read
+    listening -> thinking -> idle and never showed Speaking at all. It appeared
+    only when the dashboard's 5s poll of /api/devices happened to land
+    mid-playback, which for a ~2s response it usually did not.
+
+    Setting the flag and telling anyone about it are now one operation, so a
+    third streaming path cannot reintroduce the gap by doing only the first.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S)
+    assert setter, "_set_speaking not found"
+    assert "_push_device_state(self)" in setter.group(0), (
+        "the setter must push — that is the whole reason it exists"
+    )
+
+    # Every other write is a bug. __init__'s default and the setter's own
+    # assignment are the two legitimate ones.
+    writes = re.findall(r"self\.speaking\s*=\s*(?!=)", src)
+    assert len(writes) == 2, (
+        f"expected 2 assignments to self.speaking (the __init__ default and "
+        f"the setter), found {len(writes)} — a streaming path is setting the "
+        f"flag without pushing it"
+    )
+
+
+def test_the_speaking_push_cannot_fail_a_speaker_stream():
+    """
+    One caller is stream_speaker's finally, which is also reached when
+    barge-in cancels the task mid-send. A push that cannot complete there must
+    not take the stream down with it — turn end pushes the same state moments
+    later. The flag assignment is synchronous and happens either way.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S).group(0)
+    assign = setter.find("self.speaking = value")
+    push = setter.find("_push_device_state(self)")
+    assert assign < push, "the flag must be set before the push is attempted"
+    assert "except BaseException" in setter, (
+        "a bare `except Exception` does not catch the CancelledError this sees "
+        "during barge-in"
+    )
