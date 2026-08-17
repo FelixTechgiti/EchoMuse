@@ -37,6 +37,7 @@ import bcrypt
 from aiohttp import web
 
 import em_db as db
+import em_ingressauth
 
 log = logging.getLogger("echomuse.auth")
 
@@ -132,6 +133,60 @@ async def login(username: str, password: str) -> tuple[str, str]:
     )
     log.info(f"[auth] Login: {username} ({user['role']})")
     return token, user["role"]
+
+
+async def login_via_ingress(identity) -> tuple[str, str]:
+    """
+    Create a session for a Home Assistant user, provisioning the account on
+    first sight. Returns (token, role).
+
+    The caller must already have established that the request is a genuine
+    ingress request — em_ingressauth.decide does that, and this function
+    deliberately does not re-check, so there is exactly one place where that
+    judgement is made rather than two that can disagree.
+
+    The first user through the door becomes admin — matching the standalone
+    container, where whoever holds the bootstrap token becomes the owner.
+    Everyone after that is read-only until an admin promotes them
+    (PATCH /api/users/{id}).
+
+    Roles are NOT mirrored from Home Assistant. Supervisor forwards no admin
+    flag, so knowing whether someone is an HA admin means asking Supervisor's
+    /auth endpoints — and that permission also grants the ability to reset
+    any Home Assistant user's password with no verification. That is a steep
+    price for one boolean on a system with one operator, so the role is ours
+    to manage. See issue #171 if multi-user demand makes it worth revisiting.
+
+    An existing user's role is left alone on every subsequent login, which is
+    what makes a manual promotion stick.
+    """
+    loop = asyncio.get_event_loop()
+
+    user = await loop.run_in_executor(
+        None, db.get_user_by_ha_id, identity.user_id)
+
+    if user is None:
+        existing = await loop.run_in_executor(None, db.user_count)
+        role = em_ingressauth.role_for(
+            existing_users=existing,
+            configured_default=db.get_config("ingress_default_role", "readonly"),
+        )
+        user_id = await loop.run_in_executor(
+            None, db.create_ha_user, identity.user_id, identity.username, role)
+        user = await loop.run_in_executor(None, db.get_user_by_id, user_id)
+        log.info(
+            f"[auth] Home Assistant user provisioned: "
+            f"{user['username']} ({role})"
+        )
+
+    token = generate_token()
+    expiry_days = int(db.get_config("session_expiry_days", "30") or 30)
+    await loop.run_in_executor(
+        None, db.create_session, token, user["id"], expiry_days
+    )
+    log.info(f"[auth] Ingress login: {user['username']} ({user['role']})")
+    return token, user["role"]
+
 
 
 async def logout(token: str) -> None:

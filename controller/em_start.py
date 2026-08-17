@@ -35,6 +35,7 @@ OPTION_ENV_VARS = {
     "oww_threshold": "OWW_THRESHOLD",
     "require_device_tls": "REQUIRE_DEVICE_TLS",
     "device_approval": "DEVICE_APPROVAL",
+    "debug": "DEBUG",
 }
 
 if OPTIONS_PATH.is_file():

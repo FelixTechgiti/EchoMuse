@@ -1,9 +1,23 @@
-name: "EchoMuse"
+# GENERATED FILE — DO NOT EDIT.
+#
+# Produced from controller/config.yaml by controller/tools/
+# sync_channels.py, and checked by tests/test_channels.py. Edit the
+# GA config and re-run the generator; an edit here is reverted by
+# the next sync and fails CI in the meantime.
+#
+# `version:` is the exception — channels advance independently, so
+# it is preserved across syncs and is the one field a release moves.
+#
+# Comments below are inherited verbatim from the GA config and
+# describe it: this directory has no Dockerfile and never builds,
+# it only pulls the tag named by `version:`.
+#
+name: "EchoMuse (Early Access)"
 # Tracks the published controller image tag, which controller-release.yml
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.20.1"
+version: "2.20.1-ea.5"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -20,8 +34,8 @@ version: "2.20.1"
 # branch), and "it compiles onnxruntime" made that loop look far more
 # expensive than it is. tools/make_dev_addon.sh packages one.
 image: "ghcr.io/wilbowes/echomuse-controller"
-slug: "controller"
-description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
+slug: "controller-ea"
+description: "Early Access build of the EchoMuse controller — the next release, before it is general. Install this INSTEAD of the stable add-on, not alongside it: both use host networking and the same ports. Add-ons do not share storage, so switching channels starts with an empty database and a new certificate authority, and existing devices will not connect until the stable add-on's /data is copied across."
 url: "https://github.com/wilbowes/EchoMuse"
 init: false
 arch:
@@ -43,7 +57,7 @@ ingress_port: 8768
 # read-only until promoted.
 panel_admin: true
 panel_icon: mdi:microphone-message
-panel_title: EchoMuse
+panel_title: EchoMuse EA
 environment:
   ECHOMUSE_HOME_ASSISTANT_INGRESS: "true"
   # /data is the add-on's own persistent storage, provided automatically by

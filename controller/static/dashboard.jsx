@@ -13,6 +13,14 @@ function ingressPath(path) {
   return path.startsWith('/') ? `.${path}` : path;
 }
 
+// True when the page is being served through Home Assistant's ingress
+// gateway. Read off the injected <base href> rather than /api/system/status's
+// ha_ingress, so it is available synchronously and to code with no API token
+// — the WebUSB check runs before any of that.
+function isIngress() {
+  return document.baseURI.includes('/hassio_ingress/');
+}
+
 function ingressWebSocketUrl(path) {
   const url = new URL(ingressPath(path), document.baseURI);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -323,19 +331,29 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   );
 }
 
-function Toggle({ label, sub, value, onChange }) {
+function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
   // wider than the grid column — which pushed the switch past the edge of
   // the config dialog. flexShrink: 0 keeps the switch at full size.
+  //
+  // `disabled` is honoured in the HANDLER, not only in the styling — the
+  // capability rule ("shown disabled with the reason, never a control that
+  // silently does nothing") is a claim about what a click does, and a switch
+  // that greys itself while still writing is worse than one that does
+  // nothing: the stored setting then disagrees with what the control shows.
+  // Slider has always taken the same prop; Toggle did not take it at all, so
+  // every caller that wanted it had to fake it by neutering `value` and
+  // `onChange` at the call site.
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, minWidth: 0, gap: 10 }}>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
         {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
       </div>
-      <div onClick={() => onChange(!value)} style={{
-        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative', flexShrink: 0,
+      <div onClick={() => { if (!disabled) onChange(!value); }} style={{
+        width: 36, height: 20, borderRadius: 10, cursor: disabled ? 'default' : 'pointer',
+        position: 'relative', flexShrink: 0, opacity: disabled ? 0.45 : 1,
         background: value ? 'var(--accent)' : 'var(--muted)',
         border: value ? '1px solid var(--accent-deep)' : '1px solid var(--muted)',
         transition: 'background 0.15s',
@@ -670,6 +688,12 @@ function Shell({ deviceId, token, height = 320 }) {
     term.loadAddon(fit);
     term.open(containerRef.current);
     fit.fit();
+    // Take the caret straight away. Shell is mounted only while the Console
+    // tab is selected (see `tab === 'console'`), so this component existing
+    // IS the user asking for a terminal — there is nothing else on the tab
+    // that could reasonably want focus, and without it every visit starts
+    // with a click that does nothing except tell xterm you meant it.
+    term.focus();
 
     const sock = new WebSocket(ingressWebSocketUrl(`/api/devices/${deviceId}/shell?token=${token}`));
     sock.binaryType = 'arraybuffer';
@@ -766,7 +790,7 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
 
@@ -830,7 +854,10 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
     urlsRef.current = {};
   }, []);
 
-  const anyAudio = turns.some(t => t.audio_file);
+  // Recordings and transcripts are admin-only — the server enforces it
+  // (require_admin on the audio route, stt_text stripped from /turns);
+  // this just avoids offering controls that would 404.
+  const anyAudio = isAdmin && turns.some(t => t.audio_file);
 
   const ok = turns.filter(t => t.outcome === 'ok');
   const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
@@ -907,7 +934,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                     The slot is reserved even when a turn has no recording so
                     the columns stay aligned as the retention window rolls. */}
                 <span style={{ width: 34, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                  {t.audio_file && !gone.has(t.turn_id) && (<>
+                  {isAdmin && t.audio_file && !gone.has(t.turn_id) && (<>
                     <button onClick={() => toggleAudio(t)}
                       title={playing === t.turn_id ? 'Stop' : 'Play the mic audio for this turn'}
                       style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: playing === t.turn_id ? 'var(--warn)' : 'var(--text2)' }}>
@@ -1731,6 +1758,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     nearMisses={device.owwNearMisses}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.dot}
+                    isAdmin={isAdmin}
                   />
                 </Panel>
               </div>
@@ -2289,10 +2317,27 @@ const _ADB = (() => {
     // ready Client.  logFn is optional — wizard passes addLog.
     static async requestDevice(logFn = () => {}) {
       if (!navigator.usb) {
+        // Name the origin. Chrome's insecure-origin allowlist is per-origin
+        // and matches on scheme, host and port exactly, so someone who has
+        // already allowlisted the standalone dashboard gets no benefit here
+        // and has no way to tell why — the add-on's page is served from
+        // Home Assistant's origin, not the controller's.
+        const origin = window.location.origin;
         throw new Error(
-          'WebUSB not available — requires a secure context (HTTPS or localhost). ' +
-          'Access the dashboard at http://localhost:8768, or enable ' +
-          'chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
+          `WebUSB not available — requires a secure context (HTTPS or localhost). ` +
+          `This page is on ${origin}. ` +
+          (isIngress()
+            // Under the add-on there is no localhost route to offer:
+            // _ingress_only_middleware rejects anything that is not the
+            // Supervisor gateway, so suggesting a direct port would send
+            // the user to a 403.
+            ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to ` +
+              `chrome://flags/#unsafely-treat-insecure-origin-as-secure and ` +
+              `relaunch the browser. An allowlist entry for the controller's ` +
+              `own address does not cover this one.`
+            : `Open the dashboard at http://localhost:8768, or add exactly ` +
+              `${origin} to chrome://flags/#unsafely-treat-insecure-origin-as-secure ` +
+              `and relaunch the browser.`)
         );
       }
 
@@ -5317,13 +5362,16 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
         {subHeader('Action button', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          {/* Offered only when the device says it can measure a hold. */}
-          <Toggle label="Tap sends an event"
+          {/* Offered only when the device says it can measure a hold. The
+              value still reads through holdCapable so an incapable device
+              shows the switch off rather than showing a stored true it
+              cannot honour. */}
+          <Toggle label="Tap sends an event" disabled={!holdCapable}
             sub={holdCapable
               ? "tap fires the HA action-button event instead of starting a turn — hold still fires 'long'; the button can no longer cancel a response. A tap is easy to trigger by accident and the button is unauthenticated — bind destructive automations to 'long' instead"
               : 'needs newer firmware on this Echo — it has no action-button event for a tap to fire'}
             value={holdCapable && (config.buttonSingleTapEvent ?? false)}
-            onChange={holdCapable ? (v => set('buttonSingleTapEvent', v)) : (() => {})}/>
+            onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
         </div>
         {subHeader('Turn processing')}
@@ -5694,6 +5742,9 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('em_token'));
   const [role, setRole] = useState(() => localStorage.getItem('em_role'));
+  // How this session was obtained — 'ingress' when Home Assistant
+  // authenticated us, otherwise a password. Set by the landing page.
+  const authVia = localStorage.getItem('em_auth_via');
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
@@ -5721,6 +5772,7 @@ function App() {
     API.token = null;
     localStorage.removeItem('em_token');
     localStorage.removeItem('em_role');
+    localStorage.removeItem('em_auth_via');
     // The landing page owns sign-in — green-ring login form.
     location.replace('.');
   }
@@ -5854,7 +5906,15 @@ function App() {
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
           <ThemeToggle/>
           <IconButton onClick={() => setShowSettings(true)} label="Settings">⚙</IconButton>
-          <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          {/* No sign-out on a Home Assistant session: HA owns it, so signing
+              out would land on the landing page and be re-authenticated
+              immediately — a button that visibly does nothing. Keyed on how
+              this session was obtained, not on whether the page is under
+              ingress: someone who fell back to the password form (Supervisor
+              forwarded no user) can and should still sign out. */}
+          {authVia !== 'ingress' && (
+            <IconButton onClick={handleLogout} label="Sign out" danger><SignOutIcon/></IconButton>
+          )}
         </div>
       </div>
 

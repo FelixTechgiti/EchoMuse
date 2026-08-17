@@ -121,6 +121,25 @@ It is also never inherited from the fleet, whatever the section's Fleet /
 Device switch says — otherwise a device would come back at another room's
 volume.
 
+**The top of the range changed in 2.20.0.** EchoMuse used to drive the
+codec's digital volume past the point where it can only clip — measured at
+65% distortion three button presses above the midpoint, and 89% at the
+maximum, with the output no longer getting any louder. Stock Alexa never
+touches that control, which is why EchoMuse sounded worse than stock when
+turned up. The range now stops at the codec's unity gain, so the loudest
+setting is quieter than it was and everything below it is cleaner.
+
+The percentage Home Assistant shows also moved: a device at the same
+physical level reads a higher number than before, because the scale no
+longer includes a stretch that only distorted. Nothing changed about how
+loud it actually is. If you have an automation with a volume threshold in
+it, check that threshold.
+
+The physical buttons step about 4dB per press across the audible range,
+rather than spending presses near the bottom of a scale where nothing is
+audible — silencing the device is the mute button's job. The cyan ring
+spans that same range, so a press always moves it.
+
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —
 whether or not the controller is reachable.
@@ -145,6 +164,39 @@ use the **+ Custom model** tile to upload the `.onnx` — it's stored in the
 controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
+
+**If the device does its own wake word detection** (see *On-device wake
+word*), the model has to be copied onto it before it can listen for the new
+word. That happens automatically when you select it, and the device carries on
+answering to its **current** wake word until the new one has arrived — usually
+a few seconds. If the copy fails, the device stays on the word it already has
+and the device log says why. It is never left listening for a word it does not
+have.
+
+**Changing the wake word briefly reconnects the device in Home Assistant.**
+Home Assistant only reads a satellite's wake word configuration when it
+connects, so the controller drops and remakes that connection to make the new
+name show up. It takes a few milliseconds, but during it **every entity for
+that device goes unavailable and comes straight back** — the voice assistant,
+the media player, the action button, the ambient light sensor.
+
+That matters if you have an automation using a **state trigger** on any of
+them: coming back online is a state change, and the automation will fire. The
+action button's event entity is the one people hit, because a returning event
+entity restores its last event and looks exactly like the button being pressed
+again. Exclude the transition:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: event.your_device_action_button
+    not_from:
+      - unavailable
+      - unknown
+```
+
+Nothing is wrong with the device when this happens, and it only happens when
+you change the wake word.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
@@ -192,6 +244,16 @@ v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
 voice much. Raise it if responses ever cut themselves off. (During the
 silent *thinking* pause the normal wake sensitivity applies instead —
 nothing is playing, so the low barge threshold isn't needed there.)
+
+**What happens after you interrupt.** The device stops talking and listens
+straight away — say the wake word and your new command in one breath and it
+hears both, without waiting for a second prompt. This only started working
+properly in 2.20.1: before that the interrupt cut the response off but the
+command that followed was never picked up, so you had to wait and ask again.
+
+**Interrupting cannot be taken back.** If you say the wake word and then stay
+quiet, the original answer is gone rather than resumed — Home Assistant has no
+way to restart a reply it has already abandoned. The turn just ends quietly.
 
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
@@ -533,7 +595,7 @@ These are set once, on the server, and need a controller restart to change:
 
 | Setting | What it is |
 |---|---|
-| `SERVER_IP` | The controller computer's LAN IP — what devices connect to. |
+| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
@@ -591,7 +653,11 @@ poll loop spin without pausing, which is worse than leaving it alone.
   cloud speech-to-text service, HA sends it there. EchoMuse itself sends it
   nowhere but HA.
 - **Saved utterance recordings** (`saveUtterances`, off by default) — written
-  to disk beside the database and never uploaded.
+  to disk beside the database and never uploaded. Playing or downloading them
+  is **admin-only**, as is seeing the transcript text of a turn: on the Home
+  Assistant add-on every household user can reach the dashboard, so read-only
+  accounts get turn timings, scores and outcomes without the speech. Enforced
+  on the server, not just hidden in the page.
 - **Device serials, WiFi credentials, network names and your fleet's
   configuration.** These live only in the controller's database.
 - **Support bundles** are built only when you ask for one, and sharing the

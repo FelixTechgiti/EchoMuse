@@ -18,7 +18,13 @@ jobs:
       # math, nothing that pulls in openwakeword/onnxruntime (which would
       # cost minutes of install for zero coverage).
       - name: Install test dependencies
-        run: pip install pytest numpy scipy
+        # pyyaml is for the add-on config parity tests (test_channels.py):
+        # config.yaml is genuinely YAML and hand-parsing it to compare
+        # options and schema would be fragile in exactly the way that test
+        # exists to prevent. Pure Python and dependency-free — nothing like
+        # pulling openwakeword or aiohttp in here, which is what the
+        # minimal-test-env rule is actually about.
+        run: pip install pytest numpy scipy pyyaml
       - name: Run pytest
         working-directory: controller
         run: python -m pytest tests/ -v
@@ -138,7 +144,22 @@ jobs:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # GOTOOLCHAIN=auto for the INSTALL only, so Go fetches whatever
+        # toolchain the tool needs to compile itself. golang.org/x/vuln raised
+        # its minimum to Go 1.25 at v1.2.0, and this runner is pinned to the
+        # firmware's 1.24.0 via device/go.mod — so `@latest` started failing
+        # on every run, on a check whose scan step already carries `|| true`
+        # and cannot fail the job. Pure noise: red emails for a check that
+        # was not reporting anything.
+        #
+        # Not a version pin: v1.1.4 is the last release that builds under
+        # 1.24, which would freeze the scanner on 2024 and re-break the day
+        # its minimum moves again. This survives the next bump.
+        #
+        # Scoped to this step deliberately. The scan below must keep running
+        # under the module's own Go, or it analyses a standard library the
+        # firmware does not ship.
+        run: GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
       # govulncheck reports only vulnerabilities on REACHABLE call paths, so
       # it is low-noise enough to read every time — unlike a plain dependency
       # diff, most of which never executes.

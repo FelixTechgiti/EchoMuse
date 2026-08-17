@@ -1,3 +1,26 @@
+# EchoMuse — Early Access
+
+This is the **Early Access** channel: the next controller release,
+before it is general. It is the same program as the stable add-on
+and the same settings; only the version differs.
+
+**Install this instead of the stable add-on, not alongside it.**
+Both use host networking and the same ports (8767, 8768, 8770), so
+whichever starts second will fail to bind.
+
+**Switching channels is a migration, not a toggle.** Home Assistant
+add-ons do not share storage, so this starts with an empty database
+and a newly generated certificate authority. Existing devices hold
+the stable add-on's CA, and they take `wss` from the mDNS record
+rather than from `require_device_tls` — so they will fail
+verification and will not connect at all until you copy the stable
+add-on's `/data` across, including all four files in `tls/`.
+
+Report anything you find against the EchoMuse repository, saying
+which channel you are on.
+
+---
+
 # EchoMuse
 
 Runs the EchoMuse controller — wake word detection, fleet dashboard, and

@@ -45,9 +45,21 @@ Voice turn flow:
   8. Sends VoiceAssistantAnnounceFinished when playback completes
 
 Cancel (esphome mode):
-  Local-only per ESPHOME_SPEC.md §7.4 — stop local playback, clear state,
-  do NOT signal HA. Any in-flight server-side generation is left to complete
-  and its result discarded on arrival (HA connection stays up).
+  Local by default — stop local playback, clear state, and leave any in-flight
+  server-side generation to complete with its result discarded on arrival (the
+  HA connection stays up).
+
+  When another turn is going to start on this connection, that is not enough:
+  the protocol carries no run identifier, so the old run's trailing events land
+  on the new turn. cancel_turn(abort_ha=True) sends
+  VoiceAssistantRequest(start=False) — a real server-side abort, mapped to
+  handle_stop(True) -> HA's _abort_pipeline() — and em_runbarrier discards the
+  old run's tail until our own RUN_START. See em_runbarrier for the whole
+  reasoning.
+
+  (This header, and cancel_turn's docstring, used to state that the protocol
+  has no server-side abort, citing an ESPHOME_SPEC.md §7.4 that is not in the
+  tree. It has one; we simply never sent it, which is what broke barge-in.)
 """
 
 from __future__ import annotations
@@ -67,11 +79,15 @@ from zeroconf import ServiceInfo
 
 import em_db as db
 import em_api as api
+import em_hostip
 import em_ns
+import em_announce
 import em_recordings
+import em_runbarrier
 import em_oww_models
 import em_player
 import em_turnclock
+import em_volume
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -185,7 +201,7 @@ log = logging.getLogger("echomuse.esphome")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
+SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 
@@ -288,7 +304,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                               # standalone-announce path can read the live
                               # _standalone_play callback rather than a
                               # point-in-time copy taken at connect (see
-                              # _fetch_and_play_announce). Optional/typed
+                              # _announce_play_cb). Optional/typed
                               # loosely to avoid a circular import; may be
                               # None in tests or the reject-connection path.
     ) -> None:
@@ -321,6 +337,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
+        self._run_started       = False
+        self._ha_never_started  = False
+        # Barge-in run serialisation — the protocol has no run id, so the
+        # satellite is what keeps two runs from overlapping on one connection.
+        # See em_runbarrier for the whole reasoning; it is a separate module
+        # because the test suite cannot import this one.
+        self._barrier = em_runbarrier.RunBarrier()
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn
         # after run_esphome_voice_turn returns to decide whether to re-trigger
@@ -352,7 +375,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
         self._on_thinking       = None   # async callable()
         self._on_stt_end        = None   # async callable(text: str)
-        self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _fetch_and_play_announce).
+        self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
     # ── Message handling ─────────────────────────────────────────────────
 
@@ -414,7 +437,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield api_pb2.ListEntitiesMediaPlayerResponse(
                 object_id="media_player",
                 key=MEDIA_PLAYER_KEY,
-                name=self.label,
+                # Empty, not the label. HA sets _attr_has_entity_name = True
+                # for every esphome entity and composes "<device> <entity>"
+                # itself, so a label here is rendered TWICE — "Lounge Voice
+                # Assistant Lounge". An empty name is HA's own convention for
+                # the device's primary entity (entity.py:
+                # `self._attr_name = static_info.name or None`), which renders
+                # as the device name alone.
+                name="",
                 supports_pause=True,
                 feature_flags=MEDIA_PLAYER_FEATURES,
                 supported_formats=[
@@ -437,7 +467,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 yield api_pb2.ListEntitiesEventResponse(
                     object_id="action_button",
                     key=EVENT_KEY,
-                    name=f"{self.label} Action Button",
+                    name="Action Button",
                     device_class="button",
                     event_types=BUTTON_EVENT_TYPES,
                 )
@@ -447,7 +477,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 yield api_pb2.ListEntitiesSensorResponse(
                     object_id="ambient_light",
                     key=AMBIENT_LUX_KEY,
-                    name=f"{self.label} Ambient Light",
+                    name="Ambient Light",
                     unit_of_measurement="lx",
                     accuracy_decimals=0,
                     device_class="illuminance",
@@ -478,7 +508,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 available_wake_words=[
                     api_pb2.VoiceAssistantWakeWord(
                         id=self.oww_model_id,
-                        wake_word=self.oww_model_id.replace("_", " "),
+                        wake_word=em_oww_models.display_name(self.oww_model_id),
                         trained_languages=["en"],
                     )
                 ],
@@ -487,13 +517,50 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             )
             return
 
+        if isinstance(msg, api_pb2.VoiceAssistantSetConfiguration):
+            # HA writing a wake-word choice back to us (its select entity's
+            # async_select_option). Handled explicitly rather than falling into
+            # the generic "unhandled" debug, which made a user-visible control
+            # silently do nothing.
+            #
+            # We advertise ONE model with max_active_wake_words=1, so HA's
+            # dropdown offers exactly our model plus "no wake word" — there is
+            # nothing to switch between, and a request naming our own model is
+            # genuinely a no-op rather than an unimplemented one. Selecting our
+            # model back is therefore correct and silent.
+            #
+            # An EMPTY list means "no wake word", i.e. deafen this satellite.
+            # That is a real request we do not implement — wake detection is
+            # controller-side config, not an HA-owned setting — so it is logged
+            # at warning rather than accepted quietly. Honouring it, and
+            # offering a choice worth making, both wait on multi-model support
+            # (#112).
+            requested = list(msg.active_wake_words)
+            if requested == [self.oww_model_id]:
+                log.debug(
+                    f"[{self._log_name}] VoiceAssistantSetConfiguration: "
+                    f"{self.oww_model_id} already active — nothing to do"
+                )
+            else:
+                log.warning(
+                    f"[{self._log_name}] VoiceAssistantSetConfiguration asked "
+                    f"for active_wake_words={requested or '[] (no wake word)'} "
+                    f"— not applied; this device's wake word is set in the "
+                    f"EchoMuse dashboard and stays {self.oww_model_id}"
+                )
+            yield _HANDLED
+            return
+
         if isinstance(msg, api_pb2.MediaPlayerCommandRequest):
             device_id = (self._owning_server.device_id
                          if self._owning_server is not None else None)
             if msg.has_volume and self._owning_server is not None:
-                # HA set an explicit volume — convert float (0.0–1.0) to device
-                # integer (0–175) and forward to the physical device.
-                level = max(0, min(175, round(msg.volume * 175)))
+                # HA set an explicit volume — convert float (0.0–1.0) to the
+                # device's native level and forward to the physical device.
+                # The conversion is em_volume's, not a local `* 175`: the
+                # ceiling is the codec's unity gain, above which the DAC
+                # clips (see em_volume's docstring).
+                level = em_volume.ha_volume_to_device(msg.volume)
                 log.debug(
                     f"[{self._log_name}] MediaPlayerCommandRequest: "
                     f"volume={msg.volume:.3f} → level={level}"
@@ -509,7 +576,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._fetch_and_play_announce(msg.media_url))
+                    asyncio.create_task(self._play_media_announce(msg.media_url))
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
                     asyncio.create_task(em_player.play(device_id, msg.media_url))
@@ -565,27 +632,37 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         if isinstance(msg, api_pb2.VoiceAssistantAnnounceRequest):
             # HA-initiated announcement (setup wizard audio test, or TTS push).
-            # HA expects the satellite to transition MediaPlayerState to
-            # ANNOUNCING then back to IDLE around the announce, then send
-            # AnnounceFinished — the setup wizard checks this state machine
-            # to confirm the device can reach HA's audio endpoint.
-            # Audio fetch+play runs as a background task; state transitions
-            # are sent synchronously so the wizard doesn't time out.
+            #
+            # AnnounceFinished is HA's completion signal and it BLOCKS on it:
+            # assist_satellite.entity.async_internal_announce documents
+            # async_announce as "should block until the announcement is done
+            # playing", holds _is_announcing and the RESPONDING state for the
+            # duration, and raises SatelliteBusyError on a concurrent announce.
+            # The esphome side awaits it via
+            # send_voice_assistant_announcement_await_response.
+            #
+            # So it is sent when playback ACTUALLY finishes — see _run_announce.
+            # Answering it here used to return the service call while audio was
+            # still playing, drop the entity out of RESPONDING early, and let
+            # two chained announcements overlap on the device instead of
+            # queueing behind HA's own guard.
+            #
+            # The justification for answering early was that the setup wizard
+            # would otherwise time out. It would not: _ANNOUNCEMENT_TIMEOUT_SEC
+            # is 5 minutes, and the wizard's connection test does not wait on
+            # this message at all — it fires when the device fetches the
+            # CONNECTION_TEST_URL_BASE media id.
+            #
+            # ANNOUNCING goes out now, synchronously, because it describes the
+            # state we are entering rather than one we have reached.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._fetch_and_play_announce(msg.media_id))
+            asyncio.create_task(self._run_announce(msg.media_id))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.ANNOUNCING,
                 volume=self._current_volume,
                 muted=False,
             )
-            yield api_pb2.VoiceAssistantAnnounceFinished(success=True)
-            # Real state, not IDLE: an announcement over music pauses the
-            # session, so PAUSED is the truth here and resume_interrupted
-            # follows with PLAYING once the feed is back up. Asserting IDLE
-            # made the entity wrong for as long as it took the music to
-            # restart.
-            yield self._media_state_msg()
             return
 
         log.debug(
@@ -606,6 +683,29 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         data = {item.name: item.value for item in msg.data}
 
         log.debug(f"[{self._log_name}] VoiceAssistantEvent type={event_type} data={data}")
+
+        if self._barrier.active:
+            # We aborted a run and started another. HA acknowledges an abort
+            # with NO wire message at all (_abort_pipeline just cancels the
+            # task), so the barrier has to be ordering rather than timing:
+            # discard everything until the next RUN_START, which is
+            # necessarily ours — HA emits RUN_START only when it creates a
+            # pipeline, we created exactly one more, and the connection is
+            # processed in order.
+            #
+            # Without it the aborted run's tail lands on the new turn: its
+            # RUN_END arrives ~4ms after we start, _run_started is False for
+            # the new turn, and the "HA ended a run it never started" branch
+            # below reads it as terminal. Every barge-in then ended
+            # pipeline_refused with zero audio captured (measured 2026-08-17,
+            # 5 of 5 attempts).
+            if self._barrier.discards(event_type == ET.VOICE_ASSISTANT_RUN_START):
+                log.debug(
+                    f"[{self._log_name}] Discarding event {event_type} from the "
+                    f"aborted run — waiting for our RUN_START"
+                )
+                return
+            log.debug(f"[{self._log_name}] Aborted run drained — our RUN_START seen")
 
         if event_type == ET.VOICE_ASSISTANT_STT_VAD_START:
             # HA's model-driven VAD heard speech begin — authoritative
@@ -657,8 +757,38 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             self._tts_audio_url = url
             self._tts_event.set()
 
+        elif event_type == ET.VOICE_ASSISTANT_RUN_START:
+            # First event of any genuine pipeline run — measured on hardware
+            # at 2ms before STT_START, with RUN_END last after TTS_END. Its
+            # ABSENCE is what identifies a RUN_END that HA emitted without
+            # running a pipeline at all: the wake-word interception the
+            # satellite setup flow uses returns straight after
+            # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
+            # RUN_START is ever sent. Structural, not a race on timing.
+            self._run_started = True
+
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
+
+            if not self._run_started:
+                # HA ended a run it never started. Terminal, and safe to act
+                # on: the premature RUN_END below is a real thing HA does
+                # MID-turn, and a mid-turn RUN_END by definition follows the
+                # RUN_START that opened it.
+                #
+                # Without this the turn held the microphone until our own
+                # timers expired — measured at 20.0s (the streaming hard cap)
+                # and 5.2s (the no-speech window) — while HA had re-armed for
+                # the next wake word 18ms after ending this one. That is what
+                # made the setup flow's second "say it again" step land on a
+                # device still listening for the first.
+                #
+                # Unblocking both waiters mirrors the ERROR path below, which
+                # is the established shape for "HA is done, stop feeding it".
+                self._ha_never_started = True
+                self._ha_vad_end.set()
+                self._tts_event.set()
+                return
             # HA can emit a RUN_END that isn't the turn's real terminal event —
             # confirmed in practice: a RUN_END arriving before STT_START, with
             # the genuine terminal RUN_END following ~5s later after TTS_END.
@@ -714,13 +844,42 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             muted=False,
         )
 
-    async def _fetch_and_play_announce(self, media_id: str) -> None:
+    def _announce_play_cb(self):
         """
-        Background task: fetch TTS audio from HA and play it on the device.
+        Where announcement audio goes, resolved at call time.
 
-        Fired after VoiceAssistantAnnounceFinished is already sent, so HA's
-        setup wizard doesn't time out waiting for the response. Audio playback
-        happens asynchronously — if it fails, the wizard has already passed.
+        """
+        cb = self._on_announce
+        if cb is None and self._owning_server is not None:
+            cb = self._owning_server._standalone_play
+        return cb
+
+    async def _play_media_announce(self, media_id: str) -> None:
+        """
+        play_media with announce=true — an ordinary media_player command.
+
+        Deliberately does NOT send VoiceAssistantAnnounceFinished: HA is not
+        waiting for one here, unlike VoiceAssistantAnnounceRequest. Two ways
+        to announce, one of which has a completion contract.
+        """
+        try:
+            await em_announce.play_media(
+                media_id,
+                fetch=_fetch_tts_audio,
+                play=self._announce_play_cb(),
+                log_name=self._log_name,
+            )
+        except Exception as e:
+            log.error(f"[{self._log_name}] play_media announce failed: {e}")
+
+    async def _run_announce(self, media_id: str) -> None:
+        """
+        Background task: fetch TTS audio from HA, play it, then tell HA the
+        announcement is done.
+
+        The sequencing rules and their reasons live in em_announce, which is
+        importable by the test suite. This is the adapter: it resolves the
+        playback callback and decides whether the reply can still be written.
 
         During a voice turn, _on_announce is set by run_esphome_voice_turn()
         and takes priority — it routes audio to the device's speaker pipeline
@@ -739,23 +898,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         "no playback callback set" on freshly-established connections, not
         just stale reconnects, which ruled out a staleness-only explanation.
         """
-        if not media_id:
-            return
-        try:
-            pcm_bytes = await _fetch_tts_audio(media_id)
-            if not pcm_bytes:
+        def reply(ok: bool) -> None:
+            if not self._transport or self._transport.is_closing():
                 return
+            self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=ok))
+            # Real state, not IDLE: an announcement over music pauses the
+            # session, so PAUSED is the truth here and resume_interrupted
+            # follows with PLAYING once the feed is back up. Asserting IDLE
+            # made the entity wrong for as long as it took the music to
+            # restart.
+            self._send_one(self._media_state_msg())
 
-            play_cb = self._on_announce
-            if play_cb is None and self._owning_server is not None:
-                play_cb = self._owning_server._standalone_play
-
-            if play_cb:
-                await play_cb(pcm_bytes)
-            else:
-                log.info(f"[{self._log_name}] Announce audio fetched ({len(pcm_bytes)}b) — no playback callback set (standalone announce)")
-        except Exception as e:
-            log.error(f"[{self._log_name}] Announce fetch/play error: {e}")
+        await em_announce.run(
+            media_id,
+            fetch=_fetch_tts_audio,
+            play=self._announce_play_cb(),
+            on_finished=reply,
+            log_name=self._log_name,
+        )
 
     # ── Voice turn (outbound) ────────────────────────────────────────────
 
@@ -766,6 +926,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         post_turn_play,    # async callable(pcm_chunks) -> decoded byte count
         trace: "TurnTrace | None" = None,
         preroll_discard: int = VOICE_PREROLL_DISCARD,
+        wake_word_phrase: str = "",
     ) -> None:
         """
         Execute one voice turn over the live HA connection.
@@ -798,6 +959,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url         = None
         self._tts_audio_data        = None
         self._intent_ended          = False
+        self._run_started           = False
+        self._ha_never_started      = False
+        # Takes ownership of an abort armed during the PREVIOUS turn (at the
+        # barge). Deliberately not a plain reset: the arm has to survive this
+        # block to reach the turn it protects.
+        self._barrier.begin_turn()
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
@@ -816,10 +983,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         try:
             # ── Tell HA to start the Assist pipeline ──────────────────────
             # flags=0 → device detected wake word, skip HA-side wake word step.
+            #
+            # wake_word_phrase names WHICH wake word fired, and is empty for
+            # a button turn — where no wake word fired and claiming one would
+            # tell HA something untrue. aioesphomeapi maps "" back to None
+            # (client.py: `if wake_word_phrase == "": wake_word_phrase = None`),
+            # so an empty string is the correct way to say "no wake word",
+            # not a phrase that happens to be blank.
+            #
+            # Sending nothing at all is what stalled Home Assistant's voice
+            # satellite setup dialog: it arms an interceptor for the next wake
+            # word, reads this field, and on None raises
+            # AssistSatelliteError("No wake word phrase provided") and ends the
+            # run within milliseconds. Every turn worked, and the one flow that
+            # asks the device to prove it heard a wake word could never finish.
             self._send_one(api_pb2.VoiceAssistantRequest(
                 start=True,
                 conversation_id=self._conversation_id,
                 flags=VOICE_REQUEST_FLAGS_WAKE_WORD_DONE,
+                wake_word_phrase=wake_word_phrase,
             ))
 
             # ── Stream mic audio from device.voice_queue ──────────────────
@@ -850,12 +1032,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace: trace.outcome = "cancelled"
                 return
 
+            if self._ha_never_started:
+                # HA ended the run without starting a pipeline — currently
+                # only the satellite setup flow's wake-word interception.
+                # Release the microphone now rather than waiting out a timer
+                # for speech nobody is listening to.
+                log.info(
+                    f"[{self._log_name}] HA ended the run without starting a "
+                    f"pipeline — releasing the turn"
+                )
+                if trace: trace.outcome = "pipeline_refused"
+                return
+
             if self._no_speech_timeout:
                 # Device gave up locally before any speech was detected —
                 # _stream_mic_audio already skipped sending end=True to HA,
                 # so there's no in-flight HA pipeline to wait on. Close the
                 # turn immediately rather than sitting on the 30s TTS wait
                 # for a response that was never requested.
+                #
+                # A genuine no-speech turn. An HA run that never started is
+                # caught above by _ha_never_started, so reaching here means
+                # HA was listening and nobody spoke.
                 if trace: trace.outcome = "no_speech"
                 return
 
@@ -937,6 +1135,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # the feed is actually up.
                 self._send_one(self._media_state_msg())
             self._turn_active    = False
+            self._barrier.end_turn()
             self._on_thinking    = None
             self._on_announce    = None
             self._trace          = None
@@ -1286,20 +1485,56 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if self._transport and not self._transport.is_closing():
             self._transport.close()
 
-    def cancel_turn(self) -> None:
+    def cancel_turn(self, abort_ha: bool = False) -> None:
         """
-        Cancel an in-flight voice turn — local only, no upstream signal.
+        Cancel an in-flight voice turn.
 
-        Per ESPHOME_SPEC.md §7.4: the ESPHome protocol has no server-side
-        abort mechanism. cancel_turn() stops local state only; any in-flight
-        HA pipeline generation is left to complete and its result discarded
-        on arrival — the cancel is local-only; nothing reaches into HA's
-        in-flight pipeline.
+        abort_ha=False is local-only: HA's pipeline is left to complete and
+        its result discarded on arrival. Correct when nothing follows this
+        turn, or when HA has already finished (a barge during PLAYBACK — the
+        run ended at RUN_END and only our speaker is still busy).
+
+        abort_ha=True additionally sends VoiceAssistantRequest(start=False).
+        aioesphomeapi maps that to handle_stop(True) → HA's _abort_pipeline(),
+        which queues the audio-stream sentinel AND cancels _pipeline_task. It
+        is required before starting another turn on this connection, because
+        the protocol has no run id and HA does not serialise runs itself.
+
+        (An earlier docstring here claimed the protocol has no server-side
+        abort, citing an ESPHOME_SPEC.md §7.4 that no longer exists in the
+        tree. It does have one; we simply never sent it.)
         """
-        if self._turn_active:
+        if not self._turn_active:
+            return
+        if abort_ha:
+            self.abort_ha_run()
+            log.info(f"[{self._log_name}] Turn cancelled (HA pipeline aborted)")
+        else:
             log.info(f"[{self._log_name}] Turn cancelled (local only)")
-            self._turn_cancelled = True
-            self._tts_event.set()  # unblock any waiting coroutine
+        self._turn_cancelled = True
+        self._tts_event.set()  # unblock any waiting coroutine
+
+    def abort_ha_run(self) -> None:
+        """
+        Abort HA's pipeline and arm the run barrier, without touching local
+        turn state.
+
+        Split out of cancel_turn because a barge during PLAYBACK must not mark
+        the turn cancelled — the response was delivered and the trace outcome
+        should say so — but still has to serialise against the interrupting
+        turn. HA's RUN_END lands after TTS_END, so it is usually consumed by
+        the still-active turn before the barge; "usually" is not a guarantee,
+        and the cost of losing that race is the whole interrupting turn.
+
+        Aborting an already-finished pipeline is harmless: _abort_pipeline
+        cancels a completed task (a no-op) and queues a sentinel into a queue
+        that handle_pipeline_start drains before the next run.
+        """
+        if self._transport and not self._transport.is_closing():
+            self._send_one(api_pb2.VoiceAssistantRequest(start=False))
+        # Armed even if the transport is gone: the barrier is cheap, and a
+        # reconnect that replays events is exactly when it earns its keep.
+        self._barrier.abort()
 
 
 # ─── TTS audio fetch ─────────────────────────────────────────────────────────
@@ -1989,23 +2224,38 @@ async def trigger_voice_turn(
         trigger=trigger_label, t0=time.monotonic(), wake_info=wake_info
     )
 
+    # Only a wake-word turn names a wake word. A button turn genuinely has
+    # none, and "" is how the protocol says so — aioesphomeapi turns it back
+    # into None. Keyed on the trigger label rather than on whether a model is
+    # configured, because a model is always configured; what varies is whether
+    # it fired. Covers "wakeword(0.522)" and the on-device "wakeword-dev(…)".
+    wake_word_phrase = (
+        em_oww_models.display_name(server.oww_model_id)
+        if trigger_label.startswith("wakeword") else ""
+    )
+
     await satellite.run_esphome_voice_turn(
         device=device,
         preroll_discard=preroll_discard,
         on_thinking=on_thinking,
         post_turn_play=post_turn_play,
         trace=trace,
+        wake_word_phrase=wake_word_phrase,
     )
 
     return satellite._continue_conversation
 
 
-def cancel_voice_turn(device_id: str) -> None:
+def cancel_voice_turn(device_id: str, abort_ha: bool = False) -> None:
     """
     Cancel an in-flight ESPHome voice turn for a device.
 
-    Local-only per ESPHOME_SPEC.md §7.4 — does not signal HA.
-    Called from em_controller.handle_button_event() when voice_lock is held.
+    abort_ha=True also aborts HA's pipeline — pass it whenever another turn
+    is going to start on this connection (barge-in during thinking). See
+    EchoMuseSatellite.cancel_turn.
+
+    Called from em_controller.handle_button_event() when voice_lock is held,
+    and from _barge_watcher.
     """
     server = get_server(device_id)
     if server is None:
@@ -2013,7 +2263,25 @@ def cancel_voice_turn(device_id: str) -> None:
     satellite = server.get_satellite()
     if satellite is None:
         return
-    satellite.cancel_turn()
+    satellite.cancel_turn(abort_ha=abort_ha)
+
+
+def abort_ha_run(device_id: str) -> None:
+    """
+    Abort HA's in-flight pipeline without cancelling the local turn.
+
+    For a barge during playback: the response was delivered, so the turn is
+    not "cancelled", but an interrupting turn is about to start on the same
+    connection and the protocol serialises runs at the satellite or not at
+    all. See EchoMuseSatellite.abort_ha_run.
+    """
+    server = get_server(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite.abort_ha_run()
 
 
 async def push_media_state(device_id: str, state: str) -> None:

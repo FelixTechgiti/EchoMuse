@@ -54,11 +54,14 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_firmware
+import em_ingressauth
 import em_oww_assets
 import em_oww_models
 import em_pki
 import em_player
 import em_recordings
+import em_volume
 import em_scenes
 import em_shadow
 import em_support
@@ -266,9 +269,18 @@ async def create_app() -> web.Application:
 
     # Auth
     app.router.add_post("/api/auth/login",           _post_login)
+    # Public: decides for itself whether the request is a genuine ingress
+    # request. Requiring a session here would defeat the purpose.
+    app.router.add_post("/api/auth/ingress",          _post_ingress_login)
     app.router.add_post("/api/auth/logout",          _post_logout)
     app.router.add_get("/api/auth/me",               _get_me)
     app.router.add_post("/api/auth/change-password", _post_change_password)
+
+    # Users — roles. There was no way to change one at all until 2026-08-14,
+    # which only became load-bearing when ingress started provisioning
+    # accounts the operator never created.
+    app.router.add_get("/api/users",        _get_users)
+    app.router.add_patch("/api/users/{id}", _patch_user)
 
     # Devices — order matters: specific paths before parameterised ones
     app.router.add_get("/api/devices",                    _get_devices)
@@ -472,6 +484,102 @@ async def _post_setup(request: web.Request) -> web.Response:
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
+@auth.require_admin
+async def _get_users(request: web.Request) -> web.Response:
+    """
+    GET /api/users — accounts and their roles. ADMIN ONLY.
+
+    Never returns password_hash. `ha_linked` says whether Home Assistant
+    governs this account's role, which is what makes a refused PATCH
+    explicable rather than arbitrary.
+    """
+    loop  = asyncio.get_event_loop()
+    users = await loop.run_in_executor(None, db.get_all_users)
+    return _ok([{
+        "id":         u["id"],
+        "username":   u["username"],
+        "role":       u["role"],
+        "ha_linked":  bool(u["ha_user_id"]),
+        "created_at": u["created_at"],
+    } for u in users])
+
+
+@auth.require_admin
+async def _patch_user(request: web.Request) -> web.Response:
+    """
+    PATCH /api/users/{id}  {role} — change a user's role. ADMIN ONLY.
+
+    This is the ONLY way to promote someone, including accounts Home
+    Assistant created through ingress — roles are not mirrored from HA, so
+    nothing here is later overwritten by a login.
+
+    One refusal: **never leave the install with no admin.** On the standalone
+    container local accounts are the only auth, so an install with no admin
+    has no way back in — and this endpoint is the one an admin reaches for
+    while tidying up.
+    """
+    body = await _json_body(request)
+    role = _require_str(body, "role")
+    if role not in ("admin", "readonly"):
+        return _error("bad_request", "role must be 'admin' or 'readonly'", 400)
+
+    try:
+        user_id = int(request.match_info["id"])
+    except ValueError:
+        return _error("bad_request", "user id must be numeric", 400)
+
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(None, db.get_user_by_id, user_id)
+    if user is None:
+        return _error("user_not_found", f"No user: {user_id}", 404)
+
+    if user["role"] == role:
+        return _ok({"id": user_id, "role": role, "changed": False})
+
+    if user["role"] == "admin":
+        admins = await loop.run_in_executor(None, db.admin_count)
+        if admins <= 1:
+            return _error(
+                "last_admin",
+                "This is the only admin — promote someone else first", 409)
+
+    await loop.run_in_executor(None, db.set_user_role, user_id, role)
+    log.info(f"[api] {request['user']['username']} set "
+             f"{user['username']} to {role}")
+    return _ok({"id": user_id, "role": role, "changed": True})
+
+
+async def _post_ingress_login(request: web.Request) -> web.Response:
+    """
+    POST /api/auth/ingress — authenticate as the Home Assistant user that
+    Supervisor forwarded. → {token, role} or 401.
+
+    Home Assistant has already authenticated this person; a second EchoMuse
+    password would be a lock on a door that is already locked. Supervisor
+    strips client-supplied copies of these headers before proxying, so their
+    presence on a request that genuinely came from the gateway is proof of
+    an authenticated HA session.
+
+    Whether it *did* come from the gateway is em_ingressauth.decide's
+    judgement, made from the deployment mode and the peer address together.
+    A 401 here is not a failure — it is the ordinary answer everywhere that
+    is not the add-on, and the dashboard falls back to the login form.
+    """
+    identity = em_ingressauth.decide(
+        ingress_only=INGRESS_ONLY,
+        remote=request.remote,
+        user_id=request.headers.get("X-Remote-User-Id"),
+        username=request.headers.get("X-Remote-User-Name"),
+        display_name=request.headers.get("X-Remote-User-Display-Name"),
+    )
+    if identity is None:
+        return _error("not_authenticated",
+                      "Home Assistant authentication is not available", 401)
+
+    token, role = await auth.login_via_ingress(identity)
+    return _ok({"token": token, "role": role, "via": "ingress"})
+
+
 async def _post_login(request: web.Request) -> web.Response:
     """POST /api/auth/login — {username, password} → {token, role}"""
     body     = await _json_body(request)
@@ -548,13 +656,41 @@ async def _get_device_turns(request: web.Request) -> web.Response:
     turns = await loop.run_in_executor(
         None, lambda: db.get_turns(device_id, limit, since)
     )
-    return _ok(turns)
+    return _ok(_redact_turns_for(turns, request["user"]))
 
 
-@auth.require_auth
+def _redact_turns_for(turns: list, user: dict) -> list:
+    """
+    Remove transcripts for a non-admin session.
+
+    A transcript is the content of what someone said in their home — the
+    same class of data as the recording it came from, differing only in
+    format. Stripped HERE rather than hidden in the dashboard, because the
+    dashboard is not what protects it: /api/devices/{id}/turns is a plain
+    GET with a session token, so a UI-only rule protects nothing from
+    anyone who opens the network tab.
+
+    The rest of the row — timings, scores, outcome — is what the Activity
+    tab is for and stays visible, so read-only access keeps its diagnostic
+    value.
+    """
+    if user.get("role") == "admin":
+        return turns
+    return [{k: v for k, v in t.items() if k != "stt_text"} for t in turns]
+
+
+@auth.require_admin
 async def _get_turn_audio(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/turns/{turn}/audio — the saved mic audio for
-    one voice turn, as a downloadable WAV.
+    one voice turn, as a downloadable WAV. ADMIN ONLY.
+
+    This is recognisable speech recorded in someone's home — the most
+    sensitive thing the controller stores, and the reason saveUtterances is
+    off by default. Under the add-on every Home Assistant user in the
+    household can reach the dashboard (Supervisor's ingress view sets
+    requires_auth=False and panel_admin only hides the sidebar entry), so
+    read-only is no longer a synonym for "someone the operator trusts with
+    the recordings".
 
     Only turns captured while saveUtterances was on have one, and only the
     newest em_recordings.KEEP_PER_DEVICE per device survive — a turn row
@@ -825,7 +961,11 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     the EFFECTIVE config, never a request body: with per-section scoping a
     body is partial by design, and a device must always be sent the whole
     resolved picture.
+
+    One key is held back: a NEW `owwModel` is not sent to a device that scores
+    locally until the classifier is actually on it — see _hold_back_oww_model.
     """
+    effective, pending_model = _hold_back_oww_model(live, effective)
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:
         live.oww_threshold = float(effective["owwThreshold"])
@@ -835,6 +975,10 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # em_api at module level).
         import em_esphome
         em_esphome.update_oww_model(device_id, effective["owwModel"])
+    if pending_model:
+        # The device is still on its previous wake word, still scoring
+        # locally, still answering. Install, then switch.
+        asyncio.create_task(_install_then_switch(device_id, pending_model))
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
@@ -858,7 +1002,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # no code to send, leaving it deaf. em_shadow.effective_mode degrades
         # that to shadow.
         live.oww_on_device = em_shadow.effective_mode(
-            effective["owwOnDevice"], live.oww_trigger_capable
+            effective["owwOnDevice"], live.oww_trigger_capable,
+            getattr(live, "oww_model_ready", True),
         )
     if "eqBands" in effective:
         live.eq_bands = effective["eqBands"]
@@ -1395,7 +1540,7 @@ async def _run_update(device_id: str, release: dict,
             await _push_log_event(device_id, "info", "controller",
                                   f"Using uploaded binary ({len(binary):,} bytes)")
         else:
-            binary = await _fetch_binary(release["url"])
+            binary = await _fetch_binary(release["url"], release.get("version", ""))
             if binary is None:
                 await _update_failed(device_id,
                                      "Failed to fetch binary from GitHub")
@@ -2487,7 +2632,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     if release is None:
         return _error("no_release", "No release information available", 404)
 
-    binary = await _fetch_binary(release["url"])
+    binary = await _fetch_binary(release["url"], release.get("version", ""))
     if binary is None:
         return _error("fetch_failed", "Could not download binary from GitHub", 502)
 
@@ -3328,6 +3473,120 @@ def _oww_wanted_models(device_id: str) -> list[str]:
     return [model] if model else []
 
 
+def _hold_back_oww_model(live, effective: dict):
+    """
+    Keep a NEW wake word off a device until it has the model for it.
+
+    Returns (config_to_send, pending_model). `pending_model` is the model the
+    device should end up on once the classifier is installed, or None when the
+    change can go straight through.
+
+    A device cannot score a wake word whose classifier it does not have. Under
+    `owwOnDevice=on` the controller has stood down and no longer triggers on
+    its behalf, so telling the device to use a model it lacks produced a device
+    with NO wake word: nothing fired, nothing warned, and the dashboard
+    reported it healthy (#191). Selecting a wake word a device was never
+    provisioned with is an ordinary dashboard action.
+
+    So the device is never told about the new model until the file is there.
+    It keeps listening for its CURRENT wake word, on-device, the whole time —
+    no silent fall back to controller-side scoring, which is a posture the user
+    did not ask for and would not see. If the install fails, the device simply
+    stays where it was.
+
+    Only devices that actually score locally are held back. With
+    `owwOnDevice=off` the controller does the scoring and the file on the
+    device is irrelevant, so the change applies immediately — which is the
+    common case, and it stays instant.
+
+    Both the old and the NEW mode are consulted: turning on-device scoring on
+    in the same save that changes the wake word would otherwise slip through
+    on the strength of the old mode being "off".
+    """
+    new_model = (effective.get("owwModel") or "").strip()
+    if not new_model or new_model == live.oww_model:
+        return effective, None
+    if not live.oww_shadow_capable:
+        return effective, None
+
+    was_local = live.oww_on_device != em_shadow.MODE_OFF
+    now_local = em_shadow.normalise_mode(
+        effective.get("owwOnDevice", live.oww_on_device)
+    ) != em_shadow.MODE_OFF
+    if not (was_local or now_local):
+        return effective, None
+
+    held = dict(effective)
+    held["owwModel"] = live.oww_model
+    return held, new_model
+
+
+async def _install_then_switch(device_id: str, model: str) -> None:
+    """
+    Install a wake word classifier, then move the device onto it.
+
+    Background task: the push is a multi-megabyte shell-plane transfer over a
+    link measured at 5-7% packet loss, and blocking the config save on it would
+    time out the request without making anything safer. Nothing is degraded
+    while it runs — the device is still on its previous wake word and still
+    scoring locally.
+
+    The sync is idempotent, so a device that already has the model completes in
+    an md5 compare and the switch is effectively immediate.
+    """
+    live = _devices.get(device_id)
+    if live is None:
+        return
+
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Installing wake word model {model} before switching to it"
+    )
+    try:
+        result = await _sync_oww_assets(live, device_id)
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+
+    live = _devices.get(device_id)
+    if live is None:
+        return
+
+    if not result.get("ok"):
+        # Deliberately leaves the device where it was: on a wake word it can
+        # actually hear. The controller is scoring the NEW model (fleet config
+        # decides that), so the two disagree until this is resolved — worth
+        # saying loudly, and better than a device that hears nothing.
+        await _push_log_event(
+            device_id, "error", "controller",
+            f"Could not install wake word model {model} "
+            f"({result.get('error')}) — this device is still using "
+            f"{live.oww_model}"
+        )
+        log.error(f"[api] [{device_id}] wake word switch to {model} abandoned: "
+                  f"{result.get('error')} — device left on {live.oww_model}")
+        return
+
+    effective = await asyncio.get_event_loop().run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    if (effective.get("owwModel") or "").strip() != model:
+        # Changed again while the push was running; that save owns the
+        # outcome and has its own install task.
+        log.info(f"[api] [{device_id}] wake word changed again during install "
+                 f"— dropping the switch to {model}")
+        return
+
+    await live.send_control({"type": "config", **effective})
+    live.oww_model = model
+    import em_esphome
+    em_esphome.update_oww_model(device_id, model)
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Wake word model {model} installed — device switched"
+    )
+    log.info(f"[api] [{device_id}] wake word switched to {model} after install")
+
+
 async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
     """
     Make a device's asset directory match what it needs. Idempotent.
@@ -3376,10 +3635,16 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
 
         dest = em_oww_assets.device_path(asset.name)
         part = f"{dest}.part"
-        pushed = await _stream_file_to_device(live, data, part, mode="644")
-        if not pushed:
-            await say("error", f"{asset.name} transfer failed: {pushed}")
-            return {"ok": False, "error": f"{asset.name}: {pushed}"}
+        # NOT `pushed` — that is the accumulator above, and assigning the
+        # transfer result to it shadowed the list on the first file, so the
+        # append below raised AttributeError and asset installation failed
+        # outright. TransferResult is truthy-compatible, which is what let
+        # this reach a release: every `if not …` call site kept working and
+        # only the one that treated it as a list broke.
+        sent = await _stream_file_to_device(live, data, part, mode="644")
+        if not sent:
+            await say("error", f"{asset.name} transfer failed: {sent}")
+            return {"ok": False, "error": f"{asset.name}: {sent}"}
 
         res = await _shell_run(live, (
             f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
@@ -3759,8 +4024,27 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     )
 
 
-async def _fetch_binary(download_url: str) -> Optional[bytes]:
-    """Download the binary from a GitHub release asset URL."""
+async def _fetch_binary(download_url: str,
+                        version: str = "") -> Optional[bytes]:
+    """
+    The release binary, from disk if we already have it.
+
+    A published tag never changes what it points at, so the download is worth
+    doing once per release rather than once per device — a fleet update used to
+    pull the same ~10MB for every Dot, and the provisioning wizard again for
+    every device it set up.
+
+    `version` is optional so a caller with only a URL still works; it simply
+    does not get the cache. Nothing here can fail an update: a cache miss, an
+    unwritable directory or a corrupt entry all end in an ordinary download.
+    """
+    if version:
+        cached = await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.read, version
+        )
+        if cached is not None:
+            return cached
+
     log.info(f"[api] Fetching binary: {download_url}")
     try:
         async with aiohttp.ClientSession() as session:
@@ -3771,10 +4055,18 @@ async def _fetch_binary(download_url: str) -> Optional[bytes]:
                 if resp.status != 200:
                     log.error(f"[api] Binary download failed: HTTP {resp.status}")
                     return None
-                return await resp.read()
+                data = await resp.read()
     except Exception as e:
         log.error(f"[api] Binary download exception: {e}")
         return None
+
+    if version and data:
+        # Off the event loop: hashing and writing 10MB blocks it for long
+        # enough to delay speaker frames, and this runs during an OTA.
+        await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.write, version, data
+        )
+    return data
 
 
 # ─── Periodic background tasks ────────────────────────────────────────────────
@@ -3978,7 +4270,11 @@ def _stored_volume(row):
     if level is None:
         return None
     try:
-        return max(0.0, min(1.0, float(level) / 175.0))
+        # float() first, deliberately: em_volume swallows bad input and
+        # returns 0.0, which is the right answer on the audio path and the
+        # wrong one here — this function's None means "not known", and a
+        # corrupt stored value must not report as "silent".
+        return em_volume.device_level_to_ha(float(level))
     except (TypeError, ValueError):
         return None
 

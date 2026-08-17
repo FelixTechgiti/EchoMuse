@@ -66,6 +66,8 @@ COPY em_support.py .
 COPY em_shadow.py .
 COPY em_ns.py .
 COPY em_pki.py .
+COPY em_hostip.py .
+COPY em_ingressauth.py .
 COPY em_linkauth.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
@@ -78,6 +80,10 @@ COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
 COPY em_turnclock.py .
+COPY em_firmware.py .
+COPY em_announce.py .
+COPY em_runbarrier.py .
+COPY em_volume.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/

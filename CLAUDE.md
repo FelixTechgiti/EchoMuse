@@ -61,10 +61,10 @@ Tests only cover pure-Go logic — hardware-dependent code is not testable on th
 **Run controller tests (host):**
 ```bash
 cd controller
-python -m pytest tests/        # needs: pytest numpy scipy — not the full requirements.txt
+python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
 ```
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`, `em_hostip`, `em_ingressauth`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
@@ -105,7 +105,7 @@ Two guards sit in front of that, both tested by reintroducing the bug:
 Device firmware and controller are versioned independently from the same repo:
 
 - **Device**: plain `v*` tags (e.g. `v2.7.6`) → `release.yml` → GitHub Release with the `server` binary asset. The tag is embedded in the binary and compared against `firmware_ver` by OTA — don't change this scheme.
-- **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, amd64). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
+- **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, **multi-arch: linux/amd64 + linux/arm64** — it said amd64 here until 2026-08-13, long after arm64 shipped). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
 
@@ -137,10 +137,295 @@ Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
 - `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
+- `DEBUG` — `1` raises the controller to DEBUG. Read **once at import**, so
+  a change needs a restart, and parsed as `== "1"` rather than a bare
+  truthiness test: every non-empty string is truthy in Python including the
+  `"0"` that `em_start.py` writes for a false add-on option, which would put
+  every add-on install at DEBUG with the toggle showing off. It is also an
+  add-on option (`debug`), because it went unreachable there until
+  2026-08-16 while being the first thing support asks for — the #163 class
+  of gap. `tests/test_deploy.py` walks all four things an option needs (a
+  default, a schema type, a translation, an `OPTION_ENV_VARS` line) in both
+  directions; the missing env mapping is the quiet one, since Supervisor
+  accepts, displays and stores the setting and `em_start` warns to a log
+  nobody reads.
+
+### Home Assistant add-on
+
+The controller also ships as a Home Assistant Supervisor add-on
+(`controller/config.yaml` + `repository.yaml` at the repo root, from #122).
+Supervisor clones the **default branch**, so add-on files only take effect
+once they are on `main` — a branch cannot be installed.
+
+**The add-on and the standalone container are both first-class, and neither
+may gain or lose capability relative to the other.** A setting reachable in
+one and not the other is a divergence that silently invalidates
+documentation and support answers depending on how someone installed. Every
+`.env` variable therefore needs a matching add-on option (`options` +
+`schema` + `translations/en.yaml`, plus `em_start.py`'s `OPTION_ENV_VARS`)
+or a stated reason it is fixed. Two are deliberately fixed: `DB_PATH`
+(pinned to `/data/…` so it cannot point somewhere that does not survive a
+restart) and `API_PORT` (must equal `ingress_port`). `SERVER_TLS_PORT` and
+`SERVER_PORT` are unreconciled gaps — #163.
+
+**`config.yaml`'s `version:` pins the image Supervisor pulls**, so it names
+an artifact that must exist AND must contain the add-on code. Shipping it
+pinned to `2.18.0` — an image built before the add-on existed — started a
+controller with no ingress support at all, which presented as two unrelated
+faults: the dashboard answering the LAN with 200 instead of 403, and the
+panel throwing `JSON.parse ... column 4` because the old bundle's absolute
+`/api` paths reached Home Assistant, which answers `404: Not Found` as plain
+text. `controller-release.yml` now refuses to build when the tag and the pin
+disagree; there is nothing else that catches it, since it fails no test and
+fails no release.
+
+**Ingress.** `em_start.py` bridges `/data/options.json` into the env vars
+`em_controller.py` already reads and execs into it, so the controller stays
+unaware of Home Assistant. `em_api` injects a `<base href>` from the
+`X-Ingress-Path` header and `dashboard.jsx` routes every fetch through
+`ingressPath()`; absolute paths bypass the base and hit HA instead.
+`_ingress_only_middleware` rejects anything whose `request.remote` is not
+Supervisor's gateway `172.30.32.2` — **verified on hardware 2026-08-13**,
+including under `host_network: true`, where the container shares the host
+netns and the assumption looked shaky. That gate is the add-on's only
+network protection, since host networking exposes 8768 on the LAN.
+`/api/system/status` reports `ha_ingress` for presentation only: the
+dashboard does provisioning, OTA, the shell and turn history, none of which
+HA offers, so **nothing is gated on it**.
+
+**Auth under ingress: Home Assistant has already done it.** Supervisor
+forwards the authenticated user as `X-Remote-User-Id` (plus optional name
+headers) and **strips any client-supplied copies** before proxying, so on a
+genuine ingress request those values are proof of an HA session. `POST
+/api/auth/ingress` mints an EchoMuse session from them and the landing page
+tries it before rendering any form, which also removes the bootstrap-token
+step under the add-on — the first HA user through the door becomes admin,
+exactly as the token holder does on the container.
+
+The decision is `em_ingressauth.decide`, pure and tested, for the reason
+`em_linkauth.decide` is: **two conditions, never one.** The header only means
+something when `INGRESS_ONLY` **and** the peer is Supervisor's gateway. On the
+standalone container that same header is attacker-supplied, so honouring it
+there is an unauthenticated admin session on a dashboard that proxies a root
+shell. `tests/test_deploy.py` pins that the call site passes the live
+`INGRESS_ONLY` and `request.remote` rather than literals, and that nothing
+else in the tree reads those headers.
+
+Users are keyed on the **HA user id, never the name** (schema v18,
+`users.ha_user_id`) — names are editable in HA, and keying on one would hand a
+renamed user a fresh account, or hand somebody else's account to whoever took
+the old name. These rows carry a password sentinel that no bcrypt check can
+match, so they can never be used on the password form.
+
+**Roles are NOT mirrored from Home Assistant.** The first user through the
+door is admin; everyone after is read-only until promoted via
+`PATCH /api/users/{id}` (admin, and it refuses to demote the last admin —
+on the standalone container local accounts are the only auth, so there would
+be no way back in). Nothing overwrites a role on a later login, which is what
+makes a promotion stick.
+
+Mirroring was built and then removed on 2026-08-14, deliberately. Supervisor
+forwards **no admin flag** — only the user id and names — and HA core's
+ingress view sets `requires_auth=False` and leans on the session token, so
+`panel_admin` hides the sidebar entry rather than gating the URL: **reaching
+this dashboard is not evidence of being an HA admin.** Asking HA therefore
+needs a permission, and both routes are too expensive for one boolean.
+`homeassistant_api` grants the entire HA API; `auth_api` looks narrow but its
+`/auth` set includes **`POST /auth/reset`, which sets any Home Assistant
+user's password with no verification**. On a single-operator system that is a
+steep price for automation the `PATCH` endpoint already covers. Revisit under
+#171 if real multi-user demand appears.
+
+**Recordings and transcripts are admin-only** — `_get_turn_audio` is
+`require_admin` and `_redact_turns_for` strips `stt_text` from `/turns` for
+non-admin sessions. This is recognisable speech from inside someone's home,
+and once every household HA user can reach the dashboard, "read-only" stopped
+meaning "trusted with the recordings". Enforced **server-side**: `/turns` is a
+plain GET with a session token, so a dashboard-only rule protects nothing from
+anyone who opens the network tab. `tests/test_deploy.py` pins both.
+
+There is no **Sign out** control on a session obtained through ingress: HA owns
+it, so signing out would re-authenticate immediately and read as a broken
+button. Keyed on how the session was obtained (`em_auth_via`), not on whether
+the page is under ingress — those differ when Supervisor forwards no user and
+the person falls back to the password form, and they can sign out.
+
+Note HA display names contain spaces, unlike every local username, and they
+now reach the user table — `em_support`'s account redaction already covers
+them because it reads that table rather than matching a pattern, and a test
+pins it.
+
+**Release channels.** Home Assistant has no channel concept — one add-on is
+one version — so a channel is a **second add-on with its own slug**, opted
+into by installing it (the shape ESPHome uses). `controller/` is GA;
+`controller-ea/` is Early Access and is **generated** by
+`controller/tools/sync_channels.py`, never edited: everything but the add-on's
+identity and its own `version:` is copied verbatim, and
+`tests/test_channels.py` fails on drift (verified by reintroducing it). Two
+hand-maintained config files describing one program is #160's failure
+multiplied by every option, schema entry and permission.
+
+One publish path, channel taken from the tag: `controller-v2.20.0` →
+`:2.20.0` + `:latest`; `controller-ea-v2.20.0-ea.1` → `:2.20.0-ea.1` only.
+**EA never moves `:latest`** — that is what `docker-compose.deploy.yml` pulls,
+so an EA build touching it would push a prerelease to every standalone
+container on the next `docker compose pull`. The prefixes are distinct rather
+than one scheme with a suffix because `_fetch_controller_release` lists tags
+by **prefix match** on `controller-v`, which excludes `controller-ea-v*` from
+the dashboard's update notice for free.
+
+**Channels share no storage.** Each slug gets its own `/data`, so switching is
+a migration: a new database *and a newly generated CA*, and devices holding the
+old CA then dial `wss`, fail verification and cannot connect (they take `wss`
+from the mDNS `tls_port` record, so `require_device_tls: false` does not help).
+Copy the old `/data` — at minimum all four files in `tls/` — before starting
+the other channel. Isolation is deliberate: `MIGRATIONS` is append-only and
+forward-only, so a shared database would let EA upgrade the schema out from
+under GA, permanently.
+
+**`version.parse` does not order prereleases** — `2.20.0-ea.1` parses equal to
+`2.20.0`, so the dashboard's update notice cannot tell an EA build from the GA
+release of the same version. Advisory-only and Supervisor drives real updates,
+so it is a wrong banner rather than a wrong install. Fixing it needs care: git
+describe output (`2.19.0-3-gabc`) must keep parsing **equal** to its tag, so
+a real prerelease has to be distinguished from a describe suffix.
+
+**Testing add-on changes before they land.** Supervisor clones the **default
+branch**, so a branch cannot be installed. `controller/tools/make_dev_addon.sh`
+packages the working tree as a **local** add-on (dropped `image:`, distinct
+slug) that Supervisor builds from `/addons/<folder>` on the HA host. The build
+compiles nothing — ffmpeg is apt, onnxruntime/speexdsp-ns/scipy/scikit-learn
+are prebuilt wheels — so it costs minutes.
+
+**Migrating an existing fleet is not just a config change.** The device
+picks `wss` from the mDNS `tls_port` TXT record, NOT from
+`REQUIRE_DEVICE_TLS` (`internal/client/control.go`) — so a device holding
+an old CA meeting a controller with a freshly generated one dials wss,
+fails verification and cannot connect, and `require_device_tls: false` does
+not help. Copy the old `data/tls/` (all four files — the server cert must
+match the CA) into the add-on's `/data/tls/`. The devices then verify,
+arrive at a controller whose DB does not know them, and are allowed through
+because `em_linkauth` **ignores** a token for a device with nothing on
+record; they appear as pending and are approved onto fresh config.
 
 ### Voice backend
 
 The controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`). Servers are created at startup for every approved device **and on demand** when a device approved after boot first connects (`_register_device_server` — idempotent on purpose: the startup loop and `device_connected()` race, first creation wins). HA naming: friendly name is `<label> Voice Assistant` (BT proxy: `<label> BT Proxy`); `project_name` carries `ESPHOME_DEVICE_MODEL` after the dot because HA displays that segment as the device Model, overriding DeviceInfo's `model` field. (A legacy `claracore` WebSocket backend was removed 2026-07-12 — ESPHome/HA is the only voice path.)
+
+**Entity names must NOT repeat the device label.** HA sets
+`_attr_has_entity_name = True` for every esphome entity and composes
+`<device name> <entity name>` itself, and our device name is already
+`<label> Voice Assistant` — so a label in the entity name renders twice
+("Lounge Voice Assistant Lounge"). It did, on every device and every entity,
+until 2026-08-16. The media player takes an **empty** name, which is HA's
+convention for a device's primary entity (`self._attr_name =
+static_info.name or None`) and renders as the device name alone.
+`tests/test_deploy.py` pins that no `ListEntities` name references
+`self.label`. Note fixing this changes only the displayed name: entity keys
+are untouched, so registry rows and **entity_ids survive** and automations
+keep working.
+
+**`wake_word_phrase` is not optional.** The pipeline start must name which
+wake word fired, and the string must be **identical** to the `wake_word` we
+advertise — HA matches it against the STATE of its wake-word select entity
+(`ww_state.state == wake_word_phrase`), whose options are those display
+names. Both therefore come from `em_oww_models.display_name`, one function,
+pinned by test. Send `""` for a button turn: aioesphomeapi maps empty back to
+`None`, which is how the protocol says "no wake word", and claiming one would
+be untrue. Sending nothing at all is what stalled HA's **voice satellite
+setup dialog** for the life of the feature — it arms an interceptor for the
+next wake word, and on `None` raises
+`AssistSatelliteError("No wake word phrase provided")` and ends the run in
+milliseconds. Every ordinary turn worked, so only the one flow that asks a
+device to prove it heard a wake word ever noticed.
+
+**A `RUN_END` with no preceding `RUN_START` is terminal; one after it is
+not.** HA's interception path emits `RUN_END` and returns without ever
+starting a pipeline, while a genuine run is `RUN_START` (measured 2ms before
+`STT_START`) … `RUN_END` (last, after `TTS_END`). That is the discriminator —
+structural, not a timing race — and it matters because HA *does* emit a
+premature `RUN_END` mid-turn, which must stay non-terminal or genuine turns
+get cut short. Without it the turn held the mic until our own timers expired
+(20s streaming cap, 5s no-speech) while HA re-armed 18ms later. The outcome
+is `pipeline_refused`, never `no_speech` — the audio was captured and
+streamed into a closed run, and `no_speech` is persisted, so it would put
+every HA-side refusal into the activity stats as a silent user.
+Note this makes turns end in **milliseconds**, so the ring needs an explicit
+`ack_anim` cue or it flashes and reads as a glitch; it previously stayed lit
+only because the turn was hung.
+
+**The protocol has NO run identifier, and HA does not serialise runs.**
+`VoiceAssistantEventResponse` is an event type plus a name/value list and
+nothing else, so a client structurally cannot attribute an event to a run: the
+protocol assumes one pipeline run at a time per connection and **the satellite
+is what enforces that**. HA does not — `handle_pipeline_start` clears the audio
+queue and cancels `_tts_streaming_task`, then overwrites `_pipeline_task`
+*without cancelling the old one*, so a second start orphans the first run and
+leaves it emitting onto the same socket.
+
+Barge-in is the only place two runs overlap, and it was broken for the life of
+the feature: measured 2026-08-17, five barge-ins, five interrupting turns dead
+in 4-17ms with zero audio, because the aborted run's `RUN_END` landed ~4ms
+after the new turn started and the branch above read it as terminal. Two
+halves, both required:
+
+- **`VoiceAssistantRequest(start=False)` IS a server-side abort** —
+  aioesphomeapi maps it to `handle_stop(True)` → HA's `_abort_pipeline()`,
+  which queues the audio sentinel AND cancels `_pipeline_task`. `cancel_turn`
+  used to claim the protocol had no such mechanism, citing an
+  `ESPHOME_SPEC.md §7.4` that is not in this tree. It has one; we never sent
+  it. (`VoiceAssistantAudio(end=True)` → `handle_stop(False)` is the *graceful*
+  end, which is what VAD end already sends.)
+- **HA acknowledges an abort with no wire message at all**, so the barrier is
+  ordering, never a timeout: after an abort, discard every event until the next
+  `RUN_START`, which is necessarily ours. `em_runbarrier` holds that state.
+  Armed **only** by an abort and bounded to **one turn**, so the
+  `_ha_never_started` path above — a genuine `RUN_END` with no `RUN_START`,
+  which stalled the satellite setup dialog when it was missed — stays
+  untouched. `RUN_START` releases the barrier and is itself **delivered**, not
+  swallowed; eating it would leave `_run_started` False and re-arm the same bug
+  for the turn's own terminal `RUN_END`.
+
+**Announcements: HA has TWO paths and only one waits for a reply.**
+`VoiceAssistantAnnounceRequest` blocks —
+`assist_satellite.entity.async_internal_announce` holds `_is_announcing` and
+the RESPONDING state for the duration and raises `SatelliteBusyError` on a
+concurrent announce, and the esphome side awaits
+`send_voice_assistant_announcement_await_response`. `play_media` with
+`announce=true` is an ordinary media_player command and waits for nothing;
+sending `AnnounceFinished` there answers a question nobody asked. Both resolve
+their playback callback through **one** `_announce_play_cb`, because renaming
+the old shared helper updated one call site and not the other and shipped an
+`AttributeError` on every `play_media` announce (2.20.1-ea.1).
+
+So `AnnounceFinished` is sent when playback **actually finishes**, from a
+`finally` on every path, and `success` reports whether the audio reached the
+speaker. Answering early returns the service call while audio is still playing,
+drops the entity out of RESPONDING, and lets chained announcements overlap. Not
+answering at all is worse: it parks HA for `_ANNOUNCEMENT_TIMEOUT_SEC`
+(**5 minutes**) holding `_is_announcing`, after which every announcement fails.
+The old code answered synchronously and justified it as stopping the setup
+wizard timing out — it would not have: the wizard's connection test does not
+wait on this message, it fires when the device fetches
+`CONNECTION_TEST_URL_BASE`.
+
+**`cancel_event` must be cleared by anything that starts playing, not just a
+voice turn.** It is set by a cancel (a button press mid-turn, a mute) and was
+cleared *only* at voice-turn start, so a cancelled turn silently killed every
+subsequent **announcement** — `_run_post_turn_playback` checks the flag.
+Measured on Test Device 01: a turn cancelled at 12:02:32 left seven
+announcements over three minutes logging `Cancelled during playback` and
+playing nothing. With two devices it reads as a routing fault, because the
+other device is fine. An announcement is a new action and nothing that set that
+flag earlier has a claim on it.
+
+**`VoiceAssistantSetConfiguration` is handled but not applied.** It is HA
+writing a wake-word choice back to us. We advertise one model with
+`max_active_wake_words=1`, so the dropdown offers our model plus "no wake
+word" and there is nothing to switch between; an empty list means "deafen
+this satellite", which is a real request we do not implement and log at
+warning rather than drop. Applying it, and offering a choice worth making,
+both wait on #112.
 
 ### HA entities beyond the voice satellite
 
@@ -262,7 +547,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 - **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist
 - **AEC** (`internal/aec/`) — speexdsp echo canceller (vendored C, SpeexDSP-1.2.1), whole mic path including the wake stream; far-end reference tapped at the speaker ALSA write (every period incl. silence), delayed by `aecDelayMs` — **keep 0**: the mic side's 160ms batch reads absorb the speaker's output latency, and higher values make the echo non-causal (zero cancellation). The mic ALSA ring is only 160ms deep, so >160ms capture stalls silently lose whole batches (~every 20–30s in steady state, load-correlated); an occupancy governor trims the resulting reference backlog **without resetting the filter** — the trim restores the alignment the filter converged against, and the reset that used to live there thrashed convergence to ≤5dB (the v2.7.8 fix). `[aec] att=`/`far:` telemetry logs ~1/s during playback; `[mic] clock/stall` lines track capture loss. `far:` carries `rms`, `mean` and `peak` — **rms alone cannot tell audio from a constant offset**, since both read high, and that ambiguity cost an evening on #117 where the device was writing rms≈4000 to a codec while every speaker stayed silent. `mean≈±rms` with a small peak-to-peak is a DC offset; `mean≈0` with peak well above rms is real audio and the fault is downstream. Note this tap sits after the (L+R)/2 downmix and 3:1 decimation, so DC survives intact but `peak` is mildly smoothed — read it as a floor. It reports only while `aecEnabled`, so a diagnosis that needs it must not have AEC turned off. Default off (`aecEnabled`); ~14dB per response, held across turns
-- **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003
+- **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see below
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
 
@@ -369,6 +654,8 @@ with no way for the user to tell which they had.
 | `em_tap_burst.py` | Coalesces a burst of action-button taps into one single/double/triple event. The window is restarted per tap and `enabled()` is re-checked at expiry, both correct. **The window is timed at the CONTROLLER, on arrival**, so the gap it measures is the real gap plus the RTT difference between the two taps — 26.4% of probes on this fleet exceed 200ms, which is why double/triple are unreliable below ~350ms (#115). The fix is a device-measured gap, the same reasoning as `heldMs` |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn |
+| `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see "Barge-in serialisation" below. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
+| `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
@@ -509,6 +796,98 @@ verifies a device reproduces Python and reports the real CPU cost. It costs
 ~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
 **enable it on one device at a time**.
 
+**The scorer pointer must be re-read PER FRAME, never cached for a stream.**
+A config push replaces the scorer and **closes** the old one, so a mic stream
+holding the pointer it captured at `StartMic` is feeding a dead object. This
+cost two bugs in succession on 2026-08-16, and the second is the instructive
+one:
+
+- `Close()` used to close the channel `enqueue` sends on, so the next 80ms
+  frame panicked the process. It restarted in ~6s, opened a fresh mic stream,
+  picked up the new scorer, and worked — the crash was **accidentally
+  self-healing**.
+- Making `enqueue` drop silently removed the crash *and* the recovery. The new
+  scorer then received nothing and detection stayed dead until the next
+  `StartMic`, which only follows a voice turn, which cannot happen because the
+  wake word is dead.
+
+So `Close()` signals a dedicated `quit` channel and never closes `ch`, AND the
+push site re-reads `d.ShadowScorer()` per  frame. A mutex read per 80ms is
+nothing beside the inference it feeds. Both halves are needed; either alone
+leaves a device that goes deaf or panics. The comment that justified caching
+("a stream that began before the change keeps using the scorer it started
+with") described exactly what made it fatal.
+
+**A missing classifier used to silently deafen a device under
+`owwOnDevice=on`.** The device cannot score without the model, and the
+controller has stood down and no longer triggers on its behalf — so nothing
+fired, nothing warned, and the dashboard reported the device as healthy. That
+is a degradation to *no* behaviour, which the capability rule above exists to
+forbid. Selecting a wake word a device was never provisioned with is enough to
+produce it, and that is an ordinary dashboard action.
+
+**Bouncing the HA connection flaps EVERY entity for that device.**
+`update_oww_model` drops and remakes the connection so HA re-reads the wake
+word, and that is the only lever the protocol offers — HA calls
+`_update_satellite_config()` from `async_added_to_hass` and nowhere else. The
+cost is that the voice assistant, media player, event and sensor entities all
+go unavailable and back in the same instant.
+
+For the **event** entity that is user-visible and looks like a fault: HA's
+`EsphomeEvent._on_device_update` deliberately writes state on reconnect
+("Event entities should go available directly when the device comes online"),
+restoring the last event's timestamp. `_trigger_event` is NOT called, so HA
+does not think a new event happened — but a **state-triggered** automation sees
+`unavailable` → timestamp and fires. Reported 2026-08-17 as "changing the wake
+word triggers a long button press"; the controller had sent no event at all.
+The user-side fix is `not_from: [unavailable, unknown]`, documented in
+docs/configuration.md. Worth remembering before adding any new bounce.
+
+**The fix is install-before-switch, not a fallback.** A device is never told
+about a new `owwModel` until the classifier is on it
+(`em_api._hold_back_oww_model` swaps the key back to the current model, and
+`_install_then_switch` pushes the real config once the file has landed). The
+device keeps listening for its CURRENT wake word, on-device, throughout; if the
+install fails it simply stays there and says so loudly.
+
+The first attempt stood the device down to controller-side scoring while the
+model installed. That works and was rejected: it silently overrides a setting
+the user chose, and the dashboard goes on reporting `owwOnDevice: on` — the
+same "reports healthy while something else is true" shape the capability rule
+exists to forbid. Note there is no privacy difference between the two modes
+(the device streams the wake audio either way, and the controller scores it in
+`on` mode too — that is what `turns.ctrl_wake_score` records), but a silent
+override is a trust problem regardless.
+
+Only devices that actually score locally are held back — with
+`owwOnDevice=off` the file is irrelevant, so the change stays instant. Both the
+old and the incoming mode are consulted, or a save that enables on-device
+scoring while changing the wake word slips through on the old mode.
+
+`em_shadow.effective_mode` also takes `model_ready` alongside
+`trigger_capable`, as a **backstop** with no current writer: install-before-
+switch removed the case that set it, and its intended writer is the
+reconcile-on-connect pass designed in #191 — the first thing that will actually
+know what a device has. A known-missing model degrades to **`off`, not `shadow`** —
+shadow cannot score either, so degrading to it would be the wrong answer
+dressed as a fallback; only `off` puts the controller back in charge of
+triggering, which is the one arrangement that still answers the user. It
+defaults **True**: absence of evidence is not evidence of absence, and standing
+every device down because the controller has not looked would be worse than the
+bug.
+
+The hold-back is invisible at the call site — the config push looks entirely
+ordinary and the whole guard is that one key was swapped out first — so tests
+pin the ordering, the capability gate, and that a failed install returns rather
+than falling through into the switch. The install runs as a background task:
+blocking the config save on a multi-megabyte shell-plane push would time out
+the request without making anything safer, and nothing is degraded while it
+runs.
+
+The rest of #191 — installing all four stock classifiers, custom slots,
+reconcile-on-connect and a per-device Repair action — is designed on the issue
+and not yet built.
+
 ### Asset distribution (`em_oww_assets.py`)
 
 Installing those files is automatic. `em_oww_assets` plans (pure, unit-tested);
@@ -536,6 +915,14 @@ enabled it and nothing happened" this removes.
   `parse_free_mb`, never an awk field index — busybox wraps a long filesystem
   name onto its own line, so `$4` is the *percentage* on these devices, which
   parsed as "unknown" and silently disabled the check.
+- **`TransferResult` is truthy-compatible so existing `if not …` call sites
+  keep working — which is exactly how a call site that treated it as a LIST
+  reached a release.** `_sync_oww_assets` assigned the per-file transfer
+  result over its own `pushed` accumulator, so the first file replaced the
+  list and the append raised `AttributeError`. Every classifier push 500'd,
+  and provisioning is the only other path that installs one, so a device
+  could never be given a wake word it had not been provisioned with. Pinned
+  by test.
 - `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
   against the firmware constants **by test**. Drift installs assets the device
   never looks for, and the only symptom is shadow mode silently never starting.
@@ -943,6 +1330,29 @@ block updates on any device whose `df` we have not seen. Note binary growth
 is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
 v2.10.0 is 10.3MB.
 
+**The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
+the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
+a fleet update pulled it once per device and the provisioning wizard again per
+device set up; a published tag never changes what it points at. Two rules, both
+of which read as over-caution until they are not:
+
+- **md5 decides a hit, not the file existing.** A truncated download leaves a
+  file of plausible size, and the OTA's device-side verification *cannot* catch
+  it — that check confirms the device received what the controller SENT, so a
+  corrupt entry verifies perfectly all the way onto the device, where a corrupt
+  binary and a genuinely broken one produce the same observable (three fast
+  exits, a rollback).
+- **A cache failure is never an update failure.** Every path degrades to "use
+  the bytes we already have". This is the *opposite* of the DB-backup-before-
+  migration rule, deliberately: there refusing is the safe action, here it
+  costs the user the thing they asked for and protects nothing.
+
+Note `Path.with_suffix` is unusable for these names and the first version used
+it: a tag contains dots, so pathlib reads `server-v2.11.0` as stem
+`server-v2.11` with suffix `.0`, and `with_suffix(".md5")` silently writes a
+digest filename that never matches its payload — every read a miss, the cache
+doing nothing, and nothing saying so.
+
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
@@ -1105,6 +1515,44 @@ Reverting a section **discards** its stored values (`set_device_config_sections`
 
 ### Volume / mute persistence
 
+**The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
+tinymix ctl 61 is the tlv320aic32x4 DAC *digital* volume: 176 steps of 0.5dB
+spanning −63.5…+24dB, with 0dB at index **127**. The firmware shipped
+`volumeMax = 175` — the control's own maximum — so the top 27% of the range
+applied up to +24dB of digital gain to already near-full-scale PCM and
+saturated inside the DAC. Measured on hardware 2026-08-13 (1kHz at −6dBFS,
+recorded through the mic array): THD 1.5% at index 127, 2.3% at 136, **65% at
+153, 89% at 170**, with the output level *flat* from 153 upward because it had
+stopped being able to get louder, and h3 at −1.1dB relative to the fundamental
+(very nearly a square wave). The control that isolates it: index 170 with the
+source scaled down to land at the same acoustic level reads 1.1% — clean — so
+the gain stage is fine and it is purely source × gain exceeding full scale.
+Stock FireOS never writes this control **at all** (absent from
+`/system/etc/audio_device.xml` and from every `/system` binary), leaving the
+DAC at its 0dB reset default and taking user volume from AudioFlinger's
+software attenuation, which only ever attenuates — that is why native Alexa
+has no such distortion.
+
+Two things not to undo: `DEVICE_VOLUME_MAX`/`volumeMax` stay at 127 (both
+pinned by test), and the conversion lives in **one** place — `em_volume.py`,
+because `level / 175` was copy-pasted into `em_controller`, `em_esphome` and
+`em_api` with no test on any of them, which is how the wrong ceiling survived.
+The lost headroom **cannot** be bought back from `Ext_Amp_Gain` (ctl 13): that
+control is inert on this board — sweeping its full 6/12/18/24dB range moves
+the output 0.0dB while still reading its new value back, the same shape as the
+mute LED being on a different GPIO than Amazon's own HAL believed.
+`HP Driver Gain Volume` (ctl 62) *is* live (+18dB commanded → +18.1dB actual,
+THD 2.25%) if more output is ever wanted, but that is a taste call to make by
+ear, and the speaker's behaviour above stock level is unmeasured.
+
+The **physical buttons** traverse `volumeButtonFloor`(47, −40dB)…127 in 4dB
+steps rather than the whole control: the scale is dB-linear, so the bottom
+third is indistinguishable from silence and stepping across it spends presses
+to go nowhere. Silencing the device is the mute button's job. Explicit `Set()`
+calls are deliberately **not** floored — HA's volume 0.0 must still mean
+silent — and a press from below the floor lands *on* it, so one press always
+reaches audible.
+
 Volume is **state, not a setting** — it rides the config channel but has no dashboard control (the slider was removed 2026-07-25: `SeedVolume` ignores later pushes, so moving it did nothing until the device restarted and any real volume change overwrote it). It is listed in `em_config_sections.STATE_KEYS`, exempt from section scoping, and shown read-only on the Status tab.
 
 Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, red ring/button LED after LED init).
@@ -1121,6 +1569,46 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
+
+## Dashboard device state
+
+`deviceState()` in `dashboard.jsx` ranks pending / offline / muted / speaking /
+thinking / listening / idle, and `_push_device_state` carries all of them. The
+trap is that **the flag and the push are separate things and drifted apart**:
+pushes existed for listening, thinking and turn end, but nothing pushed the
+`speaking` transition, so a turn read listening → thinking → idle and the tile
+never showed Speaking at all. It surfaced only when the dashboard's 5s poll of
+`/api/devices` happened to land mid-playback, which for a ~2s response usually
+did not — so it presented as "stuck on thinking", not "Speaking is broken".
+
+Setting the flag and pushing it are therefore **one operation**
+(`Device._set_speaking`), and a test pins that no other assignment to
+`self.speaking` exists — a new streaming path cannot reintroduce the gap by
+doing only half.
+
+**Which edge is truth, and which is a guess.** `False` is the DEVICE's — the
+playback functions wait on its `playback_stats` (sent once the audio channel
+drains after EOS) and clear the flag there. Clearing it in the stream task's
+`finally` instead drops the tile out of Speaking **seconds** early, because
+that returns when the last byte reaches the socket and a socket write completes
+near-instantly however slow the link is; the device still has its whole buffer
+to play. That is the same mistake the LED ring made until 2026-07-24, in the
+same file. `True` is still a controller-side **estimate** — the first period on
+the wire — and leads the speaker by up to `SPEAKER_PRIME_SECONDS`, because the
+device holds audio until primed. Closing that needs the device to report the
+start; `playback_stats` is the only playback message the firmware sends (#203).
+
+**`speaking` and `thinking` are mutually exclusive and starting to speak clears
+`thinking`.** Both reach the dashboard and `speaking` outranks `thinking`, so a
+stale `thinking` is invisible until speaking clears — and then the tile reads
+as if the device started thinking again mid-response. The push is guarded with `except BaseException`, because one
+caller is `stream_speaker`'s `finally`, which is also reached when barge-in
+cancels the task mid-send; a plain `except Exception` does not catch the
+`CancelledError` that arises there, and a dashboard push is not worth failing a
+speaker stream over. The assignment is synchronous and always happens.
+
+Note `em_player` must **not** set `device.speaking` for music — it makes the
+wake loop drop frames, deafening the device for the length of a song.
 
 ## Dashboard styling and theming
 

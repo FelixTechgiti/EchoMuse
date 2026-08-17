@@ -68,6 +68,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_pki
+import em_hostip
 import em_linkauth
 import em_eq
 import em_scenes
@@ -79,11 +80,21 @@ import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
 import em_player
+import em_volume
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
+# Any non-empty string is truthy in Python, so `os.environ.get("DEBUG")`
+# alone turned debug logging ON for DEBUG=0 — and em_start.py renders a
+# false add-on option as exactly that string, so an untouched "Debug
+# logging" toggle would have shipped every add-on install at DEBUG level.
+# Same `== "1"` convention as REQUIRE_DEVICE_TLS, widened to the word
+# spellings because DEBUG went undocumented for long enough that a
+# container user's .env may already say `true`.
+DEBUG = os.environ.get("DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
 logging.basicConfig(
-    level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
+    level=logging.DEBUG if DEBUG else logging.INFO,
     format=_LOG_FORMAT,
 )
 log = logging.getLogger("echomuse")
@@ -128,7 +139,10 @@ SERVER_TLS_PORT = int(os.environ.get("SERVER_TLS_PORT", "8770"))
 # working during the rollout.
 REQUIRE_DEVICE_TLS = os.environ.get("REQUIRE_DEVICE_TLS", "0") == "1"
 API_PORT     = int(os.environ.get("API_PORT", "8768"))
-SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
+# The address devices are told to dial. Detected from the routing table when
+# unset — never a literal, which used to send every unconfigured deployment
+# to a developer's own machine. See em_hostip.
+SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
 
@@ -200,16 +214,11 @@ SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
 
-# Volume conversion — device uses integer 0–175, HA expects float 0.0–1.0.
-VOLUME_MAX_DEVICE = 175
-
-def _device_level_to_ha(level: int) -> float:
-    """Convert device volume (0–175) to HA float (0.0–1.0)."""
-    return max(0.0, min(1.0, level / VOLUME_MAX_DEVICE))
-
-def _ha_volume_to_device(volume: float) -> int:
-    """Convert HA volume float (0.0–1.0) to device integer (0–175)."""
-    return max(0, min(VOLUME_MAX_DEVICE, round(volume * VOLUME_MAX_DEVICE)))
+# Volume conversion lives in em_volume so the scale has ONE definition and a
+# test — it used to be spelled `/ 175` in three separate modules.
+VOLUME_MAX_DEVICE = em_volume.DEVICE_VOLUME_MAX
+_device_level_to_ha = em_volume.device_level_to_ha
+_ha_volume_to_device = em_volume.ha_volume_to_device
 
 # ─── Device registry ──────────────────────────────────────────────────────────
 
@@ -348,6 +357,25 @@ class Device:
         # every push, so a device whose config has never arrived behaves
         # exactly as it always did.
         self.oww_on_device: str = em_shadow.MODE_OFF
+        # Whether this device is believed to HAVE the classifier it is
+        # configured to use. False stands it down to controller-side wake
+        # (em_shadow.effective_mode), because a device cannot score a model it
+        # does not have and "on" means nobody else is triggering for it —
+        # which is silent, and looks healthy (#191).
+        #
+        # Optimistic by default: absence of evidence is not evidence of
+        # absence, and standing every device down on a fresh controller would
+        # be a worse bug than the one this prevents.
+        #
+        # A BACKSTOP, not the primary mechanism. Config changes are handled by
+        # install-before-switch (em_api._hold_back_oww_model): a device is
+        # never told to use a model it does not have, so it cannot be deafened
+        # by an ordinary wake-word change. This covers the causes a config
+        # change cannot see — a file deleted underneath us, a device
+        # reprovisioned behind our back — and its writer is the
+        # reconcile-on-connect pass designed in #191, which is the first thing
+        # that will actually KNOW what a device has.
+        self.oww_model_ready: bool = True
         self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
         # This controller's own crossings while the DEVICE is triggering —
         # the comparison from the other side. Kept in "on" mode because the
@@ -654,10 +682,55 @@ class Device:
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})
 
+    async def _set_speaking(self, value: bool) -> None:
+        """
+        Set the speaking flag AND tell the dashboard.
+
+        The single writer, because the flag and the push had drifted apart:
+        stream_speaker/stream_speaker_chunks set it, and nothing pushed the
+        transition. _push_device_state has always carried `speaking` and the
+        dashboard has always rendered it above `thinking` — but the only
+        pushes were at listening, thinking and turn end, so a turn read
+        listening -> thinking -> idle and **never showed Speaking at all**. It
+        appeared only when the dashboard's 5s poll of /api/devices happened to
+        land mid-playback, which for a typical ~2s response it usually did not.
+
+        WHEN each edge fires, and how true each is:
+
+        - **False is device truth.** The playback functions wait on the
+          device's own `playback_stats`, sent once its audio channel drains
+          after EOS, and clear the flag there.
+        - **True is still a controller-side ESTIMATE** — the first period put
+          on the wire. The device holds audio until roughly
+          SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
+          the tile leads the speaker by up to that much. Closing that gap needs
+          the DEVICE to report the moment it starts, which no released firmware
+          does; `playback_stats` is the only playback message it sends.
+
+        Guarded rather than plain, because one caller is stream_speaker's
+        finally, which is also reached when barge-in cancels the task
+        mid-send: the flag assignment is synchronous and always happens, and a
+        push that cannot complete is not worth failing a speaker stream over —
+        turn end pushes the same state moments later.
+        """
+        if self.speaking == value:
+            return
+        self.speaking = value
+        if value:
+            # Mutually exclusive phases. Leaving `thinking` set meant the tile
+            # FELL BACK to Thinking the moment speaking cleared, instead of
+            # going quiet — which is what made an early clear look like the
+            # device had started thinking again mid-response.
+            self.thinking = False
+        try:
+            await _push_device_state(self)
+        except BaseException:
+            pass
+
     async def stream_speaker(self, pcm: bytes):
         """Stream resampled mono 48kHz PCM as 0x02 frames, then 0x03 EOS."""
         self.begin_data_stream()
-        self.speaking = True
+        await self._set_speaking(True)
         try:
             offset = 0
             while offset < len(pcm):
@@ -672,7 +745,10 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
         finally:
-            self.speaking = False
+            # NOT where speaking clears — see _run_post_turn_playback. This
+            # returns when the last byte is written to the socket, which
+            # completes near-instantly however slow the link is; the device
+            # still has its whole buffer to play.
             # EOS must go out on EVERY exit, including task cancellation
             # (barge-in cancels this task mid-send): the device's barge-in
             # flush discards 0x02 frames until it sees this stream's 0x03 —
@@ -695,7 +771,6 @@ class Device:
         end of the response.
         """
         self.begin_data_stream()
-        self.speaking = True
         pending = bytearray()
         total_pcm = 0
         eq_seconds = 0.0
@@ -724,6 +799,7 @@ class Device:
                     if first_send_time is None:
                         first_send_time = asyncio.get_event_loop().time()
                         self.playback_send_t0 = first_send_time
+                        await self._set_speaking(True)
                         log.info(
                             f"[{self.device_id}] First streamed PCM period "
                             "sent to device"
@@ -738,6 +814,7 @@ class Device:
                 if first_send_time is None:
                     first_send_time = asyncio.get_event_loop().time()
                     self.playback_send_t0 = first_send_time
+                    await self._set_speaking(True)
                     log.info(
                         f"[{self.device_id}] First streamed PCM period "
                         "sent to device"
@@ -746,7 +823,7 @@ class Device:
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 send_seconds += asyncio.get_event_loop().time() - _t_send
         finally:
-            self.speaking = False
+            # NOT where speaking clears — see the note in stream_speaker.
             # One EOS terminates the complete response. Sending EOS per HTTP
             # chunk would make the device repeatedly prime and flush.
             try:
@@ -823,6 +900,12 @@ _OUTCOME_ANIM = {
     "tts_error":     "error_anim",
     "timeout":       "error_anim",
     "stream_timeout": "error_anim",
+    # Not an error — HA took the wake word and ended the run deliberately,
+    # which the satellite setup flow does on every prompt. Needs a cue
+    # because the turn is over in milliseconds: without one the ring lights
+    # and clears too fast to register, and a device that worked perfectly
+    # looks like it glitched.
+    "pipeline_refused": "ack_anim",
 }
 
 
@@ -1051,11 +1134,20 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     device.cancel_event.set()
                     if in_playback:
                         await device.send_control({"type": "speaker_flush"})
+                        # HA's run is normally over by now (RUN_END follows
+                        # TTS_END, and we only reach playback at TTS_END), but
+                        # a barge in the first milliseconds of audio can beat
+                        # it. Serialise anyway — the interrupting turn is the
+                        # thing that pays if we lose that race.
+                        esphome.abort_ha_run(device.device_id)
                     else:
-                        # Nothing is playing — abort the in-flight HA
-                        # pipeline instead (local-only; a late HA result is
-                        # discarded on arrival).
-                        esphome.cancel_voice_turn(device.device_id)
+                        # Nothing is playing — HA is mid-pipeline, and an
+                        # interrupting turn is about to start on the same
+                        # connection. The protocol carries no run id, so the
+                        # old run MUST be aborted upstream first or its tail
+                        # events land on the new turn and kill it
+                        # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
+                        esphome.cancel_voice_turn(device.device_id, abort_ha=True)
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
@@ -1165,6 +1257,14 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                     f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
                 )
 
+    # The real end of audio, not the end of the socket write. The device
+    # reports playback_stats once its audio channel drains after EOS, and
+    # everything above waits for exactly that — so this is the one place that
+    # knows the speaker has actually stopped. Clearing it in the stream task's
+    # finally instead dropped the tile out of Speaking seconds early (the write
+    # completes near-instantly), which is the same mistake the ring made until
+    # 2026-07-24.
+    await device._set_speaking(False)
     cancel_task.cancel()
     done_task.cancel()
 
@@ -1288,6 +1388,10 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             )
         return total_pcm
     finally:
+        # See _run_post_turn_playback: the end of audio is what the DEVICE
+        # reports, not when the last byte reached the socket. In the finally so
+        # a cancel or an error leaves the tile idle rather than stuck Speaking.
+        await device._set_speaking(False)
         for t in (cancel_task, done_task):
             t.cancel()
         if not stream_task.done():
@@ -2380,7 +2484,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.
         device.oww_on_device = em_shadow.effective_mode(
-            config.get("owwOnDevice"), device.oww_trigger_capable
+            config.get("owwOnDevice"), device.oww_trigger_capable,
+            device.oww_model_ready,
         )
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
@@ -2396,11 +2501,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await leds_off(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
-        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
+        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
             # stop it for the duration and put it back after. An active
             # media session pauses for the announcement and resumes.
+            #
+            # cancel_event is cleared first, exactly as a voice turn does.
+            # It is set by a cancel (a button press during a turn, a mute)
+            # and was ONLY ever cleared when the next voice turn started —
+            # so a cancelled turn left it set and _run_post_turn_playback
+            # then abandoned every subsequent announcement at "Cancelled
+            # during playback", silently, until a turn happened to run.
+            # Measured on Test Device 01 on 2026-08-17: a turn cancelled at
+            # 12:02:32 killed the next seven announcements over three
+            # minutes. An announcement is a new action and nothing that set
+            # that flag earlier has any claim on it.
+            _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
             try:
@@ -2408,6 +2525,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             finally:
                 await _d.mic_start()
                 await em_player.resume_interrupted(_d.device_id)
+            # Whether the audio actually reached the speaker. Something that
+            # cancelled mid-playback (a mute, a button) means the user did
+            # not hear it, and telling HA it finished successfully would be
+            # untrue — it is the one thing the announcement reply reports.
+            return not _d.cancel_event.is_set()
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         # Capabilities before the servers come up: they decide which HA
@@ -2504,7 +2626,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     })
 
                 elif msg_type == "volume_state":
-                    # Device reports current volume level (0–175 int).
+                    # Device reports its current volume level (raw tinymix index).
                     # Convert to HA float, update in-memory state, persist to
                     # config so the value survives controller and device restarts.
                     raw_level = int(msg.get("level", 85))

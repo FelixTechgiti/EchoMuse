@@ -47,13 +47,46 @@ configuration, even a remote terminal — happens over WiFi from the dashboard.
 
 ## Step 2 — Start the controller
 
-On your always-on computer, using the prebuilt image (nothing to compile):
+Two ways, and they run the same software. If you already have Home
+Assistant, the add-on is less work; otherwise use Docker on any
+always-on machine.
+
+<details open>
+<summary><b>As a Home Assistant add-on</b></summary>
+
+Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
+`https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
+store. The README has a one-click badge for adding the repository.
+
+The dashboard appears as a **sidebar panel** — it is reached through Home
+Assistant, so there is no extra port to open and no second address to
+remember. It is *only* reachable that way: the add-on refuses connections
+that do not arrive through Home Assistant.
+
+Settings that would go in `.env` are add-on options instead (Configuration
+tab). Leave `server_ip` empty unless the controller picks the wrong
+address — see [When something doesn't work](#when-something-doesnt-work).
+
+Your data lives in the add-on's own storage and survives updates.
+
+**If you have devices from a previous controller**, they hold that
+controller's certificate authority and will refuse to trust a new one.
+Copy the old `data/tls/` directory (all four files) into the add-on's
+data directory before connecting them, or they cannot connect at all.
+
+</details>
+
+<details>
+<summary><b>With Docker, on any always-on computer</b></summary>
+
+Using the prebuilt image (nothing to compile):
 
 ```bash
 mkdir echomuse && cd echomuse
 curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
 curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
-# Edit .env: set SERVER_IP to this computer's LAN IP address
+# Optional: set SERVER_IP in .env to this computer's LAN IP. Left empty it is
+# detected, and the address in use is printed at startup.
 docker compose -f docker-compose.deploy.yml up -d
 ```
 
@@ -66,13 +99,15 @@ To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker co
 git clone https://github.com/wilbowes/EchoMuse.git
 cd EchoMuse/controller
 cp .env.example .env
-# Edit .env: set SERVER_IP to this computer's LAN IP address
+# Optional: set SERVER_IP to this computer's LAN IP. Left empty it is detected.
 docker compose up -d --build
 ```
 
 Note: `docker-compose.yml` requests an NVIDIA GPU (for onnxruntime-gpu).
 On a machine without one, remove the `deploy:` block and the `GPU: "1"`
 build arg — or just use the prebuilt image above, which is CPU-only.
+
+</details>
 
 </details>
 
@@ -84,12 +119,19 @@ That's it. The controller is now running two things:
 
 ## Step 3 — Create your admin account
 
-Open `http://<SERVER_IP>:8768` in a browser. On a fresh install you'll see
-the Echo graphic with a **pulsing amber ring** and a setup form.
+**On the Home Assistant add-on** there is nothing to create. Open the
+**EchoMuse panel** in the sidebar and you are already signed in as your Home
+Assistant user — it has authenticated you, so a second password would be a
+lock on a door that is already locked. The first person to open the panel
+becomes the EchoMuse admin; anyone after that gets read-only access until an
+admin promotes them.
 
-It asks for a **setup token** — this is a one-time code printed in the
-controller's logs, so that only you (the person who can read the server's
-logs) can claim the controller. Get it with:
+**With Docker**, open `http://<SERVER_IP>:8768`. On a fresh install you'll
+see the Echo graphic with a **pulsing amber ring** and a setup form.
+
+It asks for a **setup token** — a one-time code printed in the controller's
+logs, so that only you (the person who can read the server's logs) can claim
+the controller:
 
 ```bash
 docker logs echomuse-controller

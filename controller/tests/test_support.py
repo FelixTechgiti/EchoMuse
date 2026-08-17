@@ -654,3 +654,21 @@ def test_the_wizard_probe_list_matches_the_allowlist():
     assert not (in_py - in_jsx), (
         f"em_support allows {sorted(in_py - in_jsx)}, which the wizard never "
         f"collects")
+
+
+def test_home_assistant_display_names_are_redacted():
+    """
+    Ingress login provisions accounts from Home Assistant's user record, so
+    the user table now holds names that were never typed into EchoMuse —
+    and they contain spaces, unlike every local username. A multi-word name
+    reaching a public issue is the same leak as #62's, from a new source.
+    """
+    accounts = {"Wil Bowes": "admin", "wil": "admin"}
+    out = S.sanitise_log([
+        "Ingress login: Wil Bowes (admin)",
+        "Shell session opened by wil",
+    ], accounts=accounts)
+    joined = " ".join(out)
+    assert "Wil Bowes" not in joined
+    assert "wil" not in joined.replace("<admin>", "")
+    assert joined.count("<admin>") == 2
