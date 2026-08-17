@@ -32,8 +32,6 @@ abort, and only for one turn.
 import re
 from pathlib import Path
 
-import pytest
-
 import em_esphome
 from esphome.vendor import api_pb2
 from esphome.vendor.api_pb2 import VoiceAssistantEvent as ET
