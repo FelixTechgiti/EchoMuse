@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.20.1-ea.5 — Early Access
+
+- **Changing a wake word now installs it before switching the device onto
+  it.** In ea.3 and ea.4, picking a wake word a device did not have made the
+  controller take over the listening for that device while it installed the
+  model — even if you had deliberately chosen on-device detection. It worked,
+  but it quietly changed a setting you had chosen and the dashboard carried on
+  showing the setting you asked for.
+
+  The device now keeps listening for its current wake word, on the device,
+  until the new model has actually arrived — then it switches. If the model
+  cannot be installed, the device stays on the wake word it already has and
+  the device log says so. Nothing you chose gets overridden.
+
+  Devices that use controller-side wake word detection are unaffected: the
+  model file means nothing to them, so the change applies immediately as
+  before.
+
 ## 2.20.1-ea.4 — Early Access
 
 - **The dashboard's Speaking state now follows the device.** In ea.3 the tile
