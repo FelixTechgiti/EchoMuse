@@ -1,5 +1,77 @@
 # Changelog
 
+## 2.20.2-ea.1 (Early Access)
+
+Two fixes that stop the controller doing something wrong, and the first two
+steps of making the speaker sound better. No new database migration, no
+firmware requirement.
+
+### Home Assistant sign-in through the sidebar works again
+
+Opening EchoMuse from the Home Assistant sidebar failed and fell back to the
+setup-token page. The lookup that matches your Home Assistant account to an
+EchoMuse one crashed on every request, so automatic sign-in — the main reason
+to run the add-on rather than the standalone container — has been unusable for
+several releases. Reported and diagnosed by @lennart24, fixed by @finik.
+
+### Wake words no longer fire at nobody
+
+The wake-word engine fills its buffer with random noise whenever it is reset,
+and we scored that noise as if it were sound for the next 1.28 seconds. On one
+device in one day that produced **19 wake events with nobody speaking**, all of
+them just under a second after a turn ended, some scoring higher than real
+speech does. Worse, it could fire the barge-in detector and cancel an answer
+you were waiting for.
+
+Raising the wake-word threshold would not have helped — these score higher than
+real speech, and two of the recorded events cleared 0.80. Found, measured and
+fixed by @dmndru.
+
+One consequence worth knowing: interrupting a response is now ignored for the
+first 1.28 seconds of it. That is the right trade against turns being cancelled
+by nobody.
+
+### The equalizer no longer distorts what it boosts
+
+Turning any EQ band up could push the audio past full scale, and it was being
+hard-clipped — measured at **4.7% of samples** on a normal signal with a modest
+bass boost, and 18% at the top of the sliders. Flat EQ was unaffected, so this
+only ever hit people who reached for the controls to improve their sound.
+
+There is now a limiter on the output. Same test signal, same settings, no
+clipping at all, for 1–6 dB of gain reduction rather than the 12 dB a simple
+volume trim would have cost. **Limiter** and its ceiling and release are in
+Playback; leave it on.
+
+### New: Bass guard
+
+A dynamic control that drops bass the speaker physically cannot produce.
+
+It sounds backwards, and it is the single biggest thing available for a driver
+this size. Frequencies below about 115 Hz still move the cone even though you
+cannot hear them, and that movement muddies everything above — which is what
+"tin-can" actually is. Removing them makes the midrange clearer, and measurably
+*louder*, because the limiter no longer has to hold the whole signal down to
+contain bass peaks nobody was going to hear. Quiet passages keep their low end;
+only loud content is affected.
+
+The parameters come from measurements of the stock Amazon firmware on the same
+speaker. **Bass guard depth** is in Playback, defaulting to −20 dB where stock
+uses −40 dB — deliberately gentler, because stock pairs its setting with an
+equalizer curve we have not measured.
+
+**This one wants your ears.** Play something with real low end and try the depth
+from 0 to −40. Expect it to sound thinner at first and then clearer; the best
+setting is probably deeper than feels right.
+
+### Also
+
+- Every device now carries all four stock wake word models, so changing wake
+  word no longer requires a device to have been provisioned with it.
+- Security updates to the web server, TLS and mDNS libraries.
+- The rooting guide now says the unlock needs Linux, not macOS. Thanks
+  @StefanOltmann.
+
 ## 2.20.1
 
 Everything from the 2.20.1 Early Access builds. All fixes — no new settings,
