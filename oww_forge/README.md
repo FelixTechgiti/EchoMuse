@@ -172,15 +172,37 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    single-spelling `hey_clara`, 0.43 vs 0.52 on the augmented test set) —
    if a variant model feels deaf, add real recordings and retrain, or lower
    the device's `owwThreshold` a notch.
-2. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
+2. **Piper voices in another accent or language** (local, free) — the
+   `+ Accents & languages` button, or `forge.py piper-voices <name>
+   --language en_GB`. Piper publishes voices in **55 languages** and the
+   catalogue is read at runtime, so this is not an English-only lever.
+   Where a language has a multi-speaker voice it is chosen automatically,
+   because speaker identity is what buys variety: en_US 904 speakers,
+   de_DE 236, fr_FR 125, en_GB 109, vi_VN 65. `forge.py voices` lists what
+   is available; the first run downloads the voice (20–80MB) and keeps it.
+
+   Note the wake-word model still rests on openWakeWord's frozen **English**
+   speech embedding, so a wake word in another language is not as well
+   served by the rest of the pipeline as an English one.
+3. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
    `google-tts` pass before build adds genuinely British/Australian
    synthetic speakers (`--languages en-GB,en-AU` to skip the US ones).
-3. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
+4. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
    16kHz wavs into `positive_train/`) adds actual samples of you and the
    kids to the training set; any phone recording format works (ffmpeg
    converts). Even 20–50 real clips measurably pull the model toward the
    voices that matter. They're augmented with reverb/noise like everything
    else, and displace synthetic clips rather than growing the set.
+
+### Hearing the phrase before training on it
+
+Spelling variants only pay off if they read the way you intended, and until
+2026-08-20 the only way to find out was to generate 30,000 clips and train
+on them. **Hear each spelling** (when creating a wake word) speaks the
+variants in order, and each spelling on an existing wake word is clickable.
+The speaker is held fixed, so two spellings can be compared without the
+voice changing underneath the comparison. It uses the same Piper voices as
+the accent lever above, so the first press downloads one.
 
 ### Testing a built model
 
@@ -198,6 +220,19 @@ rate/pitch variation, and drops the clips into the same positive train/test
 dirs — the subsequent piper generation counts them toward `n_samples`, so
 you get a mixed-family training set at no extra training cost. Piper remains
 the volume source; Google adds acoustic character a single TTS family can't.
+
+**It will be rate-limited, and that is handled.** Google refuses requests at
+any real concurrency — measured at 1388 of 2000 clips on one run — so
+transient failures back off and retry the same request five times, jittered,
+at four workers. A run of a few thousand clips therefore takes minutes
+rather than seconds, and the log distinguishes errors absorbed by retrying
+from clips actually abandoned. Do not read "absorbed N transient errors" as
+a fault; it means the quota was hit and the retries covered it.
+
+Two related behaviours worth knowing: a voice is only retired from a run for
+a **permanent** refusal (Chirp rejects `pitch`, for instance, and is then
+asked without it), never for a transient one; and the working request shape
+is remembered per voice, which removes about a third of the API calls.
 
 Setup, from the web UI: **Google voices** on the left, then upload (or paste)
 the JSON key and press **Test connection**. The key is written to
@@ -253,10 +288,14 @@ scores (`em_oww_models.prediction_key`), so keep filenames unique.
 oww_forge/
   Dockerfile           pinned training environment (openWakeWord + piper + deps)
   docker-compose.yml   forge-ui (web) + forge/forge-cpu (CLI) services
-  forge.py             CLI: assets | new | google-tts | build | test | ui
+  forge.py             CLI: assets | new | voices | piper-voices | google-tts |
+                            build | test | ui
   forge_web.py         aiohttp web UI (port 8769) — thin layer over forge.py
   static/index.html    the web frontend (single file, no build step)
   google_tts.py        Google Cloud TTS positive-sample generator
+  piper_voices.py      Piper ONNX voices — accents/languages, and the phrase
+                       preview; catalogue fetched, never hardcoded
+  docker-compose.deploy.yml   pulls the published image instead of building
   config.template.yml  per-wake-word training config template
   data/                (gitignored) assets, per-word workdirs, finished models
 ```
