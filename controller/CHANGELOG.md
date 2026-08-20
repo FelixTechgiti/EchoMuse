@@ -1,5 +1,72 @@
 # Changelog
 
+## 2.20.2-ea.4 (Early Access)
+
+Four fixes. Two change what you hear, one unblocks Home Assistant users who
+could not administer the add-on, and one is a change to the dashboard's
+speaker controls.
+
+### Long answers no longer interrupt themselves
+
+Ask for something lengthy — a story, a detailed explanation — and EchoMuse
+would stop partway, sit with the ring lit, and then end without finishing.
+It was hearing its own voice as a wake word and cancelling itself.
+
+The detector that listens for you interrupting a response used to act on a
+single 80ms fragment, at a deliberately low confidence bar. That was fine for
+short replies, which never got near it, and wrong for long ones: continuous
+speech offers far more chances to sound briefly like a wake word. Measured on
+a real device, a short reply peaked at 0.03 while a story reached 0.18 against
+a 0.05 bar.
+
+Two frames in a row are now required, and the default bar has moved from 0.05
+to 0.25. Interrupting still works — talking over a response scores far higher
+than the response itself does. **If you had raised this setting yourself to
+stop responses cutting out, you can put it back to the default.**
+
+### The speaker settings are now one switch
+
+The bass guard and limiter were five controls. None of them could be judged by
+ear: the two stages cancel out each other's most obvious effect, and the depth
+slider moves the overall level by 0.14dB across its entire range. They are now
+a single **Speaker protection** toggle under Advanced, in the Playback section,
+and it should be left on.
+
+Nothing is lost — every setting still exists and still applies, and anything
+you had set is still in force. If you tuned the limiter ceiling or the guard
+depth, those values are unchanged; the controls to change them again have gone
+from the dashboard.
+
+The bass guard's default depth also moved from −20dB to −30dB. You will not
+hear the difference, and it is not meant to be heard: it puts the default in
+the middle of the range so there is room to adjust either way.
+
+### Home Assistant users could be locked out of administering the add-on
+
+If you set up a local EchoMuse account before opening the panel through Home
+Assistant — including by copying your existing `/data` across when moving from
+the container, which the migration guide tells you to do — every Home
+Assistant user was created read-only, permanently. The only way back was
+editing the database by hand.
+
+The rule was counting accounts rather than accounts that can actually sign in
+through Home Assistant, and a local password account cannot: the panel signs
+you in through Home Assistant before it ever offers a login form. Fixed, and
+the dashboard now takes your role from the server on load rather than
+remembering it, so a role that is corrected or promoted takes effect on the
+next page load instead of the next sign-in.
+
+**If you are currently stuck read-only, updating should be enough.** No
+database editing and no cache clearing.
+
+### Speaker processing now says what it is doing
+
+The add-on log records what the output chain is set to, whenever a stream
+starts and whenever you change a setting, and how much work each stage
+actually did. This is diagnostic only and changes nothing about playback — it
+exists because "is this setting doing anything?" was not answerable from
+outside, which cost four separate listening tests.
+
 ## 2.20.2-ea.3 (Early Access)
 
 One fix, and it is the one that makes the previous release's headline feature
