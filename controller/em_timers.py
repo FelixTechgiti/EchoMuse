@@ -16,10 +16,10 @@ imports it without pulling in aiohttp/openwakeword:
   * TimerRegistry reduces the event stream into "is a finished timer waiting
     to be dismissed?" and reports the ring transitions (start / stop) that
     the async orchestrator in em_controller acts on.
-  * alarm_pcm() synthesises the alarm chime as 48kHz mono S16_LE — the wire
-    format the device speaker plane already expects (em_controller
-    SPEAKER_RATE) — so the alert needs no firmware support and no bundled
-    audio asset.
+  * attenuate() ducks the alert while someone speaks over it. The alert audio
+    itself is the bundled Home Assistant Voice PE sound (ALARM_SOUND_FILE),
+    decoded by em_controller — it is already 48kHz mono, the format the device
+    speaker plane expects, so the alert needs no firmware support.
 
 Dismissal of a RINGING alarm is always local, because HA discards a timer the
 moment it finishes and can no longer cancel it: a dot-button tap, or a spoken
@@ -31,8 +31,8 @@ cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 
 from __future__ import annotations
 
-import math
-import struct
+import array
+import os
 
 # ── ESPHome VoiceAssistantTimerEvent values ─────────────────────────────────
 # Mirrors the api_pb2.VoiceAssistantTimerEvent enum. Reproduced as plain ints
@@ -49,15 +49,20 @@ RING_START = "start"
 RING_STOP  = "stop"
 RING_NONE  = "none"
 
-# ── Alarm audio parameters ──────────────────────────────────────────────────
-SAMPLE_RATE = 48000          # matches em_controller.SPEAKER_RATE (wire rate)
-_TONE_HZ    = 880.0          # a clear, non-harsh alert pitch
-_BEEP_S     = 0.18           # length of one beep
-_GAP_S      = 0.12           # silence between beeps in a burst
-_BEEPS      = 3              # beeps per burst
-_TAIL_S     = 0.9            # trailing silence so a looped burst is not frantic
-_FADE_S     = 0.008          # cosine fade in/out per beep — avoids click artefacts
-_AMPLITUDE  = 0.5            # fraction of full scale (headroom against clipping)
+# ── Alarm audio ─────────────────────────────────────────────────────────────
+# The alert is the Home Assistant Voice PE timer sound (CC BY 4.0 — see
+# sounds/LICENSE.md), so a finished timer sounds like the one people already
+# know from HA's own hardware. It ships as 48kHz mono FLAC, which is already
+# the wire format, so decoding is a straight ffmpeg call with no resample.
+# em_controller decodes and caches it; this module stays free of subprocesses
+# so the test suite can import it.
+ALARM_SOUND_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "sounds", "timer_finished.flac"
+)
+
+# The sound IS the alert — there is no synthesised fallback. A missing or
+# undecodable file is a broken build, and a build that rings with a different
+# sound than every other one is harder to support than a build that says so.
 
 # Safety cap: how long a finished timer keeps ringing if nobody dismisses it.
 # HA leaves a finished timer ringing indefinitely; the room should not.
@@ -192,52 +197,20 @@ def is_dismissal(text: str) -> bool:
     return any(f" {w} " in padded for w in _DISMISS_WORDS)
 
 
-def _beep(sample_rate: int) -> list[float]:
-    n = int(round(_BEEP_S * sample_rate))
-    fade = max(1, int(round(_FADE_S * sample_rate)))
-    out = [0.0] * n
-    two_pi_f = 2.0 * math.pi * _TONE_HZ / sample_rate
-    for i in range(n):
-        s = math.sin(two_pi_f * i)
-        # Raised-cosine fade at both ends so the beep starts and ends at zero.
-        if i < fade:
-            s *= 0.5 - 0.5 * math.cos(math.pi * i / fade)
-        elif i >= n - fade:
-            j = n - 1 - i
-            s *= 0.5 - 0.5 * math.cos(math.pi * j / fade)
-        out[i] = s * _AMPLITUDE
-    return out
-
-
-def alarm_pcm(sample_rate: int = SAMPLE_RATE, gain_db: float = 0.0) -> bytes:
+def attenuate(pcm: bytes, gain_db: float) -> bytes:
     """
-    One alarm burst as 48kHz mono S16_LE PCM: _BEEPS beeps then trailing
-    silence. The orchestrator loops this until the timer is dismissed.
+    Scale S16_LE PCM by gain_db (<= 0 — a duck never boosts).
 
-    gain_db attenuates the burst (<= 0). It exists so a wake word spoken over
-    a ringing alarm can duck the chime for the length of the turn: the person
-    has to be heard saying "dismiss" over it, and the chime is otherwise the
-    loudest thing at the mic by far. Detection itself happens at FULL volume
-    (AEC plus the barge-in threshold, same as speech over TTS) — the duck is
-    for what comes after the wake word, not for the wake word.
+    Ducks the alert while a wake word is heard over it, so the command that
+    follows reaches STT over the alarm rather than under it. Positive gain is
+    clamped to 0 rather than amplifying: the alert is already mastered near
+    full scale, so a boost would clip.
     """
-    beep = _beep(sample_rate)
-    gain = 10.0 ** (min(0.0, gain_db) / 20.0)
-    if gain != 1.0:
-        beep = [s * gain for s in beep]
-    gap  = [0.0] * int(round(_GAP_S * sample_rate))
-    tail = [0.0] * int(round(_TAIL_S * sample_rate))
-
-    samples: list[float] = []
-    for k in range(_BEEPS):
-        samples.extend(beep)
-        if k != _BEEPS - 1:
-            samples.extend(gap)
-    samples.extend(tail)
-
-    # Clamp then quantise to int16.
-    pcm = bytearray()
-    for s in samples:
-        v = int(max(-1.0, min(1.0, s)) * 32767.0)
-        pcm += struct.pack("<h", v)
-    return bytes(pcm)
+    if gain_db >= 0.0 or not pcm:
+        return pcm
+    gain  = 10.0 ** (gain_db / 20.0)
+    count = len(pcm) // 2
+    out   = array.array("h", pcm[: count * 2])
+    for i, v in enumerate(out):
+        out[i] = int(max(-32768, min(32767, v * gain)))
+    return out.tobytes()

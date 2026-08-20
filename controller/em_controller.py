@@ -312,6 +312,14 @@ class Device:
         # — must not leave the alarm quiet for the rest of its 120s cap.
         self.timer_alarm_duck_t: float = 0.0
 
+        # How many playbacks are streaming-or-draining on the speaker plane.
+        # NOT the same thing as `speaking`, which clears as soon as the socket
+        # writes finish — those complete near-instantly however slow the link
+        # is (see send_ms), while the device is still playing from a ~5.5s
+        # buffer. Anything that must not write over live audio has to test
+        # this, not `speaking`.
+        self.speaker_busy = 0
+
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
         self.muted     = False
@@ -1296,95 +1304,108 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                            device.eq_loudness, limiter=_limiter,
                            guard=_guard)
 
-    _t_eq0 = asyncio.get_event_loop().time()
-    speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
-    device.playback_eq_ms = int(
-        (asyncio.get_event_loop().time() - _t_eq0) * 1000
-    )
-    log.info(
-        f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
-        f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
-        f"{em_eq.describe_activity(_limiter, _guard)}"
-    )
-    cancel_task    = asyncio.create_task(device.cancel_event.wait())
-    device.playback_done.clear()
-    done_task      = asyncio.create_task(device.playback_done.wait())
-    stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
-    t_stream_start = asyncio.get_event_loop().time()
-    # Opens the delivery window measured against the device's
-    # playback_stats report (see Device.playback_send_t0).
-    device.playback_send_t0 = t_stream_start
+    # Held from the moment we commit to playing until the device's own
+    # playback_stats says the audio stopped — so it stays set while the device
+    # plays out of its ~5.5s buffer, which is exactly the window `speaking`
+    # does NOT cover (that clears when the socket write finishes, near-instantly
+    # however slow the link is). The timer ring tests it before each burst so a
+    # chime cannot interleave with a response on the 0x02 plane; see
+    # _ring_timer_alarm. A counter rather than a flag because an announcement
+    # can overlap a turn's playback, and try/finally because a cancelled turn
+    # that leaked it would block the ring for the life of the process.
+    device.speaker_busy += 1
+    try:
+        _t_eq0 = asyncio.get_event_loop().time()
+        speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
+        device.playback_eq_ms = int(
+            (asyncio.get_event_loop().time() - _t_eq0) * 1000
+        )
+        log.info(
+            f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
+            f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
+            f"{em_eq.describe_activity(_limiter, _guard)}"
+        )
+        cancel_task    = asyncio.create_task(device.cancel_event.wait())
+        device.playback_done.clear()
+        done_task      = asyncio.create_task(device.playback_done.wait())
+        stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
+        t_stream_start = asyncio.get_event_loop().time()
+        # Opens the delivery window measured against the device's
+        # playback_stats report (see Device.playback_send_t0).
+        device.playback_send_t0 = t_stream_start
 
-    done, _ = await asyncio.wait(
-        [stream_task, cancel_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
+        done, _ = await asyncio.wait(
+            [stream_task, cancel_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    if cancel_task in done:
-        log.info(f"[{device.device_id}] Cancelled during playback")
-        stream_task.cancel()
-    else:
-        if not device.cancel_event.is_set():
-            # Wait for the DEVICE to say it finished, rather than estimating.
-            #
-            # The old code slept `audio_duration - elapsed` and declared
-            # completion. Two things made that wrong, and both bite hardest
-            # on exactly the links that need the most patience: `elapsed` is
-            # socket-write time (which completes near-instantly however slow
-            # the wire is) and was *subtracted*, and the estimate had no
-            # visibility of how long the device's own buffer took to drain.
-            # Measured 2026-07-24: the ring cleared 6.1s before the audio
-            # actually stopped on a Retreat turn, 3.2s early on Lounge.
-            #
-            # playback_stats is emitted once the device's audio channel has
-            # drained after EOS, so it is the real end of audio. The timeout
-            # is only a backstop for the report never arriving (device drop,
-            # pre-v2.9 firmware): generous, because ending the turn early is
-            # the failure we are fixing. cancel_event is still raced — a
-            # barge-in or a mute usually lands in this window, and an
-            # uncancellable wait here is what caused the 5.7s dead window
-            # fixed on 2026-07-10.
-            audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
-            elapsed        = asyncio.get_event_loop().time() - t_stream_start
-            device.playback_send_ms = int(elapsed * 1000)
-            timeout        = audio_duration * 2 + 10.0
-            log.info(
-                f"[{device.device_id}] Socket write took {elapsed:.1f}s "
-                f"(NOT delivery — see delivery_ms), awaiting device "
-                f"playback_stats (est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
-            )
-            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
-            await asyncio.wait(
-                [done_task, cancel_task, timeout_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            timeout_task.cancel()
-            if device.cancel_event.is_set():
-                log.info(f"[{device.device_id}] Cancelled during playback drain")
-            elif done_task.done():
-                actual = asyncio.get_event_loop().time() - t_stream_start
+        if cancel_task in done:
+            log.info(f"[{device.device_id}] Cancelled during playback")
+            stream_task.cancel()
+        else:
+            if not device.cancel_event.is_set():
+                # Wait for the DEVICE to say it finished, rather than estimating.
+                #
+                # The old code slept `audio_duration - elapsed` and declared
+                # completion. Two things made that wrong, and both bite hardest
+                # on exactly the links that need the most patience: `elapsed` is
+                # socket-write time (which completes near-instantly however slow
+                # the wire is) and was *subtracted*, and the estimate had no
+                # visibility of how long the device's own buffer took to drain.
+                # Measured 2026-07-24: the ring cleared 6.1s before the audio
+                # actually stopped on a Retreat turn, 3.2s early on Lounge.
+                #
+                # playback_stats is emitted once the device's audio channel has
+                # drained after EOS, so it is the real end of audio. The timeout
+                # is only a backstop for the report never arriving (device drop,
+                # pre-v2.9 firmware): generous, because ending the turn early is
+                # the failure we are fixing. cancel_event is still raced — a
+                # barge-in or a mute usually lands in this window, and an
+                # uncancellable wait here is what caused the 5.7s dead window
+                # fixed on 2026-07-10.
+                audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+                elapsed        = asyncio.get_event_loop().time() - t_stream_start
+                device.playback_send_ms = int(elapsed * 1000)
+                timeout        = audio_duration * 2 + 10.0
                 log.info(
-                    f"[{device.device_id}] Playback complete "
-                    f"(device-confirmed after {actual:.1f}s, est {audio_duration:.1f}s)"
+                    f"[{device.device_id}] Socket write took {elapsed:.1f}s "
+                    f"(NOT delivery — see delivery_ms), awaiting device "
+                    f"playback_stats (est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
                 )
-            else:
-                # Ring held the full backstop. Either the device never
-                # reported (worth knowing) or delivery was pathological.
-                log.warning(
-                    f"[{device.device_id}] Playback completion timed out after "
-                    f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
+                timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+                await asyncio.wait(
+                    [done_task, cancel_task, timeout_task],
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                timeout_task.cancel()
+                if device.cancel_event.is_set():
+                    log.info(f"[{device.device_id}] Cancelled during playback drain")
+                elif done_task.done():
+                    actual = asyncio.get_event_loop().time() - t_stream_start
+                    log.info(
+                        f"[{device.device_id}] Playback complete "
+                        f"(device-confirmed after {actual:.1f}s, est {audio_duration:.1f}s)"
+                    )
+                else:
+                    # Ring held the full backstop. Either the device never
+                    # reported (worth knowing) or delivery was pathological.
+                    log.warning(
+                        f"[{device.device_id}] Playback completion timed out after "
+                        f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
+                    )
 
-    # The real end of audio, not the end of the socket write. The device
-    # reports playback_stats once its audio channel drains after EOS, and
-    # everything above waits for exactly that — so this is the one place that
-    # knows the speaker has actually stopped. Clearing it in the stream task's
-    # finally instead dropped the tile out of Speaking seconds early (the write
-    # completes near-instantly), which is the same mistake the ring made until
-    # 2026-07-24.
+        cancel_task.cancel()
+        done_task.cancel()
+    finally:
+        device.speaker_busy -= 1
+
+    # The real end of audio, not the end of the socket write. The device reports
+    # playback_stats once its audio channel drains after EOS, and everything
+    # above waits for exactly that — so this is the one place that knows the
+    # speaker has actually stopped. Clearing it in the stream task's finally
+    # instead dropped the tile out of Speaking seconds early, the same mistake
+    # the ring made until 2026-07-24.
     await device._set_speaking(False)
-    cancel_task.cancel()
-    done_task.cancel()
 
 
 # ── Timer alarm ──────────────────────────────────────────────────────────────
@@ -1439,6 +1460,81 @@ async def stop_timer_alarm(device: Device) -> bool:
     return True
 
 
+_alarm_pcm_cache: "bytes | None" = None
+
+
+async def _alarm_burst_pcm() -> bytes:
+    """
+    The alarm burst as 48kHz mono S16_LE, decoded once and cached.
+
+    The bundled Voice PE sound is already 48kHz mono, so this is a straight
+    decode with no resample.
+
+    Returns b"" if the sound cannot be produced, and the caller refuses to
+    ring. There is deliberately no synthesised fallback: a device that alerts
+    with a different sound from every other one is harder to support than one
+    that says loudly that its install is broken, and the file ships in the
+    image (Dockerfile) so its absence is a packaging fault, not a runtime
+    condition to paper over.
+    """
+    global _alarm_pcm_cache
+    if _alarm_pcm_cache is not None:
+        return _alarm_pcm_cache
+
+    if not os.path.exists(em_timers.ALARM_SOUND_FILE):
+        log.error(
+            f"Timer alarm sound missing at {em_timers.ALARM_SOUND_FILE} — "
+            f"timers cannot ring. Is sounds/ present in the image?"
+        )
+        return b""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-i", em_timers.ALARM_SOUND_FILE,
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", str(SPEAKER_RATE), "-ac", "1", "-",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        pcm, err = await proc.communicate()
+    except FileNotFoundError:
+        log.error("ffmpeg not found — timers cannot ring")
+        return b""
+    if proc.returncode != 0 or not pcm:
+        log.error(
+            f"Timer alarm sound failed to decode — timers cannot ring "
+            f"({err.decode(errors='replace').strip()[:200]})"
+        )
+        return b""
+
+    _alarm_pcm_cache = pcm
+    return pcm
+
+
+async def _wait_for_turn_audio(device: Device) -> bool:
+    """
+    Block until any voice turn already in flight has fully finished.
+
+    A timer whose duration is shorter than its own triggering turn's round trip
+    ("set a timer for one second") reaches FINISHED while that turn's spoken
+    reply is still going out, and two writers on the 0x02 plane interleave
+    their frames. `device.voice_lock` is held for the WHOLE turn including
+    device-confirmed playback, so acquiring it is the barrier; it is released
+    again immediately, because a spoken dismissal has to be able to START a
+    turn while the alarm rings — holding it for the ring would make the
+    feature this ring exists to support impossible.
+
+    Returns whether it had to wait, for the log line. Cancellation while
+    waiting is the dismissal path (stop_timer_alarm cancels this task) and
+    needs no special handling: the lock is never held across an await here.
+    """
+    if not device.voice_lock.locked():
+        return False
+    await device.voice_lock.acquire()
+    device.voice_lock.release()
+    return True
+
+
 async def _ring_timer_alarm(device: Device) -> None:
     """
     Loop the alarm chime until cancelled or MAX_RING_S elapses.
@@ -1451,8 +1547,19 @@ async def _ring_timer_alarm(device: Device) -> None:
     detection ducks the chime (Device.duck_timer_alarm) so the command after
     the wake word reaches STT over the alarm rather than under it.
     """
-    pcm      = em_timers.alarm_pcm(SPEAKER_RATE)
-    pcm_duck = em_timers.alarm_pcm(SPEAKER_RATE, gain_db=em_timers.DUCK_DB)
+    pcm = await _alarm_burst_pcm()
+    if not pcm:
+        # Already logged, with the reason. Clear the registry so the timer is
+        # not left "finished but not ringing", which would make the next
+        # CANCELLED try to stop a ring that never started.
+        esphome.clear_timers(device.device_id)
+        return
+    pcm_duck = em_timers.attenuate(pcm, em_timers.DUCK_DB)
+    if await _wait_for_turn_audio(device):
+        log.info(
+            f"[{device.device_id}] Timer alarm — waited for the in-flight "
+            f"turn to finish before ringing"
+        )
     await em_player.interrupt(device.device_id)
     loop = asyncio.get_event_loop()
     t0 = loop.time()
@@ -1462,8 +1569,12 @@ async def _ring_timer_alarm(device: Device) -> None:
             # speaker plane while it answers. Two writers would interleave
             # frames on it, so the ring waits its turn rather than talking
             # over the response — the duck is an amplitude, this is the
-            # mutual exclusion that makes the amplitude meaningful.
-            if device.speaking:
+            # mutual exclusion that makes the amplitude meaningful. Tested on
+            # speaker_busy and NOT on `speaking`, which clears when the socket
+            # writes finish while the device is still playing the response out
+            # of its buffer — the ring bursting into that gap is exactly the
+            # overlap this guard is for.
+            if device.speaker_busy:
                 await asyncio.sleep(0.1)
                 continue
             in_turn = device.voice_lock.locked()

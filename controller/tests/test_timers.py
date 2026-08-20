@@ -2,7 +2,8 @@
 
 HA owns the countdown; the satellite only tracks live timers and decides when
 to ring. These pin the ring-transition reducer (which is what the async
-orchestrator in em_controller keys off) and the chime synthesis.
+orchestrator in em_controller keys off), the spoken-dismissal matcher, and the
+duck applied to the alert while someone speaks over it.
 """
 import struct
 import pytest
@@ -80,87 +81,6 @@ def test_clear_reports_whether_it_was_ringing():
     assert reg.active_count() == 0
 
 
-# ── alarm_pcm ────────────────────────────────────────────────────────────────
-
-def _samples(pcm: bytes):
-    assert len(pcm) % 2 == 0, "S16_LE must be an even number of bytes"
-    return list(struct.unpack(f"<{len(pcm)//2}h", pcm))
-
-
-def test_alarm_pcm_is_nonempty_int16():
-    pcm = t.alarm_pcm()
-    s = _samples(pcm)
-    assert len(s) > 0
-
-
-def test_alarm_pcm_makes_sound():
-    # A silent alarm is worse than no alarm — assert real signal energy.
-    s = _samples(t.alarm_pcm())
-    assert max(abs(x) for x in s) > 8000
-
-
-def test_alarm_pcm_stays_within_int16_and_leaves_headroom():
-    s = _samples(t.alarm_pcm())
-    peak = max(abs(x) for x in s)
-    assert peak <= 32767            # never clips / wraps
-    assert peak < 32000             # amplitude headroom, not slammed to full scale
-
-
-def test_alarm_pcm_starts_and_ends_at_silence():
-    # Faded beeps and trailing silence — no click on loop boundaries.
-    s = _samples(t.alarm_pcm())
-    assert abs(s[0]) < 100
-    assert abs(s[-1]) < 100
-
-
-def test_alarm_pcm_respects_sample_rate():
-    lo = t.alarm_pcm(16000)
-    hi = t.alarm_pcm(48000)
-    # More samples at a higher rate for the same wall-clock burst.
-    assert len(hi) > len(lo)
-
-
-# ── Ducking the chime for a spoken dismissal ─────────────────────────────────
-# A wake word spoken OVER the ring ducks the chime so the command that follows
-# ("dismiss") reaches STT over the alarm rather than under it. Detection itself
-# happens at full volume — AEC plus the barge-in threshold, same as speech over
-# TTS — so the duck must attenuate without changing the burst's shape or length.
-
-def test_duck_attenuates_the_chime():
-    full = _samples(t.alarm_pcm(48000))
-    duck = _samples(t.alarm_pcm(48000, gain_db=t.DUCK_DB))
-    peak_full = max(abs(x) for x in full)
-    peak_duck = max(abs(x) for x in duck)
-    assert peak_duck < peak_full
-    # −18dB is ~0.126×; allow generous slack for quantisation.
-    ratio = peak_duck / peak_full
-    assert 0.10 < ratio < 0.16
-
-
-def test_ducked_chime_is_still_audible():
-    # Ducked, not muted: the alarm must still read as ringing while the user
-    # speaks over it, or the duck is indistinguishable from a dismissal.
-    s = _samples(t.alarm_pcm(48000, gain_db=t.DUCK_DB))
-    assert max(abs(x) for x in s) > 1500
-
-
-def test_duck_preserves_burst_length_and_edges():
-    # The ring loop swaps between these two mid-ring, so a length change would
-    # shift the cadence and a non-zero edge would click at the swap.
-    full = t.alarm_pcm(48000)
-    duck = t.alarm_pcm(48000, gain_db=t.DUCK_DB)
-    assert len(full) == len(duck)
-    s = _samples(duck)
-    assert abs(s[0]) < 100
-    assert abs(s[-1]) < 100
-
-
-def test_positive_gain_never_boosts():
-    # Guards the min(0.0, …) clamp: a duck must never turn into a boost, which
-    # on a chime already at 0.5 full scale would clip.
-    assert t.alarm_pcm(48000, gain_db=6.0) == t.alarm_pcm(48000)
-
-
 # ── Spoken dismissal ─────────────────────────────────────────────────────────
 # HA discards a timer when it finishes, so a spoken "stop" over a ringing alarm
 # reaches HA and is answered "there are no timers" — no CANCELLED is ever sent
@@ -204,3 +124,64 @@ def test_dismissal_matches_whole_words_only():
     # on substrings would eat ordinary commands.
     assert t.is_dismissal("start the stopwatch") is False
     assert t.is_dismissal("what's on offer") is False
+
+
+# ── attenuate() — ducking the alert ──────────────────────────────────────────
+# The alert audio is the bundled Voice PE sound, decoded by em_controller
+# (ffmpeg), so these work on synthetic PCM rather than the file: the duck is
+# pure arithmetic on S16_LE and must not need an audio decoder to test.
+
+def _pcm(*values: int) -> bytes:
+    return struct.pack(f"<{len(values)}h", *values)
+
+
+def _samples(pcm: bytes):
+    assert len(pcm) % 2 == 0, "S16_LE must be an even number of bytes"
+    return list(struct.unpack(f"<{len(pcm)//2}h", pcm))
+
+
+def test_attenuate_scales_by_the_requested_gain():
+    duck = _samples(t.attenuate(_pcm(30000, -30000, 1000), t.DUCK_DB))
+    # −18dB ≈ 0.126×
+    assert 3600 < duck[0] < 3900
+    assert -3900 < duck[1] < -3600
+    assert 100 < duck[2] < 140
+
+
+def test_attenuate_preserves_length():
+    # The ring swaps between full and ducked mid-alarm; a length change would
+    # shift the cadence of the loop.
+    full = _pcm(*([12000] * 500))
+    assert len(t.attenuate(full, t.DUCK_DB)) == len(full)
+
+
+def test_attenuate_never_boosts():
+    # The alert is mastered near full scale, so a positive gain would clip.
+    full = _pcm(30000, -30000)
+    assert t.attenuate(full, 6.0) == full
+    assert t.attenuate(full, 0.0) == full
+
+
+def test_attenuated_alert_stays_audible():
+    # Ducked, not muted: it must still read as ringing while the user speaks
+    # over it, or the duck is indistinguishable from a dismissal.
+    duck = _samples(t.attenuate(_pcm(*([28000] * 100)), t.DUCK_DB))
+    assert max(abs(x) for x in duck) > 1500
+
+
+def test_attenuate_handles_empty_and_odd_input():
+    assert t.attenuate(b"", t.DUCK_DB) == b""
+    # An odd trailing byte cannot be a whole S16 sample — dropped, not crashed.
+    assert len(t.attenuate(b"\x00\x10\x7f", t.DUCK_DB)) == 2
+
+
+def test_alert_sound_ships_with_its_licence():
+    # CC BY 4.0 requires the attribution to travel with the audio, and there is
+    # no synthesised fallback any more — a build without the file cannot ring,
+    # so both the sound and its licence are load-bearing.
+    import os
+    assert os.path.exists(t.ALARM_SOUND_FILE), "the alert sound must ship"
+    licence = os.path.join(os.path.dirname(t.ALARM_SOUND_FILE), "LICENSE.md")
+    assert os.path.exists(licence), "bundled sound must ship with LICENSE.md"
+    text = open(licence, encoding="utf-8").read()
+    assert "CC BY" in text or "Creative Commons Attribution" in text
