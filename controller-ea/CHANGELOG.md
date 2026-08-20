@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.20.2-ea.6 (Early Access)
+
+One fix: interrupting a long answer dropped the device off Home Assistant.
+
+### Barging in during a response disconnected the Echo
+
+Say the wake word while EchoMuse is answering and the device would drop its
+connection and reconnect a few seconds later. Everything came back on its own,
+but Home Assistant lost the satellite briefly each time — so the media player
+and the voice assistant flicked to unavailable, and anything mid-flight was
+lost.
+
+The cause was two lines of internal bookkeeping that had been sitting in an
+unreachable spot in the code for months, so a value the controller expected
+after playback was never set up. It only mattered when playback was
+*interrupted* rather than finishing normally, which is why it surfaced now that
+interrupting works properly.
+
+Interrupting a response is now what it should be: the answer stops, your new
+request is heard, and the device stays connected throughout.
+
+Also in this release, a guard against the same class of mistake anywhere in the
+controller, and a limit on how fast the wake-word listener may restart itself
+if it ever fails repeatedly — that recovery was added in 2.20.2-ea.5 and could
+have monopolised the controller in the worst case.
+
+Nothing required of you: no database migration, no firmware requirement, and
+nothing to do on your devices.
+
 ## 2.20.2-ea.5 (Early Access)
 
 One fix, and it is for the fault that showed up while testing 2.20.2-ea.4.
