@@ -174,11 +174,18 @@ jobs:
             org.opencontainers.image.version=${{ steps.v.outputs.version }}
             org.opencontainers.image.description=EchoMuse wake-word trainer (CPU)
 
+      # The BARE hex, with the sha256: prefix stripped. upload-artifact
+      # rejects a colon in a filename, and it rejects it at UPLOAD — after
+      # the image layers have already been pushed — so the failure lands
+      # exactly where a half-published release is created. Which is what
+      # happened on forge-v1.0.0: both CPU images reached the registry and
+      # neither reached a manifest.
       - name: Export the digest
         if: steps.v.outputs.publish == 'true'
         run: |
+          digest="${{ steps.build.outputs.digest }}"
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ matrix.slug }}-${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload the digest
         if: steps.v.outputs.publish == 'true'
