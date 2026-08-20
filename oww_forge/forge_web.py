@@ -8,6 +8,7 @@ stays honest about what actually exists on disk.
 No auth: this is a LAN batch tool, same trust model as `docker compose run`.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -565,6 +566,67 @@ async def api_wakeword_patch(request):
         {"custom_negative_phrases": negatives} if negatives is not None else {})}})
 
 
+async def api_piper_voices(request):
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    body = await request.json() if request.can_read_body else {}
+    samples = int(body.get("samples") or 4000)
+    lang = (body.get("language") or "en_GB").strip()
+    argv = ["piper-voices", name, "--samples", str(samples), "--language", lang]
+    if body.get("voices"):
+        argv += ["--voices", body["voices"]]
+    _start_job("piper-voices", f"{lang} voices × {samples} for '{name}'", argv)
+    return web.json_response({"ok": True})
+
+
+async def api_voices(request):
+    """
+    The published voice catalogue, so the UI can offer languages rather than
+    hardcoding the maintainer's own. Cached on disk after the first fetch.
+    """
+    import piper_voices
+
+    loop = asyncio.get_running_loop()
+    lang = request.query.get("language")
+    try:
+        if lang:
+            rows = await loop.run_in_executor(None, piper_voices.catalogue, forge.ASSETS)
+            return web.json_response([v for v in rows if v["language"] == lang])
+        return web.json_response(
+            await loop.run_in_executor(None, piper_voices.languages, forge.ASSETS))
+    except SystemExit as e:
+        raise web.HTTPBadRequest(text=str(e))
+    except Exception as e:
+        raise web.HTTPBadGateway(text=f"could not read the voice catalogue: {e}")
+
+
+async def api_preview(request):
+    """
+    Synthesize a phrase so it can be HEARD before a training run is started.
+
+    Synchronous rather than a job: it takes about a second, and the whole
+    value is comparing two spelling variants back to back. Runs in a thread
+    because onnxruntime does not release the event loop.
+    """
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise web.HTTPBadRequest(text="nothing to say")
+    if len(text) > 200:
+        raise web.HTTPBadRequest(text="phrase is too long to preview")
+    import piper_voices
+
+    try:
+        wav = await asyncio.get_running_loop().run_in_executor(
+            None, piper_voices.preview, text, forge.ASSETS,
+            body.get("voice") or None, int(body.get("speaker") or 0),
+            body.get("language") or None,
+        )
+    except SystemExit as e:
+        raise web.HTTPBadRequest(text=str(e))
+    return web.Response(body=wav, content_type="audio/wav")
+
+
 async def api_test(request):
     name = request.match_info["name"]
     if not (forge.MODELS / f"{name}.onnx").exists():
@@ -630,6 +692,9 @@ def make_app() -> web.Application:
     app.router.add_patch("/api/wakewords/{name}", api_wakeword_patch)
     app.router.add_post("/api/wakewords/{name}/build", api_build)
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
+    app.router.add_post("/api/wakewords/{name}/piper-voices", api_piper_voices)
+    app.router.add_get("/api/voices", api_voices)
+    app.router.add_post("/api/preview", api_preview)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
     app.router.add_post("/api/wakewords/{name}/samples", api_add_samples)
     app.router.add_delete("/api/wakewords/{name}", api_delete)

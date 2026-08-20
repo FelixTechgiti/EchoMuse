@@ -235,10 +235,16 @@ jobs:
             echo "::error::expected 2 architecture digests, found $n: $(ls | tr '\n' ' ')"
             exit 1
           fi
+          # The files are named by BARE digest hex (upload-artifact rejects
+          # the colon in sha256:), so the prefix is added back here. Producer
+          # and consumer have to move together: stripping it at export and
+          # not restoring it here is what broke forge-v1.0.1, one release
+          # after the colon broke forge-v1.0.0.
           refs=""
           for f in *; do
-            refs="$refs ${IMAGE}@${f#*-}"
+            refs="$refs ${IMAGE}@sha256:${f}"
           done
+          echo "assembling from:$refs"
           docker buildx imagetools create \
             -t "${IMAGE}:${version}-cpu" \
             -t "${IMAGE}:latest-cpu" \

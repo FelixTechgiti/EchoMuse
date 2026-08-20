@@ -361,6 +361,48 @@ def cmd_google_tts(args) -> None:
     )
 
 
+# ---------------------------------------------------------------- piper voices
+
+def cmd_voices(args) -> None:
+    """List what Piper publishes, so --language/--voices can be chosen."""
+    import piper_voices
+
+    if args.language:
+        rows = [v for v in piper_voices.catalogue(ASSETS)
+                if v["language"] == args.language]
+        if not rows:
+            sys.exit(f"no voices for {args.language} — run without --language to list them")
+        print(f"{'voice':<40}{'speakers':>9}  quality")
+        for v in rows:
+            print(f"{v['name']:<40}{v['speakers']:>9}  {v['quality']}")
+    else:
+        print(f"{'language':<10}{'voices':>7}{'best speakers':>15}  name")
+        for l in piper_voices.languages(ASSETS):
+            print(f"{l['language']:<10}{l['voices']:>7}{l['max_speakers']:>15}  {l['label']}")
+
+
+def cmd_piper_voices(args) -> None:
+    import yaml
+
+    cfg_path = WAKEWORDS / args.name / "config.yml"
+    if not cfg_path.exists():
+        sys.exit(f"no such wake word: {cfg_path} missing (run forge.py new first)")
+    cfg = yaml.safe_load(cfg_path.read_text())
+    out_base = Path(cfg["output_dir"]) / cfg["model_name"]
+
+    import piper_voices
+
+    piper_voices.synthesize(
+        phrases=cfg["target_phrase"],
+        n_samples=args.samples,
+        train_dir=out_base / "positive_train",
+        test_dir=out_base / "positive_test",
+        assets=ASSETS,
+        voices=args.voices.split(",") if args.voices else None,
+        language=args.language,
+    )
+
+
 # ---------------------------------------------------------------- test
 
 def cmd_test(args) -> None:
@@ -451,6 +493,24 @@ def main() -> None:
                    help="also use lower-quality Standard voices")
     p.add_argument("--yes", action="store_true", help="skip the cost-estimate confirmation")
     p.set_defaults(func=cmd_google_tts)
+
+    p = sub.add_parser("voices",
+                       help="list the Piper voices available, by language")
+    p.add_argument("--language", help="e.g. en_GB, de_DE — omit to list languages")
+    p.set_defaults(func=cmd_voices)
+
+    p = sub.add_parser("piper-voices",
+                       help="add positives in another accent or language, generated "
+                            "locally from Piper's published voices (no account, no cost)")
+    p.add_argument("name")
+    p.add_argument("--samples", type=int, default=4000,
+                   help="clips to synthesize (default 4000)")
+    p.add_argument("--language", default="en_GB",
+                   help="language code to draw voices from (default en_GB); "
+                        "see `forge.py voices`")
+    p.add_argument("--voices",
+                   help="comma-separated voice names, overriding --language")
+    p.set_defaults(func=cmd_piper_voices)
 
     p = sub.add_parser("ui", help="serve the web frontend")
     p.add_argument("--host", default="0.0.0.0")

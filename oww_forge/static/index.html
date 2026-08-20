@@ -216,6 +216,8 @@
   .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .ww h3 { font-size: 16px; font-weight: 600; }
   .ww .phrase { color: var(--text2); font-style: italic; font-size: 13px; }
+  .ww .phrase a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--faint); }
+  .ww .phrase a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .ww .built { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); }
 
   /* pipeline stepper */
@@ -308,6 +310,10 @@
       <div class="hint">Pick a short phrase of 3&ndash;4 syllables. The training voices are American
         &mdash; add a comma-separated spelling of how <em>your family</em> says it
         (&ldquo;clarra&rdquo; for a British &ldquo;clara&rdquo;). One wake word listens for all spellings.</div>
+      <div class="row" style="margin-top:8px">
+        <button class="small" id="previewBtn">▶ Hear each spelling</button>
+        <span class="hint" id="previewNote" style="margin:0"></span>
+      </div>
       <details>
         <summary>advanced</summary>
         <label>Model name</label>
@@ -388,7 +394,8 @@ function friendlyJob(label) {
   return label
     .replace(/^downloading assets.*/, 'Downloading voice data')
     .replace(/^building '(.+)'$/, 'Training “$1”')
-    .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”');
+    .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”')
+    .replace(/^(\S+) voices × (\d+) for '(.+)'$/, 'Adding $2 $1 voices to “$3”');
 }
 
 function render() {
@@ -432,7 +439,8 @@ function render() {
     <div class="card ww" data-name="${esc(w.name)}">
       <div class="top">
         <h3>${esc(w.name)}</h3>
-        <span class="phrase">“${esc(w.phrases.join('” / “'))}”</span>
+        <span class="phrase">${w.phrases.map((p, i) =>
+          `<a href="#" data-say="${esc(p)}" title="Hear this spelling">“${esc(p)}” ▸</a>`).join(' / ')}</span>
         ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
       </div>
       <div class="stepper">${stepper}</div>
@@ -452,6 +460,8 @@ function render() {
           <button class="small" data-act="addrec" ${busy() ? 'disabled' : ''}
             title="The strongest accuracy boost: real recordings of your household saying the phrase">
             + Family recordings…</button>
+          <button class="small" data-act="pipergb" ${busy() ? 'disabled' : ''}
+            title="Add voices in another accent or language, generated locally — no account, no cost">+ Accents &amp; languages…</button>
           <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
             title="Adds British/Australian/US synthetic voices (usually free)">+ Google voices…</button>
           <span class="hint" style="margin:0">then retrain to apply</span>
@@ -585,6 +595,48 @@ $('createBtn').onclick = async () => {
   refresh();
 };
 
+/* Speak a phrase so it can be judged by ear before a training run.
+   The first call downloads the voice (~77MB) and takes a moment; after that
+   the session is cached and it is roughly instant. */
+let previewing = false;
+async function say(text, note) {
+  if (previewing) return;
+  previewing = true;
+  if (note) note.textContent = 'synthesizing…';
+  try {
+    const r = await fetch('/api/preview', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})});
+    if (!r.ok) { alert(await r.text()); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const a = new Audio(url);
+    // Wait for it, so "hear each spelling" plays them in order rather than
+    // on top of each other.
+    await new Promise(res => { a.onended = a.onerror = res; a.play().catch(res); });
+    URL.revokeObjectURL(url);
+  } finally {
+    previewing = false;
+    if (note) note.textContent = '';
+  }
+}
+
+$('previewBtn').onclick = async () => {
+  const variants = $('newPhrase').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!variants.length) return alert('Type the wake phrase first, e.g. "hey clara"');
+  const note = $('previewNote');
+  for (const v of variants) {
+    note.textContent = `“${v}”`;
+    await say(v, null);
+  }
+  note.textContent = '';
+};
+
+$('wakewords').addEventListener('click', e => {
+  const link = e.target.closest('a[data-say]');
+  if (!link) return;
+  e.preventDefault();
+  say(link.dataset.say, null);
+});
+
 $('themeBtn').onclick = () => {
   const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
@@ -658,6 +710,23 @@ $('wakewords').addEventListener('click', async e => {
     v.style.display = ''; v.className = 'verdict ok';
     v.textContent = '✓ Saved — press Train to apply';
     lastWwHtml = null;
+  } else if (act === 'pipergb') {
+    let langs;
+    try { langs = await api('/api/voices'); } catch { return; }
+    const withMulti = langs.filter(l => l.max_speakers > 1);
+    const lang = prompt(
+      'Which accent or language should the extra voices use?\n\n' +
+      'The built-in voices are all American English, so this is how you teach it\n' +
+      'the way the phrase is actually said in your house.\n\n' +
+      'Codes with the most distinct speakers:\n  ' +
+      withMulti.slice(0, 8).map(l => `${l.language} (${l.max_speakers} speakers, ${l.label})`).join('\n  ') +
+      `\n\n${langs.length} languages available in total.`, 'en_GB');
+    if (!lang) return;
+    const n = prompt('How many clips to add?\n(Generated locally — no account, no cost. The first run downloads the voice, typically 20-80MB.)', '4000');
+    if (!n) return;
+    await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({samples: +n, language: lang.trim()})});
   } else if (act === 'gtts') {
     if (!(state.google && state.google.valid)) {
       return alert('Set up the Google key first — see "Google voices" on the left.');
