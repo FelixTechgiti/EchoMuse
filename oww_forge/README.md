@@ -62,7 +62,34 @@ is no auth in front of it. That is the same trust model as everything else
 here (the UI can already delete training data and run arbitrary jobs), but
 it is a secret at rest now, so keep the port on the LAN.
 
-## Quickstart — CLI
+## Quickstart — published image
+
+```bash
+cd oww_forge
+docker compose -f docker-compose.deploy.yml up -d forge-ui   # http://<host>:8769
+```
+
+Two images, and picking the wrong one costs a night:
+
+| tag | torch | platforms | for |
+|-----|-------|-----------|-----|
+| `:latest` | CUDA 12.8 | linux/amd64 | a machine with an NVIDIA GPU |
+| `:latest-cpu` | CPU | linux/amd64, linux/arm64 | everything else, including Apple Silicon |
+
+On Apple Silicon use `-cpu` and the `forge-ui-cpu` / `forge-cpu` services. The
+arm64 image runs natively instead of under emulation, which is the difference
+between the overnight CPU run described below and one nobody would sit
+through. It is **still CPU training**: Docker on macOS runs containers in a
+Linux VM with no Metal passthrough, so there is no GPU in there to reach. Using
+the M-series GPU means running the trainer outside Docker against torch's MPS
+backend, which is not what this ships.
+
+Prefer the published image unless you are changing the trainer itself. Every
+pin in the Dockerfile is load-bearing, and a local build re-resolves the
+floating layers underneath them on every run; the published image is the only
+artifact that preserves what was actually verified.
+
+## Quickstart — local build
 
 ```bash
 cd oww_forge
