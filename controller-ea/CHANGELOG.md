@@ -1,5 +1,130 @@
 # Changelog
 
+## 2.20.2
+
+**Better sound, and a long run of fixes.** Your Echo gets a speaker protection
+stage that clears up the midrange and stops the equaliser distorting what it
+boosts. Long answers no longer cut themselves off, wake words no longer fire at
+nobody, interrupting a response no longer disconnects the device, Home
+Assistant sidebar sign-in works again, and adding a second Echo no longer
+overwrites the first.
+
+**Two things to know before updating.** Your speaker will sound different —
+the new protection stage is on by default. And the database migrates on first
+start (a backup is taken automatically); for a small number of people that also
+gives a device a new identity in Home Assistant, which is the last item here.
+No firmware update is required and there is nothing to do on your devices.
+
+### Your Echo sounds different, and it should sound better
+
+Turning any equaliser band up used to push the audio past full scale, where it
+was hard-clipped — measured at 4.7% of samples on a normal signal with a modest
+bass boost, and 18% at the top of the sliders. A flat equaliser was unaffected,
+so this only ever hit people who reached for the controls to improve their
+sound.
+
+There is now a limiter on the output, and a dynamic bass guard in front of it
+that drops the low frequencies this driver physically cannot produce. The
+second sounds backwards and is the bigger of the two: frequencies below about
+115 Hz still move the cone even though you cannot hear them, and that movement
+muddies everything above it — which is what "tin-can" actually is. Removing
+them makes the midrange clearer and measurably *louder*, because the limiter no
+longer has to hold the whole signal down to contain bass peaks nobody was going
+to hear.
+
+Both are on by default, as a single **Speaker protection** toggle under
+Advanced → Playback. Leave it on. It was five separate controls during Early
+Access and is now one, because none of the five could be judged by ear: the two
+stages cancel out each other's most obvious effect, and the depth slider moves
+the overall level by 0.14 dB across its entire range. Nothing was lost —
+every setting still exists and still applies, and any value you had set is
+still in force; the controls to change them again have gone from the dashboard.
+
+Speaker settings also now take effect the moment you save them, mid-track,
+rather than at the next track or the next restart.
+
+### Long answers no longer cut themselves off
+
+Ask for something lengthy — a story, a detailed explanation — and EchoMuse
+would stop partway, sit with the ring lit, and end without finishing. It was
+hearing its own voice as a wake word and cancelling itself. Measured on a real
+device, a short reply peaked at 0.03 against the bar while a story reached
+0.18 against a bar of 0.05.
+
+Interrupting now needs two consecutive frames, and the default bar has moved
+from 0.05 to 0.25. Talking over a response still works — real speech scores far
+higher than the response does. **If you raised this setting yourself to stop
+responses cutting out, you can put it back to the default.**
+
+### Wake words no longer fire at nobody
+
+The wake-word engine fills its buffer with random noise whenever it is reset,
+and we scored that noise as if it were sound for the next 1.28 seconds. On one
+device in one day that produced 19 wake events with nobody speaking, some
+scoring higher than real speech. Raising your threshold would not have helped —
+two of them cleared 0.80. Found, measured and fixed by @dmndru.
+
+One consequence: interrupting a response is ignored for its first 1.28 seconds.
+
+### Interrupting a response no longer disconnects the Echo
+
+Saying the wake word mid-answer dropped the device off Home Assistant and
+reconnected it a few seconds later — so the media player and voice assistant
+flicked to unavailable each time. The cause was two lines of bookkeeping
+sitting in an unreachable spot in the code, which only mattered when playback
+was interrupted rather than finishing normally.
+
+Also here: if the wake-word listener ever fails, it now restarts itself and
+writes a loud error first, rather than leaving a device that hears you, lights
+its ring, and never answers. A stuck "turn in progress" flag recovers the same
+way. **We do not yet know what triggers that**, so if you see a device go deaf,
+the log now contains the answer and we would like it.
+
+### Home Assistant sign-in and admin rights
+
+Opening EchoMuse from the Home Assistant sidebar failed and fell back to the
+setup-token page — the lookup matching your HA account to an EchoMuse one
+crashed on every request. Reported and diagnosed by @lennart24, fixed by
+@finik.
+
+Separately, if you had created a local EchoMuse account before ever opening the
+panel through Home Assistant — including by copying `/data` across when moving
+from the container, which the migration guide tells you to do — every Home
+Assistant user was made read-only, permanently, with no way back but editing
+the database by hand. Fixed, and existing installs in that state recover.
+
+### Home Assistant behind your own certificate authority
+
+If Home Assistant is served over HTTPS with a certificate from your own
+internal CA, EchoMuse could not fetch the spoken response: the Echo woke up and
+every turn ended silently. There is a new **Private CA certificate** option —
+put the certificate (PEM) in Home Assistant's `ssl` folder and set the option
+to `/ssl/<filename>`. On the standalone container, mount it and set
+`EM_EXTRA_CA_CERT`. A missing or malformed file now stops the add-on starting
+and says why.
+
+Worth trying first, because it needs no certificate at all: if Home Assistant
+itself still listens on plain HTTP behind something that terminates TLS, set
+its *internal URL* to `http://<its-address>:8123`.
+
+### Adding a second Echo no longer overwrites the first
+
+Home Assistant identifies each satellite by a MAC address we derive from the
+Echo's serial number. That derivation stripped letters out of the serial, so
+two Echoes from the same batch differing only in their trailing characters
+collapsed onto the same address and Home Assistant concluded they were one
+device. Found and diagnosed by @lennart24.
+
+That identity is now assigned once and stored, so a fix reaches only the
+devices that need it. **On upgrade, every device keeps the identity it has
+today unless it is in a colliding pair** — in which case the older device keeps
+it and the other takes a new one, appearing in Home Assistant as a new device.
+That device's entity IDs change and any automation naming them needs
+repointing; it is the device that was being overwritten, so it had no working
+entities to lose.
+
+Also in this release: EchoMuse now carries a LICENSE and a contributing guide.
+
 ## 2.20.2-ea.7 (Early Access)
 
 One addition, for people running Home Assistant over HTTPS with their own
