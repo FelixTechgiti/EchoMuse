@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.20.2-ea.5 (Early Access)
+
+One fix, and it is for the fault that showed up while testing 2.20.2-ea.4.
+
+### A device could stop responding to the wake word until the add-on restarted
+
+It went quiet with nothing in the log to say so, and — the confusing part —
+the Echo itself carried on detecting the wake word perfectly. On devices doing
+their own wake word detection, the Echo hears you, decides it heard you, and
+tells the controller; the part of the controller that acts on that had stopped
+running. So the device looked healthy from every angle and simply never
+answered.
+
+Two things could leave it in that state and neither said anything. The loop
+that listens for wake words could end on an unexpected error and nothing
+restarted it or noticed. Separately, the flag that says "a voice turn is in
+progress" could be left on after something went wrong mid-turn, and while it
+is on the device deliberately ignores the microphone.
+
+Both now recover on their own, and both write a loud error to the log first,
+so a recurrence explains itself instead of looking like the device has gone
+deaf for no reason. **If you saw this on 2.20.2-ea.4, please still send the
+log if you have it** — the fix makes it survivable, but we do not yet know
+what triggered it.
+
+Nothing else changed. No database migration, no firmware requirement, nothing
+to do on your devices.
+
 ## 2.20.2-ea.4 (Early Access)
 
 Four fixes. Two change what you hear, one unblocks Home Assistant users who
