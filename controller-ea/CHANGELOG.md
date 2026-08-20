@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.20.2-ea.7 (Early Access)
+
+One addition, for people running Home Assistant over HTTPS with their own
+certificate authority.
+
+### Private certificate authorities are now supported
+
+If Home Assistant is served over HTTPS using a certificate from your own
+internal CA, EchoMuse could not fetch the spoken response. The controller
+started normally and the Echo woke up, but every turn ended silently — the
+audio fetch failed certificate verification, and nothing on screen said so.
+
+There is a new **Private CA certificate** option. Put your CA certificate (PEM
+format) in Home Assistant's `ssl` folder and set the option to
+`/ssl/<filename>`. On the standalone container, mount the certificate and set
+`EM_EXTRA_CA_CERT` to its path inside the container.
+
+If the file is missing, unreadable, or not in PEM format, the add-on now
+**fails to start and says why**, rather than starting and failing on every
+voice turn afterwards with an error nothing connects back to the setting.
+
+**Worth trying first, because it needs no certificate at all:** if Home
+Assistant itself still listens on plain HTTP and something in front of it
+handles TLS, setting Home Assistant's *internal URL* to
+`http://<its-address>:8123` avoids the problem entirely — EchoMuse is on your
+network, and the audio fetch is a local hop.
+
+Nothing else changed, and nobody who is not using a private CA is affected. No
+database migration, no firmware requirement, nothing to do on your devices.
+
 ## 2.20.2-ea.6 (Early Access)
 
 One fix: interrupting a long answer dropped the device off Home Assistant.
