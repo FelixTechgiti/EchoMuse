@@ -293,6 +293,10 @@
 
 <main>
   <section>
+    <!-- Matches "Your wake words" opposite, so the two columns start on the
+         same line. Without it the left column sat one label-height higher
+         than the right and the cards read as misaligned. -->
+    <div class="microlabel" style="margin-left:2px">Setup</div>
     <div class="card">
       <div class="microlabel">Step 1 &middot; Voice data</div>
       <div id="assetSummary" class="hint" style="margin:0 0 10px"></div>
@@ -496,7 +500,14 @@ function render() {
   // in one of the inputs, and put the open panels back afterwards.
   const host = $('wakewords');
   if (html === lastWwHtml) return;
-  if (host.contains(document.activeElement)) return;
+  // Only while something is being TYPED. Guarding on focus generally was
+  // wrong: a button keeps focus after it is clicked, so pressing "remove"
+  // froze the list — the delete succeeded, every later poll saw the focus
+  // still sitting on the (now stale) button, and nothing updated until the
+  // page was reloaded.
+  const ae = document.activeElement;
+  if (ae && host.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)
+      && ae.type !== 'file') return;
   const open = new Set([...host.querySelectorAll('.ww details[open]')]
     .map(d => d.closest('.ww').dataset.name));
   host.innerHTML = html;
