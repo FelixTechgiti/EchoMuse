@@ -19,6 +19,7 @@ import collections
 import itertools
 import random
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
@@ -26,6 +27,14 @@ from threading import Lock
 SPEAKING_RATES = [0.85, 0.95, 1.0, 1.1, 1.2]
 PITCHES = [-4.0, -2.0, 0.0, 2.0, 4.0]
 TEST_FRACTION = 0.1
+# Retry policy for the quota. Google rate-limits a run of any size — measured
+# at 1388 of 2000 clips refused with ResourceExhausted — and the request is
+# not at fault, so the only remedy is to ask again later. Jittered, because a
+# fixed delay re-synchronises every worker into the next burst.
+RETRIES = 5
+BACKOFF_BASE_S = 1.0
+BACKOFF_MAX_S = 30.0
+WORKERS = 4
 # USD per 1M characters, as a RANGE, because the pool spans voice families
 # priced an order of magnitude apart: WaveNet/Standard $4, Neural2/Polyglot
 # $16, Chirp3-HD $30, Studio $160 (checked 2026-08-20). A single figure was
@@ -108,7 +117,12 @@ def synthesize(phrases, n_samples, train_dir: Path, test_dir: Path,
     # Removing them removes the load that provokes rate limiting in the first
     # place.
     voice_shape = {}         # name -> index of the request shape it accepts
+    # Attempts that failed and were RETRIED, against clips that were finally
+    # abandoned. Reporting the first as the second reads as "you lost 27
+    # clips" on a run where all 300 were written, which is a lie in the
+    # direction that makes people re-run for nothing.
     transient = collections.Counter()
+    gave_up = [0]
     lock = Lock()
 
     # Permanent, in the sense that retrying changes nothing. Anything else --
@@ -140,7 +154,14 @@ def synthesize(phrases, n_samples, train_dir: Path, test_dir: Path,
         # have not met yet pays for the discovery.
         start = voice_shape.get(voice.name, 0)
         last = None
-        for i in range(start, len(shapes)):
+        # Two loops in one: `i` walks the request shapes (a permanent refusal
+        # means ask for less), `attempt` retries the SAME shape after a wait
+        # (a transient failure means ask again later). Advancing i on a
+        # transient error would silently degrade the request — dropping the
+        # pitch variation this run exists to produce — because the quota was
+        # briefly full.
+        i, attempt = start, 0
+        while i < len(shapes):
             try:
                 resp = client.synthesize_speech(
                     **req,
@@ -158,21 +179,44 @@ def synthesize(phrases, n_samples, train_dir: Path, test_dir: Path,
                 return 1
             except permanent as e:
                 last = e
+                i += 1
+                attempt = 0
                 continue          # try a simpler request
             except Exception as e:
-                # Transient. Give this job up, but leave the voice alone.
+                # Transient — and on a run of any size this means the quota,
+                # measured: 1388 of 2000 clips lost to ResourceExhausted in a
+                # single run once the blacklist stopped hiding it. Retrying is
+                # the whole remedy; the request is fine, we simply asked too
+                # fast. Backoff is exponential with jitter, because a fixed
+                # delay re-synchronises every worker into the next burst and
+                # reproduces the problem one second later.
                 with lock:
                     transient[type(e).__name__] += 1
-                return 0
+                if attempt >= RETRIES:
+                    with lock:
+                        gave_up[0] += 1
+                    return 0
+                delay = BACKOFF_BASE_S * (2 ** attempt)
+                time.sleep(min(delay, BACKOFF_MAX_S) * (0.5 + random.random()))
+                attempt += 1
+                continue          # same shape, after a wait
         with lock:
             bad_voices[voice.name] = str(last)[:120] if last else "unknown"
         return 0
 
     done = 0
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    # 4 rather than 8: the ceiling is Google's, so more workers buy no
+    # throughput and only convert into retries and wall-clock.
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        marked = 0
         for ok in pool.map(synth_one, jobs):
             done += ok
-            if done and done % 200 == 0:
+            # Once per threshold crossed, not once per job that happens to
+            # arrive while the count sits on a multiple of 200 — which is
+            # what printed "…600/2000" twenty times in a row on the run that
+            # found the quota problem.
+            if done - marked >= 200:
+                marked = done - (done % 200)
                 log(f"…{done}/{n_samples}")
 
     if bad_voices:
@@ -182,13 +226,17 @@ def synthesize(phrases, n_samples, train_dir: Path, test_dir: Path,
         if len(bad_voices) > 5:
             log(f"  …and {len(bad_voices) - 5} more")
     if transient:
-        # Named separately from the above because the remedy is different:
-        # these are worth re-running, and a run that hits many of them is
-        # asking Google for more than it will give at this concurrency.
         total = sum(transient.values())
-        log(f"{total} clips lost to transient errors "
-            f"({', '.join(f'{k}×{v}' for k, v in transient.most_common(3))}) "
-            f"— re-run to fill them in")
+        detail = ', '.join(f'{k}×{v}' for k, v in transient.most_common(3))
+        if gave_up[0]:
+            log(f"{gave_up[0]} clips gave up after {RETRIES} retries "
+                f"({total} failed attempts: {detail}) — re-run to fill them in")
+        else:
+            # Worth saying rather than staying silent: it is the difference
+            # between a run that went smoothly and one that was rate-limited
+            # throughout and only finished because it waited.
+            log(f"absorbed {total} transient errors by retrying ({detail}) — "
+                f"nothing lost")
     log(f"wrote {done} clips → {train_dir.parent}")
     if done < n_samples * 0.5:
         log("WARNING: more than half the requests failed — check API quota/credentials")
