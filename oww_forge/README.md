@@ -46,9 +46,50 @@ The UI covers the whole flow: asset download with live progress, wake-word
 creation, build with a streaming log console, Google-TTS mix-in, wav-upload
 testing, and `.onnx` download. One job runs at a time (training saturates
 the machine anyway); state is derived from disk on every poll, so it
-survives container restarts. No auth — LAN tool.
+survives container restarts. Light and dark follow the dashboard, sharing
+its `em-theme` setting. No auth — LAN tool.
 
-## Quickstart — CLI
+A run can be **stopped** from the console bar, its settings changed under
+*training settings*, and started again. Stopping keeps everything already
+produced: clip generation is resumable and both later steps check what
+exists, so the loop is stop, adjust, train again rather than start over. The
+stop kills the whole process group, because `forge.py` is only the parent —
+openWakeWord's `train.py` underneath it is what holds the GPU, and killing
+the parent alone leaves that running behind a UI that says it stopped.
+
+Note the credentials endpoint writes a Google service-account key, and there
+is no auth in front of it. That is the same trust model as everything else
+here (the UI can already delete training data and run arbitrary jobs), but
+it is a secret at rest now, so keep the port on the LAN.
+
+## Quickstart — published image
+
+```bash
+cd oww_forge
+docker compose -f docker-compose.deploy.yml up -d forge-ui   # http://<host>:8769
+```
+
+Two images, and picking the wrong one costs a night:
+
+| tag | torch | platforms | for |
+|-----|-------|-----------|-----|
+| `:latest` | CUDA 12.8 | linux/amd64 | a machine with an NVIDIA GPU |
+| `:latest-cpu` | CPU | linux/amd64, linux/arm64 | everything else, including Apple Silicon |
+
+On Apple Silicon use `-cpu` and the `forge-ui-cpu` / `forge-cpu` services. The
+arm64 image runs natively instead of under emulation, which is the difference
+between the overnight CPU run described below and one nobody would sit
+through. It is **still CPU training**: Docker on macOS runs containers in a
+Linux VM with no Metal passthrough, so there is no GPU in there to reach. Using
+the M-series GPU means running the trainer outside Docker against torch's MPS
+backend, which is not what this ships.
+
+Prefer the published image unless you are changing the trainer itself. Every
+pin in the Dockerfile is load-bearing, and a local build re-resolves the
+floating layers underneath them on every run; the published image is the only
+artifact that preserves what was actually verified.
+
+## Quickstart — local build
 
 ```bash
 cd oww_forge
@@ -158,8 +199,19 @@ dirs — the subsequent piper generation counts them toward `n_samples`, so
 you get a mixed-family training set at no extra training cost. Piper remains
 the volume source; Google adds acoustic character a single TTS family can't.
 
-Setup: create a GCP service account with the Text-to-Speech API enabled, save
-the JSON key as `./data/google-credentials.json`. **Usually free**: the API's
+Setup, from the web UI: **Google voices** on the left, then upload (or paste)
+the JSON key and press **Test connection**. The key is written to
+`./data/google-credentials.json` with mode 600 and picked up by the next job
+with no container restart, so the compose mapping is no longer something you
+have to arrange yourself. Test connection is worth pressing: the usual
+failure is a perfectly valid key on a project where the Text-to-Speech API
+was never enabled, and nothing local can see that.
+
+Setup, by hand: create a GCP service account with the Text-to-Speech API
+enabled, save the JSON key as `./data/google-credentials.json`. Note this
+must be a **service account** key, not an OAuth client secret — the UI
+rejects the latter, but the CLI will only fail later, inside a job.
+**Usually free**: the API's
 always-free tier covers ~1M premium-voice characters/month and a 2,000-clip
 wake-word run is ~25k characters (~2% of it). Past the free tier it's ~$16/1M
 chars; the command prints an estimate and asks before running.
