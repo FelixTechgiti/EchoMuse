@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.20.3-ea.1 (Early Access)
+
+An Early Access build on top of 2.20.2. The 2.20.2 notes below are the release
+this builds on — you already have them if you were running an earlier build.
+
+Two changes, both about the Echo hearing you. No database migration, no
+firmware requirement, and nothing to do on your devices.
+
+### Noise suppression no longer swallows quiet words
+
+**Noise suppression** could cut speech to complete silence rather than just
+turning it down. Measured on real turns: with it on, 8–15% of samples at a
+healthy speaking level were digital silence, against 0.3% with it off. That is
+the difference between a word sounding muffled and a word not being there at
+all, and it lands hardest on exactly the quiet speech the setting is meant to
+rescue.
+
+Suppression is now limited to 20 dB. A passage the denoiser judges to be noise
+is pushed well down instead of removed, and where it judges speech to be clean
+it passes through completely untouched — so nothing that was working gets
+quieter. Speech recognition stops improving well before 20 dB of noise
+reduction, so the limit costs nothing that was being collected.
+
+If you turned **Noise suppression** off because transcripts came back with
+words missing, it is worth another try.
+
+### Every Echo now knows all four wake words
+
+Your Dot was given the recogniser for whichever wake word was selected when it
+was provisioned. Choose a different one later and it needed that recogniser
+copied across first — which normally happened, but left a gap: a device that
+was **offline** when you changed the wake word was told to listen for a word it
+did not have.
+
+On a device doing its own wake word detection, that is a Dot that hears
+nothing. Nothing warned, and the dashboard showed it as healthy.
+
+All four stock wake words (Hey Jarvis, Alexa, Hey Mycroft, Hey Rhasspy) are now
+installed on every device — 3 MB in total — so switching between them is
+instant and cannot fail. Devices you provisioned earlier collect the missing
+ones automatically the next time they connect, and any device found without the
+recogniser it was told to use falls back to the controller listening on its
+behalf, rather than going quietly deaf.
+
+Custom wake words you have trained yourself are untouched and are still copied
+across on selection.
+
 ## 2.20.2
 
 **Better sound, and a long run of fixes.** Your Echo gets a speaker protection

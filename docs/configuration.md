@@ -219,12 +219,17 @@ takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
 
 **If the device does its own wake word detection** (see *On-device wake
-word*), the model has to be copied onto it before it can listen for the new
-word. That happens automatically when you select it, and the device carries on
-answering to its **current** wake word until the new one has arrived — usually
-a few seconds. If the copy fails, the device stays on the word it already has
-and the device log says why. It is never left listening for a word it does not
-have.
+word*), it needs the recogniser on it before it can listen for that word.
+
+All four stock words are installed during provisioning, so switching between
+them is instant and needs no copy. A **custom** model is copied across when you
+select it: the device carries on answering to its **current** wake word until
+the new one arrives — usually a few seconds — and if the copy fails it stays on
+the word it already has and the log says why. It is never left listening for a
+word it does not have.
+
+Devices provisioned before this was added get the missing stock recognisers
+automatically the next time they connect.
 
 **Changing the wake word briefly reconnects the device in Home Assistant.**
 Home Assistant only reads a satellite's wake word configuration when it
@@ -438,6 +443,11 @@ with *steady* noise — fans, air-con, appliance hum — in rooms where
 transcripts come back garbled. It does not remove other people talking or
 the TV; pointing the beamformer away from them is the tool for that. Off by
 default — turn it on per device and compare transcripts.
+
+Suppression is limited to 20 dB, so a passage the denoiser judges to be noise
+is pushed well down rather than removed outright. Before that limit existed it
+could silence quiet speech completely — a word or two vanishing mid-sentence
+rather than sounding muffled.
 
 **Echo cancel (AEC)** — teaches the mics to *subtract the Dot's own voice*
 from what they hear. Benefits: the device can hear you properly during and
