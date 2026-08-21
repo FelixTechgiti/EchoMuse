@@ -585,7 +585,7 @@ Controller detects dead connections within 30s via WebSocket protocol keepalives
 | `boot_patched.img` | SELinux-patched boot image |
 | `magisk.db` | Pre-seeded root grant database |
 | `Magisk-v17.3.zip` | Magisk installer |
-| `f1r30s.zip` | ADB enablement patch |
+| `f1r30s.zip` | R0rt1z2's patch: ADB + UART console, blocks OTA domains, disables dm-verity. Flash it after any stock firmware image or the OS will not boot |
 | `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` | FireOS 5 firmware |
 | `server` | Compiled EchoMuse binary (ARM, API 22) — or fetch from GitHub releases |
 

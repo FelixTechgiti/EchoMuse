@@ -26,7 +26,12 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
   - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread
   - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
     (**this exact build** — see below)
-  - `f1r30s.zip` — ADB enablement patch
+  - `f1r30s.zip` — from R0rt1z2's XDA thread. Does four things, not one:
+    enables ADB and UART console access, blocks Amazon's OTA domains in
+    `/system/etc/hosts` so the device cannot update itself, and disables
+    dm-verity. **Always flash it after a stock firmware image or the OS
+    will not boot** — a stock flash restores verity against a partition
+    table the unlock modified.
   - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
   - `server` — compiled EchoMuse binary (ARM, API 22)
 
