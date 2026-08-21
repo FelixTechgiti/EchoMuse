@@ -51,7 +51,16 @@ Three consequences for reviewing a change:
   enumeration accident).
 - **A change that makes a vendor blob load-bearing is going the wrong way**,
   and needs to justify itself as a terminal opt-in for one platform rather
-  than as the path forward. PR #168 (native AFE) is the live example.
+  than as the path forward. PR #168 (native AFE) is the **worked example,
+  declined 2026-08-21**: opt-in per device, default off, old path untouched,
+  built on genuine reverse engineering of the ASP pipeline, and audibly
+  better — and still the wrong direction, because it made Amazon's audio HAL
+  the path the audio takes. **Decline the direction, keep the findings.** Two
+  live bugs it surfaced were fixed on main first (the DAC clipping above
+  unity gain, the `Toggle` `disabled` prop), and stock's playback EQ was read
+  off a device as coefficients rather than adopted as a binary (#247). We do
+  not need Amazon's code to hit Amazon's target, and that is the general
+  answer whenever a vendor blob looks like the shortcut.
 
 **LineageOS is probably the wrong target; postmarketOS already has an
 `amazon-biscuit` port** (its wiki and pmaports kernel config were corroborating
