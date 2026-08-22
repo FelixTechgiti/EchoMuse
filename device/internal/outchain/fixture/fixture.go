@@ -51,10 +51,16 @@ type Step struct {
 type Case struct {
 	Name  string
 	Steps []Step
+	// HasLimiter / HasGuard say which processors were ATTACHED, which is not
+	// the same as enabled. A disabled limiter still applies its 5ms
+	// look-ahead delay — deliberately, so that toggling it does not shift the
+	// audio and click — so a case with the limiter attached but disabled
+	// still carries that latency in every sample. Only an ABSENT processor
+	// isolates the stages, which is what these flags record.
+	HasLimiter bool
+	HasGuard   bool
 	// Tail is what flush() emitted at end of stream: the limiter's held
-	// look-ahead. Note it is non-empty even with the limiter disabled — the
-	// look-ahead delay is unconditional, so that toggling the limiter does
-	// not change the stream's latency and glitch.
+	// look-ahead. Empty when no limiter is attached.
 	Tail []int16
 }
 
@@ -65,7 +71,7 @@ type Chain struct {
 	Cases      []Case
 }
 
-const magic = "EMCHAIN1"
+const magic = "EMCHAIN2"
 
 // Load reads and validates the fixture. Every size is read from the file's own
 // headers, and the whole file must be consumed — a fixture that parses but
@@ -161,6 +167,16 @@ func Load(path string) (*Chain, error) {
 		}
 		cs := Case{Name: string(raw[p : p+int(nameLen)])}
 		p += int(nameLen)
+
+		hl, err := u8()
+		if err != nil {
+			return nil, err
+		}
+		hg, err := u8()
+		if err != nil {
+			return nil, err
+		}
+		cs.HasLimiter, cs.HasGuard = hl != 0, hg != 0
 
 		nSteps, err := u32()
 		if err != nil {
