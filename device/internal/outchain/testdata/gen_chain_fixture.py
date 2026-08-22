@@ -56,7 +56,7 @@ SAMPLE_RATE = 48000
 # behaviour — which is where state bugs live — untested.
 CHUNK = 2048
 
-MAGIC = b"EMCHAIN1"
+MAGIC = b"EMCHAIN2"
 FLAT = [0.0] * em_eq.NUM_BANDS
 
 
@@ -157,38 +157,58 @@ P_ALL = Params(bands=[6.0, 4.0, -3.0, 0.0, 2.0, -5.0, 3.0, 5.0],
 
 def build_cases():
     """
-    (name, signal, [params per chunk]) — the params list length sets the
-    number of chunks. Repeating a Params object means steady state; changing
-    it mid-list is the in-place update path.
+    (name, signal, [params per chunk], limiter?, guard?) — the params list
+    length sets the number of chunks. Repeating a Params object means steady
+    state; changing it mid-list is the in-place update path.
+
+    THE LAST TWO FLAGS ARE WHY THIS IS NOT JUST A PARAMETER. A DISABLED
+    LIMITER IS NOT AN ABSENT ONE: em_limiter.process bypasses the gain
+    computation but keeps the look-ahead bookkeeping, so the stream retains
+    its 5ms latency (deliberately — dropping the delay on toggle would shift
+    the audio and click). A case built with limiter_enabled=False therefore
+    still has the limiter's delay baked into every sample, which is correct
+    behaviour and useless for isolating the EQ. Stage isolation needs the
+    processor ABSENT, so the flags say which are attached at all, matching
+    StreamingEQ's limiter=None / guard=None.
+
+    The first version of this file claimed "each stage alone" while attaching
+    the limiter to all thirteen cases.
     """
     n8 = CHUNK * 8
     return [
-        # Each stage alone first, so a failure localises to one stage instead
-        # of to "the chain".
-        ("passthrough",     sig_noise(n8),  [P_FLAT] * 8),
-        ("eq_only",         sig_noise(n8),  [P_EQ] * 8),
-        ("eq_loudness",     sig_noise(n8),  [P_EQ_LOUD] * 8),
-        ("limiter_only",    sig_hot(n8),    [P_LIM] * 8),
-        ("limiter_hard",    sig_hot(n8),    [P_LIM_HARD] * 8),
-        ("guard_only",      sig_bass(n8),   [P_GUARD] * 8),
-        ("full_chain",      sig_sweep(n8),  [P_ALL] * 8),
+        # Genuinely isolated: no limiter, no guard, so these test the EQ and
+        # nothing else. A failure here is a biquad or a state-carry bug.
+        ("eq_flat",             sig_noise(n8),  [P_FLAT] * 8,       False, False),
+        ("eq_only",             sig_noise(n8),  [P_EQ] * 8,         False, False),
+        ("eq_loudness",         sig_noise(n8),  [P_EQ_LOUD] * 8,    False, False),
+        ("eq_sweep_signal",     sig_sweep(n8),  [P_EQ] * 8,         False, False),
+        # Loudness toggling changes the SECTION COUNT (8 <-> 9), which is the
+        # one transition where the reference deliberately drops filter state.
+        ("eq_switch_flat",      sig_noise(n8),  [P_FLAT] * 4 + [P_EQ] * 4,     False, False),
+        ("eq_switch_curve",     sig_sweep(n8),  [P_EQ] * 4 + [P_EQ_LOUD] * 4,  False, False),
 
-        # Then the transitions. These are the cases section 8.3 is about: a
-        # port that rebuilds its filters rather than updating them in place
-        # passes every case above and fails these.
-        ("switch_flat_to_eq",   sig_noise(n8),  [P_FLAT] * 4 + [P_EQ] * 4),
-        ("switch_eq_curve",     sig_sweep(n8),  [P_EQ] * 4 + [P_EQ_LOUD] * 4),
-        ("switch_limiter_on",   sig_hot(n8),    [P_FLAT] * 4 + [P_LIM] * 4),
-        ("switch_limiter_thr",  sig_hot(n8),    [P_LIM] * 4 + [P_LIM_HARD] * 4),
-        ("switch_guard_on",     sig_bass(n8),   [P_FLAT] * 4 + [P_GUARD] * 4),
+        # One stage each, attached alone.
+        ("limiter_only",        sig_hot(n8),    [P_LIM] * 8,        True,  False),
+        ("limiter_hard",        sig_hot(n8),    [P_LIM_HARD] * 8,   True,  False),
+        ("limiter_bypassed",    sig_hot(n8),    [P_FLAT] * 8,       True,  False),
+        ("guard_only",          sig_bass(n8),   [P_GUARD] * 8,      False, True),
+
+        # The whole chain, and the transitions section 8.3 is about: a port
+        # that rebuilds its filters rather than updating them in place passes
+        # every steady-state case above and fails these.
+        ("full_chain",          sig_sweep(n8),  [P_ALL] * 8,        True,  True),
+        ("switch_limiter_on",   sig_hot(n8),    [P_FLAT] * 4 + [P_LIM] * 4,     True,  True),
+        ("switch_limiter_thr",  sig_hot(n8),    [P_LIM] * 4 + [P_LIM_HARD] * 4, True,  True),
+        ("switch_guard_on",     sig_bass(n8),   [P_FLAT] * 4 + [P_GUARD] * 4,   True,  True),
         # Every chunk different: the pathological case for anything that
         # rebuilds state, and the one a user sweeping a slider produces.
         ("sweep_params",        sig_noise(n8),
-         [P_FLAT, P_EQ, P_EQ_LOUD, P_ALL, P_LIM, P_GUARD, P_EQ, P_ALL]),
+         [P_FLAT, P_EQ, P_EQ_LOUD, P_ALL, P_LIM, P_GUARD, P_EQ, P_ALL], True, True),
     ]
 
 
-def run_case(signal: np.ndarray, params: list) -> tuple[list[bytes], bytes]:
+def run_case(signal: np.ndarray, params: list,
+             has_limiter: bool, has_guard: bool) -> tuple[list[bytes], bytes]:
     """Drive the reference chain and capture what it produced per chunk.
 
     Built ONCE and updated in place, exactly as em_player and em_controller do
@@ -201,10 +221,12 @@ def run_case(signal: np.ndarray, params: list) -> tuple[list[bytes], bytes]:
         limiter=em_limiter.Limiter(SAMPLE_RATE,
                                    threshold_db=first.limiter_threshold,
                                    release_ms=first.limiter_release,
-                                   enabled=first.limiter_enabled),
+                                   enabled=first.limiter_enabled)
+        if has_limiter else None,
         guard=em_mbc.BassGuard(SAMPLE_RATE,
                                bass_guard_db=first.guard_db,
-                               enabled=first.guard_enabled))
+                               enabled=first.guard_enabled)
+        if has_guard else None)
     outs = []
     for i, p in enumerate(params):
         eq.update(bands=p.bands, loudness=p.loudness,
@@ -226,10 +248,11 @@ def main():
     blob += struct.pack("<II", SAMPLE_RATE, CHUNK)
     blob += struct.pack("<I", len(cases))
 
-    for name, signal, params in cases:
-        outs, tail = run_case(signal, params)
+    for name, signal, params, has_lim, has_guard in cases:
+        outs, tail = run_case(signal, params, has_lim, has_guard)
         nm = name.encode()
         blob += struct.pack("<H", len(nm)) + nm
+        blob += struct.pack("<BB", 1 if has_lim else 0, 1 if has_guard else 0)
         blob += struct.pack("<I", len(params))
         for i, p in enumerate(params):
             chunk_pcm = to_pcm(signal[i * CHUNK:(i + 1) * CHUNK])
@@ -237,7 +260,10 @@ def main():
             blob += struct.pack("<I", len(chunk_pcm)) + chunk_pcm
             blob += struct.pack("<I", len(outs[i])) + outs[i]
         blob += struct.pack("<I", len(tail)) + tail
-        print(f"  {name:22} {len(params)} steps, tail {len(tail) // 2} samples")
+        stages = ("eq"
+                  + (" +limiter" if has_lim else "")
+                  + (" +guard" if has_guard else ""))
+        print(f"  {name:22} {len(params)} steps, tail {len(tail) // 2:4} samples  [{stages}]")
 
     out_path = os.path.join(_HERE, "chain_fixture.bin")
     with open(out_path, "wb") as f:

@@ -3,6 +3,7 @@ package fixture
 import (
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,7 +80,7 @@ func TestTransitionCasesPresent(t *testing.T) {
 		seen[cs.Name] = true
 	}
 	for _, want := range []string{
-		"switch_flat_to_eq", "switch_eq_curve", "switch_limiter_on",
+		"eq_switch_flat", "eq_switch_curve", "switch_limiter_on",
 		"switch_limiter_thr", "switch_guard_on", "sweep_params",
 	} {
 		if !seen[want] {
@@ -94,7 +95,7 @@ func TestTransitionCasesPresent(t *testing.T) {
 func TestTransitionCasesActuallyChange(t *testing.T) {
 	c := load(t)
 	for _, cs := range c.Cases {
-		if len(cs.Name) < 6 || cs.Name[:6] != "switch" {
+		if !strings.Contains(cs.Name, "switch") && cs.Name != "sweep_params" {
 			continue
 		}
 		changed := false
@@ -127,16 +128,41 @@ func sameParams(a, b Params) bool {
 		a.GuardDB == b.GuardDB
 }
 
-// flush() must emit the limiter's held look-ahead, and it does so even when
-// the limiter is disabled — the delay is unconditional so that toggling the
-// limiter does not change stream latency and glitch. A port that skipped the
-// tail would lose the last few milliseconds of every track.
-func TestTailPresent(t *testing.T) {
+// flush() emits the limiter's held look-ahead, and does so even when the
+// limiter is DISABLED — the delay is unconditional so that toggling it does
+// not change stream latency and glitch. A port that skipped the tail would
+// lose the last few milliseconds of every track.
+//
+// Which makes the tail an exact test of the isolation flags: a case with a
+// limiter attached must have one whatever its enabled state, and a case
+// without must have none. If those ever disagree, "stage isolation" is a
+// comment rather than a property.
+func TestTailMatchesLimiterAttachment(t *testing.T) {
 	c := load(t)
 	for _, cs := range c.Cases {
-		if len(cs.Tail) == 0 {
-			t.Errorf("%s: empty flush tail", cs.Name)
+		switch {
+		case cs.HasLimiter && len(cs.Tail) == 0:
+			t.Errorf("%s: limiter attached but no flush tail", cs.Name)
+		case !cs.HasLimiter && len(cs.Tail) != 0:
+			t.Errorf("%s: no limiter attached but %d tail samples — "+
+				"the stage is not isolated", cs.Name, len(cs.Tail))
 		}
+	}
+}
+
+// The EQ-only cases are what make a biquad failure localise to the biquads.
+// Without them a wrong coefficient and a wrong limiter look identical: both
+// just make "the chain" disagree.
+func TestIsolatedEQCasesExist(t *testing.T) {
+	c := load(t)
+	n := 0
+	for _, cs := range c.Cases {
+		if !cs.HasLimiter && !cs.HasGuard {
+			n++
+		}
+	}
+	if n < 4 {
+		t.Errorf("%d isolated EQ cases, want at least 4 — regenerate the fixture", n)
 	}
 }
 
