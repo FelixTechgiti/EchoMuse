@@ -30,6 +30,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -90,6 +91,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
+
+	// Install the output chain before anything can play. A device announcing
+	// `output_chain` has told the controller to stop shaping, so from that
+	// moment the device is the only thing that can — including for the
+	// window between boot and the first config push, which is why the
+	// defaults in internal/config mirror the controller's.
+	applyOutputChainConfig(pcmSpeaker)
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 	srvPtr.Store(s)
@@ -363,6 +371,7 @@ func main() {
 		}
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
+		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -943,6 +952,31 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
 // filter state is meaningless across a timing change anyway).
+// applyOutputChainConfig pushes the current output-chain settings into the
+// speaker. Reads the SNAPSHOT rather than the message, so a partial push
+// leaves the other six keys where they are instead of resetting them —
+// ConfigMessage is partial by design and per-section scoping makes that the
+// normal case, not the exception.
+//
+// Called on every config apply, including the connect-time one, and the chain
+// itself ignores a set that has not changed — which is most of them, since the
+// controller re-sends the whole config on every reconnect.
+func applyOutputChainConfig(pcmSpeaker *speaker.PcmSpeaker) {
+	if pcmSpeaker == nil {
+		return
+	}
+	c := config.Get().OutputChain()
+	pcmSpeaker.SetOutputChain(outchain.Params{
+		Bands:              c.EqBands,
+		Loudness:           c.EqLoudness,
+		LimiterEnabled:     c.LimiterEnabled,
+		LimiterThresholdDB: c.LimiterThreshold,
+		LimiterReleaseMS:   c.LimiterRelease,
+		GuardEnabled:       c.BassGuardEnabled,
+		GuardDB:            c.BassGuardDb,
+	})
+}
+
 func applyAecConfig(canceller *aec.Canceller, dataClient *client.DataClient) {
 	snap := config.Get().Snapshot()
 	enabled := snap.AecEnabled != nil && *snap.AecEnabled
