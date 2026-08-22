@@ -193,7 +193,7 @@ entire point of the protocol, and it cannot survive that hop.
 | Piece | Requirement | Cost | Verified |
 |---|---|---|---|
 | Discovery | mDNS — server advertises `_sendspin-server._tcp.local`, client advertises `_sendspin._tcp.local` | we already run mDNS for `_emcontroller._tcp` | spec |
-| Encryption | **Mandatory.** Noise `KKpsk2`, server is initiator, client is responder, over plain `ws://` | `flynn/noise`, pure Go | spec |
+| Encryption | Spec says **mandatory** (Noise `KKpsk2`, server initiator, client responder, over plain `ws://`) — **but MA implements none of it**, see 6.5 | `flynn/noise`, pure Go | spec + MA source |
 | Cipher suite | `25519_ChaChaPoly_SHA256` or `25519_AESGCM_SHA256`; servers support both, clients need one | pick ChaCha — the A53 has no AES instructions | spec |
 | Codec | Servers MUST support `pcm`, `flac` and `opus`; the client advertises what it wants in `client/hello`'s `player@v1` support object | see below | spec |
 | Clock | Client MUST use the time-filter algorithm (2-D Kalman) to map server timestamps onto its local clock | needs a local playback clock — we have one | spec |
@@ -283,13 +283,61 @@ be wrong in.
 - **32-bit.** Every tested Sendspin platform is 64-bit (Pi 3/4/5, Zero 2 W).
   We are 32-bit ARM. Nothing in the spec depends on word size, but nobody has
   run it there.
-- **Whether MA requires the handshake in practice.** The spec makes
-  encryption mandatory for standard discovery; MA's own player docs say it
-  mandates neither encryption nor pairing. Settle this against MA's server
-  source, not against either document.
 - **`sendspin-go` is a reference, not a dependency.** v1.2.0 dropped the oto
   backend to unify on malgo/miniaudio, so its output path is hardcoded to a
   cgo audio library we have no use for — we own tinyalsa and the mixer.
+
+### 6.5 Read off Music Assistant's actual implementation
+
+Settled 2026-08-22 by reading `aiosendspin` **6.0.5** as deployed in the live
+add-on, rather than the published spec or GitHub's main — that is the code our
+devices would actually talk to. Three questions closed and one constraint
+found.
+
+**MA's server implements NO encryption.** There is no Noise anywhere in
+`aiosendspin` (every "noise" match is Kalman process noise in
+`client/time_sync.py`), and its dependencies are `aiohttp`, `mashumaro`,
+`orjson`, `zeroconf` plus `av`/`numpy`/`pillow` for the server extra — no
+crypto library at all. So a plaintext `ws://` client works against MA today,
+and the spec's "mandatory" is aspirational as far as this server is concerned.
+
+**Do not architect Noise out on the strength of that.** The spec does require
+it, MA may implement it later, and at 0.40% of a core it is cheap to carry.
+Build the client so the handshake is a layer that can be switched on, not an
+assumption baked through the transport.
+
+**Mid-stream format renegotiation IS implemented** (`player/v1.py:696`,
+`on_stream_request_format`). An active stream takes an explicit branch that
+rebuilds the audio requirements and defers `stream/start` until the next audio
+chunk, so the codec header rides with it. So the jack-insert plan in 6.2 —
+`channels: 1` normally, `channels: 2` when a plug appears — is supported by
+the server rather than merely permitted by the spec.
+
+**⚠ The constraint that will bite: a request must EXACTLY match a format the
+client advertised, and the failure is silent.** The server filters the
+client's `supported_formats` from `client/hello` through
+`filter_encodable_formats`, then requires the full
+`(codec, sample_rate, bit_depth, channels)` tuple to be present in that list.
+If it is not, it logs a warning **on the server** and silently falls back to
+the base format. The client is told nothing, and simply keeps receiving what
+it had.
+
+So the device must enumerate **every** combination it might later ask for —
+mono *and* stereo, and any PCM fallback — in its first `client/hello`.
+Advertising only mono and later requesting stereo on jack insert would appear
+to work, change nothing, and leave no trace on the device.
+
+**`client/goodbye` carries a `reason` and is the clean-leave path** that S3
+requires (`models/core.py:295`, handled at `server/connection.py:737`). The
+S3 rule — HA wins, the device leaves the group cleanly — has a message to send
+rather than a gap.
+
+**One parameter to derive, not guess:** `client/hello` carries
+`buffer_capacity`, "max size in bytes of compressed audio messages in the
+buffer that are yet to be played". That is a statement about *our* buffer
+(`audioChanDepth` ≈ 5.46s), expressed in compressed bytes, and the server's
+`BufferTracker` paces against it. Getting it wrong means the server either
+starves us or overruns us.
 
 ---
 
