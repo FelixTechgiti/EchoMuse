@@ -213,14 +213,40 @@ whole section would be impossible.
 |---|---|---|---|
 | S1 | Sendspin session starts | device becomes the music plane's producer; controller told, so the `media_player` entity reports correctly | [proposed] |
 | S2 | voice turn during Sendspin playback | unchanged — `duck on`, music attenuated by `duckDb`, response on `0x02` | [proposed] |
-| S3 | controller sends `0x04` while a Sendspin session owns the plane | **must not interleave** — see invariant 7 | [proposed] |
+| S3 | controller sends `0x04` while a Sendspin session owns the plane | **HA wins** — device leaves the group cleanly, then plays `0x04`. Never interleaved (invariant 7) | [proposed] |
 | S4 | Sendspin session ends | producer released, `music_flush` semantics unchanged | [proposed] |
 
-S3 is the genuinely new failure mode and has no answer yet. "Play some jazz"
-spoken to the device runs through HA and arrives on `0x04`; a Sendspin group
-started from the MA app arrives on the socket. Both are Music Assistant, both
-are legitimate, and summing them is noise. Whichever rule we pick, it belongs
-in one place with the ladder above, not split across two producers.
+S3 is the genuinely new failure mode. "Play some jazz" spoken to the device
+runs through HA and arrives on `0x04`; a Sendspin group started from the MA
+app arrives on the socket. Both are Music Assistant, both are legitimate, and
+summing them is noise.
+
+**Decided 2026-08-22 (Wil): HA wins — it is the direct user request.** A
+device asked for music through HA leaves the Sendspin group and plays what it
+was asked for.
+
+Three things that rule does *not* mean, each of which would be a
+misreading with real consequences:
+
+- **It does not apply to voice.** A voice turn or an announcement never
+  contends for the music plane at all — it ducks (V1, S2). This rule governs
+  the two MUSIC producers only, and the whole point of the second plane is
+  that the highest-priority audio on the device does not need to win this
+  argument.
+- **Leaving is not ignoring.** The device must end the Sendspin session
+  properly rather than stop reading the socket: a server still streaming to a
+  client that has silently stopped playing keeps filling a buffer nobody
+  hears, and the group's view of the device stays wrong. Whatever the spec's
+  clean-leave path is, that is the one to take.
+- **It is not a priority ordering.** Sendspin does not sit at a fixed rung
+  under HA — it owns the music plane whenever HA is not asking for it. Last
+  direct request wins, which is the same shape as V4, where a user command
+  during a turn overrides our auto-resume.
+
+**Open: does the device rejoin the group when the HA-routed music ends?**
+Default to no — a silent rejoin puts audio in the room that nobody asked for
+at that moment, and the person who started the group can restart it. Worth
+revisiting only if it turns out to annoy in practice.
 
 ### 6.4 What is not yet known
 
@@ -300,8 +326,10 @@ in one place with the ladder above, not split across two producers.
 4. **Playback completion comes from the device**, not from a duration estimate.
 5. **`speaker_busy` is released in a `finally`.** [proposed #167]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
-7. **The music plane has exactly one producer at a time.** [proposed #89]
-   Interleaving controller `0x04` with a Sendspin session sums two unrelated
-   streams. Invariant 2 gains a second reason here: flushing music for a voice
-   turn would drop audio a synchronised group is counting on and force a
-   resync.
+7. **The music plane has exactly one producer at a time, and HA wins.**
+   [proposed #89] Interleaving controller `0x04` with a Sendspin session sums
+   two unrelated streams; a direct request through HA ends the Sendspin
+   session rather than mixing with it, and the device leaves the group
+   **cleanly** rather than going quiet on it (S3). Invariant 2 gains a second
+   reason here: flushing music for a voice turn would drop audio a
+   synchronised group is counting on and force a resync.
