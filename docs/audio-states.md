@@ -159,6 +159,13 @@ protocol, which Music Assistant speaks natively (WebSocket, port 8927,
 `/sendspin`). Placement decided 2026-08-22: **the client runs on the device
 and talks to Music Assistant directly**, not in the controller.
 
+**This section is expected to take several passes before it settles**, and is
+written to be edited rather than to look finished. What carries a date and a
+name is decided; everything else is open, and a decision recorded here can be
+revisited — the point of writing them down as they are made is that the next
+pass starts from the current position instead of re-deriving it. Nothing here
+has been built yet.
+
 ### 6.1 It is a second producer, not a third plane
 
 This is the part to get right before any code. Sendspin carries the same
@@ -243,10 +250,11 @@ misreading with real consequences:
   direct request wins, which is the same shape as V4, where a user command
   during a turn overrides our auto-resume.
 
-**Open: does the device rejoin the group when the HA-routed music ends?**
-Default to no — a silent rejoin puts audio in the room that nobody asked for
-at that moment, and the person who started the group can restart it. Worth
-revisiting only if it turns out to annoy in practice.
+**No rejoin when the HA-routed music ends** (Wil, 2026-08-22). A silent
+rejoin puts audio in the room nobody asked for at that moment, and the person
+who started the group can start it again. Revisit if it annoys in practice —
+the cost of being wrong here is an extra tap, which is the cheap direction to
+be wrong in.
 
 ### 6.4 What is not yet known
 
