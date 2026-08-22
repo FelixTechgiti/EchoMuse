@@ -7,8 +7,8 @@ This exists for the same reason `led-ring-states.md` does. Four things can now
 put audio on a device — a voice response, music, an HA announcement, and (with
 #167) a timer alarm — and each was added on its own, correct in isolation. The
 interactions between them are where the open bugs live: #261 (the duck lifting
-mid-response), #262 (music deferred until a turn ends), #243 (whether the
-output chain belongs device-side at all).
+mid-response) and #262 (music deferred until a turn ends). #243 — whether the
+output chain belongs device-side — was answered on 2026-08-22 and is section 8.
 
 Status markers match the LED doc: **[today]** is shipped behaviour verified in
 code, **[proposed]** is designed or in review and not merged.
@@ -300,23 +300,8 @@ be wrong in.
   a turn owns the speaker, so a stream started from a phone sits silent until
   the answer finishes (#262). Now that music has its own plane, the reason for
   the blanket rule is weaker than when it was written. Undecided.
-- **Q2 — where does the output chain belong?** EQ, limiter and bass guard run
-  controller-side today, on **both** planes, before the audio reaches the wire
-  (#243): `em_controller.py:1402` builds a `StreamingEQ` for the response,
-  `em_player.py:544` builds one for the media feed. Each is constructed once
-  per stream and updated in place, because the filters carry state and a new
-  instance mid-track clicks.
-
-  **Sendspin turns this from a preference into a decision.** A Sendspin
-  session goes MA → device and never crosses the controller, so a
-  controller-side chain would shape voice and HA-routed music while silently
-  not shaping synchronised music — the same speaker sounding different
-  depending on which app started the track. Either the chain moves device-side
-  (it is fixed-point-friendly: the mixer already runs Q15 arithmetic on the
-  ALSA path for exactly this reason) or Sendspin playback is unshaped by
-  design and that is written down. The cost of moving is that the parameters
-  are tuned by ear in a real room, and today an A/B is a controller-side
-  update-in-place; device-side it becomes a config push.
+- ~~**Q2 — where does the output chain belong?**~~ **Answered 2026-08-22: on
+  the device.** See section 8.
 - **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
   degrades the whole audio subsystem (#117/#141) and, with a music session
   live, can silence everything including voice. That is a hardware/HAL fault
@@ -325,7 +310,92 @@ be wrong in.
 
 ---
 
-## 8. Invariants — do not break
+## 8. The output chain moves to the device **[proposed — 3.0.0]**
+
+Decided 2026-08-22 (Wil): **the whole output path runs on the device, and the
+controller provides the config knobs to drive it.** Scope is the OUTPUT path
+only — EQ, limiter, bass guard and the mix. Input-side processing
+(`em_ns.py`/DTLN on the ASR-bound mic stream) stays controller-side and is a
+separate workstream: it is a neural net on the path to speech recognition
+rather than to the speaker, and nothing here needs it moved.
+
+### 8.1 Why — three reasons, in the order they carry weight
+
+- **Tuning latency collapses, from seconds to one period.** Controller-side,
+  a parameter change reaches only samples not yet sent, and the music feed
+  runs `LEAD_S` = 4.0s ahead into a buffer up to 5.46s deep — so a change is
+  heard **at least ~4s later**, and a voice response never hears it at all,
+  since the chain is built per stream. Device-side the chain sits at the ALSA
+  write, so a config push lands within RTT + one period (~43ms). These are
+  taste parameters tuned by ear, and four seconds of the old setting is long
+  enough to blur the comparison being made.
+
+  This is the SAME argument that forced ducking device-side (principle 3:
+  audio that has left the controller cannot be un-sent). EQ tuning has the
+  identical shape.
+- **One chain post-mix is the correct topology, and today's cannot be
+  reached.** The controller runs **two independent** chains —
+  `em_controller.py:1402` for the response, `em_player.py:544` for the media
+  feed — so **neither limiter ever sees voice and music summed**. Only the
+  mixer's saturation stands behind that today.
+- **Sendspin makes it forced rather than preferred.** A Sendspin session goes
+  MA → device and never crosses the controller, so a controller-side chain
+  would shape voice and HA-routed music while silently not shaping
+  synchronised music — the same speaker sounding different depending on which
+  app started the track.
+
+No protocol or GUI work is implied: all seven keys (`eqBands`, `eqLoudness`,
+`limiter*`, `bassGuard*`) already ride the config push and are currently
+ignored by the device.
+
+### 8.2 Requirements
+
+| # | Requirement | Why |
+|---|---|---|
+| R1 | Gate on an **`output_chain` capability**, independent of any Sendspin capability | A device could speak Sendspin without a local chain; standing the controller down for it ships unshaped audio. Same split as `oww_shadow` vs `oww_trigger` |
+| R2 | Controller stands down **only** on announce; otherwise it shapes as today | Degrade to old behaviour, never to a wrong answer. Two chains in series is two limiters in series, which is audibly wrong |
+| R3 | Chain sits **after the mix**, once | 8.1 |
+| R4 | **No click on any parameter change** | Deal-breaker (Wil, 2026-08-22). See 8.3 |
+| R5 | Port validated against **golden fixtures** generated from the Python chain | Precedent: `internal/wakeword/fixture` — the reason on-device wake word was trustworthy on arrival |
+| R6 | Python chain **kept**, as reference implementation and old-firmware fallback | Not scaffolding to delete |
+| R7 | Fixed point vs float **measured, not assumed** | The mixer's Q15 precedent covers a gain multiply; a limiter and a multiband guard are more precision-sensitive. The A53 has VFP, so float32 is on the table |
+
+### 8.3 R4 — how "no click" is actually achieved
+
+**Updating in place is necessary and NOT sufficient.** Preserving filter state
+avoids the rebuild transient (the bug `em_player`'s comment describes), but it
+does not avoid the transient from coefficients changing under a running
+filter. And the obvious fix is a trap: **interpolating raw biquad coefficients
+between two stable filters can pass through unstable intermediate states**, so
+naive smoothing blows up rather than clicking.
+
+- **Constant-slew parameter ramping**, exactly as `duckRampPeriods` already
+  does for the duck — deliberately a constant slew and not a proportional one,
+  so it is a duration rather than a time constant that crawls the last few
+  percent.
+- **Dual-instance crossfade for the biquads**: run old and new in parallel,
+  equal-power crossfade over ~50–100ms, drop the old. Unconditionally stable
+  because neither instance is ever interpolated. Costs one extra chain's CPU
+  during the crossfade window only.
+- **Limiter and bass guard are easier** — threshold and release changes are
+  gain-domain and smooth naturally provided detector state carries over.
+
+**Pinned by test, not by ear:** a step change in any parameter must produce no
+sample-to-sample discontinuity above a threshold. Host-testable in Go, no
+hardware required.
+
+### 8.4 Known risk
+
+The fixed-point (or float) port sounding **audibly different** from the Python
+chain is the one item here without a known method — everything else is
+engineering. It is also the failure mode this project has previous on: the DAC
+clipping above unity gain read for weeks as "Piper sounds worse than stock".
+Measure it early rather than last, and R5 is what makes "different" detectable
+before it is a listening test.
+
+---
+
+## 9. Invariants — do not break
 
 1. **Voice is never attenuated by the duck.** Only the music plane carries
    `duckTarget`.
