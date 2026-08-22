@@ -520,7 +520,14 @@ Two traps for whoever picks this up:
 already opened with two channels and `PumpPeriod` duplicates L=R; the mono
 downmix happens at the controller, in three ffmpeg calls (`-ac 1`). That was
 right when a mono internal speaker was the only output. With a jack it throws
-information away — see the stereo issue rather than reinventing the analysis.
+information away — see **#273** rather than reinventing the analysis. (That
+pointer said "the stereo issue" and named no number until 2026-08-22, when it
+turned out no such issue had ever been filed.) Note Sendspin does not inherit
+this problem: the client asks for what it wants via `stream/request-format`,
+so the device requests `channels: 1` normally and `channels: 2` when a plug is
+in, and the downmix happens server-side. **#274** turns the same mechanism
+into a stereo PAIR — two devices each playing one channel of the identical
+group stream, which the protocol already keeps sample-accurate.
 
 **`tinymix` IS on these devices** (`/system/bin/tinymix`), and the codec
 regmap is readable at `/sys/kernel/debug/regmap/2-0018/registers`
