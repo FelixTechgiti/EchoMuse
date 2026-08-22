@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
-	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -86,8 +86,8 @@ type ControlClient struct {
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
 
-	conn         *websocket.Conn
-	connMu       sync.Mutex
+	conn   *websocket.Conn
+	connMu sync.Mutex
 
 	// serverBaseURL is the WebSocket base URL actually in use
 	// ("ws://host:port" or "wss://host:tlsport"), set on successful
@@ -118,7 +118,7 @@ func NewControlClient(
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
-func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
@@ -253,9 +253,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	c.serverAddrMu.Unlock()
 
 	reg := map[string]interface{}{
-		"type":         "register",
-		"device_id":    c.deviceID,
-		"version":      Version,
+		"type":      "register",
+		"device_id": c.deviceID,
+		"version":   Version,
 		// Capabilities, not version strings, are how the controller decides
 		// what a device can be asked to do. A version comparison has to encode
 		// knowledge of our release history in the controller and gets it wrong
@@ -748,8 +748,17 @@ func capabilities() []string {
 	// device that scores, stays silent, and looks broken. Announcing a
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
+	// "output_chain": this firmware applies EQ, bass guard and limiter
+	// itself, POST-MIX, so the controller must stand down and send unshaped
+	// audio. Getting this wrong in either direction is audible: a controller
+	// that keeps shaping puts two limiters in series, and one that stands
+	// down for a device without the capability ships audio nobody shaped.
+	// It is announced separately from "audio_mix" even though both concern
+	// the same ALSA write, because the fleet already contains firmware that
+	// mixes and does not shape.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix"}
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
+		"output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -770,7 +779,7 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		// Always sent, never omitempty: absent must mean "this firmware does
 		// not report it" so the controller can fall back to mute_state, and
 		// omitempty would make an unmuted press indistinguishable from that.
-		"muted":  event.Muted,
+		"muted": event.Muted,
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},
