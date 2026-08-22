@@ -152,16 +152,137 @@ process.
 
 ---
 
-## 6. Open questions
+## 6. Sendspin **[proposed — #89]**
+
+Synchronised multi-room playback via the Open Home Foundation's Sendspin
+protocol, which Music Assistant speaks natively (WebSocket, port 8927,
+`/sendspin`). Placement decided 2026-08-22: **the client runs on the device
+and talks to Music Assistant directly**, not in the controller.
+
+### 6.1 It is a second producer, not a third plane
+
+This is the part to get right before any code. Sendspin carries the same
+thing the music plane already carries — Music Assistant audio — by a
+different route:
+
+```
+today      MA → HA → controller (em_player) → 0x04 → device music stream
+sendspin   MA ─────────────────────────────────────→ device music stream
+```
+
+So **no new frame type, no new mixer input, no new row in the ownership
+ladder**. The music `audioStream` gains a second thing that can fill it, and
+everything worked out for the first producer — the duck, `music_flush`,
+saturating mix, prime gate, underrun accounting — applies unmodified. The
+work is a client and a clock, not an audio path.
+
+The alternative (controller runs the client, re-streams over `0x04`) was
+rejected: our plane carries no timestamps, so playback would land whenever
+the ~5.5s device buffer happened to drain it. Sample-accurate sync is the
+entire point of the protocol, and it cannot survive that hop.
+
+### 6.2 What the device has to implement
+
+| Piece | Requirement | Cost | Verified |
+|---|---|---|---|
+| Discovery | mDNS — server advertises `_sendspin-server._tcp.local`, client advertises `_sendspin._tcp.local` | we already run mDNS for `_emcontroller._tcp` | spec |
+| Encryption | **Mandatory.** Noise `KKpsk2`, server is initiator, client is responder, over plain `ws://` | `flynn/noise`, pure Go | spec |
+| Cipher suite | `25519_ChaChaPoly_SHA256` or `25519_AESGCM_SHA256`; servers support both, clients need one | pick ChaCha — the A53 has no AES instructions | spec |
+| Codec | Servers MUST support `pcm`, `flac` and `opus`; the client advertises what it wants in `client/hello`'s `player@v1` support object | see below | spec |
+| Clock | Client MUST use the time-filter algorithm (2-D Kalman) to map server timestamps onto its local clock | needs a local playback clock — we have one | spec |
+
+**Codec: FLAC first, and Opus is not an entry cost.** The August assessment
+had Opus-via-cgo (armv7a/API 22) as a blocker. It is not one — because the
+server must support all three, the client may advertise FLAC only, and there
+are pure-Go FLAC decoders. That is roughly half of PCM's bitrate, lossless,
+and no cgo. **Settled by measurement 2026-08-22 — advertise FLAC**; 6.4 has
+the numbers and the trade against PCM. Opus becomes a bandwidth optimisation
+to take later, deliberately.
+
+**The clock is the reason this is possible at all.** Measured 2026-08-10 off
+`/proc/asound/card0/pcm23p/sub0/status`: `hw_ptr` advances in 112–144 frame
+steps every ~2.4ms — sub-period by ~15×, and 47973 fps against 48000 nominal
+(−0.056%). The driver reports a real DMA position rather than software
+bookkeeping, so scheduled playback to ±0.5ms is plausible. Software
+bookkeeping would have advanced in 2048-frame jumps every 42.7ms, and this
+whole section would be impossible.
+
+### 6.3 Ownership and arbitration
+
+| # | Precondition | Action | Status |
+|---|---|---|---|
+| S1 | Sendspin session starts | device becomes the music plane's producer; controller told, so the `media_player` entity reports correctly | [proposed] |
+| S2 | voice turn during Sendspin playback | unchanged — `duck on`, music attenuated by `duckDb`, response on `0x02` | [proposed] |
+| S3 | controller sends `0x04` while a Sendspin session owns the plane | **must not interleave** — see invariant 7 | [proposed] |
+| S4 | Sendspin session ends | producer released, `music_flush` semantics unchanged | [proposed] |
+
+S3 is the genuinely new failure mode and has no answer yet. "Play some jazz"
+spoken to the device runs through HA and arrives on `0x04`; a Sendspin group
+started from the MA app arrives on the socket. Both are Music Assistant, both
+are legitimate, and summing them is noise. Whichever rule we pick, it belongs
+in one place with the ladder above, not split across two producers.
+
+### 6.4 What is not yet known
+
+- ~~**CPU.**~~ **Measured 2026-08-22 on EA Test Device 01 (v2.12.0), and it
+  fits.** `device/tools/sendspin_bench` against 30s of pink noise at 607 kbps
+  (40% of PCM), wall time with `GOMAXPROCS=1` on a live device, so scheduler
+  contention is included rather than hidden:
+
+  | Per second of audio | % of one core |
+  |---|---|
+  | FLAC decode | 3.28 |
+  | ChaCha20-Poly1305 @ FLAC rate | 0.40 |
+  | ChaCha20-Poly1305 @ PCM rate | 0.97 |
+  | **total, advertise `flac`** | **3.68** |
+  | **total, advertise `pcm`** | **0.97** (+929 kbps on the wire) |
+
+  X25519 is 7.74ms, so the KKpsk2 handshake is ~23ms once per connection —
+  irrelevant. **Advertise FLAC**: it costs 2.7 points of CPU over PCM and
+  saves 929 kbps on links this fleet is already known to stutter on (4.6–7.1%
+  loss measured, #139/#140). Trading a link we know is marginal against a core
+  we have 3.68% of room on is not a close call.
+
+  What this does **not** cover: WebSocket framing, the buffer scheduler, and
+  the time filter itself. All small, none zero — treat 3.68% as a floor, not
+  a budget.
+- **32-bit.** Every tested Sendspin platform is 64-bit (Pi 3/4/5, Zero 2 W).
+  We are 32-bit ARM. Nothing in the spec depends on word size, but nobody has
+  run it there.
+- **Whether MA requires the handshake in practice.** The spec makes
+  encryption mandatory for standard discovery; MA's own player docs say it
+  mandates neither encryption nor pairing. Settle this against MA's server
+  source, not against either document.
+- **`sendspin-go` is a reference, not a dependency.** v1.2.0 dropped the oto
+  backend to unify on malgo/miniaudio, so its output path is hardcoded to a
+  cgo audio library we have no use for — we own tinyalsa and the mixer.
+
+---
+
+## 7. Open questions
 
 - **Q1 — should music be allowed to start during a turn, on its own plane?**
   Today `play/resume/pause/stop` record intent and do not touch the wire while
   a turn owns the speaker, so a stream started from a phone sits silent until
   the answer finishes (#262). Now that music has its own plane, the reason for
   the blanket rule is weaker than when it was written. Undecided.
-- **Q2 — where does the output chain belong?** EQ, limiter and bass guard all
-  run controller-side today, on the voice plane, before the audio reaches the
-  wire (#243). Music does not go through them at all.
+- **Q2 — where does the output chain belong?** EQ, limiter and bass guard run
+  controller-side today, on **both** planes, before the audio reaches the wire
+  (#243): `em_controller.py:1402` builds a `StreamingEQ` for the response,
+  `em_player.py:544` builds one for the media feed. Each is constructed once
+  per stream and updated in place, because the filters carry state and a new
+  instance mid-track clicks.
+
+  **Sendspin turns this from a preference into a decision.** A Sendspin
+  session goes MA → device and never crosses the controller, so a
+  controller-side chain would shape voice and HA-routed music while silently
+  not shaping synchronised music — the same speaker sounding different
+  depending on which app started the track. Either the chain moves device-side
+  (it is fixed-point-friendly: the mixer already runs Q15 arithmetic on the
+  ALSA path for exactly this reason) or Sendspin playback is unshaped by
+  design and that is written down. The cost of moving is that the parameters
+  are tuned by ear in a real room, and today an A/B is a controller-side
+  update-in-place; device-side it becomes a config push.
 - **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
   degrades the whole audio subsystem (#117/#141) and, with a music session
   live, can silence everything including voice. That is a hardware/HAL fault
@@ -170,7 +291,7 @@ process.
 
 ---
 
-## 7. Invariants — do not break
+## 8. Invariants — do not break
 
 1. **Voice is never attenuated by the duck.** Only the music plane carries
    `duckTarget`.
@@ -179,3 +300,8 @@ process.
 4. **Playback completion comes from the device**, not from a duration estimate.
 5. **`speaker_busy` is released in a `finally`.** [proposed #167]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
+7. **The music plane has exactly one producer at a time.** [proposed #89]
+   Interleaving controller `0x04` with a Sendspin session sums two unrelated
+   streams. Invariant 2 gains a second reason here: flushing music for a voice
+   turn would drop audio a synchronised group is counting on and force a
+   resync.
