@@ -118,8 +118,9 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 ## On-device wake word (shadow mode)
 
-The Echo can run the wake model itself. `owwOnDevice` = `off` (default),
-`shadow` or `on`; an unknown value normalises to `off` at BOTH ends rather than
+The Echo can run the wake model itself. `owwOnDevice` = `off`, `shadow` or
+`on` — **`on` since 3.0.0**, which was the stated meaning of that release from
+2026-07-30; an unknown value normalises to `off` at BOTH ends rather than
 being guessed at — the two plausible guesses are "score silently" and "start
 triggering", and one of those is a live behaviour change on a device that
 cannot honour it. Neither end may assume the other is the careful one.
@@ -249,8 +250,11 @@ Requirements and cost: ONNX Runtime plus the three models must be installed at
 and both A/B slots. Absence is an ordinary condition, logged once, and the
 device carries on with controller-side wake word. `device/tools/oww_probe`
 verifies a device reproduces Python and reports the real CPU cost. It costs
-~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
-**enable it on one device at a time**.
+~38% of one core permanently on top of the ~18-20% mic-pipeline baseline. That
+cost did not change when it became the default in 3.0.0 — what changed is where
+you watch for it: on the FIRST device of a new deployment rather than as a
+per-device ritual, and **read `cpuPct` next to `coresOnline`**, since a share
+of online capacity halves the moment a second core comes up.
 
 **The scorer pointer must be re-read PER FRAME, never cached for a stream.**
 A config push replaces the scorer and **closes** the old one, so a mic stream
