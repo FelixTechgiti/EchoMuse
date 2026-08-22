@@ -56,7 +56,7 @@ SAMPLE_RATE = 48000
 # behaviour — which is where state bugs live — untested.
 CHUNK = 2048
 
-MAGIC = b"EMCHAIN2"
+MAGIC = b"EMCHAIN3"
 FLAT = [0.0] * em_eq.NUM_BANDS
 
 
@@ -242,10 +242,44 @@ def run_case(signal: np.ndarray, params: list,
     return outs, eq.flush()
 
 
+def pack_sos(sos: np.ndarray) -> bytes:
+    """A stacked SOS matrix as (rows, then row-major float64)."""
+    out = struct.pack("<I", sos.shape[0])
+    for row in sos:
+        for v in row:
+            out += struct.pack("<d", float(v))
+    return out
+
+
 def main():
     cases = build_cases()
     blob = bytearray(MAGIC)
     blob += struct.pack("<II", SAMPLE_RATE, CHUNK)
+
+    # The bass guard's Linkwitz-Riley crossover coefficients, exactly as scipy
+    # computed them.
+    #
+    # Carried in the fixture so the Go port can check its own filter DESIGN
+    # against scipy directly, rather than only inferring a coefficient error
+    # from an output that disagrees. Those two failures look identical from a
+    # test that only compares audio, and they want completely different
+    # investigations — one is a bilinear-transform detail, the other is the
+    # gain law.
+    #
+    # Safe to freeze because CROSSOVER_HZ is deliberately NOT settable
+    # (em_mbc.set_params says why: it owns filter state, and it is a measured
+    # value off stock rather than a taste one).
+    blob += struct.pack("<d", em_mbc.CROSSOVER_HZ)
+    blob += pack_sos(em_mbc._lr4(em_mbc.CROSSOVER_HZ, SAMPLE_RATE, "low"))
+    blob += pack_sos(em_mbc._lr4(em_mbc.CROSSOVER_HZ, SAMPLE_RATE, "high"))
+    # The guard's fixed law, so the port cannot quietly disagree about the
+    # numbers stock was measured at (#229).
+    blob += struct.pack("<ddd", em_mbc.BASS_RATIO,
+                        em_mbc.BASS_THRESHOLD_DB, em_mbc.BASS_RELEASE_MS)
+    # The limiter's fixed geometry, for the same reason.
+    blob += struct.pack("<dd", em_limiter.DEFAULT_LOOKAHEAD_MS,
+                        em_limiter.RELEASE_REFERENCE_DB)
+
     blob += struct.pack("<I", len(cases))
 
     for name, signal, params, has_lim, has_guard in cases:

@@ -68,10 +68,30 @@ type Case struct {
 type Chain struct {
 	SampleRate int
 	ChunkSize  int
-	Cases      []Case
+
+	// Reference constants, carried so the port can check its own filter
+	// DESIGN and its own law constants against Python directly, rather than
+	// only inferring an error from audio that disagrees. Those two failures
+	// look identical to a test that compares output alone and want completely
+	// different investigations.
+	CrossoverHz float64
+	// CrossoverLow / CrossoverHigh are the Linkwitz-Riley halves as stacked
+	// second-order sections, each row [b0 b1 b2 1 a1 a2] exactly as scipy
+	// produced it.
+	CrossoverLow  [][6]float64
+	CrossoverHigh [][6]float64
+
+	BassRatio       float64
+	BassThresholdDB float64
+	BassReleaseMS   float64
+
+	LookaheadMS        float64
+	ReleaseReferenceDB float64
+
+	Cases []Case
 }
 
-const magic = "EMCHAIN2"
+const magic = "EMCHAIN3"
 
 // Load reads and validates the fixture. Every size is read from the file's own
 // headers, and the whole file must be consumed — a fixture that parses but
@@ -152,6 +172,48 @@ func Load(path string) (*Chain, error) {
 		return nil, err
 	}
 	c.SampleRate, c.ChunkSize = int(sr), int(ck)
+
+	f64 := func() (float64, error) {
+		if err := need(8); err != nil {
+			return 0, err
+		}
+		v := math.Float64frombits(binary.LittleEndian.Uint64(raw[p:]))
+		p += 8
+		return v, nil
+	}
+	sosBlock := func() ([][6]float64, error) {
+		n, err := u32()
+		if err != nil {
+			return nil, err
+		}
+		out := make([][6]float64, n)
+		for i := range out {
+			for j := 0; j < 6; j++ {
+				if out[i][j], err = f64(); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return out, nil
+	}
+
+	if c.CrossoverHz, err = f64(); err != nil {
+		return nil, err
+	}
+	if c.CrossoverLow, err = sosBlock(); err != nil {
+		return nil, err
+	}
+	if c.CrossoverHigh, err = sosBlock(); err != nil {
+		return nil, err
+	}
+	for _, dst := range []*float64{
+		&c.BassRatio, &c.BassThresholdDB, &c.BassReleaseMS,
+		&c.LookaheadMS, &c.ReleaseReferenceDB,
+	} {
+		if *dst, err = f64(); err != nil {
+			return nil, err
+		}
+	}
 
 	nCases, err := u32()
 	if err != nil {
