@@ -3,15 +3,19 @@
 Who owns the speaker, what is on the wire, and what happens when two things
 want it at once.
 
-This exists for the same reason `led-ring-states.md` does. Four things can now
-put audio on a device — a voice response, music, an HA announcement, and (with
-#167) a timer alarm — and each was added on its own, correct in isolation. The
+This exists for the same reason `led-ring-states.md` does. Five things can now
+put audio on a device — a voice response, music, an HA announcement, (with
+#167) a timer alarm, and the device's own wake cue — and each was added on its
+own, correct in isolation. The
 interactions between them are where the open bugs live: #261 (the duck lifting
 mid-response) and #262 (music deferred until a turn ends). #243 — whether the
 output chain belongs device-side — was answered on 2026-08-22 and is section 8.
 
 Status markers match the LED doc: **[today]** is shipped behaviour verified in
-code, **[proposed]** is designed or in review and not merged.
+code, **[proposed]** is designed or in review and not merged. **[built]** is
+new here and means written, tested and merged but **not yet heard on
+hardware** — a distinction worth keeping, because most of section 8 landed on
+2026-08-22 and nobody has listened to any of it.
 
 ---
 
@@ -50,6 +54,19 @@ underneath on its own plane and is ducked rather than displaced.
 | 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
 | 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[proposed #167]** |
 | 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
+| — | **Device cue** (wake confirmation) | *neither* | `PcmSpeaker.PlayCue()`, summed at the ALSA write | plays out, ~245ms | **[today — 3.0.0]** |
+
+**The cue sits OUTSIDE the ladder on purpose** (#120). It is not a stream and
+takes no ownership: no prime gate to delay it, no EOS, no flush to discard it,
+no underrun accounting. It is a couple of hundred milliseconds the device
+generated itself and can always deliver, summed into whatever is already
+playing. Putting it through `audioStream` would mean the confirmation that the
+device is listening could be held back by the prime gate or thrown away by a
+barge-in flush — both wrong for a cue whose entire job is to be immediate.
+
+It is summed **before** the output chain, so it is EQ'd and limited with
+everything else and can never push the sum into clipping when it lands on top
+of loud music.
 
 **Ownership is taken unconditionally, and that is deliberate** — not an
 optimisation to remove. "Play some jazz" runs the intent *before* HA generates
@@ -358,10 +375,13 @@ starves us or overruns us.
 
 ---
 
-## 8. The output chain moves to the device **[proposed — 3.0.0]**
+## 8. The output chain moves to the device **[built — 3.0.0]**
 
-Decided 2026-08-22 (Wil): **the whole output path runs on the device, and the
-controller provides the config knobs to drive it.** Scope is the OUTPUT path
+Decided AND BUILT 2026-08-22 (Wil): **the whole output path runs on the
+device, and the controller provides the config knobs to drive it.** Ported in
+`device/internal/outchain`, wired in at `pcm_speaker.silenceLoop`, gated on the
+`output_chain` capability. **Not yet heard on hardware** — every claim below is
+verified against the reference implementation or by test, not by ear. Scope is the OUTPUT path
 only — EQ, limiter, bass guard and the mix. Input-side processing
 (`em_ns.py`/DTLN on the ASR-bound mic stream) stays controller-side and is a
 separate workstream: it is a neural net on the path to speech recognition
@@ -396,7 +416,22 @@ No protocol or GUI work is implied: all seven keys (`eqBands`, `eqLoudness`,
 `limiter*`, `bassGuard*`) already ride the config push and are currently
 ignored by the device.
 
-### 8.2 Requirements
+### 8.2 Requirements — all met, none heard
+
+R1–R7 below were the acceptance criteria. What they cost, recorded because the
+next port will want to know:
+
+- **R5 (fixture agreement) came out EXACT** — all fifteen cases, error −Inf dB,
+  peak difference 0 LSB, including every parameter transition and the flush
+  tail. Achievable rather than lucky: keep float64, keep scipy's transposed
+  direct form II, keep each expression in the reference's algebraic *shape*,
+  and write the shared gain law in its arithmetic ORDER.
+- **R7 (fixed point vs float) is answered: float64.** Nine biquads plus a
+  crossover at 48kHz is a few Mflop/s. There was never a reason to reach for
+  something narrower, and float64 is what makes the agreement provable.
+- **R4 (no click) needed a measurement before a mechanism** — see 8.3.
+
+#### The criteria
 
 | # | Requirement | Why |
 |---|---|---|
@@ -431,6 +466,29 @@ naive smoothing blows up rather than clicking.
 **Pinned by test, not by ear:** a step change in any parameter must produce no
 sample-to-sample discontinuity above a threshold. Host-testable in Go, no
 hardware required.
+
+**MEASURED 2026-08-22, and the obvious probe detects nothing.** A parameter
+change is only audible as a discontinuity when the FILTER STATE holds real
+energy — a low frequency at level. On a 1kHz tone, none of these changes
+produce a step above the signal's own slope:
+
+| signal | change | raw step | crossfaded | peak |
+|---|---|---|---|---|
+| 60Hz @20000 | loudness on (state reset) | 53351 | 6144 | 72863 |
+| 60Hz @20000 | all bands 0 → +12 | 61469 | 7759 | 113938 |
+| 60Hz @20000 | low shelf +12 → −12 | 1065 | 578 | 80607 |
+| 1kHz @8000 | any of the above | at or below the signal's own slope | | |
+
+The top row is a step of **73% of the signal**, and it is the state-reset case
+— so the quirk the port deliberately reproduces from `em_eq` is the single
+worst offender, and the crossfade is what makes reproducing it safe rather than
+merely faithful. Measured reduction: **8.7×**.
+
+**Linear crossfade, not equal-power.** Equal-power is the reflexive choice and
+is wrong here: it holds level for UNCORRELATED sources, whose powers add. These
+two are the same signal through similar filters, so their amplitudes add and a
+cos/sin fade would bulge by up to 3dB mid-transition — an audible swell on
+every parameter change.
 
 ### 8.4 Known risk
 
