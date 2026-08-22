@@ -28,6 +28,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
+	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
@@ -301,6 +302,20 @@ func main() {
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+	})
+
+	// Audible cue on request (#120). Only the controller-detected wake path
+	// uses this; a device that hears its own wake word plays it from
+	// onWakeCrossing without a round trip.
+	controlClient.OnPlayCue(func(name string) {
+		if name != "wake" {
+			log.Printf("[cue] unknown cue %q — ignored", name)
+			return
+		}
+		if !config.Get().WakeSoundEnabled() {
+			return
+		}
+		pcmSpeaker.PlayCue(wakeCue)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -947,7 +962,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
 	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
-		onWakeCrossing(cc, srv, score, crossed, at)
+		onWakeCrossing(cc, srv, spk, score, crossed, at)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -995,8 +1010,19 @@ func actsOnCrossings(mode string) string {
 // during playback. The controller records it against the turn, and recording
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
+// wakeCue is rendered once and reused. It is a couple of hundred milliseconds
+// of float64 — cheap to keep, and rendering it on the wake path would put
+// ~12k sin() calls between hearing the wake word and confirming it, which is
+// the one moment on this device where latency is the whole feature.
+var wakeCue = cue.WakeCue(speakerRate)
+
+// speakerRate mirrors the speaker binding's rate. Declared here rather than
+// exported from a //go:build server package so this file still compiles on a
+// host, where the binding does not.
+const speakerRate = 48000
+
 func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
-	score, crossed float32, at time.Time) {
+	pcmSpeaker *speaker.PcmSpeaker, score, crossed float32, at time.Time) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
 		cc.SendOwwShadowCross(score, ageMs)
@@ -1009,6 +1035,15 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		cc.SendOwwShadowCross(score, ageMs)
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
+	}
+	// The cue plays BEFORE the wake is reported, not after the controller
+	// acknowledges it. The whole point is immediacy — this fleet measures
+	// 22-26% of control-plane probes over 200ms (#139), and a confirmation
+	// that lands after the user has started speaking is worse than none.
+	// The device detected this itself, so it does not need anyone's
+	// permission to say so.
+	if pcmSpeaker != nil && config.Get().WakeSoundEnabled() {
+		pcmSpeaker.PlayCue(wakeCue)
 	}
 	cc.SendOwwWake(score, crossed, ageMs)
 }

@@ -67,6 +67,17 @@ DEFAULT_DEVICE_CONFIG = {
     # so the flip changed nothing for them — the usual shape, and the reason
     # the live DB gets read before a default moves.
     "owwOnDevice":      "on",
+    # wakeSound: a short rising two-tone when the wake word is recognised
+    # (#120, @tvories). Off by default — it interrupts the flow of
+    # "<wakeword>, do this thing for me", which is why it is a setting and
+    # not behaviour.
+    #
+    # It is an ACCESSIBILITY option before it is a convenience: the LED ring
+    # is currently the only indication that the device is listening, which is
+    # no use from the next room and no use at all to a blind or low-vision
+    # user. Generated on the device, so it lands with the wake rather than an
+    # RTT later.
+    "wakeSound":        False,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full

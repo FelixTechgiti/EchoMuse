@@ -77,6 +77,7 @@ type ControlClient struct {
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
+	playCueCallback       func(string)
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
@@ -122,6 +123,9 @@ func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnect
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
+
+// OnPlayCue registers the handler for a controller-requested cue.
+func (c *ControlClient) OnPlayCue(cb func(string)) { c.playCueCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
@@ -509,6 +513,18 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.wifiScanCallback()
 			}
 
+		case "play_cue":
+			// The controller asking for a device-generated cue (#120). Only
+			// used on the CONTROLLER-detected wake path: a device that
+			// detected its own wake played it from onWakeCrossing without
+			// waiting for anyone, which is the point of generating it here.
+			var cueMsg struct {
+				Cue string `json:"cue"`
+			}
+			if err := json.Unmarshal(raw, &cueMsg); err == nil && c.playCueCallback != nil {
+				c.playCueCallback(cueMsg.Cue)
+			}
+
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS
 			// playback and wants the buffered audio cut immediately.
@@ -756,9 +772,15 @@ func capabilities() []string {
 	// It is announced separately from "audio_mix" even though both concern
 	// the same ALSA write, because the fleet already contains firmware that
 	// mixes and does not shape.
+	// "wake_cue": this firmware can generate its own audible wake
+	// confirmation (#120). Gated because a controller offering the toggle to
+	// firmware that cannot make a sound gives the user a switch that saves,
+	// reports success and does nothing — and this one is an accessibility
+	// setting, so the person it silently fails is the person who most needs
+	// it to work.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"output_chain"}
+		"output_chain", "wake_cue"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

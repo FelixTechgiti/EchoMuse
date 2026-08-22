@@ -109,6 +109,10 @@ type PcmSpeaker struct {
 	// oc is the output chain — EQ, bass guard and limiter applied to the
 	// MIXED period on its way to ALSA. See outputchain.go.
 	oc chainState
+
+	// cue holds any one-shot the device is playing itself — today just the
+	// wake confirmation (#120). See cue.go.
+	cue cueState
 }
 
 // OnStreamStats registers a per-stream stats callback, reported once when a
@@ -286,6 +290,11 @@ func (p *PcmSpeaker) silenceLoop() {
 		if out == nil {
 			out = silencePeriod
 		}
+
+		// A device-generated cue sums in BEFORE the chain, so it is shaped
+		// and limited with everything else and can never push the sum into
+		// clipping when it lands on top of loud music.
+		out = p.mixCue(out)
 
 		// ─── Output chain: EQ, bass guard, limiter ───────────────────────
 		//

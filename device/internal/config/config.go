@@ -63,6 +63,16 @@ type Device struct {
 	BassGuardEnabled bool
 	BassGuardDb      float64
 
+	// WakeSound plays a short rising two-tone when the wake word is
+	// recognised (#120). Off by default: it interrupts the flow of
+	// "<wakeword>, do this thing for me", which is why it is a setting
+	// rather than behaviour.
+	//
+	// It is an ACCESSIBILITY option before it is a convenience. The LED ring
+	// is currently the only indication that the device is listening — no use
+	// from the next room, and no use at all to a blind or low-vision user.
+	WakeSound bool
+
 	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
 	// "on".
 	//
@@ -157,6 +167,7 @@ func (d *Device) loadDefaults() {
 	// announced `output_chain` is shaping its own audio from the first
 	// period, before any config arrives, so these defaults are what plays
 	// during that window and must not be silence-adjacent guesses.
+	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.EqBands = make([]float64, 8)
 	d.LimiterEnabled = envBool("LIMITER_ENABLED", true)
 	d.LimiterThreshold = envFloat("LIMITER_THRESHOLD", -1)
@@ -226,6 +237,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	// Output chain. eqBands arrives as a whole array or not at all — a
 	// partial curve is not a meaningful thing to merge, and the controller
 	// always sends the full eight.
+	if msg.WakeSound != nil {
+		d.WakeSound = *msg.WakeSound
+	}
 	if msg.EqBands != nil {
 		d.EqBands = append([]float64(nil), msg.EqBands...)
 	}
@@ -283,6 +297,18 @@ func (d *Device) Apply(msg ConfigMessage) {
 }
 
 // Snapshot returns a consistent copy of all config values.
+// WakeSoundEnabled reports whether the audible wake confirmation is on.
+//
+// Its own accessor rather than a read off Snapshot(), which does not carry it
+// — and deliberately should not grow every field, since ConfigMessage exists
+// to describe a PARTIAL push and a snapshot of it cannot distinguish "false"
+// from "not mentioned".
+func (d *Device) WakeSoundEnabled() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.WakeSound
+}
+
 // OutputChainConfig is the output chain's settings as plain values.
 //
 // A dedicated accessor rather than reading them off Snapshot(), because
@@ -392,6 +418,7 @@ type ConfigMessage struct {
 	// every band and for the limiter threshold, and false is legitimate
 	// for both toggles, so the usual "non-zero means set" rule cannot
 	// distinguish "set to zero" from "absent" for any of them.
+	WakeSound          *bool    `json:"wakeSound,omitempty"`
 	EqBands            []float64 `json:"eqBands,omitempty"`
 	EqLoudness         *bool     `json:"eqLoudness,omitempty"`
 	LimiterEnabled     *bool     `json:"limiterEnabled,omitempty"`
