@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.21.0-ea.4 (Early Access)
+
+One fix on ea.3, for anyone who builds their own firmware.
+
+### Deploying your own build no longer reports a rollback that did not happen
+
+Uploading a locally compiled binary from **Updates → Local Build** worked, and
+then said it had not:
+
+```
+⚠ Device reconnected on v2.12.0-63-g99628d3 — auto-rolled back
+```
+
+The device in that message is running exactly what was pushed. Nothing rolled
+back.
+
+Two causes. The controller reads the version out of the uploaded binary to
+know what to expect on reboot, and it only recognised the older date-style
+version string — so a build made from a clean checkout was labelled with a
+placeholder the device could never report. And the dashboard treated any
+mismatch as a rollback, when a rollback specifically means the device came
+back on the firmware it had **before**.
+
+Both fixed. A genuine rollback still says so. Anything else reports what the
+device came back on and what was expected, without guessing, and explains the
+placeholder when that was the cause.
+
+Nothing here affects updating from a published release, which reads its
+version from the release rather than from the binary.
+
 ## 2.21.0-ea.3 (Early Access)
 
 One fix on ea.2, to a number you would otherwise have trusted.
