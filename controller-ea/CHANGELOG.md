@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.21.0-ea.3 (Early Access)
+
+One fix on ea.2, to a number you would otherwise have trusted.
+
+### An answer you interrupt is recorded as interrupted
+
+Cutting a response off mid-sentence — by saying the wake word over it — was
+still recorded in the activity statistics as a completed answer.
+
+2.21.0-ea.1 fixed this for an interruption during **thinking**, before the Echo
+had started speaking. It missed the case it was actually written for: an
+interruption during **playback**, once a response had begun. The two travel
+different paths internally and only one was covered.
+
+Measured here today: a response cut off mid-sentence, recorded as answered.
+
+Both now record as **barged**. If you were reading the Activity tab across
+earlier builds, turns you interrupted while the Echo was speaking were counted
+as successful, and the totals will change once this is running — the fleet did
+not change, the counting did.
+
 ## 2.21.0-ea.2 (Early Access)
 
 Two fixes on top of 2.21.0-ea.1.
