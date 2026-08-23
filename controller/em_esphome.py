@@ -1119,9 +1119,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # "barge-in" — the interrupting wake is recorded as that
                     # turn's trigger.
                     log.info(f"[{self._log_name}] Turn cancelled during playback")
-                    trace.outcome = "barged"
+                    if trace: trace.outcome = "barged"
                 elif pcm_bytes:
-                    trace.outcome = "ok"
+                    if trace: trace.outcome = "ok"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
