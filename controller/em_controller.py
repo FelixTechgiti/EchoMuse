@@ -315,6 +315,11 @@ class Device:
         self.volume: float = _device_level_to_ha(85)
 
         self.data_ready = asyncio.Event()
+        # #299: whether ANY mic frame has arrived on the CURRENT data
+        # connection. Cleared by handle_data on every new connection; set
+        # by the wake listener when a frame flows. Lets the no-frames
+        # watchdog tell "transport dropping" apart from "stream dead".
+        self.frames_seen_this_connection: bool = False
 
         # Tunable at runtime — updated when a config push arrives.
         # wake_word_listener reads this each detection cycle rather than
@@ -1998,6 +2003,9 @@ async def wake_word_listener(device: Device):
                 payload = await asyncio.wait_for(
                     device.mic_queue.get(), timeout=10.0
                 )
+                # #299: a frame on this connection — the watchdog's link
+                # guard below may stand down from here on.
+                device.frames_seen_this_connection = True
             except asyncio.TimeoutError:
                 # The wake stream is ungated and continuous (device sends
                 # every 80ms, silence included — hardware mute still produces
@@ -2048,6 +2056,24 @@ async def wake_word_listener(device: Device):
                     # (and device.muted clears with the mute_state message),
                     # so the watchdog resumes naturally if that ever fails.
                     dead_streak = 0
+                    continue
+                # #299: "no frames" has two causes, and the ladder below
+                # assumes only one (a zombie stream device-side still holding
+                # micActive). If the data plane is down — or a fresh one has
+                # not delivered a single frame yet — the absence of frames is
+                # explained by the transport. Acting put extra control-plane
+                # traffic on an already failing link and restarted a mic
+                # pipeline that was working (bedroom, 2026-08-23: AEC resyncs
+                # 3, 4, 5, 6 after escalations into a dropping connection).
+                # Stand down; do not count the outage against the streak —
+                # once frames flow again it resets on its own below.
+                if device.data_ws is None or not device.frames_seen_this_connection:
+                    log.debug(
+                        f"[{device.device_id}] OWW: no mic frames, but the "
+                        f"data plane is "
+                        + ("down" if device.data_ws is None else "fresh")
+                        + " — nothing to repair"
+                    )
                     continue
                 dead_streak += 1
                 if dead_streak < 3:
@@ -3321,6 +3347,10 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         device.data_ws = ws
+        # #299: a fresh connection has by definition sent nothing yet — the
+        # no-frames watchdog must not start counting against the device
+        # until its first frame flows.
+        device.frames_seen_this_connection = False
         device.data_ready.set()
         log.info(f"[data] Data connection established: {device_id}")
 
