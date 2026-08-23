@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.21.0-ea.2 (Early Access)
+
+Two fixes on top of 2.21.0-ea.1.
+
+### Deploying a locally built firmware works again
+
+Uploading your own compiled binary from the Updates tab failed with "an
+internal error occurred". The controller was capping uploads at 1 MB against
+a firmware roughly ten times that, so the file never reached the code meant
+to handle it.
+
+This broke on 2026-08-18 in 2.20.2, when a routine dependency update changed
+how the web framework applies its size limit. Nothing else was affected —
+updating from a published release goes by a different path and has worked
+throughout. Only a locally built binary was blocked.
+
+The limit is now 50 MB, and a file over it says so, with its size, instead of
+reporting an internal error.
+
+### Automatic update checks say when they are off
+
+Setting `update_check_interval` to `0` stops the controller contacting GitHub
+in the background. The Updates tab showed "No release info", which looks
+exactly like GitHub being unreachable — so the tab you would open to find out
+what was wrong could not tell you.
+
+It now reads **Auto-checks off** beside the release line. **Check now** still
+works and is unaffected: pressing it is a deliberate request, not background
+traffic, and the result stays on screen until you press it again.
+
 ## 2.21.0-ea.1 (Early Access)
 
 An Early Access build on top of 2.20.2. It supersedes 2.20.3-ea.1 and includes
