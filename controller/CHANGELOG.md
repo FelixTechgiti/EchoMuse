@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.21.0-ea.5 (Early Access)
+
+One change on ea.4, to what the Activity tab tells you.
+
+### An interrupted answer now says how it was interrupted
+
+Three different things stop a response, and until now they all recorded the
+same way. They are now distinct:
+
+| Outcome | What happened |
+|---|---|
+| **barged** | You said the wake word over it — a new turn followed |
+| **cancelled** | You pressed the action button |
+| **muted** | You muted the device, which also turns the microphone off |
+
+ea.4 already recorded a wake word spoken over a *response* as **barged**. One
+spoken while the Echo was still thinking recorded as **cancelled**, because
+the two travel different paths internally and only one had been covered. Both
+are barges and both now say so.
+
+Recording all three the same way made a person talking over the assistant
+indistinguishable from a button press. It also hid the fault this was built to
+find: a device triggering on its own speech shows up as a barge followed by a
+turn the barge started, and half of those were invisible.
+
+**Expect your numbers to move.** Turns you interrupted on earlier builds were
+counted as answered, and mutes during a response were counted as cancels.
+Nothing about the fleet changed — only the counting. Older rows keep whatever
+they were recorded as; nothing is rewritten, because a cause that was never
+captured should not be invented later.
+
 ## 2.21.0-ea.4 (Early Access)
 
 One fix on ea.3, for anyone who builds their own firmware.
