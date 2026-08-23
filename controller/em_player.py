@@ -282,8 +282,15 @@ async def interrupt(device_id: str) -> None:
     turn replaces that intent (see resume_interrupted).
     """
     s = _session(device_id)
+    # #314: ownership is reference-counted, exactly like the duck below.
+    # A nested owner (announcement landing mid-turn) must not release the
+    # turn's ownership when IT finishes, nor wipe a playback command the
+    # user issued during the turn — only the FIRST claim clears stale
+    # deferrals from before it started.
+    if s.owner_depth == 0:
+        s.pending = None
+    s.owner_depth += 1
     s.owned_by_turn = True
-    s.pending = None
 
     device = _get_device(device_id) if _get_device else None
     if device is not None and getattr(device, "audio_mix_capable", False):
@@ -333,9 +340,21 @@ async def resume_interrupted(device_id: str) -> None:
     s = _sessions.get(device_id)
     if s is None:
         return
-    s.owned_by_turn = False
-    pending, s.pending = s.pending, None
-    resume_after, s.resume_after = s.resume_after, False
+    # #314: same reference counting as the duck — ownership, pending and
+    # resume_after are released only by the LAST owner leaving. An earlier
+    # finisher leaves all three untouched: the voice turn still speaking
+    # keeps its shield against play_media landing on the response plane,
+    # and the user's deferred command survives an announcement that merely
+    # passed through.
+    if s.owner_depth > 0:
+        s.owner_depth -= 1
+    last_owner = s.owner_depth == 0
+    s.owned_by_turn = s.owner_depth > 0
+    if last_owner:
+        pending, s.pending = s.pending, None
+        resume_after, s.resume_after = s.resume_after, False
+    else:
+        pending, resume_after = None, False
     # #261: this release only unducks when it is the LAST owner leaving —
     # otherwise the other speaker's tail competes with the music again.
     was_ducking = s.duck_depth > 0
@@ -400,6 +419,7 @@ class MediaSession:
         # that mixes). It changes what turn end has to do — there is nothing
         # to resume, but a deferred pause must actually be carried out.
         self.duck_depth = 0   # #261: reference-counted, see interrupt()
+        self.owner_depth = 0  # #314: owners of the speaker, counted like the duck
         # Effective pacing lead. Reduced while a turn owns the speaker so the
         # music feed stops monopolising the shared data plane (see
         # TURN_LEAD_S); restored when the turn releases it.

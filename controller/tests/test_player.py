@@ -156,6 +156,9 @@ def test_interrupt_resume_cycle_only_touches_playing_sessions():
         # Nothing playing: interrupt/resume are no-ops
         await em_player.interrupt("office")
         assert s.state == IDLE and not s.resume_after
+        # #314: ownership is counted — the cycle must balance, so release
+        # this no-op claim before the next scenario takes its own.
+        await em_player.resume_interrupted("office")
 
         await s.play("http://radio/stream")
         await asyncio.sleep(0.05)
@@ -1175,3 +1178,70 @@ def test_resume_keeps_turn_pacing_while_another_owner_speaks():
         await em_player.resume_interrupted("office")
         assert s.lead_s == em_player.LEAD_S
     asyncio.run(main())
+
+
+# ── #314: ownership is reference-counted like the duck ───────────────────────
+
+
+def test_announcement_midturn_does_not_release_ownership():
+    """
+    The exact sequence from #314: an announcement landing during a voice
+    turn used to release the turn's ownership when IT finished — so a
+    play_media arriving afterwards went straight to the wire, putting music
+    on the response plane while the answer was still speaking.
+    """
+    async def main():
+        device = FakeDevice()
+        device.audio_mix_capable = True
+        _wire(device)
+        s = StubSession("office", periods=0)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")            # voice turn
+        await em_player.interrupt("office")            # announcement lands
+
+        await em_player.resume_interrupted("office")   # announcement ends
+        assert s.owned_by_turn is True, \
+            "the voice turn still speaks — ownership must survive"
+
+        await em_player.play("office", "http://radio/jazz")  # mid-answer!
+        assert s.pending == ("play", "http://radio/jazz"), \
+            "this command must be deferred, not put on the wire"
+
+        await em_player.resume_interrupted("office")   # voice turn ends
+        assert s.owned_by_turn is False
+        return device, s
+    device, s = asyncio.run(main())
+    offs = [m for m in device.control_msgs
+            if m.get("type") == "duck" and not m.get("on")]
+    assert len(offs) == 1
+
+
+def test_nested_interrupt_preserves_the_users_deferred_command():
+    """
+    The smaller fault of the same shape: a second interrupt() used to wipe
+    a pending command the user genuinely issued — 'play jazz' during a turn,
+    silently dropped because an announcement happened to land afterwards.
+    Only the FIRST claim clears stale deferrals.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")              # voice turn
+        await em_player.play("office", "http://radio/jazz")
+        assert s.pending == ("play", "http://radio/jazz")
+
+        await em_player.interrupt("office")              # announcement
+        assert s.pending == ("play", "http://radio/jazz"), \
+            "a nested owner must not wipe the user's request"
+
+        await em_player.resume_interrupted("office")     # announcement ends
+        assert s.pending == ("play", "http://radio/jazz")
+
+        await em_player.resume_interrupted("office")     # voice turn ends
+        return s
+    s = asyncio.run(main())
+    assert s.pending is None, "settled by the last owner's resume"
