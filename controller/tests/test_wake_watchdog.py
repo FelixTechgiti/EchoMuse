@@ -8,9 +8,13 @@ extra control-plane traffic on an already failing link, and a working
 mic pipeline torn down and rebuilt (bedroom, 2026-08-23: AEC resyncs
 3, 4, 5, 6).
 
-The fix: "no frames" with the data plane down — or on a connection that
-has not delivered a single frame yet — is explained. Stand down; do not
-count it against the streak either.
+The distinction needs state AND time (review on PR #311): a boolean
+"fresh connection" guard made the zombie case unrecoverable, because a
+device streaming to a superseded socket never delivers a frame on the
+fresh one — so the flag never flipped and the escalation that repairs
+the Office-style 4.7-hour deafness could never run. The guard is
+therefore time-bounded: fresh connections get FRESH_CONN_GRACE_S; past
+that, silence IS the zombie signature and the ladder runs.
 
 em_controller is deliberately not importable here (see conftest); these
 are shape guards on the shipped source.
@@ -27,41 +31,51 @@ def _listener_src() -> str:
     return src[start:start + 30_000]
 
 
-def test_the_guard_sits_before_the_escalation_ladder():
+def test_link_down_stands_down_before_the_ladder():
     src = _listener_src()
-    guard = src.index("device.data_ws is None or not device.frames_seen_this_connection")
+    guard = src.index("if device.data_ws is None:")
     ladder = src.index("dead_streak += 1", guard)
     assert guard < ladder, \
-        "the link guard must stand down BEFORE dead_streak counts or mic_start fires"
-    # And before both escalation stages:
-    esc = src.index("mic_stop()", guard)
-    assert guard < esc
-
-
-def test_an_outage_does_not_count_against_the_streak():
-    """
-    The muted branch resets the streak (expected silence); the outage branch
-    must NOT reset it either — a streak surviving a short blip stays honest —
-    it just freezes while the transport is down. So: continue without
-    touching dead_streak between guard and frame arrival.
-    """
-    src = _listener_src()
-    guard = src.index("device.data_ws is None or not device.frames_seen_this_connection")
+        "a fully down data plane must stand the watchdog down first"
     branch_end = src.find("continue", guard)
     between = src[guard:branch_end]
-    assert "dead_streak" not in between, \
-        "the outage branch must neither increment nor reset the streak"
+    assert "dead_streak" not in between and "mic_start" not in between, \
+        "a down link must neither count nor repair"
 
 
-def test_a_new_connection_clears_the_flag_and_frames_set_it():
-    """handle_data clears on connect; the wake listener sets on first frame.
-    File position reflects definition order, not runtime — so pin each site
-    inside its own function rather than comparing offsets."""
+def test_fresh_connection_gets_a_bounded_grace():
+    src = _listener_src()
+    fresh = src.index("not device.frames_seen_this_connection")
+    grace = src.index("FRESH_CONN_GRACE_S", fresh)
+    branch_end = src.find("continue", grace)
+    between = src[grace:branch_end]
+    assert "dead_streak" not in between and "mic_start" not in between, \
+        "within the grace window the watchdog must stand down"
+    assert src[branch_end:].startswith("continue")
+
+
+def test_past_the_grace_the_ladder_runs_zombie_repair():
+    """
+    The reason the guard is time-bounded: a zombie stream never delivers a
+    frame on the fresh connection, so an unbounded grace would be the
+    Office incident (deaf 4.7h) again. Past the window, silence must fall
+    through to the escalation ladder.
+    """
+    src = _listener_src()
+    grace_check = src.index("< FRESH_CONN_GRACE_S")
+    after = src[grace_check:src.index("dead_streak = 0", grace_check)]
+    assert "zombie" in after, "past-grace silence must be named as the zombie case"
+    ladder = after.find("dead_streak += 1")
+    assert ladder != -1, \
+        "past the grace window the escalation ladder must be reachable"
+
+
+def test_both_time_sources_are_updated():
     src = (CONTROLLER / "em_controller.py").read_text()
-    hd = src[src.index("device.data_ws = ws"):]  # handle_data body
+    hd = src[src.index("device.data_ws = ws"):]
     hd = hd[:hd.index("async def", 10)]
-    assert "frames_seen_this_connection = False" in hd, \
-        "a new data connection must clear the flag"
+    assert "data_connected_at" in hd, \
+        "handle_data must timestamp each new connection"
     wl = src[src.index("payload = await asyncio.wait_for("):
              src.index("except asyncio.TimeoutError")]
     assert "frames_seen_this_connection = True" in wl, \
