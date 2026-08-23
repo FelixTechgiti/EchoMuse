@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.21.0-ea.1 (Early Access)
+
+An Early Access build on top of 2.20.2. It supersedes 2.20.3-ea.1 and includes
+everything in it — those notes are below.
+
+Seven fixes, almost all of them things that failed quietly rather than
+visibly. No database migration. One change needs new firmware and says so.
+
+### A single bad message no longer drops the device
+
+One malformed or unexpected control message could take a device's whole
+connection down with it — the voice satellite, the Bluetooth proxy and the
+audio channel together — and it reconnected every time it happened. The
+message that triggered it in practice was a **playback statistics report**,
+which is pure telemetry: the least important thing the device sends was able
+to disconnect it.
+
+Each message is now handled on its own. One that fails is logged with what it
+was, and everything else carries on.
+
+### Turning update checks off actually turns them off
+
+Setting **Update check interval** to `0` was the obvious way to stop the
+controller contacting GitHub, and it did the opposite: it removed the wait
+between checks entirely, so the controller polled continuously until GitHub
+rate-limited it. `0` now means off. A value that is not a number falls back to
+the hourly default instead of silently killing update checking altogether.
+
+### A dead music stream ends instead of hanging forever
+
+If a Music Assistant stream stopped producing audio — an upstream failure
+rather than the end of a track — playback waited indefinitely. Home Assistant
+kept showing **playing** against silence, and nothing in the log said
+otherwise.
+
+A source that produces nothing for 30 seconds now ends the stream, tells Home
+Assistant it is idle, and logs what happened. A stream that is merely slow
+still recovers; the clock resets on every chunk that arrives.
+
+### Media URLs are checked over HTTPS
+
+Audio fetched over `https` did not verify the server's certificate. It does
+now. If you stream from a server with a private or self-signed certificate,
+point `EM_EXTRA_CA_CERT` at your CA and it will work as before. Playback
+failures also now include the decoder's own error message, which previously
+went nowhere.
+
+### Interrupted answers are recorded as interrupted
+
+A response cut off partway — by the button, or by the Echo hearing a wake word
+mid-sentence — was recorded in the activity statistics as a completed answer.
+A fleet interrupting a third of its responses read as a fleet answering
+everything, which is how a real fault stayed hidden for two days. Those turns
+now show as **barged**.
+
+### The limiter's clipping counter reads correctly when it is off
+
+Clipping caught while the limiter is switched off is the backstop doing its
+job on a boosted EQ, not a fault. It was counted alongside genuine faults, so
+a working setup looked broken. The two are now counted separately.
+
+### The listening ring lights immediately — needs firmware v2.13.0
+
+On an Echo doing its own wake word detection, the ring waited for a round trip
+to the controller before lighting: measured at half a second, and longer on a
+busy network. It now lights the moment the device hears you.
+
+This one needs device firmware **v2.13.0** or later. On earlier firmware
+everything behaves exactly as it does today, and the dashboard will offer the
+update when it is published.
+
+### Also
+
+The command-line tools in `controller/tools/` now find the database under the
+Home Assistant add-on as well as the standalone container.
+
 ## 2.20.3-ea.1 (Early Access)
 
 An Early Access build on top of 2.20.2. The 2.20.2 notes below are the release
