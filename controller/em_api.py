@@ -41,6 +41,7 @@ import platform
 import re
 import shutil
 import sqlite3 as _sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -2965,8 +2966,9 @@ async def _get_system_status(request: web.Request) -> web.Response:
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
     release = await _get_cached_release()
 
-    # Lazy import — em_controller imports em_api at module level.
-    import em_controller as _ctrl
+    # Lazy resolution — em_controller imports em_api at module level, and
+    # importing by name would load a second, uninitialised copy (#306).
+    _ctrl = _running_controller_module()
 
     return _ok({
         "controller_version": CONTROLLER_VERSION,
@@ -3008,6 +3010,30 @@ async def _get_system_status(request: web.Request) -> web.Response:
             and r["firmware_ver"] != release["version"]
         ),
     })
+
+
+def _running_controller_module():
+    """
+    The module object the RUNNING controller executes as (#306).
+
+    em_start.py execvp's em_controller.py, so in production the running
+    code is __main__ — and `import em_controller` would load a SECOND,
+    never-initialised copy whose module state is all defaults. That is
+    why /api/system/status reported loop_lag_peak_ms: 0.0 next to a log
+    line saying the loop had stalled 881ms: the reader was reading a
+    fresh copy, not the live module. Resolve the running object instead
+    of importing by name. The lazy-import pattern itself stays — the
+    circular dependency is real — only the resolution changes.
+
+    Placement note (#309 review): this deliberately sits BELOW its two
+    callers' section divider rather than directly above a decorated
+    function — between `@auth.require_auth` and `_get_system_status` it
+    stole the decorator, leaving the status endpoint unauthenticated.
+    """
+    main = sys.modules.get("__main__")
+    if main is not None and hasattr(main, "_loop_lag_peak_ms"):
+        return main
+    return sys.modules.get("em_controller")
 
 
 @auth.require_admin
@@ -4079,8 +4105,9 @@ def _controller_stats() -> dict:
     """
     stats: dict[str, Any] = {}
     try:
-        import em_controller as _ctrl
-        stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
+        _ctrl = _running_controller_module()
+        if _ctrl is not None:
+            stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
     except Exception:
         pass
 
