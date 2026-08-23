@@ -266,6 +266,13 @@ _ha_volume_to_device = em_volume.ha_volume_to_device
 # ~5.5s, so a blip inside this window is inaudible.
 DATA_RECONNECT_GRACE_S = 3.0
 
+# #315: the control plane gets the same treatment the data plane has had —
+# a device whose control connection drops during a controller restart, an
+# add-on update or a link excursion keeps its ESPHome entities, BLE proxy
+# and media session for this long before they are released. The device's
+# own reconnect (endpoint pinned, per #106) lands well inside the window.
+CONTROL_RECONNECT_GRACE_S = 5.0
+
 
 class Device:
     def __init__(
@@ -3280,10 +3287,43 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # an offline device rather than up to one stats report stale.
                 db.touch_device_seen(device.device_id)
                 _devices.pop(device.device_id, None)
-                await api.notify_device_disconnected(device.device_id)
-                await esphome.device_disconnected(device.device_id)
-                await em_ble_proxy.device_disconnected(device.device_id)
-                em_player.device_gone(device.device_id)
+                # #315: the services stay up for a grace window instead of
+                # being torn down immediately — a four-second link blip used
+                # to deregister the HA entities, drop the BLE proxy and kill
+                # the media session, then rebuild all of it when the device
+                # returned on its own.
+                asyncio.create_task(
+                    _release_device_services(device)
+                ).add_done_callback(_log_task_exception)
+
+
+async def _release_device_services(device) -> None:
+    """
+    Release a device's services CONTROL_RECONNECT_GRACE_S after its control
+    connection closed — unless a replacement connection registered in the
+    meantime (#315). Mirrors the data plane's DATA_RECONNECT_GRACE_S.
+
+    esphome.device_connected() is idempotent (a still-listening port is
+    kept and only the callbacks are refreshed), so holding services
+    through a blip costs nothing on reconnect.
+    """
+    try:
+        await asyncio.sleep(CONTROL_RECONNECT_GRACE_S)
+        current = _devices.get(device.device_id)
+        if current is not None and current is not device:
+            return  # replacement is live; it owns the services now
+        log.info(
+            f"[{device.device_id}] control connection not restored within "
+            f"{CONTROL_RECONNECT_GRACE_S:.0f}s — releasing services"
+        )
+        await api.notify_device_disconnected(device.device_id)
+        await esphome.device_disconnected(device.device_id)
+        await em_ble_proxy.device_disconnected(device.device_id)
+        em_player.device_gone(device.device_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.error(f"[{device.device_id}] delayed service release failed: {e}")
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
