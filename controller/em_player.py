@@ -292,14 +292,25 @@ async def interrupt(device_id: str) -> None:
         # nothing is lost: no seek, no bookmark, no position drift on a
         # non-seekable flow stream, and no need for the entity to claim it is
         # playing while internally paused.
-        s.ducked = True
+        #
+        # #261: reference-counted, NOT boolean. Two overlapping owners —
+        # a barge-in turn, or an announcement landing mid-turn — both used to
+        # set one flag, and whichever finished FIRST popped it and sent
+        # duck:off while the other was still speaking: music back at full
+        # level under an unfinished answer. Each owner holds one count; the
+        # wire command goes out only on the 0→1 and 1→0 transitions.
+        s.duck_depth += 1
         # Yield the shared data plane to the response. The music keeps
         # playing from the device's own buffer while the feed holds off.
         s.lead_s = TURN_LEAD_S
-        try:
-            await device.send_control({"type": "duck", "on": True})
-        except Exception as e:
-            log.warning(f"[{device_id}] duck failed: {e}")
+        if s.duck_depth == 1:
+            try:
+                await device.send_control({"type": "duck", "on": True})
+                log.info(f"[{device_id}] duck ON (depth {s.duck_depth})")
+            except Exception as e:
+                log.warning(f"[{device_id}] duck failed: {e}")
+        else:
+            log.info(f"[{device_id}] duck held (depth {s.duck_depth})")
         return
 
     if s.state == PLAYING:
@@ -325,16 +336,22 @@ async def resume_interrupted(device_id: str) -> None:
     s.owned_by_turn = False
     pending, s.pending = s.pending, None
     resume_after, s.resume_after = s.resume_after, False
-    ducked, s.ducked = s.ducked, False
-    s.lead_s = LEAD_S
+    # #261: this release only unducks when it is the LAST owner leaving —
+    # otherwise the other speaker's tail competes with the music again.
+    was_ducking = s.duck_depth > 0
+    if was_ducking:
+        s.duck_depth -= 1
+    ducked_off = was_ducking and s.duck_depth == 0
+    s.lead_s = TURN_LEAD_S if s.duck_depth > 0 else LEAD_S
 
-    if ducked:
+    if ducked_off:
         # Release the duck before settling any deferred command, so the music
         # is already back at level by the time a stop or pause lands.
         device = _get_device(device_id) if _get_device else None
         if device is not None:
             try:
                 await device.send_control({"type": "duck", "on": False})
+                log.info(f"[{device_id}] duck released (depth 0)")
             except Exception as e:
                 log.warning(f"[{device_id}] unduck failed: {e}")
 
@@ -346,7 +363,7 @@ async def resume_interrupted(device_id: str) -> None:
             await s.resume()
         elif kind == "stop":
             await s.stop()
-        elif kind == "pause" and ducked:
+        elif kind == "pause" and was_ducking:
             # When we ducked, nothing was ever paused — so the user's pause
             # has to actually happen here. On the pausing path interrupt()
             # had already done it and dropping resume_after was the whole of
@@ -382,7 +399,7 @@ class MediaSession:
         # ducked: this turn lowered the music rather than pausing it (a device
         # that mixes). It changes what turn end has to do — there is nothing
         # to resume, but a deferred pause must actually be carried out.
-        self.ducked = False
+        self.duck_depth = 0   # #261: reference-counted, see interrupt()
         # Effective pacing lead. Reduced while a turn owns the speaker so the
         # music feed stops monopolising the shared data plane (see
         # TURN_LEAD_S); restored when the turn releases it.

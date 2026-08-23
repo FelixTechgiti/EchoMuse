@@ -1097,3 +1097,81 @@ def test_a_slow_but_recovering_source_is_not_killed(monkeypatch):
     types = [f[0] for f in device.data_frames]
     assert types.count(0x02) == 3 and types[-1] == 0x03, \
         "every period must have made it out before EOS"
+
+
+# ── #261: the duck is reference-counted, not boolean ─────────────────────────
+
+
+def test_overlapping_owners_release_the_duck_only_once():
+    """
+    The #261 hypothesis, pinned as behaviour: two overlapping owners (a
+    barge-in turn, an announcement landing mid-turn) both used to set one
+    boolean, and whichever finished FIRST sent duck:off while the other was
+    still speaking — music back at full level under an unfinished answer.
+    With a depth count the wire command goes out only on the 0→1 and 1→0
+    transitions.
+    """
+    async def main():
+        device = FakeDevice()
+        device.audio_mix_capable = True
+        _wire(device)
+        s = StubSession("office", periods=0)
+        em_player._sessions["office"] = s
+
+        await em_player.interrupt("office")      # owner A
+        await em_player.interrupt("office")      # owner B lands mid-turn
+        ducks_on = [m for m in device.control_msgs
+                    if m.get("type") == "duck" and m.get("on")]
+        assert len(ducks_on) == 1, "the second owner must not re-send duck:on"
+
+        await em_player.resume_interrupted("office")   # B finishes first
+        offs = [m for m in device.control_msgs
+                if m.get("type") == "duck" and not m.get("on")]
+        assert offs == [], "releasing one of two owners must NOT unduck"
+
+        await em_player.resume_interrupted("office")   # A finishes
+        offs = [m for m in device.control_msgs
+                if m.get("type") == "duck" and not m.get("on")]
+        assert len(offs) == 1, "unduck exactly once, when the last owner leaves"
+        return s
+    s = asyncio.run(main())
+    assert s.duck_depth == 0, "balanced interrupts/resumes must return to 0"
+
+
+def test_a_single_turn_still_ducks_and_releases_once():
+    """The common path is unchanged by the counting."""
+    async def main():
+        device = FakeDevice()
+        device.audio_mix_capable = True
+        _wire(device)
+        s = StubSession("office", periods=0)
+        await em_player.interrupt("office")
+        ducks = [m for m in device.control_msgs if m["type"] == "duck"]
+        assert ducks == [{"type": "duck", "on": True}]
+        await em_player.resume_interrupted("office")
+        ducks = [m for m in device.control_msgs if m["type"] == "duck"]
+        assert ducks == [{"type": "duck", "on": True},
+                         {"type": "duck", "on": False}]
+    asyncio.run(main())
+
+
+def test_resume_keeps_turn_pacing_while_another_owner_speaks():
+    """
+    lead_s must stay at TURN_LEAD_S while ANY owner still holds the duck —
+    restoring full pacing on the first release would let a deferred feed
+    race the remaining speaker.
+    """
+    async def main():
+        device = FakeDevice()
+        device.audio_mix_capable = True
+        _wire(device)
+        s = StubSession("office", periods=0)
+        em_player._sessions["office"] = s
+        await em_player.interrupt("office")
+        await em_player.interrupt("office")
+        await em_player.resume_interrupted("office")
+        assert s.lead_s == em_player.TURN_LEAD_S, \
+            "one release must not restore full pacing while another speaks"
+        await em_player.resume_interrupted("office")
+        assert s.lead_s == em_player.LEAD_S
+    asyncio.run(main())
