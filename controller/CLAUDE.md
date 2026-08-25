@@ -320,12 +320,32 @@ halves, both required:
 - **HA acknowledges an abort with no wire message at all**, so the barrier is
   ordering, never a timeout: after an abort, discard every event until the next
   `RUN_START`, which is necessarily ours. `em_runbarrier` holds that state.
-  Armed **only** by an abort and bounded to **one turn**, so the
-  `_ha_never_started` path above — a genuine `RUN_END` with no `RUN_START`,
-  which stalled the satellite setup dialog when it was missed — stays
-  untouched. `RUN_START` releases the barrier and is itself **delivered**, not
+  Bounded to **one turn**, so the `_ha_never_started` path above — a genuine
+  `RUN_END` with no `RUN_START`, which stalled the satellite setup dialog when
+  it was missed — stays untouched. `RUN_START` releases the barrier and is itself **delivered**, not
   swallowed; eating it would leave `_run_started` False and re-arm the same bug
   for the turn's own terminal `RUN_END`.
+- **A barge is not the only way to orphan a run, and the guard belongs at
+  teardown.** Any turn that stops waiting while HA is still working leaves the
+  run live: a `timeout` gives up after 30s, and `no_speech` never sends the
+  `end=True` sentinel at all. Both used to walk away silently, and the stale
+  `RUN_END` then landed on the NEXT turn, which had not seen its own
+  `RUN_START` — `_ha_never_started` read it as terminal and killed that turn in
+  ~3ms. Measured 2026-08-25: every `pipeline_refused` in a 15-hour sample
+  followed a timeout, none followed a good turn, so one slow HA intent cost
+  three turns and asking again was the guaranteed failure.
+  `timeout` was fixed on its own path first (#329) and `no_speech` — the far
+  more common one — sat one branch away, so the guard moved to the turn's
+  `finally` (#333): `if self._run_started and not self._run_finished:
+  end_ha_run()`. That is the invariant, and it covers returns nobody has
+  written yet. `_run_finished` is set by both branches where HA genuinely ends
+  a run, so an ordinary turn tears down with nothing to do.
+  `end_ha_run` is split out of `abort_ha_run` because **teardown is not a
+  barge** — letting it default `_turn_end_reason` to "barged" would invent a
+  cause on every turn that merely stopped waiting — and it is **idempotent**,
+  because a barge ends the run and then teardown runs anyway, and a second
+  `start=False` there races the *interrupting* turn's pipeline, which is the
+  failure the barrier exists to prevent.
 
 **A low barge threshold needs TWO consecutive frames, and the reason it went
 unnoticed is that responses used to be short.** The watcher scores 80ms frames

@@ -139,7 +139,8 @@ wake word?" Cross the sensitivity bar and the conversation starts.
 
 With more than one device online, the **first** Echo to hear you answers
 straight away, and any other device detecting the same word within the
-**arbitration window** (default 700ms, configurable) stands down silently.
+**arbitration window** (default 700ms, configurable) stands down silently,
+its ring going dark as soon as the other device claims the turn.
 One utterance, one response, even in earshot of two devices — and no added
 latency, because the winner claims the turn on the spot rather than waiting
 out the window.
