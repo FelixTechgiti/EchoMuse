@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.21.0-ea.7 (Early Access)
+
+One fix on ea.6, for a fault that could throw your question away before
+anything had heard it.
+
+### The Echo no longer interrupts itself while it is thinking
+
+Say the wake word, ask for something, and while the Echo was working out what
+you meant it could decide you had spoken again — cancel what you actually
+asked for, and reopen the microphone at you. Nothing you said was ever sent
+anywhere. It simply looked like the Echo had lost interest and started
+listening for no reason.
+
+It was reacting to room noise. While thinking, the bar for "they're talking
+over me" sat low enough that ordinary background sound could clear it twice in
+a row, and twice in a row was enough.
+
+That low bar was added to catch a real case, and the reason it was needed has
+since been fixed independently. Nothing needed it any more, and what it caught
+instead was the room. Interrupting the Echo while it thinks still works
+exactly as before, because saying the wake word out loud scores far above
+anything a room does.
+
 ## 2.21.0-ea.6 (Early Access)
 
 Three fixes on ea.5, all found by reading a night of ea.5's own logs rather
