@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.21.0-ea.6 (Early Access)
+
+Three fixes on ea.5, all found by reading a night of ea.5's own logs rather
+than by anyone reporting them.
+
+### Asking again after a turn that went nowhere no longer gets ignored
+
+If Home Assistant took too long to answer, the turn gave up after 30 seconds —
+and then so did the next one, and the one after that, each in about three
+milliseconds with nothing recorded but a refusal.
+
+Giving up left Home Assistant's side of the conversation still running. Its
+eventual "run finished" message arrived while the *next* question was
+starting, and that question was thrown away as though it had already ended.
+The natural thing to do — ask again — was the one thing guaranteed not to
+work.
+
+Every refusal in a 15-hour sample followed a slow answer. None followed a
+successful one.
+
+This also covers the quieter version of the same thing: saying the wake word
+and then not speaking left the conversation open in the same way, so the next
+question could be swallowed by a turn you had already abandoned. Any turn that
+ends without Home Assistant finishing its side now closes that side properly,
+whatever the reason it ended.
+
+**The slow answers themselves are a Home Assistant problem and are not fixed
+here.** Each one was a request to play music on a named device where speech
+recognition worked and no reply ever came back. What changes is that one slow
+answer now costs one turn instead of three.
+
+### Responses no longer occasionally cut off at the last word
+
+About one response in nine ended a fraction of a second early and was recorded
+as a failure, having played almost to the end.
+
+The final fragment of audio is padded out to a whole block before it is sent.
+The loudness limiter holds a few milliseconds of audio back, and when that
+held audio was handed over it could push the fragment past a whole block —
+at which point the padding was a negative length and the response stopped
+there.
+
+Short replies lost their last syllable. Nothing in the log said why, and the
+turn was filed under errors.
+
+### The Echo that did not answer stops sitting there lit
+
+With more than one Echo in earshot, both wake up and one answers. The other
+now goes dark immediately instead of holding its ring lit for up to 30
+seconds.
+
+Each Echo lights its own ring the instant it hears the wake word, which is
+what makes the response feel immediate — but it means a device lights up
+before it can know whether it is the one answering. Nothing told the losing
+device to stop, so it sat lit until an unrelated timeout expired.
+
 ## 2.21.0-ea.5 (Early Access)
 
 One change on ea.4, to what the Activity tab tells you.
