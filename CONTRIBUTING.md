@@ -51,6 +51,21 @@ one up and we will add it.
 a PR arrives that implements it, that PR was not premature — if we got the
 label wrong, that is ours to fix, not yours.
 
+### Quick links
+
+Saved searches for the common questions. Counts move; the filters do not.
+
+- [Ready to pick up](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aready%20-label%3Aclaimed%20-label%3Aneeds-hardware) — Specified, unclaimed, nothing external blocking it.
+- [Good first issue](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3A%22good%20first%20issue%22%20-label%3Aclaimed) — Small and self-contained.
+- [Needs a device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Ahardware%3Awelcome) — Can only be done with a rooted Echo — the ones we most want help with.
+- [Open bugs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Abug%20label%3Aready) — Confirmed and specified.
+- [Design not settled](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aneeds-design) — Comment before writing code.
+- [Someone is on it](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aclaimed) — Check before starting.
+
+By area: [device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adevice) · [controller](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Acontroller) · [dashboard](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adashboard) · [provisioning](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aprovisioning) · [ha](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aha) · [forge](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aforge) · [docs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adocs)
+
+By release: [2.21.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.21.0) · [2.22.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.22.0) · [3.0.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A3.0.0)
+
 ## Milestones and releases
 
 Issues are grouped by the release they are meant to land in, and a milestone
