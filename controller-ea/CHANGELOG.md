@@ -1,5 +1,222 @@
 # Changelog
 
+## 2.21.0
+
+**The Echo stops throwing away the question you just asked.** Three separate
+faults could each lose a turn, and the worst of them made asking again the one
+thing guaranteed not to work. Alongside them: every Echo now knows all four
+wake words, noise suppression no longer deletes quiet speech, a single bad
+message can no longer drop a device off Home Assistant, and the Activity tab
+tells you how a turn ended rather than lumping every interruption together.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices. One improvement waits on a
+firmware release that is not out yet, and says so where it appears.
+
+### Asking again after a turn that went nowhere no longer gets ignored
+
+If Home Assistant took too long to answer, the turn gave up after 30 seconds —
+and then so did the next one, and the one after that, each in about three
+milliseconds with nothing recorded but a refusal.
+
+Giving up left Home Assistant's side of the conversation still running. Its
+eventual "run finished" message arrived while the *next* question was
+starting, and that question was thrown away as though it had already ended.
+The natural thing to do — ask again — was the one thing that could not work.
+Every refusal in a 15-hour sample followed a slow answer; none followed a
+successful one.
+
+The same applies to the quieter version: saying the wake word and then not
+speaking left the conversation open in the same way. Any turn that ends
+without Home Assistant finishing its side now closes that side properly,
+whatever the reason it ended.
+
+**The slow answers themselves are a Home Assistant problem and are not fixed
+here.** What changes is that one slow answer now costs one turn instead of
+three.
+
+### The Echo no longer interrupts itself while it is thinking
+
+Ask for something, and while the Echo was working out what you meant it could
+decide you had spoken again — cancel what you actually asked for and reopen
+the microphone at you. Nothing you said was sent anywhere. It looked like the
+Echo had lost interest and started listening for no reason.
+
+It was reacting to room noise. While thinking, the bar for "they're talking
+over me" sat low enough that ordinary background sound could clear it twice in
+a row, and twice in a row was enough. That low bar was added to catch a real
+case, and the reason it was needed has since been fixed independently.
+
+Interrupting the Echo while it thinks still works exactly as before, because
+saying the wake word out loud scores far above anything a room does.
+
+### Responses no longer cut off at the last word
+
+About one response in nine ended a fraction of a second early and was recorded
+as a failure, having played almost to the end. Short replies lost their last
+syllable, and nothing in the log said why.
+
+The final fragment of audio is padded out to a whole block before it is sent.
+The loudness limiter holds a few milliseconds back, and when that held audio
+was handed over it could push the fragment past a whole block — at which point
+the padding was a negative length and the response stopped there.
+
+### The Echo that did not answer stops sitting there lit
+
+With more than one Echo in earshot, both wake up and one answers. The other
+now goes dark immediately instead of holding its ring lit for up to 30
+seconds.
+
+Each Echo lights its own ring the instant it hears the wake word, which is
+what makes the response feel immediate — and it means a device lights up
+before it can know whether it is the one answering. Nothing told the losing
+device to stop, so it sat lit until an unrelated timeout expired.
+
+### Every Echo now knows all four wake words
+
+Your Dot was given the recogniser for whichever wake word was selected when it
+was provisioned. Choose a different one later and it needed that recogniser
+copied across first — which normally happened, but left a gap: a device that
+was **offline** when you changed the wake word was told to listen for a word it
+did not have. On a device doing its own wake word detection, that is a Dot that
+hears nothing. Nothing warned, and the dashboard showed it as healthy.
+
+All four stock wake words (Hey Jarvis, Alexa, Hey Mycroft, Hey Rhasspy) are now
+installed on every device — 3 MB in total — so switching between them is
+instant and cannot fail. Devices you provisioned earlier collect the missing
+ones automatically the next time they connect, and any device found without the
+recogniser it was told to use falls back to the controller listening on its
+behalf, rather than going quietly deaf.
+
+Custom wake words you have trained yourself are untouched and are still copied
+across on selection.
+
+### Noise suppression no longer swallows quiet words
+
+**Noise suppression** could cut speech to complete silence rather than just
+turning it down. Measured on real turns: with it on, 8–15% of samples at a
+healthy speaking level were digital silence, against 0.3% with it off. That is
+the difference between a word sounding muffled and a word not being there at
+all, and it lands hardest on exactly the quiet speech the setting is meant to
+rescue.
+
+Suppression is now limited to 20 dB. A passage the denoiser judges to be noise
+is pushed well down instead of removed, and where it judges speech to be clean
+it passes through untouched — so nothing that was working gets quieter. Speech
+recognition stops improving well before 20 dB of noise reduction, so the limit
+costs nothing that was being collected.
+
+If you turned **Noise suppression** off because transcripts came back with
+words missing, it is worth another try.
+
+### A single bad message no longer drops the device
+
+One malformed or unexpected control message could take a device's whole
+connection down with it — the voice satellite, the Bluetooth proxy and the
+audio channel together — and it reconnected every time it happened. The
+message that triggered it in practice was a **playback statistics report**,
+which is pure telemetry: the least important thing the device sends was able
+to disconnect it.
+
+Each message is now handled on its own. One that fails is logged with what it
+was, and everything else carries on.
+
+### The Activity tab says how a turn ended
+
+Three different things stop a response, and until now they all recorded the
+same way. They are now distinct:
+
+| Outcome | What happened |
+|---|---|
+| **barged** | You said the wake word over it — a new turn followed |
+| **cancelled** | You pressed the action button |
+| **muted** | You muted the device, which also turns the microphone off |
+
+Before this, a response you cut off mid-sentence was recorded as a *completed
+answer*. A fleet interrupting a third of its responses read as a fleet
+answering everything, which is how a real fault stayed hidden for two days.
+
+**Expect your numbers to move.** Turns you interrupted on earlier builds were
+counted as answered, and mutes during a response were counted as cancels.
+Nothing about the fleet changed — only the counting. Older rows keep whatever
+they were recorded as; nothing is rewritten, because a cause that was never
+captured should not be invented later.
+
+### Promoting a user no longer needs the API
+
+The first person to sign in becomes admin and everyone after is read-only,
+which was correct and had no way to change it short of a hand-written API
+call. **Settings → Users** now lists every account with its role, shows which
+are linked to a Home Assistant login, and promotes or demotes per row. Where
+the server refuses — the last admin cannot be demoted — it says why.
+
+Contributed by @chr-braun.
+
+### Turning update checks off turns them off, and says so
+
+Setting **Update check interval** to `0` was the obvious way to stop the
+controller contacting GitHub, and it did the opposite: it removed the wait
+between checks entirely, so the controller polled continuously until GitHub
+rate-limited it. `0` now means off, and a value that is not a number falls back
+to the hourly default rather than silently killing update checking altogether.
+
+The Updates tab used to show "No release info" in that state, which looks
+exactly like GitHub being unreachable — so the tab you would open to find out
+what was wrong could not tell you. It now reads **Auto-checks off**. **Check
+now** still works either way: pressing it is a deliberate request, not
+background traffic.
+
+### If you build your own firmware
+
+Uploading your own compiled binary from **Updates → Local Build** failed with
+"an internal error occurred" — the controller was capping uploads at 1 MB
+against a firmware roughly ten times that, so the file never reached the code
+meant to handle it. This broke on 2026-08-18 in 2.20.2 when a routine
+dependency update changed how the web framework applies its size limit.
+Updating from a published release was never affected. The limit is now 50 MB,
+and a file over it says so, with its size.
+
+A successful upload also used to report a rollback that had not happened
+(`⚠ Device reconnected on v2.12.0-63-g99628d3 — auto-rolled back`). The
+controller now recognises the version string a clean checkout produces, and a
+mismatch reports what the device came back on and what was expected instead of
+guessing. A genuine rollback still says so.
+
+### Music playback
+
+A Music Assistant stream that stopped producing audio — an upstream failure
+rather than the end of a track — used to wait indefinitely, with Home Assistant
+showing **playing** against silence and nothing in the log to say otherwise. A
+source that produces nothing for 30 seconds now ends the stream, reports idle,
+and logs what happened. A stream that is merely slow still recovers; the clock
+resets on every chunk that arrives.
+
+Audio fetched over `https` did not verify the server's certificate. It does
+now. If you stream from a server with a private or self-signed certificate,
+point `EM_EXTRA_CA_CERT` at your CA and it works as before. Playback failures
+now include the decoder's own error message, which previously went nowhere.
+
+### The listening ring lights immediately — needs firmware v2.13.0
+
+On an Echo doing its own wake word detection, the ring waited for a round trip
+to the controller before lighting: measured at half a second, and longer on a
+busy network. It now lights the moment the device hears you.
+
+**That firmware is not published yet.** On the firmware you are running today
+everything behaves exactly as it does now, and the dashboard will offer the
+update when it is released.
+
+### Also
+
+- Clipping caught while the limiter is switched off is the backstop doing its
+  job on a boosted EQ, not a fault. It was counted alongside genuine faults, so
+  a working setup looked broken. The two are now counted separately.
+- The command-line tools in `controller/tools/` find the database under the
+  Home Assistant add-on as well as the standalone container.
+- The controller's event-loop stall figure read zero under the add-on however
+  busy it got. The warnings in the log were always correct; the number beside
+  them now agrees. Contributed by @chr-braun.
+
 ## 2.21.0-ea.7 (Early Access)
 
 One fix on ea.6, for a fault that could throw your question away before
