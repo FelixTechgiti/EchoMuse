@@ -252,7 +252,7 @@ only what the *interface* commits to for MVP.
 
 | Capability | crown MVP | Note |
 |------------|-----------|------|
-| `speaker` | yes | `card0,device0` → RT5616; clean binding (issue #5) |
+| `speaker` | yes | `card0,device0` → RT5616 (issue #5). Streams clean, but `Ext_Speaker_Amp_Switch` is inverted (`On`=silent, `Off`=audible) — same trap as checkers, confirmed by ear 2026-08-26. Must be driven `Off` in the binding's init; the boot default is `On` |
 | `mic` | **needs on-hardware confirmation** | Capture path exists (normal HAL/`plughw` 16 kHz mono); open question is level/SNR — see below |
 | `buttons` | yes | Resolved by name (`gpio-keys` vol, action button, camera shutter) |
 | `leds` / `led_anim` | **no** | No LED ring; a "voice turn" status overlay on the display is deferred past MVP and even then stays out of the user's way |
