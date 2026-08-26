@@ -1674,7 +1674,37 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     })())}
                     {row('Firmware', device.firmware_ver || '—')}
                     {row('WiFi network', s?.wifiSsid || '—')}
-                    {row('ESPHome port', device.esphome_port != null ? String(device.esphome_port) : '—')}
+                    {/* Was a bare port number, which answered "which port" and
+                        never the question anyone opens this panel with — is
+                        Home Assistant actually on the other end of it (#349).
+                        A device HA has never connected to is Online, idle and
+                        completely unable to answer, and until this row said so
+                        the only way to find out was to say the wake word and
+                        watch nothing happen. Measured on prod: 23 wake events
+                        in 14 hours that could not start a turn, with three
+                        tiles reading healthy throughout.
+
+                        The port stays, appended: it is what a stale HA config
+                        entry is keyed on, so it is the first thing needed the
+                        moment this row says Waiting. */}
+                    {row('Voice assistant', (() => {
+                      const vs = device.voiceSatellite;
+                      const p  = vs?.port ?? device.esphome_port;
+                      const at = p != null ? ` · port ${p}` : '';
+                      if (!vs)            return 'No satellite server';
+                      if (vs.haConnected) return `HA connected${at}`;
+                      if (vs.listening)   return `Waiting for HA${at}`;
+                      return `Port down${at}`;
+                    })(), (() => {
+                      const vs = device.voiceSatellite;
+                      // Not-connected is amber rather than red: HA reconnects
+                      // on its own from most of the ways this happens, and a
+                      // row that shouts during an ordinary restart is one
+                      // people learn to skip past — the #301 cry-wolf rule.
+                      if (!vs)            return 'var(--error)';
+                      if (vs.haConnected) return 'var(--ok)';
+                      return 'var(--warn)';
+                    })())}
                     {/* One row, not two. "Connected: Yes" plus "Last seen"
                         was redundant in both directions — while connected the
                         last-seen time says nothing, and while offline the
