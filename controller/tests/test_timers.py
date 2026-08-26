@@ -126,6 +126,64 @@ def test_dismissal_matches_whole_words_only():
     assert t.is_dismissal("what's on offer") is False
 
 
+# ── Dismissal-only: which utterances also lose HA's reply ────────────────────
+# Stopping the ring and suppressing HA's spoken reply are DIFFERENT questions,
+# and they rode on one match until 2026-08-21. A command that happens to
+# contain a dismissal word ("turn off the kitchen light") should stop the ring
+# AND still be answered — the light does turn off, so silence leaves the user
+# unable to tell whether it worked.
+
+@pytest.mark.parametrize("text", [
+    "stop",
+    "Stop.",
+    "cancel the timer",
+    "turn it off",
+    "turn off the alarm",
+    "stop the alarm please",
+    "shut up",
+    "that's enough",
+    "ok ok",
+    "I'm up",
+    "okay okay, stop",
+])
+def test_pure_dismissals_suppress_the_reply(text):
+    assert t.is_dismissal_only(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "turn off the kitchen light",
+    "stop the music",
+    "quiet the bedroom fan",
+    "turn off the lights downstairs",
+    "cancel my 7am alarm on the phone",
+])
+def test_commands_carrying_a_dismissal_keep_their_reply(text):
+    # These stop the ring — the generous match is right about that — but HA
+    # acts on them too, so its confirmation must survive.
+    assert t.is_dismissal(text) is True
+    assert t.is_dismissal_only(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "   ",
+    "what's the weather",
+    "set a timer for five minutes",
+    "turn on the kitchen light",
+])
+def test_non_dismissals_are_not_dismissal_only(text):
+    # Nothing to suppress if nothing was dismissed.
+    assert t.is_dismissal_only(text) is False
+
+
+def test_dismissal_only_consumes_every_repetition():
+    # " stop stop " must lose BOTH — a single str.replace pass leaves the
+    # second one behind (the first eats the space between them) and the
+    # leftover reads as an unrecognised word.
+    assert t.is_dismissal_only("stop stop") is True
+    assert t.is_dismissal_only("stop, stop, stop!") is True
+
+
 # ── attenuate() — ducking the alert ──────────────────────────────────────────
 # The alert audio is the bundled Voice PE sound, decoded by em_controller
 # (ffmpeg), so these work on synthetic PCM rather than the file: the duck is

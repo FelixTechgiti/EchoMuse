@@ -788,11 +788,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             srv = self._owning_server
             if (srv is not None and srv.timer_ringing
                     and em_timers.is_dismissal(text)):
+                # Stopping the ring is the generous match; suppressing HA's
+                # reply is NOT. "Turn off the kitchen light" is a dismissal by
+                # the rule above and also a real command HA answers, so the
+                # reply is only swallowed when the utterance is nothing but a
+                # dismissal (em_timers.is_dismissal_only).
+                self._dismissed_alarm = em_timers.is_dismissal_only(text)
                 log.info(
                     f"[{self._log_name}] Spoken dismissal {text!r} — "
                     f"stopping alarm locally"
+                    + ("" if self._dismissed_alarm
+                       else "; utterance carries a command, HA's reply stands")
                 )
-                self._dismissed_alarm = True
                 task = asyncio.create_task(srv.dismiss_timer_alarm())
                 self._timer_tasks.add(task)
                 task.add_done_callback(self._timer_tasks.discard)

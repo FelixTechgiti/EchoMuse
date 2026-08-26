@@ -31,8 +31,9 @@ cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 
 from __future__ import annotations
 
-import array
 import os
+
+import numpy as np
 
 # ── ESPHome VoiceAssistantTimerEvent values ─────────────────────────────────
 # Mirrors the api_pb2.VoiceAssistantTimerEvent enum. Reproduced as plain ints
@@ -169,6 +170,39 @@ _DISMISS_WORDS = (
     "okay okay", "ok ok", "alright already", "im up",
 )
 
+# Words that can pad a dismissal without making it a command: articles, the
+# nouns a person uses for the thing that is ringing, and ordinary politeness.
+# Used ONLY by is_dismissal_only — the generous matcher above does not care
+# what else is in the sentence.
+_FILLER_WORDS = frozenset({
+    "a", "the", "this", "that", "thats", "it", "its", "please", "now",
+    "just", "already", "im",
+    "alarm", "alarms", "timer", "timers", "ringing", "sound", "noise", "thing",
+    "ok", "okay", "yeah", "yes", "alright", "thanks", "thank", "you", "hey",
+})
+
+# Longest phrases first, so "turn off" is consumed before the bare "off" can
+# leave "turn" behind as an unexplained word.
+_DISMISS_PHRASES = tuple(sorted(
+    _DISMISS_WORDS, key=lambda w: (-len(w.split()), -len(w))
+))
+
+
+def _normalise(text: str) -> str:
+    """
+    Space-padded, punctuation-free lowercase, so a match is whole-word.
+
+    Apostrophes are DROPPED rather than turned into spaces (so "I'm" is one
+    word, not "i m"), in both the straight and curly forms since STT emits
+    either.
+    """
+    if not text:
+        return ""
+    lowered = text.lower().replace("'", "").replace("’", "")
+    cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in lowered)
+    joined  = " ".join(cleaned.split())
+    return f" {joined} " if joined else ""
+
 
 def is_dismissal(text: str) -> bool:
     """
@@ -183,18 +217,56 @@ def is_dismissal(text: str) -> bool:
     It is NOT generous enough to eat a real command, though: "set a timer for
     five minutes" while one rings must still reach HA, which is why this
     matches words rather than simply treating every utterance as a dismissal.
+
+    Use this to STOP THE RING and nothing else. Suppressing HA's spoken reply
+    needs is_dismissal_only — see there for why the two cannot be the same
+    question.
     """
-    if not text:
+    padded = _normalise(text)
+    if not padded:
         return False
-    # Normalise: lowercase, DROP apostrophes (so "I'm" is one word, not "i m"
-    # — the straight and curly forms both, since STT emits either), turn the
-    # rest of the punctuation into spaces, collapse runs.
-    lowered = text.lower().replace("'", "").replace("’", "")
-    cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in lowered)
-    padded  = f" {' '.join(cleaned.split())} "
-    if not padded.strip():
+    return any(f" {w} " in padded for w in _DISMISS_PHRASES)
+
+
+def is_dismissal_only(text: str) -> bool:
+    """
+    Whether the utterance is a dismissal AND NOTHING ELSE.
+
+    The generosity above is right for stopping the ring and wrong for
+    swallowing HA's reply, and those rode on one match until 2026-08-21.
+    "Turn off the kitchen light" spoken over an alarm is a dismissal by the
+    rule above — reasonably, since the alarm should stop — but it is also a
+    real command that HA answers. Suppressing that answer left the light
+    switched off and the user with silence, unable to tell whether anything
+    had happened. A false positive here is not a spare stop; it is a lost
+    reply.
+
+    So the reply is only suppressed when what remains after removing every
+    dismissal phrase is filler: articles, a word for the thing that is
+    ringing, politeness. Anything else — a room, a device, a noun this module
+    has never heard of — means HA has something to say and must be allowed to
+    say it, while the ring still stops.
+    """
+    padded = _normalise(text)
+    if not padded:
         return False
-    return any(f" {w} " in padded for w in _DISMISS_WORDS)
+
+    matched = False
+    changed = True
+    while changed:
+        changed = False
+        for w in _DISMISS_PHRASES:
+            needle = f" {w} "
+            if needle in padded:
+                # Replace with a single space so the surrounding word
+                # boundaries survive — " stop stop " must lose both.
+                padded  = padded.replace(needle, " ", 1)
+                matched = changed = True
+                break
+
+    if not matched:
+        return False
+    return all(word in _FILLER_WORDS for word in padded.split())
 
 
 def attenuate(pcm: bytes, gain_db: float) -> bytes:
@@ -210,7 +282,9 @@ def attenuate(pcm: bytes, gain_db: float) -> bytes:
         return pcm
     gain  = 10.0 ** (gain_db / 20.0)
     count = len(pcm) // 2
-    out   = array.array("h", pcm[: count * 2])
-    for i, v in enumerate(out):
-        out[i] = int(max(-32768, min(32767, v * gain)))
-    return out.tobytes()
+    # An odd trailing byte cannot be a whole sample, so it is dropped rather
+    # than crashing frombuffer. Vectorised because this runs over every burst
+    # of a ring that can last 120s — numpy is already a controller dependency.
+    samples = np.frombuffer(pcm[: count * 2], dtype="<i2")
+    scaled  = np.clip(np.rint(samples * gain), -32768, 32767).astype("<i2")
+    return scaled.tobytes()
