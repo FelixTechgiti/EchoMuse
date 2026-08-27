@@ -236,6 +236,17 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
+    # The ring's RESTING colour, owned by Home Assistant's light entity
+    # rather than by the dashboard — persisted device STATE, like
+    # startupVolume, not a setting (see em_config_sections.STATE_KEYS and
+    # em_ring_light.py). Every voice state outranks it, and turn end
+    # restores it instead of clearing the ring.
+    #
+    # Brightness 0 is OFF, which is why the default pair is a colour nobody
+    # sees: it keeps the shipped behaviour exactly as it was (a dark ring at
+    # rest) while giving HA's light card a colour to offer on the first tap.
+    "idleRing":           "#ffffff",
+    "idleRingBrightness": 0,
     # Playback "meter" ring response curve — how hard the ring throbs with
     # the speaker level. Device-side defaults live in animator.go
     # (meterDefaults) and these mirror them; both are clamped independently.

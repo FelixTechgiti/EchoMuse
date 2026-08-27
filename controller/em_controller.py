@@ -73,6 +73,7 @@ import em_linkauth
 import em_eq
 import em_limiter
 import em_mbc
+import em_ring_light
 import em_scenes
 import em_shadow
 import em_oww_warmup
@@ -295,6 +296,27 @@ class Device:
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
+        # Monotonic instant this device's control socket closed, or None
+        # while the link is up (#354).
+        #
+        # The device STAYS in _devices while this is set. It is held for
+        # CONTROL_RECONNECT_GRACE_S so a four-second blip does not tear down
+        # the HA entities and the media session, and "absent from the
+        # registry" is the wrong way to say that: for the length of the
+        # grace the satellite is still registered with HA and still answers,
+        # while every lookup that means "a device I can send something to"
+        # silently reads as "no such device". The two are different claims
+        # and only the second was ever expressible.
+        #
+        # Never cleared: a Device is constructed per control connection, so
+        # a reconnect installs a NEW object and this one is discarded by
+        # _release_device_services.
+        self.link_down_since: float | None = None
+        # Ring resting state — Home Assistant's light entity (em_ring_light).
+        # Seeded from the device's stored config on the first push; these
+        # defaults only cover the window before that arrives.
+        self.idle_ring: str            = em_ring_light.DEFAULT_COLOR
+        self.idle_ring_brightness: int = 0
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
 
@@ -704,6 +726,16 @@ class Device:
         await self.send_control(msg)
 
     @property
+    def link_down(self) -> bool:
+        """
+        This device's control socket has closed and its reconnect grace has
+        not expired yet (#354). It is still in the registry, its HA entities
+        are still up and its media session is still alive — but nothing sent
+        to it can arrive.
+        """
+        return self.link_down_since is not None
+
+    @property
     def led_anim_capable(self) -> bool:
         return "led_anim" in (self.capabilities or [])
 
@@ -1004,7 +1036,37 @@ _shell_dashboard:  dict[str, object]         = {}
 
 
 def get_device(device_id: str) -> Device | None:
+    """
+    The device IF IT CAN BE REACHED — None while its control link is down.
+
+    This is the accessor for every caller that wants to send the device
+    something, which is nearly all of them. A device inside the
+    control-plane reconnect grace is present in `_devices` but has a closed
+    socket, so handing it out here would turn "the link blipped" into
+    "the command was accepted and did nothing" (#354).
+
+    Use get_device_any() to reach the object regardless — for reporting the
+    link-down state itself, and for the teardown that ends the grace.
+    """
+    device = _devices.get(device_id)
+    return None if device is not None and device.link_down else device
+
+
+def get_device_any(device_id: str) -> Device | None:
+    """The device whether or not its control link is up. See get_device()."""
     return _devices.get(device_id)
+
+
+def _reachable_count() -> int:
+    """
+    How many devices can actually be sent something right now.
+
+    len(_devices) stopped meaning this when link-down devices began being
+    held through their grace (#354). Wake arbitration is the caller that
+    cares: it skips the contention window for a solo fleet, and a fleet of
+    one live Echo plus one mid-blip is solo.
+    """
+    return sum(1 for d in _devices.values() if not d.link_down)
 
 
 def _limiter_for(device):
@@ -1043,6 +1105,12 @@ async def _push_device_state(device: Device) -> None:
 
 # ─── LED helpers ──────────────────────────────────────────────────────────────
 
+# How long an outcome cue holds the ring before the device retires it on its
+# own ticker. Mirrors the TTL baked into the scene anims (em_scenes), with a
+# little slack so the repaint lands after the cue rather than racing it.
+LED_CUE_TTL_S = 1.2
+
+
 def _make_leds(r, g, b):
     return [{"id": i, "r": r, "g": g, "b": b} for i in range(NUM_LEDS)]
 
@@ -1052,6 +1120,31 @@ async def leds_off(device: Device):
         await device.send_led_anim({"pattern": "off"})
     else:
         await device.set_leds(_make_leds(0, 0, 0))
+
+
+async def leds_idle(device: Device):
+    """
+    Return the ring to REST — which is dark, unless Home Assistant's light
+    entity has been given a colour to rest at (`em_ring_light`).
+
+    Every path that used to mean "clear the ring" means this instead. The
+    ring is not a lamp: listening, thinking, speaking, mute and the outcome
+    cues all outrank the light, so what the entity owns is only what is
+    shown when none of them is claiming it.
+
+    A raw `leds` frame rather than an `led_anim`, on purpose and on both
+    firmwares: it is a static colour with nothing to animate, and a frame
+    supersedes a running animation spec on the device's own generation
+    counter, so this is also what stops a retired cue leaving the ring dark.
+    """
+    rgb = em_ring_light.painted_rgb(
+        getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+        getattr(device, "idle_ring_brightness", 0),
+    )
+    if rgb is None:
+        await leds_off(device)
+        return
+    await device.set_leds(_make_leds(*rgb))
 
 
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
@@ -1097,8 +1190,38 @@ async def _leds_turn_end(device: Device):
         if anim:
             log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
             await device.send_led_anim(anim)
+            # The cue retires itself on the device's own ticker (1s TTL),
+            # which leaves the ring DARK — correct when rest is dark, and a
+            # light Home Assistant believes is on but that went out when a
+            # turn happened to end badly, once rest is a colour. Repaint
+            # after the TTL, and only when there is something to repaint, so
+            # the common case still sends nothing at all.
+            if em_ring_light.painted_rgb(
+                getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+                getattr(device, "idle_ring_brightness", 0),
+            ) is not None:
+                asyncio.create_task(
+                    _restore_idle_ring_after_cue(device)
+                ).add_done_callback(_log_task_exception)
             return
-    await leds_off(device)
+    await leds_idle(device)
+
+
+async def _restore_idle_ring_after_cue(device: Device) -> None:
+    """
+    Put the resting ring back once an outcome cue has expired.
+
+    The cue's TTL is what makes it self-clearing — nothing to leak if the
+    controller dies between sending it and its end — so this deliberately
+    does not shorten or replace that; it only paints what should be there
+    afterwards. A turn starting in the meantime repaints the ring itself and
+    supersedes this on the device's generation counter, so a late arrival is
+    harmless rather than something to guard with a lock.
+    """
+    await asyncio.sleep(LED_CUE_TTL_S)
+    if device.speaking or device.thinking or device.listening:
+        return  # a new turn owns the ring now
+    await leds_idle(device)
 
 
 async def leds_listening(device: Device):
@@ -1123,7 +1246,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
         except asyncio.CancelledError:
             pass
         finally:
-            await leds_off(device)
+            await leds_idle(device)
         return
     spin_frame = device.led_scene["spin_frame"]
     pos = 0
@@ -1135,7 +1258,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     except asyncio.CancelledError:
         pass
     finally:
-        await leds_off(device)
+        await leds_idle(device)
 
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
@@ -1671,7 +1794,7 @@ async def _ring_timer_alarm(device: Device) -> None:
         # left it routed — the same defensive restart the turn path ends with.
         await device.mic_start()
         await em_player.resume_interrupted(device.device_id)
-        await leds_off(device)
+        await leds_idle(device)
 
 
 async def _meter_at_playback_start(pcm_chunks, on_start):
@@ -2701,7 +2824,7 @@ async def wake_word_listener(device: Device):
                         # syllable, so we arm optimistically and revert on
                         # loss. Solo fleets skip the window entirely.
                         won_by = device.device_id
-                        if device.wake_arb_ms > 0 and len(_devices) > 1:
+                        if device.wake_arb_ms > 0 and _reachable_count() > 1:
                             # Synchronous — the winner starts its turn on
                             # this same tick. The old version awaited the
                             # full window on EVERY wake (~364ms measured)
@@ -2725,7 +2848,7 @@ async def wake_word_listener(device: Device):
                             # retires it. Plain off, not _leds_turn_end:
                             # there was no turn, so an outcome cue would be
                             # inventing one.
-                            await leds_off(device)
+                            await leds_idle(device)
                             ceded = 0
                             while not device.voice_queue.empty():
                                 try:
@@ -3130,6 +3253,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.limiter_release   = float(config.get(
             "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)
+        # The ring's resting colour, owned by HA's light entity. Persisted
+        # device state, so this is what carries it across a reboot.
+        device.idle_ring            = config.get(
+            "idleRing", em_ring_light.DEFAULT_COLOR)
+        device.idle_ring_brightness = em_ring_light.clamp_brightness(
+            config.get("idleRingBrightness", 0))
         # #263: hand the device its current listening animation so a wake it
         # detected ITSELF can light the ring immediately, instead of waiting
         # for leds_listening to make the round trip (measured +522ms before
@@ -3148,7 +3277,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
-        await leds_off(device)
+        # leds_idle, not leds_off: this is what restores the ring's resting
+        # colour after a device reboot or a controller restart, which is the
+        # whole reason the HA light's state is persisted rather than held in
+        # memory.
+        await leds_idle(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
@@ -3167,6 +3300,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             # 12:02:32 killed the next seven announcements over three
             # minutes. An announcement is a new action and nothing that set
             # that flag earlier has any claim on it.
+            if _d.link_down:
+                # The control link is inside its reconnect grace, so the
+                # frames would be dropped by send_data and this would still
+                # return True — telling Home Assistant an announcement it
+                # holds RESPONDING for played to a device nobody can reach.
+                # The reply is the one thing an announcement reports (#354).
+                log.warning(
+                    f"[{_d.device_id}] Announcement refused — control link "
+                    f"is down"
+                )
+                return False
             _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
@@ -3186,6 +3330,34 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
+        async def _set_idle_ring(colour: str, level: int, _d=_device_ref) -> None:
+            """
+            HA set the ring's resting colour: apply, persist, repaint.
+
+            Persisted read-modify-write, exactly as a volume report is —
+            these live in the same device config row and a blind write would
+            stomp whatever else is in it.
+
+            The repaint is conditional on the ring being at rest. A turn owns
+            it otherwise, and painting the resting colour over a listening
+            ring would tell the user the device had stopped listening while
+            it had not; the turn restores the new colour at its end anyway.
+            """
+            _d.idle_ring            = colour
+            _d.idle_ring_brightness = level
+            _loop = asyncio.get_event_loop()
+            try:
+                stored = await _loop.run_in_executor(
+                    None, db.get_device_config, _d.device_id)
+                stored["idleRing"]           = colour
+                stored["idleRingBrightness"] = level
+                await _loop.run_in_executor(
+                    None, db.set_device_config, _d.device_id, stored)
+            except Exception as e:
+                log.warning(
+                    f"[{_d.device_id}] Ring light not persisted: {e}")
+            if not (_d.speaking or _d.thinking or _d.listening):
+                await leds_idle(_d)
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -3197,7 +3369,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             send_volume_set=_send_volume_set,
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
+            set_idle_ring=_set_idle_ring,
         )
+        # Seed HA's light entity from the stored row, so it reads the colour
+        # the ring is actually resting at rather than the default.
+        esphome.update_device_ring(
+            device_id, device.idle_ring, device.idle_ring_brightness)
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller
@@ -3688,7 +3865,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 db.touch_device_seen(device.device_id)
-                _devices.pop(device.device_id, None)
+                # NOT popped: the device is marked link-down and HELD in the
+                # registry for the length of the grace (#354). Popping it
+                # here made "cannot be reached" indistinguishable from "no
+                # such device" for the five seconds in which the satellite,
+                # the BLE proxy and the media session were all still up and
+                # still answering Home Assistant — the one window in which
+                # the difference matters. get_device() refuses a link-down
+                # device, so every caller that means "send this device
+                # something" behaves exactly as it did when the row vanished;
+                # what is new is that the ones which mean "what is the state
+                # of this device" can now be told.
+                # get_event_loop().time(), not the `loop` bound 700 lines
+                # up at registration: this `finally` runs for any exit, and
+                # depending on a name assigned that far away in a function
+                # this long is a NameError waiting for someone to reorder
+                # two statements. Same clock either way.
+                device.link_down_since = asyncio.get_event_loop().time()
                 # #315: the services stay up for a grace window instead of
                 # being torn down immediately — a four-second link blip used
                 # to deregister the HA entities, drop the BLE proxy and kill
@@ -3718,6 +3911,13 @@ async def _release_device_services(device) -> None:
             f"[{device.device_id}] control connection not restored within "
             f"{CONTROL_RECONNECT_GRACE_S:.0f}s — releasing services"
         )
+        # The grace is over, so the device leaves the registry now rather
+        # than at close (#354). Identity-guarded above: a replacement that
+        # registered during the sleep owns the entry and must not be popped
+        # out from under itself. Popping BEFORE the releases below, so no
+        # lookup can hand out a device whose services are mid-teardown.
+        if current is device:
+            _devices.pop(device.device_id, None)
         await api.notify_device_disconnected(device.device_id)
         await esphome.device_disconnected(device.device_id)
         await em_ble_proxy.device_disconnected(device.device_id)
@@ -3752,7 +3952,13 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         for _ in range(20):
-            device = _devices.get(device_id)
+            # get_device, not _devices.get: during a control-plane grace the
+            # OLD Device is still in the registry with a closed socket, and
+            # binding this fresh data connection to it would hand the stream
+            # to an object _release_device_services is about to discard.
+            # Keep waiting instead — the redial that brought this data plane
+            # back is bringing a new control plane with it (#354).
+            device = get_device(device_id)
             if device is not None:
                 break
             await asyncio.sleep(0.1)
@@ -4034,7 +4240,10 @@ async def main():
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
-        get_device=_devices.get,
+        # get_device, not _devices.get: a link-down device is held in the
+        # registry through its grace (#354), and the player asking for it
+        # means "something to send audio to".
+        get_device=get_device,
         notify_state=esphome.push_media_state,
     )
 

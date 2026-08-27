@@ -78,7 +78,16 @@ SECTIONS: dict[str, dict] = {
 # until the device restarted and was overwritten by any real volume change).
 # Fleet default 85 still does one real job: the starting point for a device
 # that has never reported.
-STATE_KEYS: frozenset[str] = frozenset({"startupVolume"})
+# idleRing/idleRingBrightness are the same shape one step further along: the
+# ring's resting colour is set from Home Assistant's light entity and written
+# back here so it survives a restart, exactly as a volume change is. Not
+# fleet-inherited, for the reason volume is not — "every Echo in the house
+# turns the same colour when one of them is told to" is not a fleet default,
+# it is a bug — and deliberately not on a dashboard Stage: two controls owning
+# one value is how they drift.
+STATE_KEYS: frozenset[str] = frozenset({
+    "startupVolume", "idleRing", "idleRingBrightness",
+})
 
 SECTION_IDS: tuple[str, ...] = tuple(SECTIONS)
 

@@ -63,6 +63,7 @@ import em_pki
 import em_player
 import em_recordings
 import em_volume
+import em_ring_light
 import em_scenes
 import em_shadow
 import em_support
@@ -151,7 +152,40 @@ _controller_cache: dict = {}
 _controller_cache_ts: float = 0.0
 
 # Reference to the live devices dict from em_controller — set by init().
+#
+# It holds devices whose control link is DOWN as well as up: a blip leaves the
+# device in place for CONTROL_RECONNECT_GRACE_S so its HA entities and media
+# session survive it (#315/#354). Read it through _live() rather than directly
+# — every handler in this file that looks a device up is about to send it
+# something.
 _devices: dict = {}
+
+
+def _live(device_id: str):
+    """
+    The device IF SOMETHING SENT TO IT CAN ARRIVE, else None.
+
+    Mirrors em_controller.get_device. Every call site here means "the live
+    device object I am about to push config / firmware / a shell command to",
+    and for the length of a reconnect grace the entry in `_devices` is a
+    device with a closed socket. Handing it out would turn a four-second link
+    blip into a request that reports success and does nothing.
+
+    getattr, not attribute access: the dict is injected by init() and the
+    tests pass simple stubs into it, which must keep reading as reachable.
+    """
+    device = _devices.get(device_id)
+    if device is not None and getattr(device, "link_down", False):
+        return None
+    return device
+
+
+def _live_items():
+    """(device_id, device) for every REACHABLE device — see _live()."""
+    return [
+        (did, d) for did, d in list(_devices.items())
+        if not getattr(d, "link_down", False)
+    ]
 
 # Device-link TLS material directory — set by em_controller.main() once
 # em_pki.ensure_pki() succeeds. None = TLS listener not running (no
@@ -987,7 +1021,7 @@ async def _disconnect_device(device_id: str) -> None:
     `shell_close` it sends is the only thing that ends an INTERACTIVE
     dashboard session — those deliberately do not set `_shell_ws`.
     """
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
     await _release_shell_ws(device_id, live)
@@ -1102,6 +1136,14 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     if "bassGuardDb" in effective:
         live.bass_guard_db = float(effective["bassGuardDb"])
     live.led_scene = em_scenes.resolve(effective)
+    # Ring resting colour — the mirror of em_controller's registration path
+    # (tests/test_config_mirrors.py). Not settable from the dashboard, but a
+    # config save must not reset it to the default either.
+    if "idleRing" in effective:
+        live.idle_ring = effective["idleRing"]
+    if "idleRingBrightness" in effective:
+        live.idle_ring_brightness = em_ring_light.clamp_brightness(
+            effective["idleRingBrightness"])
     # #263: keep the device's cached listening animation in step when the
     # scene changes live, same push as at registration. Without it the ring
     # lit locally in the OLD scene's colours until the next reconnect.
@@ -1226,7 +1268,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     # Push the EFFECTIVE config — with per-section scoping the body is
     # partial by design, so the device must be sent the resolved picture.
     pushed = False
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is not None:
         await _apply_live_config(device_id, live, config)
         log.info(f"[api] Config pushed to live device: {device_id}")
@@ -1275,7 +1317,7 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
         return _error("invalid_credentials",
                       f"WPA passphrase must be 8–63 characters (got {len(psk)})", 400)
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -1305,7 +1347,7 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     takes ~5s).
     """
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
     if getattr(live, "wifi_scan_future", None) is not None:
@@ -1414,7 +1456,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -1444,7 +1486,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
         return _error("no_rollback_available",
                       "No previous version recorded — cannot roll back", 404)
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -1702,7 +1744,7 @@ async def _run_update(device_id: str, release: dict,
         current_ver = row["firmware_ver"] if row else None
         await loop.run_in_executor(None, db.set_firmware_previous, device_id, current_ver)
 
-        live = _devices.get(device_id)
+        live = _live(device_id)
         if live is None:
             await _update_failed(device_id,
                                  "Device disconnected before update could start")
@@ -1876,7 +1918,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
         await _push_log_event(device_id, "info", "controller",
                               f"Rolling back to {target_version}")
 
-        live = _devices.get(device_id)
+        live = _live(device_id)
         if live is None:
             await _update_failed(device_id,
                                  "Device disconnected before rollback")
@@ -1963,7 +2005,7 @@ async def _monitor_reconnect(
     await asyncio.sleep(8)  # give device time to stop and restart
 
     while time.monotonic() < deadline:
-        if device_id in _devices:
+        if _live(device_id) is not None:
             row = await loop.run_in_executor(None, db.get_device, device_id)
             if row:
                 running = row["firmware_ver"]
@@ -2589,7 +2631,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     if user["role"] != "admin":
         raise web.HTTPForbidden()
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         raise web.HTTPConflict(reason="Device is not connected")
 
@@ -2688,7 +2730,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
     skipped = []
     loop = asyncio.get_event_loop()
 
-    for device_id, live in list(_devices.items()):
+    for device_id, live in _live_items():
         row = await loop.run_in_executor(None, db.get_device, device_id)
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
@@ -2912,7 +2954,7 @@ async def _post_secure_link(request: web.Request) -> web.Response:
         return _error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
@@ -2936,7 +2978,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
     pressing it twice costs a `pm list packages` and nothing else.
     """
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
@@ -2960,7 +3002,7 @@ def _log_task_exception_api(task: asyncio.Task) -> None:
 async def _run_secure_link(device_id: str) -> None:
     """Background task: install TLS credentials on a live device."""
     loop = asyncio.get_event_loop()
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
     try:
@@ -3023,7 +3065,9 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
-        "connected":      len(_devices),
+        # Reachable, not merely present: a device inside its reconnect
+        # grace is still in _devices and cannot be sent anything (#354).
+        "connected":      len(_live_items()),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
         "approval_mode":  db.get_config("device_approval", "strict"),
@@ -3188,7 +3232,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
 
     # Push every connected device its own resolved effective config.
     pushed = []
-    for device_id, live in list(_devices.items()):
+    for device_id, live in _live_items():
         effective = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
         )
@@ -3763,7 +3807,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     The sync is idempotent, so a device that already has the model completes in
     an md5 compare and the switch is effectively immediate.
     """
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
 
@@ -3776,7 +3820,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     except Exception as e:
         result = {"ok": False, "error": str(e)}
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
 
@@ -3897,7 +3941,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
     except Exception as e:
         result = {"ok": False, "error": str(e)}
 
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
 
@@ -4015,7 +4059,7 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
 async def _get_oww_assets(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/oww_assets — what is installed, and what is needed."""
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
 
     desired, problems = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
     payload = {
@@ -4053,7 +4097,7 @@ async def _get_oww_assets(request: web.Request) -> web.Response:
 async def _post_oww_assets(request: web.Request) -> web.Response:
     """POST /api/devices/{id}/oww_assets — install or update them."""
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
     result = await _sync_oww_assets(live, device_id)
@@ -4296,7 +4340,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         did = row["device_id"]
         device_configs[did] = await loop.run_in_executor(
             None, db.get_effective_device_config, did)
-        live = _devices.get(did)
+        live = _live(did)
         live_state[did] = {
             "connected":    live is not None,
             # Capabilities decide which HA entities are advertised at all,
@@ -4487,7 +4531,7 @@ async def _collect_supervisor_log(device_id: str) -> None:
     so the evidence arrives where someone would look, instead of sitting in a
     file nobody knows to read.
     """
-    live = _devices.get(device_id)
+    live = _live(device_id)
     if live is None:
         return
     out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
@@ -4655,7 +4699,7 @@ def _merge_device(row) -> dict:
     muted, listening, thinking).
     """
     device_id = row["device_id"]
-    live = _devices.get(device_id)
+    live = _live(device_id)
     # Lazy, for the reason every other em_esphome call site here is lazy:
     # em_esphome imports em_api at module level. After the first call this
     # is a sys.modules lookup, which is what makes it affordable on a path
@@ -4706,6 +4750,13 @@ def _merge_device(row) -> dict:
         "voiceSatellite":   em_esphome.get_status(device_id),
         # Device-link security: token issued (persistent) + whether the
         # current control connection came in over the TLS listener (live).
+        # Inside a control-plane reconnect grace: present in the registry,
+        # unreachable, HA entities and media session still up (#354). It is
+        # NOT "connected" — `live` is None above and every other field here
+        # reads offline, which is the honest answer while the socket is shut
+        # — but "offline" alone cannot distinguish a device that went away
+        # from one whose link blipped four seconds ago and is coming back.
+        "linkDown":         getattr(_devices.get(device_id), "link_down", False),
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
         "linkTls":          getattr(live, "secure", False) if live else False,
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as

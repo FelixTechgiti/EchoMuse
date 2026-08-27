@@ -66,7 +66,23 @@ def parse(text: str) -> tuple | None:
     parts = text.split("-")[0].split(".")
     if not parts or not all(p.isdigit() for p in parts):
         return None
-    return tuple(int(p) for p in parts[:3])
+    # PADDED to exactly three, never merely truncated to at most three.
+    # Tuples compare element-wise and a shorter one loses, so "2.13" used to
+    # parse as (2, 13) and read as OLDER than the identical "2.13.0" —
+    # "update available", permanently, for the version already running, with
+    # nothing the reader could do to clear it.
+    #
+    # Two-component versions are not hypothetical: EM_CONTROLLER_VERSION is
+    # documented above as the override hook for anyone building their own
+    # image, and both release readers parse whatever tag a repository
+    # actually carries rather than a tag they have validated.
+    #
+    # A FOURTH component is still discarded, deliberately: these are
+    # three-part versions everywhere they are produced, and a 2.13.0.1 that
+    # compares equal to 2.13.0 is a wrong answer nobody can currently
+    # generate, where an arity mismatch was one anybody could.
+    nums = [int(p) for p in parts[:3]]
+    return tuple(nums + [0] * (3 - len(nums)))
 
 
 def compare(current: str, latest: str) -> dict:
