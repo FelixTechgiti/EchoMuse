@@ -718,13 +718,33 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # this message at all — it fires when the device fetches the
             # CONNECTION_TEST_URL_BASE media id.
             #
-            # ANNOUNCING goes out now, synchronously, because it describes the
+            # The state goes out now, synchronously, because it describes the
             # state we are entering rather than one we have reached.
+            #
+            # It is PLAYING and NOT ANNOUNCING, however much ANNOUNCING is the
+            # truthful answer. HA's esphome media_player cannot map it:
+            #
+            #   File "homeassistant/components/esphome/media_player.py", line 115
+            #     return _STATES.from_esphome(self._state.state)
+            #   File "homeassistant/components/esphome/enum_mapper.py", line 28
+            #     return self._mapping[value]
+            #   KeyError: <MediaPlayerState.ANNOUNCING: 4>
+            #
+            # `MediaPlayerState.ANNOUNCING` is a real protobuf value (4) and
+            # `_STATES` has no entry for it, so every announcement we made
+            # raised inside `async_write_ha_state` — in the state-write path,
+            # which is nothing to do with the announcement's own result, so it
+            # surfaces as "Task exception was never retrieved" and nothing in
+            # HA's UI says a thing. Announcing state reaches the user through
+            # the assist_satellite entity's RESPONDING anyway; the media player
+            # claiming it buys nothing and costs an exception per announce.
+            # Measured on HA 2026.8.3, alongside the setup wizard stalling on
+            # SatelliteBusyError.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
             asyncio.create_task(self._run_announce(msg.media_id))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.ANNOUNCING,
+                state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
                 muted=False,
             )
@@ -2293,9 +2313,70 @@ async def stop_esphome_servers() -> None:
     log.info("ESPHome servers stopped")
 
 
+async def device_deleted(device_id: str) -> None:
+    """
+    Drop a deleted device's satellite entirely — listener, mDNS record and
+    registry entry.
+
+    `device_disconnected` deliberately keeps the server object across a
+    disconnect (the port is the device's for good), so without this a delete
+    leaves it in `_servers` holding the OLD port. A re-added device then meets
+    that stale entry in `device_connected`, returns early on "already
+    listening", and never reaches `assign_esphome_port` — so it silently keeps
+    the port it was supposed to be leaving, under the previous row's label and
+    MAC, while its new DB row reads `esphome_api_port` NULL and the dashboard
+    shows no port at all. Measured 2026-08-27 on the EA controller, where the
+    delete was specifically an attempt to move a device off a colliding port.
+
+    Reusing the port is not a risk this creates: `assign_esphome_port` only
+    ever moves the counter forwards, so the number is retired either way.
+    """
+    server = _servers.pop(device_id, None)
+    _pending_caps.pop(device_id, None)
+    if server is None:
+        return
+    if server._mdns_info and _azc:
+        try:
+            await _azc.async_unregister_service(server._mdns_info)
+        except Exception as e:
+            log.warning(f"[{device_id}] mDNS deregistration failed: {e}")
+    await server.stop()
+    log.info(f"[esphome.{device_id[-8:]}] satellite removed (device deleted)")
+
+
 def get_server(device_id: str) -> Optional[DeviceESPhomeServer]:
     """Return the DeviceESPhomeServer for a device, or None."""
     return _servers.get(device_id)
+
+
+def get_status(device_id: str) -> Optional[dict]:
+    """
+    Controller-side voice satellite state for the dashboard (None when the
+    device has no server, which is itself the worst of the states below).
+
+    THIS MUST READ WHAT THE TURN PATH READS. `_start_esphome_voice_turn`
+    refuses a turn on exactly `get_server()` and `get_satellite()`, so those
+    are the two calls made here rather than a second opinion assembled from
+    flags beside them. A readout that can disagree with the decision it
+    describes is worse than none: it is the `speaking` drift (see the
+    dashboard notes in CLAUDE.md) waiting to happen on the panel someone
+    opens *because* the device is not answering.
+
+    THREE STATES, NOT FOUR. The BT proxy reports `haSubscribed` alongside
+    `haConnected` because a connected HA that has not subscribed to
+    advertisements is a real and distinct condition there. Voice has no
+    equivalent — the precondition is the satellite existing, full stop — so
+    there is deliberately no fourth field. Adding one would describe
+    something this code does not track.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return None
+    return {
+        "port":        server.port,
+        "listening":   server._server is not None,
+        "haConnected": server.get_satellite() is not None,
+    }
 
 
 # ─── Voice turn trigger ───────────────────────────────────────────────────────
