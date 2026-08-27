@@ -3766,7 +3766,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # something" behaves exactly as it did when the row vanished;
                 # what is new is that the ones which mean "what is the state
                 # of this device" can now be told.
-                device.link_down_since = loop.time()
+                # get_event_loop().time(), not the `loop` bound 700 lines
+                # up at registration: this `finally` runs for any exit, and
+                # depending on a name assigned that far away in a function
+                # this long is a NameError waiting for someone to reorder
+                # two statements. Same clock either way.
+                device.link_down_since = asyncio.get_event_loop().time()
                 # #315: the services stay up for a grace window instead of
                 # being torn down immediately — a four-second link blip used
                 # to deregister the HA entities, drop the BLE proxy and kill

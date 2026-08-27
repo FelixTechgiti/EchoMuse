@@ -85,3 +85,32 @@ def test_an_unknown_running_version_never_claims_to_be_up_to_date():
     result = version.compare("dev", "v2.11.0")
     assert result["status"] == "unknown"
     assert result["available"] is False
+
+
+def test_parse_pads_to_three_so_arity_cannot_decide_a_comparison():
+    """
+    Tuples compare element-wise and a shorter one loses, so an unpadded
+    parse made "2.13" read as OLDER than the identical "2.13.0" — the
+    dashboard offering an update to the version already running, with
+    nothing the reader could do to clear it.
+
+    EM_CONTROLLER_VERSION is the documented override hook for anyone
+    building their own image, and both release readers parse whatever tag
+    a repository actually carries, so a two-component version is something
+    a user can produce rather than something we would have to ship.
+    """
+    assert version.parse("2.13") == (2, 13, 0)
+    assert version.parse("v2.13") == (2, 13, 0)
+    assert version.parse("controller-v2.13") == (2, 13, 0)
+    assert version.parse("2") == (2, 0, 0)
+
+    same = version.compare("2.13", "2.13.0")
+    assert same["available"] is False, \
+        "the same version written two ways is not an update"
+    assert same["status"] == "current"
+
+    # The properties that must survive the padding.
+    assert version.compare("2.13", "2.14")["available"] is True
+    assert version.compare("2.19.0-3-gabc1234", "2.19.0")["available"] is False, \
+        "a build between tags is ahead of its tag, never behind it"
+    assert version.parse("dev") is None
