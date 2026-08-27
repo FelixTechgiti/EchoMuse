@@ -55,10 +55,12 @@ class StubSession(MediaSession):
         self._periods = periods
         self._endless = endless
         self.spawns: list[float] = []   # position_s per spawn
+        self.spawn_urls: list[str | None] = []
         self.procs: list[FakeProc] = []
 
     async def _spawn_decoder(self, url, position_s):
         self.spawns.append(position_s)
+        self.spawn_urls.append(url)
         proc = FakeProc(self._periods, self._endless)
         self.procs.append(proc)
         return proc
@@ -668,7 +670,11 @@ def test_pacing_sleep_is_not_mistaken_for_a_source_stall():
     """
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "em_player.py").read_text()
-    fn = src[src.index("    async def _feed(self)"):]
+    # Anchored on the name and open paren only: pinning the full signature
+    # made this fail with a bare ValueError when _feed took its URL as an
+    # argument (#346), which reads as a broken test rather than a broken
+    # invariant — the invariant here is about the timed read, not the args.
+    fn = src[src.index("    async def _feed("):]
     read = fn[fn.index("_t0 = loop.time()"):fn.index("_read_ms = ")]
     assert "asyncio.sleep" not in read, \
         "the pacing sleep must sit outside the timed read"
@@ -1097,3 +1103,41 @@ def test_a_slow_but_recovering_source_is_not_killed(monkeypatch):
     types = [f[0] for f in device.data_frames]
     assert types.count(0x02) == 3 and types[-1] == 0x03, \
         "every period must have made it out before EOS"
+
+
+def test_feed_uses_the_url_it_started_with_not_live_session_state():
+    """#346: the feed must not re-read state its own teardown owns.
+
+    play() is stop() -> set url -> _start_feed(), and stop() sets
+    url = None. A feed task that has not yet reached its first cancellation
+    point when the next play_media lands would read that None and die in
+    _spawn_decoder on `url.lower()`, killing the feed for both requests.
+
+    Clearing url after _start_feed but before the task runs is that window,
+    deterministically: play() ends on a synchronous call, so the task is
+    created and has not been scheduled when play() returns.
+    """
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=1)
+        await s.play("http://radio/first.flac")
+        s.url = None
+        await asyncio.wait_for(s._task, 5)
+        return s
+    s = asyncio.run(main())
+    assert s.spawn_urls == ["http://radio/first.flac"]
+
+
+def test_start_feed_without_a_url_does_not_start_a_task():
+    """The None guard reports rather than spawning a decoder against nothing."""
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=1)
+        s.url = None
+        s._start_feed()
+        return s
+    s = asyncio.run(main())
+    assert s.spawn_urls == []
+    assert s.state != PLAYING

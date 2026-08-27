@@ -505,10 +505,21 @@ class MediaSession:
         # t0 for the playback chain trace: the moment we were ASKED to play,
         # so every later stage can be reported as a delta from the command.
         self._t_play = asyncio.get_event_loop().time()
+        url = self.url
+        if url is None:
+            # Nothing to play. Both callers set it first, so this is a guard
+            # against a future third rather than a state we expect.
+            log.warning(f"[{self.device_id}] Media play requested with no URL")
+            return
         self.state = PLAYING
-        self._task = asyncio.create_task(self._feed())
+        # The URL is CAPTURED here and passed in, never re-read by the feed.
+        # stop() clears self.url as part of teardown, and play() is
+        # stop() → set url → _start_feed(); a feed that has not yet reached a
+        # cancellation point when the next play_media lands would otherwise
+        # read the None its own teardown just wrote (#346).
+        self._task = asyncio.create_task(self._feed(url))
         log.info(
-            f"[{self.device_id}] Media playing: {self.url!r} "
+            f"[{self.device_id}] Media playing: {url!r} "
             f"(from {self._pos:.1f}s)"
         )
 
@@ -571,7 +582,7 @@ class MediaSession:
             except Exception as e:
                 log.warning(f"[{self.device_id}] media state push failed: {e}")
 
-    async def _feed(self) -> None:
+    async def _feed(self, url: str) -> None:
         loop = asyncio.get_running_loop()
         device = _get_device(self.device_id) if _get_device else None
         if device is None:
@@ -637,7 +648,7 @@ class MediaSession:
         t_first_send = None
 
         try:
-            proc = await self._spawn_decoder(self.url, start_pos)
+            proc = await self._spawn_decoder(url, start_pos)
             self._proc = proc
             stderr_drain = asyncio.create_task(
                 self._drain_stderr(proc, stderr_tail))
@@ -669,7 +680,7 @@ class MediaSession:
                     if stderr_drain is not None:
                         stderr_drain.cancel()
                         stderr_drain = None
-                    proc = await self._spawn_decoder(self.url, 0.0)
+                    proc = await self._spawn_decoder(url, 0.0)
                     self._proc = proc
                     stderr_drain = asyncio.create_task(
                         self._drain_stderr(proc, stderr_tail))
