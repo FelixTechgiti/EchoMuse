@@ -793,6 +793,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
             log.info(f"[{self._log_name}] STT result: {text!r}")
+            # HA has final text, so no further microphone audio can change
+            # this turn — stop feeding it, the same "HA is done" shape the
+            # RUN_END-without-RUN_START and ERROR paths already use.
+            #
+            # Without this the only exits left are the device's own VAD
+            # sentinel and the 20s hard cap, and once speech_seen is true
+            # em_turnclock deliberately stops closing the turn (HA's VAD owns
+            # end-of-turn from that point). In a room with background noise
+            # the device's RMS gate need not reclose, so a turn whose answer
+            # HA has already produced sits in the streaming phase until the
+            # cap — the response is ready and nothing plays it (#343).
+            #
+            # STT_VAD_END normally gets here first and this is a no-op. It is
+            # the pipelines that never emit it that strand the turn.
+            self._ha_vad_end.set()
             if self._trace:
                 self._trace.stt_text = text
                 self._trace.t_stt_ms = self._trace.elapsed_ms()
