@@ -1135,7 +1135,7 @@ function ConnectivityTab({ device, row }) {
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
-  const [tab, setTab] = useState('status');
+  const [tab, setTab] = useState(() => device.approved ? 'status' : 'approve');
   // Seed from the EFFECTIVE config, not the raw stored one — see
   // effectiveConfig(). A migrated row's stored dict is not the truth.
   const [config, setConfig] = useState(() => effectiveConfig(globalConfig, device));
@@ -1587,18 +1587,27 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <CircleButton onClick={onClose} title="Close">×</CircleButton>
             </div>
           </div>
-          <div className="em-tabs" style={{ display: 'flex', gap: 2 }}>
-            {TABS.map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{t}</button>
-            ))}
-          </div>
+          {device.approved ? (
+            <div className="em-tabs" style={{ display: 'flex', gap: 2 }}>
+              {TABS.map(t => (
+                <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{t}</button>
+              ))}
+            </div>
+          ) : (
+            // One tab is not a tab bar — it reads as a label and the approval
+            // form sat behind a click. Pending devices get a banner instead.
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: -1, padding: '9px 14px', background: 'linear-gradient(180deg,var(--accent-tint),var(--surface))', border: '1px solid var(--accent-line)', borderBottom: '1px solid var(--surface)', borderRadius: '6px 6px 0 0', fontFamily: "'DM Sans',sans-serif", fontSize: 12, color: 'var(--accent-deep)', lineHeight: 1.4 }}>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--warn)', fontWeight: 600, flexShrink: 0 }}>Action required</span>
+              <span>Name this device below, then approve it to add it to your fleet.</span>
+            </div>
+          )}
         </div>
 
         {/* Body */}
         <div className="em-modal-body" style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
 
           {/* APPROVE */}
-          {tab === 'approve' && (
+          {!device.approved && (
             <div style={{ maxWidth: 400 }}>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 16 }}>New Device — Pending Approval</div>
               {row('Serial', device.device_id)}
