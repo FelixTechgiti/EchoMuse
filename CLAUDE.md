@@ -141,6 +141,14 @@ The controller's own version is resolved by `controller/version.py` (env `EM_CON
 
 ### Device → Controller protocol
 
+**The full wire contract is `docs/device-controller-interface.md`** (#347,
+@dweng0) — every `/control` message both ways, the `/data` frame codes and
+their direction-namespacing, config-push semantics, link auth, and the exact
+capability list. It is written for someone building a device binary for a NEW
+board against a specification rather than by reading `biscuit`'s source, and
+it was more accurate about our own capability list than this file was. Keep
+the summary below as a summary; put detail there.
+
 Each device opens **three** WebSocket connections to the controller:
 
 | Path | Direction | Purpose |

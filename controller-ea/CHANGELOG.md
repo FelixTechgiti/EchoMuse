@@ -1,5 +1,67 @@
 # Changelog
 
+## 2.22.0-ea.1 (Early Access)
+
+**Timers.** Ask the Echo to set one and it rings on the Echo itself, with the
+same alert sound Home Assistant's own Voice PE hardware uses. Say "stop" — or
+press the button on top — and it stops. Saying something that merely contains
+the word "stop", like "stop the music", still does what you asked and still
+gets its answer.
+
+Alongside it, four fixes for things that went wrong when two parts of the
+Echo wanted the speaker at once, or when your network hiccuped.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Music no longer comes back to full volume mid-answer
+
+Music ducks under the Echo's voice and lifts again when it has finished. If
+two things were speaking — an announcement arriving while the Echo was already
+answering you — whichever finished first put the music back up, and the rest of
+the answer competed with it.
+
+### Music asked for during a reply no longer plays over the reply
+
+"Play some jazz" gets acted on by Home Assistant before the spoken confirmation
+has been generated, so the music can arrive while the Echo is still talking.
+That was already handled — but an announcement landing in the middle released
+the hold early, and the music started underneath the answer. A request you made
+during a turn also survives now, instead of being quietly dropped if an
+announcement happened to land after it.
+
+### A brief network blip no longer removes the Echo from Home Assistant
+
+A four-second interruption — a controller restart, an add-on update, a moment
+of bad wifi — used to deregister the Echo's entities, drop its Bluetooth proxy
+and stop whatever it was playing, then rebuild all of it when the device came
+back seconds later. It now waits to see whether the device returns first.
+
+### A struggling connection no longer makes the Echo restart its microphone
+
+When no audio arrived, the controller assumed the microphone had stopped and
+began rebuilding it — even when the reason was simply that the connection
+carrying the audio had dropped. It now checks. A microphone that really has
+stopped is still repaired, exactly as before.
+
+### The Echo stops listening once Home Assistant has heard you
+
+In a room with background noise the Echo could keep listening well after you
+had finished, holding back an answer that was already written. It now stops as
+soon as Home Assistant has the words.
+
+### Setting up a new Echo is clearer
+
+The approval step for a newly connected device was a single tab that did not
+look like one, so it was easy to miss entirely. It is now a labelled prompt.
+
+### Two quieter ones
+
+Two media requests arriving within a second of each other could kill playback
+for both. And a device that dropped off mid-stream wrote one warning per audio
+frame — thousands of identical lines that pushed everything explaining the
+fault out of the support bundle.
+
 ## 2.21.0
 
 **The Echo stops throwing away the question you just asked.** Three separate

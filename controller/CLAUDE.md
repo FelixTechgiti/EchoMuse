@@ -718,6 +718,63 @@ with no way for the user to tell which they had.
     **`DATA_RECONNECT_GRACE_S`** (3s) rides out a brief data-plane drop instead of discarding the rest of the audio (#28). The budget is per STREAM, armed by `begin_data_stream()` and spent down by `send_data` — **never per frame**: `send_data` runs once per audio period, so a per-frame wait makes a genuinely-gone device stall every remaining frame in turn, draining a stream for hours while holding the voice lock.
 4. **Speaker** — the wire carries **mono** 48kHz; `_fetch_tts_audio` decodes at the wire rate (the satellite declares `supported_formats` 48k/mono/FLAC so HA transcodes at source when it can; ffmpeg resamples otherwise — no numpy resample step anymore). The device duplicates L=R at the ALSA write (stereo ALSA config is an I2S/codec constraint, not a wire one). Device buffers ~5.5s (`audioChanDepth`) and holds playback until ~1s is queued or EOS arrives (`primePeriods`) — WiFi-stall protection for marginal links
 
+## Timers, and owners are COUNTED not flagged
+
+Voice-assistant timers (#167, @bluescreen10) make the alarm ring a **fourth
+owner of the speaker**, alongside voice, music and announcements. `em_timers.py`
+holds the matchers and constants; `start_timer_alarm` / `stop_timer_alarm` /
+`_ring_timer_alarm` in `em_controller.py` drive it. Bursts are gated on
+`device.speaker_busy`, dismissal sends `speaker_flush` (or the ring plays out of
+~5.5s of device buffer after it has been stopped), and an unanswered ring stops
+at `MAX_RING_S` = 120s.
+
+**HA hands ringing to the satellite and expects the satellite to own dismissal**
+— the same shape its own Voice PE hardware has. So the dismissal is recognised
+here, from the transcript HA already sends, rather than waiting for a CANCELLED
+that structurally will not come. The registry's CANCELLED path stays for the
+cases HA *does* answer.
+
+**Two dismissal matchers, and they must not be collapsed into one.**
+`is_dismissal` is deliberately generous, because a missed dismissal leaves the
+alarm ringing and HA answering "there are no timers", which is far worse than
+an extra stop. `is_dismissal_only` is strict, because it suppresses HA's reply
+— and a false positive there is not a spare stop, it is a **lost answer**.
+"Turn off the kitchen light" over a ringing alarm is a dismissal by the
+generous rule (correctly — the alarm should stop) and also a real command HA
+answers; suppressing that left the light off and the user unable to tell
+whether anything had happened. Note it is the `off` variant that breaks, not
+`on`. Phrases are stripped **longest-first** so `turn off` is consumed before
+the bare `off` strands `turn` as an unexplained word.
+
+**Overlapping owners are COUNTED, and this is the bug class the two fixes
+share.** `ducked` was one boolean per session, so a barge-in turn or an
+announcement landing mid-turn both set it and whichever finished FIRST sent
+`duck: false` while the other was still speaking (#261). `owned_by_turn`,
+`pending` and `resume_after` had exactly the same shape (#314): an announcement
+ending mid-turn released the turn's ownership, and a `play_media` arriving then
+went straight to the wire and put music under the response — the precise thing
+`interrupt()` exists to prevent.
+
+- `duck_depth` and `owner_depth` are **separate counters on purpose.**
+  `duck_depth` only increments on the mixing path (`audio_mix_capable`), so a
+  device that pauses instead of ducking has overlapping owners and no duck
+  depth at all. Reusing one as the other is correct everywhere except on
+  exactly those devices, which is the worst kind of wrong.
+- The wire command goes out only on the **0→1 and 1→0 transitions**, never on
+  the intermediate ones.
+- `s.lead_s` follows `duck_depth`, not the first release — holding `TURN_LEAD_S`
+  while another owner still has the duck.
+- Only the FIRST claim clears `pending`. A nested `interrupt()` must not wipe a
+  playback command the user genuinely issued during the turn.
+- **The hazard refcounting introduces is a leaked owner**, which turns a
+  self-healing transient into permanently quiet music. Both call sites are
+  balanced across `try`/`finally` (the voice turn and the announcement path);
+  keep them that way.
+
+**The alarm is a fourth owner and the state map is still owed** — `speaker_busy`
+handles it as far as the ring goes, but voice/music/announcement/alarm has no
+single written ladder. `docs/audio-states.md` §2 is the nearest thing.
+
 ## Key Python modules
 
 | File | Role |
@@ -742,6 +799,7 @@ with no way for the user to tell which they had.
 | `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see the barge-in rules under the voice backend. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
 | `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
+| `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn` |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
 
