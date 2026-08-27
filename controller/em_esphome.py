@@ -718,13 +718,33 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # this message at all — it fires when the device fetches the
             # CONNECTION_TEST_URL_BASE media id.
             #
-            # ANNOUNCING goes out now, synchronously, because it describes the
+            # The state goes out now, synchronously, because it describes the
             # state we are entering rather than one we have reached.
+            #
+            # It is PLAYING and NOT ANNOUNCING, however much ANNOUNCING is the
+            # truthful answer. HA's esphome media_player cannot map it:
+            #
+            #   File "homeassistant/components/esphome/media_player.py", line 115
+            #     return _STATES.from_esphome(self._state.state)
+            #   File "homeassistant/components/esphome/enum_mapper.py", line 28
+            #     return self._mapping[value]
+            #   KeyError: <MediaPlayerState.ANNOUNCING: 4>
+            #
+            # `MediaPlayerState.ANNOUNCING` is a real protobuf value (4) and
+            # `_STATES` has no entry for it, so every announcement we made
+            # raised inside `async_write_ha_state` — in the state-write path,
+            # which is nothing to do with the announcement's own result, so it
+            # surfaces as "Task exception was never retrieved" and nothing in
+            # HA's UI says a thing. Announcing state reaches the user through
+            # the assist_satellite entity's RESPONDING anyway; the media player
+            # claiming it buys nothing and costs an exception per announce.
+            # Measured on HA 2026.8.3, alongside the setup wizard stalling on
+            # SatelliteBusyError.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
             asyncio.create_task(self._run_announce(msg.media_id))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.ANNOUNCING,
+                state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
                 muted=False,
             )
