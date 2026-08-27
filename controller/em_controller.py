@@ -288,6 +288,13 @@ class Device:
         # begin_data_stream(); spent down by send_data so the whole stream
         # shares one budget rather than each frame having its own.
         self._data_grace_left: float = 0.0
+        # Frames dropped for a missing data plane in the CURRENT stream, and
+        # whether the first has been reported. send_data runs once per audio
+        # period, so warning per frame writes thousands of identical lines and
+        # flushes everything that would explain them out of the support
+        # bundle's 2000-line ring (#351).
+        self._data_gone_frames: int = 0
+        self._data_gone_logged: bool = False
         self.voice_lock   = asyncio.Lock()
         self.cancel_event = asyncio.Event()
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
@@ -612,7 +619,17 @@ class Device:
         Called at the start of each stream so the budget is fresh, and so a
         stream that already spent it cannot borrow from the next one.
         """
+        # Report the previous stream's total before re-arming. This is the
+        # only lifecycle hook either side of a stream, so the count would
+        # otherwise be reset without ever being said out loud.
+        if self._data_gone_frames:
+            log.warning(
+                f"[{self.device_id}] Previous stream dropped "
+                f"{self._data_gone_frames} frames with no data connection"
+            )
         self._data_grace_left = DATA_RECONNECT_GRACE_S
+        self._data_gone_frames = 0
+        self._data_gone_logged = False
 
     async def _await_data_reconnect(self, budget: float) -> float:
         """Wait up to `budget` seconds for the data plane. Returns time spent."""
@@ -635,7 +652,15 @@ class Device:
             self._data_grace_left -= await self._await_data_reconnect(
                 self._data_grace_left)
         if self.data_ws is None:
-            log.warning(f"[{self.device_id}] No data connection")
+            # Once per stream, not once per frame — the rest are counted and
+            # reported as a total by the next begin_data_stream.
+            self._data_gone_frames += 1
+            if not self._data_gone_logged:
+                self._data_gone_logged = True
+                log.warning(
+                    f"[{self.device_id}] No data connection — dropping this "
+                    f"stream's remaining frames silently"
+                )
             return
         try:
             await self.data_ws.send(data)
