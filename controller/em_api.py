@@ -952,8 +952,43 @@ async def _delete_device(request: web.Request) -> web.Response:
     await loop.run_in_executor(None, db.delete_device, device_id)
     # Row gone → reconcile tears down any BT proxy listener/mDNS for it.
     await em_ble_proxy.reconcile(device_id)
+    # ...and the device is told to redial, or it never notices it was deleted.
+    # Link auth is decided once, at register time, so a connected device keeps
+    # running on the socket it already has: it vanishes from the dashboard and
+    # carries on serving turns, and only comes back as pending after something
+    # else drops the link — a reboot, a controller restart, a WiFi blip. The
+    # bounce is what makes delete mean "start over" within seconds instead of
+    # whenever. Deliberately AFTER the row is gone: the device redials in 5s
+    # and must find an empty registry, or it re-registers into the row we were
+    # deleting. em_linkauth ignores the token it still carries (rule 3), so it
+    # arrives as pending — except under REQUIRE_DEVICE_TLS, where it is
+    # refused and re-provisioning over USB is the intended path.
+    await _disconnect_device(device_id)
     await _push_event({"type": "device_deleted", "device_id": device_id})
     return _ok({})
+
+
+async def _disconnect_device(device_id: str) -> None:
+    """
+    Close a device's control plane, and any shell session riding on it.
+
+    Only the control plane is closed: the device's own loop cancels its data
+    client when control drops (`control.go` Run) and re-establishes both on
+    the next dial, so closing `/data` here would only race that. The shell
+    plane is separate and demand-opened, so an open session would otherwise
+    hang against a device that is about to redial. `_release_shell_ws` is
+    called even with no programmatic session registered, because the
+    `shell_close` it sends is the only thing that ends an INTERACTIVE
+    dashboard session — those deliberately do not set `_shell_ws`.
+    """
+    live = _devices.get(device_id)
+    if live is None:
+        return
+    await _release_shell_ws(device_id, live)
+    try:
+        await live.control_ws.close()
+    except Exception as e:
+        log.warning(f"[api] Could not close control plane for {device_id}: {e}")
 
 
 @auth.require_admin

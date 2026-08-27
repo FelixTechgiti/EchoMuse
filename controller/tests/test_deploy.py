@@ -1711,3 +1711,32 @@ def test_a_stuck_pause_can_be_recovered():
         "the stuck-pause recovery must check that no turn holds the lock — "
         "time alone would cut a long but healthy turn"
     )
+
+
+def test_deleting_a_device_bounces_its_link():
+    """
+    Link auth is decided ONCE, at register time, so deleting a device's row
+    does nothing to the socket it is already on: it disappears from the
+    dashboard and carries on serving turns, and only comes back as pending
+    after something else drops the link — a reboot, a controller restart, a
+    WiFi blip. From the front that reads as a delete that did not happen.
+
+    The bounce must come AFTER the row is gone. The device redials in 5s
+    (`control.go` Run), and a close issued first races that redial against
+    the delete — it re-registers into the row being deleted and survives.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _fn_body(src, "_delete_device")
+    # Comments stripped: this one explains the ordering it is pinning, and a
+    # test that reads its own explanation as the code can be satisfied by
+    # prose alone.
+    code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
+
+    assert "_disconnect_device(device_id)" in code, (
+        "a deleted device keeps running on its existing connection unless the "
+        "control plane is closed"
+    )
+    assert code.index("db.delete_device") < code.index("_disconnect_device"), (
+        "the row must be gone before the device is told to redial, or it "
+        "re-registers into the row being deleted"
+    )
