@@ -1236,6 +1236,54 @@ Scan results are the real tension: the flags and frequency ARE the diagnosis
 (`[SAE-CCMP]` is the whole answer to #82) while the names locate someone's
 house, so rows survive with the SSID replaced and the selected network marked.
 
+## A blipped device is link-down, not absent
+
+A control-plane drop leaves the device **in `_devices`** with
+`link_down_since` set, for the length of `CONTROL_RECONNECT_GRACE_S`
+(#315/#354). Popping it at close was the older behaviour, and it made two
+different claims read identically for those five seconds — *this device
+cannot be reached right now* and *there is no such device* — in the one
+window where the difference is the whole point, because #315 deliberately
+keeps the satellite registered with HA, the BLE proxy listening and the
+media session alive throughout. The device is emphatically there; it is
+merely unreachable.
+
+**The hazard the fix introduces is the mirror image, and it is the one to
+watch.** Nearly every lookup in this tree means "the device I am about to
+send something to", and handing those a device with a closed socket turns a
+four-second blip into a request that reports success and does nothing. So
+the registry is never read directly:
+
+- `em_controller.get_device()` refuses a link-down device;
+  `get_device_any()` is the escape hatch for the callers that are
+  *reporting* the state rather than acting on it, and for the teardown that
+  ends the grace.
+- `em_api._live()` / `_live_items()` are the same rule for the API's own
+  handlers, all of which are about to push config, firmware or a shell
+  command. `tests/test_link_down.py` pins that **no other direct read
+  exists** — a new handler reaching for `_devices.get` compiles, passes every
+  other test, and reintroduces the bug.
+- Counts mean *reachable*, not *present*: `/api/system/status` "connected"
+  and the wake arbiter's solo-fleet shortcut both changed meaning the day
+  link-down devices began being held, and neither would have failed a test.
+
+**The pop moves to the end of the grace**, guarded on identity so a
+replacement that registered during the sleep is not popped out from under
+itself, and it happens *before* the service releases so no lookup can be
+handed a device whose services are mid-teardown.
+
+`_standalone_play` refuses while the link is down and returns **False**. It
+used to return True: the frames were dropped by `send_data`'s own budget and
+the closure reported success anyway, which told Home Assistant — blocking on
+that reply and holding the entity in RESPONDING — that an announcement had
+played to a device nobody could reach. The reply is the one thing an
+announcement reports.
+
+`/api/devices` carries `linkDown` so the state is expressible at all. Every
+other field still reads offline, which is honest while the socket is shut,
+but "offline" alone cannot separate a device that went away from one whose
+link blipped four seconds ago and is already coming back.
+
 ## Dashboard device state
 
 `deviceState()` in `dashboard.jsx` ranks pending / offline / muted / speaking /

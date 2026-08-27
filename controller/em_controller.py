@@ -295,6 +295,22 @@ class Device:
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
+        # Monotonic instant this device's control socket closed, or None
+        # while the link is up (#354).
+        #
+        # The device STAYS in _devices while this is set. It is held for
+        # CONTROL_RECONNECT_GRACE_S so a four-second blip does not tear down
+        # the HA entities and the media session, and "absent from the
+        # registry" is the wrong way to say that: for the length of the
+        # grace the satellite is still registered with HA and still answers,
+        # while every lookup that means "a device I can send something to"
+        # silently reads as "no such device". The two are different claims
+        # and only the second was ever expressible.
+        #
+        # Never cleared: a Device is constructed per control connection, so
+        # a reconnect installs a NEW object and this one is discarded by
+        # _release_device_services.
+        self.link_down_since: float | None = None
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
 
@@ -704,6 +720,16 @@ class Device:
         await self.send_control(msg)
 
     @property
+    def link_down(self) -> bool:
+        """
+        This device's control socket has closed and its reconnect grace has
+        not expired yet (#354). It is still in the registry, its HA entities
+        are still up and its media session is still alive — but nothing sent
+        to it can arrive.
+        """
+        return self.link_down_since is not None
+
+    @property
     def led_anim_capable(self) -> bool:
         return "led_anim" in (self.capabilities or [])
 
@@ -1004,7 +1030,37 @@ _shell_dashboard:  dict[str, object]         = {}
 
 
 def get_device(device_id: str) -> Device | None:
+    """
+    The device IF IT CAN BE REACHED — None while its control link is down.
+
+    This is the accessor for every caller that wants to send the device
+    something, which is nearly all of them. A device inside the
+    control-plane reconnect grace is present in `_devices` but has a closed
+    socket, so handing it out here would turn "the link blipped" into
+    "the command was accepted and did nothing" (#354).
+
+    Use get_device_any() to reach the object regardless — for reporting the
+    link-down state itself, and for the teardown that ends the grace.
+    """
+    device = _devices.get(device_id)
+    return None if device is not None and device.link_down else device
+
+
+def get_device_any(device_id: str) -> Device | None:
+    """The device whether or not its control link is up. See get_device()."""
     return _devices.get(device_id)
+
+
+def _reachable_count() -> int:
+    """
+    How many devices can actually be sent something right now.
+
+    len(_devices) stopped meaning this when link-down devices began being
+    held through their grace (#354). Wake arbitration is the caller that
+    cares: it skips the contention window for a solo fleet, and a fleet of
+    one live Echo plus one mid-blip is solo.
+    """
+    return sum(1 for d in _devices.values() if not d.link_down)
 
 
 def _limiter_for(device):
@@ -2701,7 +2757,7 @@ async def wake_word_listener(device: Device):
                         # syllable, so we arm optimistically and revert on
                         # loss. Solo fleets skip the window entirely.
                         won_by = device.device_id
-                        if device.wake_arb_ms > 0 and len(_devices) > 1:
+                        if device.wake_arb_ms > 0 and _reachable_count() > 1:
                             # Synchronous — the winner starts its turn on
                             # this same tick. The old version awaited the
                             # full window on EVERY wake (~364ms measured)
@@ -3167,6 +3223,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             # 12:02:32 killed the next seven announcements over three
             # minutes. An announcement is a new action and nothing that set
             # that flag earlier has any claim on it.
+            if _d.link_down:
+                # The control link is inside its reconnect grace, so the
+                # frames would be dropped by send_data and this would still
+                # return True — telling Home Assistant an announcement it
+                # holds RESPONDING for played to a device nobody can reach.
+                # The reply is the one thing an announcement reports (#354).
+                log.warning(
+                    f"[{_d.device_id}] Announcement refused — control link "
+                    f"is down"
+                )
+                return False
             _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
@@ -3688,7 +3755,18 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 db.touch_device_seen(device.device_id)
-                _devices.pop(device.device_id, None)
+                # NOT popped: the device is marked link-down and HELD in the
+                # registry for the length of the grace (#354). Popping it
+                # here made "cannot be reached" indistinguishable from "no
+                # such device" for the five seconds in which the satellite,
+                # the BLE proxy and the media session were all still up and
+                # still answering Home Assistant — the one window in which
+                # the difference matters. get_device() refuses a link-down
+                # device, so every caller that means "send this device
+                # something" behaves exactly as it did when the row vanished;
+                # what is new is that the ones which mean "what is the state
+                # of this device" can now be told.
+                device.link_down_since = loop.time()
                 # #315: the services stay up for a grace window instead of
                 # being torn down immediately — a four-second link blip used
                 # to deregister the HA entities, drop the BLE proxy and kill
@@ -3718,6 +3796,13 @@ async def _release_device_services(device) -> None:
             f"[{device.device_id}] control connection not restored within "
             f"{CONTROL_RECONNECT_GRACE_S:.0f}s — releasing services"
         )
+        # The grace is over, so the device leaves the registry now rather
+        # than at close (#354). Identity-guarded above: a replacement that
+        # registered during the sleep owns the entry and must not be popped
+        # out from under itself. Popping BEFORE the releases below, so no
+        # lookup can hand out a device whose services are mid-teardown.
+        if current is device:
+            _devices.pop(device.device_id, None)
         await api.notify_device_disconnected(device.device_id)
         await esphome.device_disconnected(device.device_id)
         await em_ble_proxy.device_disconnected(device.device_id)
@@ -3752,7 +3837,13 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         for _ in range(20):
-            device = _devices.get(device_id)
+            # get_device, not _devices.get: during a control-plane grace the
+            # OLD Device is still in the registry with a closed socket, and
+            # binding this fresh data connection to it would hand the stream
+            # to an object _release_device_services is about to discard.
+            # Keep waiting instead — the redial that brought this data plane
+            # back is bringing a new control plane with it (#354).
+            device = get_device(device_id)
             if device is not None:
                 break
             await asyncio.sleep(0.1)
@@ -4034,7 +4125,10 @@ async def main():
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
-        get_device=_devices.get,
+        # get_device, not _devices.get: a link-down device is held in the
+        # registry through its grace (#354), and the player asking for it
+        # means "something to send audio to".
+        get_device=get_device,
         notify_state=esphome.push_media_state,
     )
 
