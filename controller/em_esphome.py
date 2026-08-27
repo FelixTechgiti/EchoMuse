@@ -2313,6 +2313,37 @@ async def stop_esphome_servers() -> None:
     log.info("ESPHome servers stopped")
 
 
+async def device_deleted(device_id: str) -> None:
+    """
+    Drop a deleted device's satellite entirely — listener, mDNS record and
+    registry entry.
+
+    `device_disconnected` deliberately keeps the server object across a
+    disconnect (the port is the device's for good), so without this a delete
+    leaves it in `_servers` holding the OLD port. A re-added device then meets
+    that stale entry in `device_connected`, returns early on "already
+    listening", and never reaches `assign_esphome_port` — so it silently keeps
+    the port it was supposed to be leaving, under the previous row's label and
+    MAC, while its new DB row reads `esphome_api_port` NULL and the dashboard
+    shows no port at all. Measured 2026-08-27 on the EA controller, where the
+    delete was specifically an attempt to move a device off a colliding port.
+
+    Reusing the port is not a risk this creates: `assign_esphome_port` only
+    ever moves the counter forwards, so the number is retired either way.
+    """
+    server = _servers.pop(device_id, None)
+    _pending_caps.pop(device_id, None)
+    if server is None:
+        return
+    if server._mdns_info and _azc:
+        try:
+            await _azc.async_unregister_service(server._mdns_info)
+        except Exception as e:
+            log.warning(f"[{device_id}] mDNS deregistration failed: {e}")
+    await server.stop()
+    log.info(f"[esphome.{device_id[-8:]}] satellite removed (device deleted)")
+
+
 def get_server(device_id: str) -> Optional[DeviceESPhomeServer]:
     """Return the DeviceESPhomeServer for a device, or None."""
     return _servers.get(device_id)

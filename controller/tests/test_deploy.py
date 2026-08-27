@@ -1755,3 +1755,34 @@ def test_deleting_a_device_bounces_its_link():
         "the row must be gone before the device is told to redial, or it "
         "re-registers into the row being deleted"
     )
+
+
+def test_deleting_a_device_drops_its_satellite():
+    """
+    `device_disconnected` keeps the DeviceESPhomeServer across a disconnect on
+    purpose — the port belongs to that device for good. So a delete that does
+    not remove it leaves the old port sitting in `_servers`, and a re-added
+    device meets it in `device_connected`, returns early on "already
+    listening", and never reaches assign_esphome_port: it keeps the port it
+    was being deleted to move OFF, under the previous row's label and MAC,
+    while its new row reads esphome_api_port NULL and the dashboard shows no
+    port at all.
+
+    The BT proxy already had this (`em_ble_proxy.reconcile`); the satellite
+    did not.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _fn_body(src, "_delete_device")
+    code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
+
+    assert "em_esphome.device_deleted(device_id)" in code, (
+        "a deleted device's satellite must be dropped, or its port outlives "
+        "the row and the next registration inherits it"
+    )
+
+    esp = (CONTROLLER / "em_esphome.py").read_text()
+    body = _fn_body(esp, "device_deleted")
+    assert "_servers.pop(device_id" in body, (
+        "stopping the listener is not enough — the registry entry is what "
+        "device_connected finds and reuses"
+    )
