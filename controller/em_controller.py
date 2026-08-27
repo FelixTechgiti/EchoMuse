@@ -73,6 +73,7 @@ import em_linkauth
 import em_eq
 import em_limiter
 import em_mbc
+import em_ring_light
 import em_scenes
 import em_shadow
 import em_oww_warmup
@@ -311,6 +312,11 @@ class Device:
         # a reconnect installs a NEW object and this one is discarded by
         # _release_device_services.
         self.link_down_since: float | None = None
+        # Ring resting state — Home Assistant's light entity (em_ring_light).
+        # Seeded from the device's stored config on the first push; these
+        # defaults only cover the window before that arrives.
+        self.idle_ring: str            = em_ring_light.DEFAULT_COLOR
+        self.idle_ring_brightness: int = 0
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
 
@@ -1099,6 +1105,12 @@ async def _push_device_state(device: Device) -> None:
 
 # ─── LED helpers ──────────────────────────────────────────────────────────────
 
+# How long an outcome cue holds the ring before the device retires it on its
+# own ticker. Mirrors the TTL baked into the scene anims (em_scenes), with a
+# little slack so the repaint lands after the cue rather than racing it.
+LED_CUE_TTL_S = 1.2
+
+
 def _make_leds(r, g, b):
     return [{"id": i, "r": r, "g": g, "b": b} for i in range(NUM_LEDS)]
 
@@ -1108,6 +1120,31 @@ async def leds_off(device: Device):
         await device.send_led_anim({"pattern": "off"})
     else:
         await device.set_leds(_make_leds(0, 0, 0))
+
+
+async def leds_idle(device: Device):
+    """
+    Return the ring to REST — which is dark, unless Home Assistant's light
+    entity has been given a colour to rest at (`em_ring_light`).
+
+    Every path that used to mean "clear the ring" means this instead. The
+    ring is not a lamp: listening, thinking, speaking, mute and the outcome
+    cues all outrank the light, so what the entity owns is only what is
+    shown when none of them is claiming it.
+
+    A raw `leds` frame rather than an `led_anim`, on purpose and on both
+    firmwares: it is a static colour with nothing to animate, and a frame
+    supersedes a running animation spec on the device's own generation
+    counter, so this is also what stops a retired cue leaving the ring dark.
+    """
+    rgb = em_ring_light.painted_rgb(
+        getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+        getattr(device, "idle_ring_brightness", 0),
+    )
+    if rgb is None:
+        await leds_off(device)
+        return
+    await device.set_leds(_make_leds(*rgb))
 
 
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
@@ -1153,8 +1190,38 @@ async def _leds_turn_end(device: Device):
         if anim:
             log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
             await device.send_led_anim(anim)
+            # The cue retires itself on the device's own ticker (1s TTL),
+            # which leaves the ring DARK — correct when rest is dark, and a
+            # light Home Assistant believes is on but that went out when a
+            # turn happened to end badly, once rest is a colour. Repaint
+            # after the TTL, and only when there is something to repaint, so
+            # the common case still sends nothing at all.
+            if em_ring_light.painted_rgb(
+                getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+                getattr(device, "idle_ring_brightness", 0),
+            ) is not None:
+                asyncio.create_task(
+                    _restore_idle_ring_after_cue(device)
+                ).add_done_callback(_log_task_exception)
             return
-    await leds_off(device)
+    await leds_idle(device)
+
+
+async def _restore_idle_ring_after_cue(device: Device) -> None:
+    """
+    Put the resting ring back once an outcome cue has expired.
+
+    The cue's TTL is what makes it self-clearing — nothing to leak if the
+    controller dies between sending it and its end — so this deliberately
+    does not shorten or replace that; it only paints what should be there
+    afterwards. A turn starting in the meantime repaints the ring itself and
+    supersedes this on the device's generation counter, so a late arrival is
+    harmless rather than something to guard with a lock.
+    """
+    await asyncio.sleep(LED_CUE_TTL_S)
+    if device.speaking or device.thinking or device.listening:
+        return  # a new turn owns the ring now
+    await leds_idle(device)
 
 
 async def leds_listening(device: Device):
@@ -1179,7 +1246,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
         except asyncio.CancelledError:
             pass
         finally:
-            await leds_off(device)
+            await leds_idle(device)
         return
     spin_frame = device.led_scene["spin_frame"]
     pos = 0
@@ -1191,7 +1258,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     except asyncio.CancelledError:
         pass
     finally:
-        await leds_off(device)
+        await leds_idle(device)
 
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
@@ -1727,7 +1794,7 @@ async def _ring_timer_alarm(device: Device) -> None:
         # left it routed — the same defensive restart the turn path ends with.
         await device.mic_start()
         await em_player.resume_interrupted(device.device_id)
-        await leds_off(device)
+        await leds_idle(device)
 
 
 async def _meter_at_playback_start(pcm_chunks, on_start):
@@ -2781,7 +2848,7 @@ async def wake_word_listener(device: Device):
                             # retires it. Plain off, not _leds_turn_end:
                             # there was no turn, so an outcome cue would be
                             # inventing one.
-                            await leds_off(device)
+                            await leds_idle(device)
                             ceded = 0
                             while not device.voice_queue.empty():
                                 try:
@@ -3186,6 +3253,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.limiter_release   = float(config.get(
             "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)
+        # The ring's resting colour, owned by HA's light entity. Persisted
+        # device state, so this is what carries it across a reboot.
+        device.idle_ring            = config.get(
+            "idleRing", em_ring_light.DEFAULT_COLOR)
+        device.idle_ring_brightness = em_ring_light.clamp_brightness(
+            config.get("idleRingBrightness", 0))
         # #263: hand the device its current listening animation so a wake it
         # detected ITSELF can light the ring immediately, instead of waiting
         # for leds_listening to make the round trip (measured +522ms before
@@ -3204,7 +3277,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
-        await leds_off(device)
+        # leds_idle, not leds_off: this is what restores the ring's resting
+        # colour after a device reboot or a controller restart, which is the
+        # whole reason the HA light's state is persisted rather than held in
+        # memory.
+        await leds_idle(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
@@ -3253,6 +3330,34 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
+        async def _set_idle_ring(colour: str, level: int, _d=_device_ref) -> None:
+            """
+            HA set the ring's resting colour: apply, persist, repaint.
+
+            Persisted read-modify-write, exactly as a volume report is —
+            these live in the same device config row and a blind write would
+            stomp whatever else is in it.
+
+            The repaint is conditional on the ring being at rest. A turn owns
+            it otherwise, and painting the resting colour over a listening
+            ring would tell the user the device had stopped listening while
+            it had not; the turn restores the new colour at its end anyway.
+            """
+            _d.idle_ring            = colour
+            _d.idle_ring_brightness = level
+            _loop = asyncio.get_event_loop()
+            try:
+                stored = await _loop.run_in_executor(
+                    None, db.get_device_config, _d.device_id)
+                stored["idleRing"]           = colour
+                stored["idleRingBrightness"] = level
+                await _loop.run_in_executor(
+                    None, db.set_device_config, _d.device_id, stored)
+            except Exception as e:
+                log.warning(
+                    f"[{_d.device_id}] Ring light not persisted: {e}")
+            if not (_d.speaking or _d.thinking or _d.listening):
+                await leds_idle(_d)
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -3264,7 +3369,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             send_volume_set=_send_volume_set,
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
+            set_idle_ring=_set_idle_ring,
         )
+        # Seed HA's light entity from the stored row, so it reads the colour
+        # the ring is actually resting at rather than the default.
+        esphome.update_device_ring(
+            device_id, device.idle_ring, device.idle_ring_brightness)
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller

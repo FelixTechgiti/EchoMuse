@@ -61,13 +61,19 @@ def test_the_go_config_message_carries_the_field():
         "the wire field must exist with the exact tag the controller sends"
 
 
-def test_the_arbitration_loser_gets_its_ring_turned_off():
+def test_the_arbitration_loser_gets_its_ring_put_back_to_rest():
     """
     #326: the flip side of drawing locally. The device lights the ring at
     its own crossing, before arbitration has happened, so a device that
-    loses is lit with nothing on its path to darken it — leds_off and
+    loses is lit with nothing on its path to clear it — leds_idle and
     _leds_turn_end are both on the turn path a ceding device never reaches.
     It used to burn until listening_anim's 30s TTL expired.
+
+    The invariant is that SOMETHING on this path repaints the ring, not
+    that the repaint is black. Rest is dark until Home Assistant's light
+    entity is given a colour, and once it has one the loser must return to
+    that colour rather than to off — going dark would make an arbitration
+    it lost look like the light had been switched off.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
     cede = src[src.index("if won_by != device.device_id:"):]
@@ -76,7 +82,7 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     code = "\n".join(
         line for line in cede.splitlines() if not line.lstrip().startswith("#")
     )
-    assert "leds_off(device)" in code, \
-        "a ceding device must be told to darken its ring"
+    assert "leds_idle(device)" in code, \
+        "a ceding device must be told to repaint its ring"
     assert "_leds_turn_end" not in code, \
-        "the loser had no turn, so it gets plain off, not an outcome cue"
+        "the loser had no turn, so it gets rest, not an outcome cue"

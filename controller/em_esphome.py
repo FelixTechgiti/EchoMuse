@@ -86,6 +86,7 @@ import em_recordings
 import em_runbarrier
 import em_oww_models
 import em_player
+import em_ring_light
 import em_timers
 import em_turnclock
 import em_volume
@@ -230,6 +231,7 @@ MEDIA_PLAYER_KEY = 1
 # Append only.
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
+LIGHT_KEY        = 4   # the LED ring's RESTING colour, as an HA light
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -340,6 +342,33 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 )
         self._log_timer_task_error = _log_timer_task_error
 
+        def _spawn(coro, what: str, _dev=device_id):
+            """
+            Run a coroutine from `handle_message`, which is a plain
+            generator and cannot await.
+
+            Two things, both of which the timer path already does by hand
+            and neither of which is optional: hold a strong reference until
+            the task finishes (asyncio only holds a weak one, so a
+            fire-and-forget task can be collected mid-execution), and report
+            a failure rather than leaving it to surface as "Task exception
+            was never retrieved" at some later garbage collection.
+            """
+            task = asyncio.create_task(coro)
+            self._timer_tasks.add(task)
+            task.add_done_callback(self._timer_tasks.discard)
+
+            def _report(t, _w=what):
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    log.error(f"[esphome.{_dev[-8:]}] {_w} failed: {exc!r}",
+                              exc_info=exc)
+            task.add_done_callback(_report)
+            return task
+        self._spawn = _spawn
+
         # Set on the base class so connection_lost dispatches back to
         # DeviceESPhomeServer for claimant cleanup.
         self._disconnected_hook = on_disconnected_cb
@@ -433,6 +462,30 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return self._device_has("ambient_light")
 
     @property
+    def _leds_capable(self) -> bool:
+        return self._device_has("leds")
+
+    def _light_state_msg(self):
+        """
+        The ring's resting state as HA sees it (em_ring_light).
+
+        Read off the owning server rather than kept here: a device has one
+        ring and may have more than one HA connection over its life, and the
+        state has to survive the connection that set it.
+        """
+        srv = self._owning_server
+        fields = em_ring_light.ha_state(
+            srv.idle_ring if srv else em_ring_light.DEFAULT_COLOR,
+            srv.idle_ring_brightness if srv else 0,
+        )
+        return api_pb2.LightStateResponse(
+            key=LIGHT_KEY,
+            color_mode=api_pb2.COLOR_MODE_RGB,
+            color_brightness=1.0,
+            **fields,
+        )
+
+    @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
         if self._owning_server is not None:
@@ -524,6 +577,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # The LED ring, as a light HA can set. What the entity owns is
+            # the ring's RESTING colour — see em_ring_light: listening,
+            # thinking, speaking, mute and the outcome cues all outrank it,
+            # and turn end restores it rather than clearing the ring.
+            #
+            # Gated on `leds` for this file's standing reason: an entity
+            # whose commands can never do anything is worse than no entity,
+            # because someone builds an automation on it and it silently
+            # never works.
+            if self._leds_capable:
+                yield api_pb2.ListEntitiesLightResponse(
+                    object_id="ring",
+                    key=LIGHT_KEY,
+                    name="Ring",
+                    supported_color_modes=[api_pb2.COLOR_MODE_RGB],
+                    icon="mdi:circle-outline",
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -531,6 +601,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
+            if self._leds_capable:
+                yield self._light_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -693,6 +765,38 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 task.add_done_callback(self._timer_tasks.discard)
                 task.add_done_callback(self._log_timer_task_error)
             yield _HANDLED
+            return
+
+        if isinstance(msg, api_pb2.LightCommandRequest):
+            srv = self._owning_server
+            if srv is None or not self._leds_capable:
+                yield _HANDLED
+                return
+            # Every field arrives behind its own has_* flag, so "on", "blue"
+            # and "dimmer" are three messages each carrying a fraction of
+            # the state. em_ring_light.apply_command owns the folding — it
+            # is the half of this feature worth testing, and this file is
+            # not importable by the suite.
+            colour, level = em_ring_light.apply_command(
+                srv.idle_ring, srv.idle_ring_brightness,
+                has_state=msg.has_state, state=msg.state,
+                has_brightness=msg.has_brightness, brightness_f=msg.brightness,
+                has_rgb=msg.has_rgb,
+                red=msg.red, green=msg.green, blue=msg.blue,
+            )
+            log.info(
+                f"[{self._log_name}] Ring light: {colour} @ {level} "
+                f"({'on' if level else 'off'})"
+            )
+            srv.idle_ring            = colour
+            srv.idle_ring_brightness = level
+            # Persisting and repainting belong to the controller, which owns
+            # the device row and the ring. A satellite with no such callback
+            # (no device connected yet) still updates its own state, so HA
+            # gets a coherent answer rather than a command that vanishes.
+            if srv._set_idle_ring is not None:
+                self._spawn(srv._set_idle_ring(colour, level), "ring light set")
+            yield self._light_state_msg()
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantAnnounceRequest):
@@ -2007,6 +2111,13 @@ class DeviceESPhomeServer:
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
         self._standalone_play = None
+        # Ring resting state, mirrored from the device row so it survives
+        # any single HA connection (em_ring_light).
+        self.idle_ring: str            = em_ring_light.DEFAULT_COLOR
+        self.idle_ring_brightness: int = 0
+        # async callable(colour: str, level: int) — persists and repaints.
+        # Provided by em_controller as a closure over the Device.
+        self._set_idle_ring = None
         # Injected by device_connected() — async callable(level: int) that
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
@@ -2718,6 +2829,7 @@ async def device_connected(
     send_volume_set=None,
     ring_alarm=None,
     stop_alarm=None,
+    set_idle_ring=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -2755,6 +2867,7 @@ async def device_connected(
         server = await _register_device_server(device_id, row["label"])
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
+    server._set_idle_ring = set_idle_ring
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
     if server._server is not None:
@@ -2912,6 +3025,31 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def update_device_ring(device_id: str, idle_ring: str, brightness: int) -> None:
+    """
+    Called by em_controller when the ring's resting colour is (re)loaded from
+    the device row — on connect, and on any config save.
+
+    Seeds the server so HA's light entity reads the stored value rather than
+    the default, and pushes it if HA is already connected. Without the push,
+    a controller restart would leave the entity showing white-and-off until
+    HA next reconnected, while the ring itself was lit correctly — the class
+    of drift `_media_state_msg` exists to avoid on the media player.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.idle_ring            = idle_ring
+    server.idle_ring_brightness = brightness
+    satellite = server.get_satellite()
+    if satellite is None or not satellite._leds_capable:
+        return
+    try:
+        satellite._send_one(satellite._light_state_msg())
+    except Exception as e:
+        log.debug(f"[esphome.{device_id[-8:]}] ring state push failed: {e}")
 
 
 def update_device_volume(device_id: str, volume: float) -> None:

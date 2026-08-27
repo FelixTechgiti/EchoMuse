@@ -63,6 +63,7 @@ import em_pki
 import em_player
 import em_recordings
 import em_volume
+import em_ring_light
 import em_scenes
 import em_shadow
 import em_support
@@ -1135,6 +1136,14 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     if "bassGuardDb" in effective:
         live.bass_guard_db = float(effective["bassGuardDb"])
     live.led_scene = em_scenes.resolve(effective)
+    # Ring resting colour — the mirror of em_controller's registration path
+    # (tests/test_config_mirrors.py). Not settable from the dashboard, but a
+    # config save must not reset it to the default either.
+    if "idleRing" in effective:
+        live.idle_ring = effective["idleRing"]
+    if "idleRingBrightness" in effective:
+        live.idle_ring_brightness = em_ring_light.clamp_brightness(
+            effective["idleRingBrightness"])
     # #263: keep the device's cached listening animation in step when the
     # scene changes live, same push as at registration. Without it the ring
     # lit locally in the OLD scene's colours until the next reconnect.

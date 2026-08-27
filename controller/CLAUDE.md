@@ -433,6 +433,49 @@ this satellite", which is a real request we do not implement and log at
 warning rather than drop. Applying it, and offering a choice worth making,
 both wait on #112.
 
+### The ring as an HA light
+
+`em_ring_light.py` + `LIGHT_KEY` expose each device's LED ring to Home
+Assistant as an RGB light, gated on the `leds` capability.
+
+**The entity owns the ring's RESTING state, not the ring.** Listening,
+thinking, speaking, mute and the outcome cues all outrank it; what the light
+decides is the colour shown when none of them is claiming it. So every path
+that used to mean "clear the ring" now calls `leds_idle`, which paints the
+resting colour or falls back to `leds_off` when rest is dark — turn end, the
+spinner's `finally`, the timer alarm's `finally`, the arbitration loser, and
+the connect-time paint that restores it across a reboot. A test pins that no
+`leds_off(device)` call survives outside `leds_idle` itself; leaving one
+behind means the light switches itself off whenever a turn happens to end.
+
+**Outcome cues need a repaint, because they self-clear on the device.** The
+cue anims carry a 1s TTL so nothing leaks if the controller dies mid-cue —
+which retires the ring to DARK, correct while rest is dark and wrong once
+rest is a colour. `_restore_idle_ring_after_cue` repaints after the TTL, and
+only when there is something to repaint, so the common case still sends
+nothing.
+
+**On/off lives in the brightness, not in the colour.** `idleRing` is always
+a `#RRGGBB`; `idleRingBrightness` 0 is off. The obvious encoding — a
+sentinel in the colour field — was written first and is wrong: HA's light
+card shows the last colour on a light that is off and offers it back on the
+next tap, so the sentinel loses exactly the value the user picked, every
+time they switch the ring off. The cost is that the pre-off brightness is
+not remembered, which is what HA's own UI does anyway.
+
+Both keys are **`STATE_KEYS`** — persisted device state like
+`startupVolume`, never fleet-inherited ("every Echo in the house turns the
+same colour when one of them is told to" is a bug, not a default) and
+deliberately absent from the dashboard, because two controls owning one
+value is how they drift.
+
+`LightCommandRequest` is a **partial** update: every field rides its own
+`has_*` flag, so "on", "blue" and "dimmer" are three messages each carrying
+a fraction of the state. `em_ring_light.apply_command` owns the folding and
+is where the tests are — this file is not importable by the suite, and the
+failure mode is not a crash but a colour wheel that resets the dimmer, which
+nobody reports because it reads as their own mistake.
+
 ### HA entities beyond the voice satellite
 
 Both are advertised **only when the device declares the capability** — an
@@ -808,6 +851,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_limiter.py` | Look-ahead peak limiter — stops the EQ clipping what it boosts. Pure, unit-tested |
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
+| `em_ring_light.py` | The LED ring as an HA light — the ring's RESTING colour, which every voice state outranks. Owns the partial-update semantics of `LightCommandRequest` (each field rides its own `has_*` flag) and the encoding decision that on/off lives in the brightness, so the colour survives being switched off and HA's card can offer it back |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
 | `em_arbiter.py` | Multi-device wake arbitration — pools same-utterance detections, best SNR answers |
