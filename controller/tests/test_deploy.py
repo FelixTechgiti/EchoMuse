@@ -550,10 +550,17 @@ def test_no_unjustified_hardcoded_media_state():
     while it was audibly playing. Fixing instances one at a time is how the
     second one survived the first fix, so this pins the rule.
 
-    Two remain legitimate and are named explicitly:
-      - PLAYING for play_media, documented as optimistic — the feed pushes
-        the authoritative state moments later.
-      - ANNOUNCING, a genuine transition with no em_player equivalent.
+    One remains legitimate: PLAYING, documented as optimistic — the feed
+    pushes the authoritative state moments later. It covers the announce
+    transition too, which used to send ANNOUNCING.
+
+    ANNOUNCING is now FORBIDDEN rather than merely unused. It is a real
+    protobuf value and the truthful one, and HA's esphome media_player has no
+    mapping for it — `_STATES.from_esphome` raises `KeyError:
+    <MediaPlayerState.ANNOUNCING: 4>` inside async_write_ha_state, on a path
+    unrelated to the announcement's own result, so it surfaces only as "Task
+    exception was never retrieved". Nothing in HA's UI says a word, which is
+    why it survived.
 
     Anything else must go through _media_state_msg(), which reads em_player
     truth.
@@ -561,7 +568,15 @@ def test_no_unjustified_hardcoded_media_state():
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
 
-    allowed = {"MediaPlayerState.PLAYING", "MediaPlayerState.ANNOUNCING"}
+    code = "\n".join(
+        l for l in src.splitlines() if not l.lstrip().startswith("#")
+    )
+    assert "MediaPlayerState.ANNOUNCING" not in code, (
+        "HA cannot map ANNOUNCING — it raises KeyError in the entity state "
+        "write on every announcement"
+    )
+
+    allowed = {"MediaPlayerState.PLAYING"}
     found = [
         line.strip()
         for line in src.splitlines()
