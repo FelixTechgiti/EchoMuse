@@ -187,6 +187,14 @@ SPEAKER_PRIME_SECONDS = 1.1
 # the lock is ALSO free, which no running turn allows.
 OWW_PAUSE_STUCK_S = 180.0
 
+# How long a freshly established data connection gets to deliver its first
+# mic frame before the wake watchdog stops treating the silence as
+# "device still warming up" and starts the zombie-stream ladder (#299,
+# review on PR #311: a boolean guard made the Office-style zombie — deaf
+# for hours — unrecoverable, because no frame ever arrives on the fresh
+# connection and only the escalation repairs it).
+FRESH_CONN_GRACE_S = 30.0
+
 # Restarting the wake listener must never become a hot loop. A listener that
 # raises IMMEDIATELY on start would otherwise be recreated from its own done
 # callback as fast as the event loop can run it, which starves everything
@@ -340,6 +348,15 @@ class Device:
         self.volume: float = _device_level_to_ha(85)
 
         self.data_ready = asyncio.Event()
+        # #299: whether ANY mic frame has arrived on the CURRENT data
+        # connection. Cleared by handle_data on every new connection; set
+        # by the wake listener when a frame flows. Lets the no-frames
+        # watchdog tell "transport dropping" apart from "stream dead" —
+        # but only within a grace window (see the watchdog: a connection
+        # that stays silent BEYOND it is a zombie stream, and the ladder
+        # is that case's only repair).
+        self.frames_seen_this_connection: bool = False
+        self.data_connected_at: float = 0.0
 
         # Tunable at runtime — updated when a config push arrives.
         # wake_word_listener reads this each detection cycle rather than
@@ -2291,6 +2308,9 @@ async def wake_word_listener(device: Device):
                 payload = await asyncio.wait_for(
                     device.mic_queue.get(), timeout=10.0
                 )
+                # #299: a frame on this connection — the watchdog's link
+                # guard below may stand down from here on.
+                device.frames_seen_this_connection = True
             except asyncio.TimeoutError:
                 # The wake stream is ungated and continuous (device sends
                 # every 80ms, silence included — hardware mute still produces
@@ -2342,6 +2362,38 @@ async def wake_word_listener(device: Device):
                     # so the watchdog resumes naturally if that ever fails.
                     dead_streak = 0
                     continue
+                # #299: "no frames" has two causes, and the ladder below
+                # assumes only one (a zombie stream device-side still holding
+                # micActive). The distinction needs BOTH state and time:
+                #
+                #   - data plane fully down → frames are explained by the
+                #     transport; nothing to point a repair at. Stand down,
+                #     do not count the outage against the streak.
+                #   - connected, but no frame since the connection opened:
+                #     ambiguous! Freshness says give the device a moment;
+                #     but past the grace window this silence IS the
+                #     zombie-stream signature — the device still streams to
+                #     a superseded socket, no frame will EVER arrive on the
+                #     fresh one, and the escalation below is the only repair
+                #     (Office, 2026-07-16: deaf 4.7h without it — which is
+                #     exactly why this guard is time-bounded rather than a
+                #     boolean, per the review on PR #311).
+                if device.data_ws is None:
+                    continue
+                if not device.frames_seen_this_connection:
+                    if loop.time() - device.data_connected_at < FRESH_CONN_GRACE_S:
+                        log.debug(
+                            f"[{device.device_id}] OWW: no mic frames yet on a "
+                            f"fresh data connection — giving it "
+                            f"{FRESH_CONN_GRACE_S:.0f}s before treating the "
+                            f"silence as a zombie stream"
+                        )
+                        continue
+                    log.warning(
+                        f"[{device.device_id}] OWW: data connection is up but "
+                        f"delivered no frame in {FRESH_CONN_GRACE_S:.0f}s — "
+                        f"treating as zombie stream"
+                    )
                 dead_streak += 1
                 if dead_streak < 3:
                     log.warning(
@@ -3671,6 +3723,11 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         device.data_ws = ws
+        # #299: a fresh connection has by definition sent nothing yet — the
+        # no-frames watchdog gives it FRESH_CONN_GRACE_S before treating
+        # the silence as a zombie stream.
+        device.frames_seen_this_connection = False
+        device.data_connected_at = asyncio.get_event_loop().time()
         device.data_ready.set()
         log.info(f"[data] Data connection established: {device_id}")
 
