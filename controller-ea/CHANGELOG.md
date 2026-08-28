@@ -1,5 +1,73 @@
 # Changelog
 
+## 2.22.0-ea.2 (Early Access)
+
+**Deleting an Echo now actually removes it, and the dashboard stops claiming
+things are fine when they are not.** Everything here was found on a running
+Early Access controller rather than in testing, which is the point of the
+channel.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices. Your Echoes keep their Home
+Assistant entities.
+
+### Deleting an Echo removes it
+
+A deleted Echo carried on working. It vanished from the dashboard and kept
+serving conversations, kept its Home Assistant port and kept listening for the
+wake word, only coming back as a new device when something else interrupted
+its connection — a reboot, a controller restart, a moment of bad wifi. So
+"delete it and add it again" worked eventually, or never, depending on the
+weather.
+
+Adding it back had a second fault behind the first. The new entry inherited
+the port the old one had been deleted to move off, so the Status panel showed
+no voice port at all and the Bluetooth proxy panel disappeared with it. One
+cause, two panels, neither pointing at it.
+
+### The dashboard says whether Home Assistant is connected
+
+An Echo that Home Assistant has never connected to looked exactly like one
+that works: **Online, idle**. Nothing on the page distinguished them, so the
+usual cause — a stale Home Assistant entry after a device was re-added —
+looked like the Echo was broken.
+
+The Status panel now has a **Voice assistant** row that reads the same thing
+the conversation itself reads, so it cannot disagree with what actually
+happens:
+
+```
+Voice assistant     HA connected · port 16003
+Voice assistant     Waiting for HA · port 16003
+```
+
+### Announcements no longer throw an error in Home Assistant
+
+Every announcement the Echo made raised an error inside Home Assistant, with
+nothing visible to show for it. The Echo was reporting a playback state Home
+Assistant's ESPHome integration has no name for. It now reports one it does.
+
+### A dashboard tab left open no longer asks forever
+
+When a dashboard session expired, the page kept asking for the device list
+every five seconds and quietly discarding the refusal. The list simply stopped
+updating, which reads as a controller that has stopped responding, and there
+was no way to tell from the page that you had been signed out. One tab left
+open overnight made 1262 refused requests.
+
+An expired session now returns you to the sign-in page.
+
+### Support bundles reach back further
+
+Roughly half of a support bundle's log was one measurement, repeated: a line
+for every network timing blip on every Echo, thousands of them, when the same
+figures are already recorded properly with a total to compare them against.
+Blips that actually delayed audio are still logged one by one; the rest are
+summarised.
+
+Combined with the fix above, a bundle now covers substantially more of the
+period before the problem you are reporting.
+
 ## 2.22.0-ea.1 (Early Access)
 
 **Timers.** Ask the Echo to set one and it rings on the Echo itself, with the
