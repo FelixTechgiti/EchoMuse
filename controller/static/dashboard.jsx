@@ -33,6 +33,27 @@ const API = {
   token: null,
   role: null,
 
+  // Set by App to its logout handler. Every 401 below routes through
+  // `unauthorized()` rather than only the call sites that remember to check,
+  // because the ones that forget do not fail visibly — they retry.
+  //
+  // A left-open tab did exactly that on the EA controller (#359): the 5s poll
+  // caught its own 401 and discarded it, so an expired session produced 1262
+  // consecutive 401s over 13 hours, every 5 seconds, with nothing on screen
+  // saying the session had died. It also cost 21% of the controller's log
+  // ring, which is the half that hurts someone else — a support bundle
+  // collected in that state reaches back hours less far.
+  onUnauthorized: null,
+  _unauthFired: false,
+
+  // Guarded, because every in-flight request 401s at once and the logout
+  // handler's own POST /api/auth/logout would re-enter this.
+  unauthorized() {
+    if (this._unauthFired) return;
+    this._unauthFired = true;
+    if (this.onUnauthorized) this.onUnauthorized();
+  },
+
   headers() {
     const h = { 'Content-Type': 'application/json' };
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
@@ -41,7 +62,7 @@ const API = {
 
   async get(path) {
     const r = await fetch(ingressPath(path), { headers: this.headers() });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     const data = await r.json();
     if (!r.ok) throw data;
     return data;
@@ -49,7 +70,7 @@ const API = {
 
   async post(path, body) {
     const r = await fetch(ingressPath(path), { method: 'POST', headers: this.headers(), body: JSON.stringify(body) });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     const data = await r.json();
     if (!r.ok) throw data;
     return data;
@@ -57,7 +78,7 @@ const API = {
 
   async patch(path, body) {
     const r = await fetch(ingressPath(path), { method: 'PATCH', headers: this.headers(), body: JSON.stringify(body) });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     const data = await r.json();
     if (!r.ok) throw data;
     return data;
@@ -65,7 +86,7 @@ const API = {
 
   async del(path) {
     const r = await fetch(ingressPath(path), { method: 'DELETE', headers: this.headers() });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     const data = await r.json();
     if (!r.ok) throw data;
     return data;
@@ -79,7 +100,7 @@ const API = {
     const h = {};
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
     const r = await fetch(ingressPath(path), { headers: h });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     if (!r.ok) {
       let data = { code: 'error', status: r.status };
       try { data = await r.json(); } catch {}
@@ -94,7 +115,7 @@ const API = {
     const form = new FormData();
     form.append(fieldName, file);
     const r = await fetch(ingressPath(path), { method: 'POST', headers: h, body: form });
-    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    if (r.status === 401) { API.unauthorized(); throw { code: 'not_authenticated', status: 401 }; }
     const data = await r.json();
     if (!r.ok) throw data;
     return data;
@@ -5937,8 +5958,13 @@ function App() {
     location.replace('.');
   }
 
-  // Restore token on mount
-  useEffect(() => { if (token) API.token = token; }, []);
+  // Restore token on mount, and give API somewhere to send a dead session.
+  // handleLogout only clears storage and navigates, so binding the first
+  // render's copy is safe.
+  useEffect(() => {
+    if (token) API.token = token;
+    API.onUnauthorized = handleLogout;
+  }, []);
 
   // Reconcile the cached role against the server's.
   //
@@ -6051,7 +6077,13 @@ function App() {
       }, 5000);
     };
 
-    // Polling fallback — catches anything the WebSocket misses
+    // Polling fallback — catches anything the WebSocket misses.
+    //
+    // The catch stays broad: a blip must not tear the dashboard down. A dead
+    // session is not a blip, and it is not handled here — API.unauthorized()
+    // has already fired by the time this runs. Before that existed, this line
+    // was where an expired session went to be forgotten, five seconds at a
+    // time, indefinitely.
     const poll = setInterval(() => {
       API.get('/api/devices').then(setDevices).catch(() => {});
     }, 5000);
