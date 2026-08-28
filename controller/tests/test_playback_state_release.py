@@ -119,7 +119,7 @@ def test_the_clear_survives_the_cancellation_that_triggered_it():
 def test_the_wake_listener_still_gates_on_speaking():
     """
     Pins the other half of the pair. If this guard is ever removed, the bug
-    above stops being fatal and the tests above stop being load-bearing — so
+    above stops being fatal and the tests above stop protecting anything — so
     a future reader should be told they moved together, not discover it.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
