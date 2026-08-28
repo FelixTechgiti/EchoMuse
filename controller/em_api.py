@@ -952,6 +952,12 @@ async def _delete_device(request: web.Request) -> web.Response:
     await loop.run_in_executor(None, db.delete_device, device_id)
     # Row gone → reconcile tears down any BT proxy listener/mDNS for it.
     await em_ble_proxy.reconcile(device_id)
+    # The satellite needs the same, and had no equivalent: it survives an
+    # ordinary disconnect on purpose, so a delete used to leave it in
+    # `_servers` holding the old port for a re-added device to inherit
+    # silently. Lazy import — em_esphome imports em_api at module level.
+    import em_esphome
+    await em_esphome.device_deleted(device_id)
     # ...and the device is told to redial, or it never notices it was deleted.
     # Link auth is decided once, at register time, so a connected device keeps
     # running on the socket it already has: it vanishes from the dashboard and
