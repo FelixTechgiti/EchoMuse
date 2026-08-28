@@ -1461,13 +1461,29 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     finally:
         device.speaker_busy -= 1
 
-    # The real end of audio, not the end of the socket write. The device reports
-    # playback_stats once its audio channel drains after EOS, and everything
-    # above waits for exactly that — so this is the one place that knows the
-    # speaker has actually stopped. Clearing it in the stream task's finally
-    # instead dropped the tile out of Speaking seconds early, the same mistake
-    # the ring made until 2026-07-24.
-    await device._set_speaking(False)
+        # The real end of audio, not the end of the socket write. The device
+        # reports playback_stats once its audio channel drains after EOS, and
+        # everything above waits for exactly that — so this is the one place
+        # that knows the speaker has actually stopped. Clearing it in the
+        # stream task's finally instead dropped the tile out of Speaking
+        # seconds early, the same mistake the ring made until 2026-07-24.
+        #
+        # IN the finally, for exactly the reason speaker_busy is (#366). This
+        # sat after the try, so a CANCELLED playback never reached it and
+        # `speaking` stayed set for the life of the process. stop_timer_alarm
+        # cancels the ring task, and the chime occupies 1.68s of every 2.3s —
+        # so roughly three dismissals in four land mid-burst and leak it. The
+        # cost is not a wrong tile: the wake listener skips every frame while
+        # `speaking` is set and the alarm is not ringing, so the device goes
+        # permanently deaf, its parked on-device wake never collected and its
+        # ring left to expire on TTL.
+        #
+        # shield so the clear survives the cancellation that caused it, and
+        # suppress so a failure here cannot replace the exception on its way
+        # out. The flag itself is assigned synchronously inside _set_speaking,
+        # so it is cleared even if the dashboard push never lands.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(device._set_speaking(False))
 
 
 # ── Timer alarm ──────────────────────────────────────────────────────────────
