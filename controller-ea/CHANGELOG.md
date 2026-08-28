@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.22.0-ea.4 (Early Access)
+
+**The ring now tells you it has stopped listening, whichever way you started
+the turn.** One fix.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring stays on "listening" after you have finished speaking
+
+Start a turn with the button rather than the wake word and the ring kept its
+listening animation from the moment you pressed it until the answer began —
+often ten seconds or more — with nothing to say the Echo had heard you stop.
+It made the Echo feel slow to react when it had in fact finished listening at
+the usual time, within about three seconds.
+
+A turn can finish in two ways: Home Assistant deciding you have stopped
+speaking, or the Echo deciding it for itself. Only the first switched the ring
+to its thinking spinner. Both do now.
+
+**This was never really about the button.** Which of the two gets there first
+is a matter of timing, and a wake word turn on a slow network could lose the
+same feedback. The fix applies to both, so it cannot come back on the other
+one.
+
+The time between finishing speaking and hearing a reply is unchanged — that is
+mostly speech-to-text, and it depends on the machine running Home Assistant.
+
 ## 2.22.0-ea.3 (Early Access)
 
 **Stopping a ringing timer no longer leaves the Echo deaf.** One fix, and it
