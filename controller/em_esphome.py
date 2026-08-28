@@ -2298,6 +2298,36 @@ def get_server(device_id: str) -> Optional[DeviceESPhomeServer]:
     return _servers.get(device_id)
 
 
+def get_status(device_id: str) -> Optional[dict]:
+    """
+    Controller-side voice satellite state for the dashboard (None when the
+    device has no server, which is itself the worst of the states below).
+
+    THIS MUST READ WHAT THE TURN PATH READS. `_start_esphome_voice_turn`
+    refuses a turn on exactly `get_server()` and `get_satellite()`, so those
+    are the two calls made here rather than a second opinion assembled from
+    flags beside them. A readout that can disagree with the decision it
+    describes is worse than none: it is the `speaking` drift (see the
+    dashboard notes in CLAUDE.md) waiting to happen on the panel someone
+    opens *because* the device is not answering.
+
+    THREE STATES, NOT FOUR. The BT proxy reports `haSubscribed` alongside
+    `haConnected` because a connected HA that has not subscribed to
+    advertisements is a real and distinct condition there. Voice has no
+    equivalent — the precondition is the satellite existing, full stop — so
+    there is deliberately no fourth field. Adding one would describe
+    something this code does not track.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return None
+    return {
+        "port":        server.port,
+        "listening":   server._server is not None,
+        "haConnected": server.get_satellite() is not None,
+    }
+
+
 # ─── Voice turn trigger ───────────────────────────────────────────────────────
 
 async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:

@@ -4650,6 +4650,11 @@ def _merge_device(row) -> dict:
     """
     device_id = row["device_id"]
     live = _devices.get(device_id)
+    # Lazy, for the reason every other em_esphome call site here is lazy:
+    # em_esphome imports em_api at module level. After the first call this
+    # is a sys.modules lookup, which is what makes it affordable on a path
+    # that runs per device per dashboard poll.
+    import em_esphome
 
     return {
         # Persistent
@@ -4687,6 +4692,12 @@ def _merge_device(row) -> dict:
         # Controller-side BT proxy state — non-None only while the device's
         # bleProxyEnabled config has a proxy server instantiated.
         "bleProxy":         em_ble_proxy.get_status(device_id),
+        # Controller-side voice satellite state: whether Home Assistant is
+        # actually on the other end of this device's ESPHome port. Without
+        # it a device HA has never connected to renders as idle, which is
+        # the same thing a working device renders as (#349) — the wake word
+        # fires, the ring lights, and the turn dies in milliseconds.
+        "voiceSatellite":   em_esphome.get_status(device_id),
         # Device-link security: token issued (persistent) + whether the
         # current control connection came in over the TLS listener (live).
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
