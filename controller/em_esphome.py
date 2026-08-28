@@ -415,10 +415,47 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # cleared at turn end.
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
         self._on_thinking       = None   # async callable()
+        # A turn can end in two places — HA's STT_VAD_END event, or our own
+        # device VAD sentinel — and both mean "the user stopped talking".
+        # _enter_thinking() is the single transition both call; this makes it
+        # once per turn, since on a slow turn both routes fire.
+        self._thinking_entered  = False
         self._on_stt_end        = None   # async callable(text: str)
         self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
     # ── Message handling ─────────────────────────────────────────────────
+
+    def _enter_thinking(self) -> None:
+        """
+        The user stopped talking. Ring to the spinner, dashboard out of
+        Listening, `thinking` set — whatever on_thinking does.
+
+        **Every route that concludes a turn's speech has ended must call
+        this**, and there are two: HA's STT_VAD_END event, and our own device
+        VAD sentinel in _stream_mic_audio. Wiring it to only the first is
+        what #370 was: a turn ending on the sentinel sent `end=True` to HA
+        and then sat on the listening ring through the whole STT-to-TTS
+        window — measured at ~11s on this fleet, with no indication it had
+        heard you finish.
+
+        It presented as "the button is slower than the wake word", and it is
+        not really about the trigger at all. Which route wins is a race
+        between two VAD timers; the trigger only correlates with the winner
+        (33/33 wake turns ended on HA's VAD, 11/11 button turns on the
+        sentinel, measured 2026-08-28). Nothing guarantees that correlation
+        holds on a slower link, so fixing the button case specifically would
+        have left a wake turn free to lose the same transition. The trigger
+        decides how a turn STARTS; nothing after it should differ.
+
+        Idempotent because on a slow turn both routes genuinely fire — the
+        sentinel sends end=True and HA can still emit STT_VAD_END for the
+        same silence.
+        """
+        if self._thinking_entered or self._turn_cancelled:
+            return
+        self._thinking_entered = True
+        if self._on_thinking:
+            asyncio.create_task(self._on_thinking())
 
     def _device_has(self, cap: str) -> bool:
         srv = self._owning_server
@@ -807,8 +844,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # VAD is the endpointing authority for the turn from here on —
             # the device's own RMS gate becomes advisory (see review §3.1).
             self._ha_vad_end.set()
-            if self._on_thinking and not self._turn_cancelled:
-                asyncio.create_task(self._on_thinking())
+            self._enter_thinking()
 
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
@@ -1101,6 +1137,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
         self._ha_vad_start.clear()
+        self._thinking_entered = False
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
@@ -1601,6 +1638,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if self._trace and self._trace.t_vad_end_ms == -1:
                         self._trace.t_vad_end_ms = self._trace.elapsed_ms()
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    # Same conclusion HA's STT_VAD_END reaches, so the same
+                    # transition (#370). Without it a turn ending here holds
+                    # the listening ring through STT, intent and TTS.
+                    self._enter_thinking()
                     return
 
                 if preroll_remaining > 0:
