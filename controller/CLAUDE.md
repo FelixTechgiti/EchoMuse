@@ -748,6 +748,30 @@ holds the matchers and constants; `start_timer_alarm` / `stop_timer_alarm` /
 ~5.5s of device buffer after it has been stopped), and an unanswered ring stops
 at `MAX_RING_S` = 120s.
 
+**The ring asks before writing the plane; the announcement does not, and that
+is #373.** `_ring_timer_alarm` gates every burst on `speaker_busy` because two
+writers would interleave frames on `0x02` — but `_standalone_play` performs no
+such check and streams straight into a chime already in flight. Measured
+2026-08-28: an announcement landing between bursts plays, one landing during a
+burst is **inaudible**. Both paths also share a single `device.playback_done`
+Event, so one device report satisfies two waiters (observed as two `Playback
+complete` lines in the same millisecond, and an announcement whose wait ended
+after a chime's duration rather than its own). **The exclusion being
+one-directional is the bug** — do not "fix" it by blocking announcements while
+ringing, because HA blocks on the announce call holding `_is_announcing` and a
+120s `MAX_RING_S` would fail every other announcement to that satellite. See
+`docs/audio-states.md` §6 Q4 for the options, including the longer-term move of
+the alarm onto the music plane (which needs `audio_mix` gating, or the alarm is
+silent on firmware that cannot mix).
+
+**A cancelled playback must release `speaking` (#366).** `_run_post_turn_playback`
+clears it in the `finally`, beside `speaker_busy`, and shielded — it used to sit
+after the try, so `stop_timer_alarm`'s cancel skipped it and the flag stayed set
+for the life of the process. That is not a cosmetic tile: the wake listener
+skips every frame while `speaking` is set and no alarm is ringing, so the device
+went **permanently deaf** after a mid-chime dismissal. Roughly three dismissals
+in four hit it, the chime being 1.68s of every 2.3s.
+
 **HA hands ringing to the satellite and expects the satellite to own dismissal**
 — the same shape its own Voice PE hardware has. So the dismissal is recognised
 here, from the transcript HA already sends, rather than waiting for a CANCELLED
@@ -1272,6 +1296,20 @@ caller is `stream_speaker`'s `finally`, which is also reached when barge-in
 cancels the task mid-send; a plain `except Exception` does not catch the
 `CancelledError` that arises there, and a dashboard push is not worth failing a
 speaker stream over. The assignment is synchronous and always happens.
+
+**Every route that ends a turn's speech must call `_enter_thinking`, and there
+are two (#370).** HA's `STT_VAD_END` event and the device VAD sentinel in
+`_stream_mic_audio` both mean "the user stopped talking"; only the first was
+wired to `on_thinking`, so a turn ending on the sentinel held the listening ring
+through the whole STT/intent/TTS window — ~11s measured. It presented as "the
+button is slower than the wake word" and the trigger is a red herring: there is
+exactly ONE deliberate branch on it in the turn path (`preroll_discard`), and
+which endpoint route wins is a race. 33/33 wake turns ended on HA's VAD, 11/11
+button turns on the sentinel, but nothing holds that on a slower link.
+`_enter_thinking` is idempotent because on a slow turn both routes fire.
+`tests/test_thinking_transition.py` pins that `_on_thinking` has exactly **one
+call site**, so a third endpoint route gets the ring right for free — and that
+the no-speech timeout deliberately does NOT enter it, since nothing was said.
 
 Note `em_player` must **not** set `device.speaking` for music — it makes the
 wake loop drop frames, deafening the device for the length of a song.

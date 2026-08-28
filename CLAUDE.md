@@ -121,6 +121,17 @@ Device firmware and controller are versioned independently from the same repo:
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
 
+**The release workflow does NOT build — it re-tags the image the main build
+already published for that commit.** `controller-release.yml` looks for
+`:sha-<short>` and fails with "No image published for this commit" if
+`Controller Build (main)` has not finished. So the order is **merge → wait for
+`Controller Build (main)` to go green on the merge commit → then push the
+tag**, and a tag pushed seconds after a merge fails on a race rather than on
+anything being wrong. Hit on 2026-08-28 cutting `2.22.0-ea.4`: the build had
+started 23 seconds earlier and the release checked while it was still pushing.
+The recovery is only `gh run rerun <id>` once the build finishes — the tag,
+the commit and the annotation are all fine and must not be re-cut.
+
 **`--cleanup=verbatim` is not optional if the notes use Markdown headings.**
 `git tag -a` defaults to `--cleanup=strip`, which treats a line beginning with
 `#` as a comment and deletes **the whole line** — so `## Volume` does not lose
