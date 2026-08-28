@@ -173,6 +173,24 @@ process.
 - **Q2 — where does the output chain belong?** EQ, limiter and bass guard all
   run controller-side today, on the voice plane, before the audio reaches the
   wire (#243). Music does not go through them at all.
+- **Q4 — the alarm and an announcement both write `0x02`, and only one of
+  them asks first (#373).** `_ring_timer_alarm` waits on `speaker_busy`
+  before every burst, for the stated reason that two writers would interleave
+  frames; `_standalone_play` performs no such check and streams into a chime
+  already in flight. Measured 2026-08-28: an announcement landing between
+  bursts plays, one landing during a burst is inaudible. Both paths also
+  share a single `playback_done` Event, so one device report satisfies two
+  waiters — observed as two `Playback complete` lines in the same
+  millisecond, and an announcement whose wait ended after a chime's duration
+  rather than its own.
+  **The exclusion is one-directional, which is the bug**; whether the silence
+  itself is EOS ordering on the device (§3, `stream_speaker`) is unconfirmed.
+  Blocking announcements outright while ringing is NOT the answer — HA blocks
+  on the announce call holding `_is_announcing`, so a 120s `MAX_RING_S` would
+  fail every other announcement to that satellite meanwhile. The longer-term
+  answer is likely the alarm moving to the music plane, where the device's
+  own mixer ducks it for free; that needs `audio_mix` gating, since a device
+  without it never plays `0x04` and the alarm would be silent.
 - **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
   degrades the whole audio subsystem (#117/#141) and, with a music session
   live, can silence everything including voice. That is a hardware/HAL fault
