@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.22.0-ea.3 (Early Access)
+
+**Stopping a ringing timer no longer leaves the Echo deaf.** One fix, and it
+is worth taking straight away if you use timers at all.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Stopping a timer while it is chiming
+
+Press the button, or say stop, while the alarm was actually sounding — rather
+than in the pause between chimes — and the Echo went quiet as it should, but
+then stopped responding to its wake word entirely. Saying the wake word lit the
+ring for a while and did nothing else. The dashboard went on showing the Echo
+as **Speaking** the whole time. It stayed that way until the controller was
+restarted.
+
+The chime sounds for most of each cycle, so this caught roughly three
+dismissals in four, which is why it looked occasional rather than reliable.
+
+If you are on an affected version and it happens, pressing the button once more
+recovers the Echo — that takes a different path and clears the stuck state.
+
 ## 2.22.0-ea.2 (Early Access)
 
 **Deleting an Echo now actually removes it, and the dashboard stops claiming
