@@ -72,6 +72,7 @@ COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
+COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./

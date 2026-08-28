@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_rttlog
 import em_eq
 import em_limiter
 import em_mbc
@@ -587,6 +588,8 @@ class Device:
         # devices spend most of their life not in a turn. The discriminator
         # is the excursion RATE per state, not the raw count.
         self.rtt_samples_idle    = 0
+        # Log-line coalescing only — the counters above are the measurement.
+        self.rtt_log = em_rttlog.ExcursionLog(self.device_id)
 
     def is_busy(self) -> bool:
         """Whether this device was doing anything when a ping went out."""
@@ -3622,10 +3625,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 _rtt = int((loop.time() - _sent) * 1000)
                                 device.record_rtt(_rtt, _busy)
                                 if _rtt >= RTT_EXCURSION_MS:
-                                    log.info(
-                                        f"[{device_id}] RTT excursion: {_rtt}ms "
-                                        f"({'busy' if _busy else 'idle'})"
-                                    )
+                                    # Busy excursions log one for one; idle
+                                    # ones coalesce into a periodic summary.
+                                    _line = device.rtt_log.record(
+                                        _rtt, _busy, loop.time())
+                                    if _line:
+                                        log.info(_line)
                         pass
 
                     else:
