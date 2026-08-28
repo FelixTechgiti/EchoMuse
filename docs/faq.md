@@ -326,7 +326,7 @@ sites, so a new board is mostly a mic/speaker/LED/button binding.
 ### Does it depend on Amazon's software?
 Barely, and keeping it that way is deliberate. It's a Linux daemon using ALSA,
 i2c, evdev and sysfs that happens to run on Android because that's what
-shipped on the box. A change that makes an Amazon blob load-bearing is going
+shipped on the box. A change that puts an Amazon blob back in the audio path is going
 the wrong way, even when it sounds better.
 
 ### Is there a video of it working?
