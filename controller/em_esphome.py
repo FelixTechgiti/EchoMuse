@@ -344,7 +344,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         def _spawn(coro, what: str, _dev=device_id):
             """
-            Run a coroutine from `handle_message`, which is a plain
+            Run a coroutine from a message handler, which is a plain
             generator and cannot await.
 
             Two things, both of which the timer path already does by hand
@@ -699,7 +699,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 )
                 send_fn = self._owning_server._send_volume_set
                 if send_fn is not None:
-                    asyncio.create_task(send_fn(level))
+                    self._spawn(send_fn(level), "volume set")
                 else:
                     log.warning(f"[{self._log_name}] volume set requested but device not connected")
             if msg.has_media_url and device_id is not None:
@@ -708,18 +708,20 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._play_media_announce(msg.media_url))
+                    self._spawn(self._play_media_announce(msg.media_url),
+                            "play_media announcement")
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
-                    asyncio.create_task(em_player.play(device_id, msg.media_url))
+                    self._spawn(em_player.play(device_id, msg.media_url),
+                            "media play")
             elif msg.has_command and device_id is not None:
                 cmd = msg.command
                 if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
-                    asyncio.create_task(em_player.pause(device_id))
+                    self._spawn(em_player.pause(device_id), "media pause")
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
-                    asyncio.create_task(em_player.resume(device_id))
+                    self._spawn(em_player.resume(device_id), "media resume")
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_STOP:
-                    asyncio.create_task(em_player.stop(device_id))
+                    self._spawn(em_player.stop(device_id), "media stop")
                 else:
                     log.debug(
                         f"[{self._log_name}] MediaPlayerCommandRequest: "
@@ -893,7 +895,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Measured on HA 2026.8.3, alongside the setup wizard stalling on
             # SatelliteBusyError.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._run_announce(msg.media_id))
+            self._spawn(self._run_announce(msg.media_id), "announcement")
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
@@ -960,7 +962,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # the device's own RMS gate becomes advisory (see review §3.1).
             self._ha_vad_end.set()
             if self._on_thinking and not self._turn_cancelled:
-                asyncio.create_task(self._on_thinking())
+                self._spawn(self._on_thinking(), "thinking transition")
 
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
@@ -1008,7 +1010,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 task.add_done_callback(self._timer_tasks.discard)
                 task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
-                asyncio.create_task(self._on_stt_end(text))
+                self._spawn(self._on_stt_end(text), "stt end")
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
             # Reliable "STT + intent resolution genuinely finished" marker —

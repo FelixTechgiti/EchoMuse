@@ -584,6 +584,35 @@ directions.
   `ambient_light`) — lux. A device with no sensor sends `missing_state`, not
   0, because 0 lux is a real reading.
 
+## Background tasks are held, never fired and forgotten
+
+asyncio keeps only a **weak** reference to a task — "Save a reference to the
+result of this function, to avoid a task disappearing mid-execution", from
+`asyncio.create_task`'s own documentation — so a task nothing else holds can
+be collected part-way through. The failure is silent and load-dependent,
+which is the worst pair this tree deals with: the work does not finish, with
+no exception and no log line.
+
+Sixteen call sites were bare until 2026-08-27, and the consequences were not
+uniform. Losing the wake word listener's **restart** leaves a device
+permanently deaf — the one path whose whole job is recovering from a crash;
+losing an OTA leaves a device half-updated; losing a media command leaves
+HA's entity showing something the speaker is not doing.
+
+Each module has a `_spawn(coro, what)` that holds the task in a set until it
+finishes and reports its failure instead of leaving it to surface as "Task
+exception was never retrieved" at some later collection. `em_esphome`'s
+lives on the satellite rather than at module level, because its message
+handlers are plain generators that cannot await and the tasks they start
+belong to one connection.
+
+`tests/test_background_tasks.py` is an **AST** guard, not a grep: what makes
+a call safe is what happens to its RESULT — assigned, returned, awaited, or
+chained to a done-callback — and no regex can see that. Its module list is
+written out rather than globbed, so a new module that starts background work
+has to be added deliberately, which is the moment to think about who holds
+its references.
+
 ## Schema migrations
 
 `em_db.MIGRATIONS` is **append-only** — the stored `schema_version` is an

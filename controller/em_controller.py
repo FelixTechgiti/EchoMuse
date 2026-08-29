@@ -130,6 +130,34 @@ def _log_task_exception(task: asyncio.Task) -> None:
         log.error(f"Unhandled exception in background task {task.get_name()}: {exc}", exc_info=exc)
 
 
+# Strong references to fire-and-forget tasks, held until each one finishes.
+#
+# asyncio keeps only a WEAK reference to a task ("Save a reference to the
+# result of this function, to avoid a task disappearing mid-execution" —
+# asyncio.create_task's own documentation), so a task nothing holds can be
+# collected part-way through. The failure is silent and load-dependent,
+# which is the worst combination to debug: the work simply does not finish,
+# with no exception and no log line.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro, what: str) -> asyncio.Task:
+    """
+    Start a coroutine nobody is going to await, and keep it alive.
+
+    Two things, neither optional: hold a reference until it completes, and
+    report a failure through _log_task_exception rather than leaving it to
+    surface as "Task exception was never retrieved" at some later
+    collection. `what` names the work in that log line.
+    """
+    task = asyncio.ensure_future(coro)
+    task.set_name(what)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(_log_task_exception)
+    return task
+
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
@@ -2357,7 +2385,12 @@ def _supervise_wake_listener(device: "Device", failures: int = 0) -> asyncio.Tas
                 f"[{device.device_id}] wake word listener has now failed "
                 f"{n} times in a row — retrying in {delay:.0f}s"
             )
-        asyncio.get_event_loop().create_task(_later())
+        # _spawn, not a bare create_task: nothing held a reference to this
+        # one, and asyncio holds only a weak one — so the restart of a dead
+        # wake word listener could be collected before it ran, leaving the
+        # device permanently deaf with nothing in the log between the crash
+        # and the silence.
+        _spawn(_later(), f"wake listener restart {device.device_id}")
 
     started = asyncio.get_event_loop().time()
     t = asyncio.create_task(wake_word_listener(device))
