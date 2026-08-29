@@ -4,8 +4,25 @@ FROM python:3.12-slim
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
       org.opencontainers.image.description="EchoMuse controller — Echo Dot Gen 2 open-source voice assistant satellite"
 WORKDIR /app
-# Install curl for vendoring JS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+# `upgrade` before `install`, and it is not cosmetic (#365). A Debian
+# security update reaches stable-security days to weeks before
+# python:3.12-slim is rebuilt carrying it, and installing packages does
+# not touch the ones the base already has — so every image built in that
+# window shipped a vulnerable package whose fix was already in the archive
+# the build had configured. The weekly scan was red for three Mondays on
+# exactly that: util-linux, which then self-resolved when the base image
+# was rebuilt, with openssl (CVE-2026-14456) sitting in the same window
+# behind it. A gate scoped to "findings a rebuild can act on" has to mean
+# a rebuild acts on them.
+#
+# `upgrade`, never `dist-upgrade` — the latter can remove packages, and a
+# base-image build is not the place to discover which. This does make the
+# layer's contents depend on when it was built, but so do the unpinned
+# apt install below and the floating base tag; it adds no new class of
+# nondeterminism.
+#
+# curl is for vendoring JS dependencies.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -72,6 +89,7 @@ COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
+COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./

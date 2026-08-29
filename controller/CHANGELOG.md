@@ -1,5 +1,199 @@
 # Changelog
 
+## 2.22.0-ea.6 (Early Access)
+
+**An Echo with no Home Assistant connection now says so every time you speak to
+it.** One fix, correcting ea.5.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The orange flash did not appear if another Echo answered
+
+ea.5 added an orange double flash for an Echo that hears you with no Home
+Assistant behind it. It only appeared when that Echo was the one running the
+turn — so on a house with more than one, the flash vanished exactly when it was
+most needed. Stand in front of the disconnected Echo, say the wake word, and if
+a second Echo elsewhere took the utterance, the one in front of you lit its ring
+and went dark with no explanation, while a different room answered.
+
+The flash is not a report on the turn. It is the Echo telling you three things
+about itself: the wake word is working, the controller is connected, and Home
+Assistant is not. None of that depends on what any other Echo did, so it now
+shows every time, and still clears itself after a second rather than sitting
+there lit.
+
+The button does the same. It is the control people reach for when the wake word
+seems to have done nothing, so it was the worst one to answer with silence.
+
+### An Echo without Home Assistant no longer takes the turn at all
+
+It now steps aside as soon as it hears the wake word, before deciding which Echo
+answers, rather than claiming the utterance and failing a moment later. On a
+single-Echo setup you will see no difference beyond the flash. On several, it
+means a disconnected Echo can no longer take an answer away from one that was
+ready — including when it is the nearer of the two, which is the case that used
+to lose you the reply entirely.
+
+The wake still appears in the device's activity history, so an outage remains
+visible afterwards rather than looking like an Echo that never heard anything.
+
+## 2.22.0-ea.5 (Early Access)
+
+**The Echo now tells you when there is nothing to answer you.** Two fixes, both
+about what happens when Home Assistant is not connected.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring went dark instead of saying Home Assistant was missing
+
+Say the wake word — or press the button — while Home Assistant is not connected
+to that Echo, and the ring lit for a fraction of a second and went out. The Echo
+had heard you perfectly and had nowhere to send it, but from across the room it
+looked like a device that had failed to notice you at all.
+
+It now holds the listening ring briefly, to say it heard you, and then flashes
+orange twice. Orange is the colour the Echo already uses when it cannot find its
+controller, so it reads the same way one step further along: the problem is not
+this device, it is what sits above it.
+
+This happens more often than it sounds. An Echo comes back from a restart or a
+power cut in well under a minute, but Home Assistant can take another minute to
+reconnect to it — and in that gap the wake word works, the microphone works, and
+nothing can answer. Measured on our own hardware this week: fifty-six seconds
+between the Echo being ready and Home Assistant arriving.
+
+### With several Echoes, the one that could answer stood down
+
+When one utterance wakes more than one Echo, the first to hear it answers and
+the others stay quiet — otherwise they all reply at once. But "first to hear it"
+is about which one you are standing nearest, and that has nothing to do with
+whether Home Assistant is connected to it. So an Echo with no Home Assistant
+behind it could win, silence the one that was ready, and then fail.
+
+The Echoes Home Assistant is not connected to no longer take that decision away
+from the ones it is.
+
+## 2.22.0-ea.4 (Early Access)
+
+**The ring now tells you it has stopped listening, whichever way you started
+the turn.** One fix.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring stays on "listening" after you have finished speaking
+
+Start a turn with the button rather than the wake word and the ring kept its
+listening animation from the moment you pressed it until the answer began —
+often ten seconds or more — with nothing to say the Echo had heard you stop.
+It made the Echo feel slow to react when it had in fact finished listening at
+the usual time, within about three seconds.
+
+A turn can finish in two ways: Home Assistant deciding you have stopped
+speaking, or the Echo deciding it for itself. Only the first switched the ring
+to its thinking spinner. Both do now.
+
+**This was never really about the button.** Which of the two gets there first
+is a matter of timing, and a wake word turn on a slow network could lose the
+same feedback. The fix applies to both, so it cannot come back on the other
+one.
+
+The time between finishing speaking and hearing a reply is unchanged — that is
+mostly speech-to-text, and it depends on the machine running Home Assistant.
+
+## 2.22.0-ea.3 (Early Access)
+
+**Stopping a ringing timer no longer leaves the Echo deaf.** One fix, and it
+is worth taking straight away if you use timers at all.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Stopping a timer while it is chiming
+
+Press the button, or say stop, while the alarm was actually sounding — rather
+than in the pause between chimes — and the Echo went quiet as it should, but
+then stopped responding to its wake word entirely. Saying the wake word lit the
+ring for a while and did nothing else. The dashboard went on showing the Echo
+as **Speaking** the whole time. It stayed that way until the controller was
+restarted.
+
+The chime sounds for most of each cycle, so this caught roughly three
+dismissals in four, which is why it looked occasional rather than reliable.
+
+If you are on an affected version and it happens, pressing the button once more
+recovers the Echo — that takes a different path and clears the stuck state.
+
+## 2.22.0-ea.2 (Early Access)
+
+**Deleting an Echo now actually removes it, and the dashboard stops claiming
+things are fine when they are not.** Everything here was found on a running
+Early Access controller rather than in testing, which is the point of the
+channel.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices. Your Echoes keep their Home
+Assistant entities.
+
+### Deleting an Echo removes it
+
+A deleted Echo carried on working. It vanished from the dashboard and kept
+serving conversations, kept its Home Assistant port and kept listening for the
+wake word, only coming back as a new device when something else interrupted
+its connection — a reboot, a controller restart, a moment of bad wifi. So
+"delete it and add it again" worked eventually, or never, depending on the
+weather.
+
+Adding it back had a second fault behind the first. The new entry inherited
+the port the old one had been deleted to move off, so the Status panel showed
+no voice port at all and the Bluetooth proxy panel disappeared with it. One
+cause, two panels, neither pointing at it.
+
+### The dashboard says whether Home Assistant is connected
+
+An Echo that Home Assistant has never connected to looked exactly like one
+that works: **Online, idle**. Nothing on the page distinguished them, so the
+usual cause — a stale Home Assistant entry after a device was re-added —
+looked like the Echo was broken.
+
+The Status panel now has a **Voice assistant** row that reads the same thing
+the conversation itself reads, so it cannot disagree with what actually
+happens:
+
+```
+Voice assistant     HA connected · port 16003
+Voice assistant     Waiting for HA · port 16003
+```
+
+### Announcements no longer throw an error in Home Assistant
+
+Every announcement the Echo made raised an error inside Home Assistant, with
+nothing visible to show for it. The Echo was reporting a playback state Home
+Assistant's ESPHome integration has no name for. It now reports one it does.
+
+### A dashboard tab left open no longer asks forever
+
+When a dashboard session expired, the page kept asking for the device list
+every five seconds and quietly discarding the refusal. The list simply stopped
+updating, which reads as a controller that has stopped responding, and there
+was no way to tell from the page that you had been signed out. One tab left
+open overnight made 1262 refused requests.
+
+An expired session now returns you to the sign-in page.
+
+### Support bundles reach back further
+
+Roughly half of a support bundle's log was one measurement, repeated: a line
+for every network timing blip on every Echo, thousands of them, when the same
+figures are already recorded properly with a total to compare them against.
+Blips that actually delayed audio are still logged one by one; the rest are
+summarised.
+
+Combined with the fix above, a bundle now covers substantially more of the
+period before the problem you are reporting.
+
 ## 2.22.0-ea.1 (Early Access)
 
 **Timers.** Ask the Echo to set one and it rings on the Echo itself, with the

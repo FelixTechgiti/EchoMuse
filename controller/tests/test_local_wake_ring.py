@@ -69,15 +69,24 @@ def test_the_arbitration_loser_gets_its_ring_put_back_to_rest():
     _leds_turn_end are both on the turn path a ceding device never reaches.
     It used to burn until listening_anim's 30s TTL expired.
 
-    The invariant is that SOMETHING on this path repaints the ring, not
-    that the repaint is black. Rest is dark until Home Assistant's light
-    entity is given a colour, and once it has one the loser must return to
-    that colour rather than to off — going dark would make an arbitration
-    it lost look like the light had been switched off.
+    The branch now has TWO exits — a device standing down because it has no
+    Home Assistant behind it, and a device that lost arbitration — and they
+    end differently on purpose: the first plays the no_ha cue, the second
+    goes back to rest. Slice to the ceding one specifically, or this passes
+    on the wrong path's code.
+
+    "Back to rest" rather than "dark" is the invariant, and the difference
+    only appeared once HA's light entity could give the ring a resting
+    colour: something on this path must repaint it, but going dark would
+    make an arbitration this device lost look like the light had been
+    switched off.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    cede = src[src.index("if won_by != device.device_id:"):]
-    cede = cede[:cede.index("continue")]
+    branch = src[src.index("if not serves or won_by != device.device_id:"):]
+    # The no-HA sub-branch ends at its own `continue`; ceding is what follows.
+    stand = branch.index("if not serves:")
+    cede  = branch[branch.index("continue", stand) + len("continue"):]
+    cede  = cede[:cede.index("continue")]
     # Comments on this path necessarily discuss the call they exclude.
     code = "\n".join(
         line for line in cede.splitlines() if not line.lstrip().startswith("#")
@@ -86,3 +95,10 @@ def test_the_arbitration_loser_gets_its_ring_put_back_to_rest():
         "a ceding device must be told to repaint its ring"
     assert "_leds_turn_end" not in code, \
         "the loser had no turn, so it gets rest, not an outcome cue"
+
+    # And the two exits must stay distinguishable: the stand-down path is the
+    # one that cues, and reading it as a cede would take the cue away exactly
+    # on a multi-device fleet, which is how this was reported.
+    standdown = branch[stand:branch.index("continue", stand)]
+    assert "_leds_turn_end(device)" in standdown, \
+        "a device with no HA cues its state whether or not another Echo won"

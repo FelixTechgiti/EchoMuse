@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_rttlog
 import em_eq
 import em_limiter
 import em_mbc
@@ -637,6 +638,8 @@ class Device:
         # devices spend most of their life not in a turn. The discriminator
         # is the excursion RATE per state, not the raw count.
         self.rtt_samples_idle    = 0
+        # Log-line coalescing only — the counters above are the measurement.
+        self.rtt_log = em_rttlog.ExcursionLog(self.device_id)
 
     def is_busy(self) -> bool:
         """Whether this device was doing anything when a ping went out."""
@@ -1195,7 +1198,20 @@ _OUTCOME_ANIM = {
     # and clears too fast to register, and a device that worked perfectly
     # looks like it glitched.
     "pipeline_refused": "ack_anim",
+    # Nothing upstream to answer: no ESPHome server, or HA has never dialled
+    # this device's port. The turn dies in milliseconds like the refusal
+    # above, but the causes are opposite — there the pipeline answered and
+    # declined, here there is no pipeline — so the cue says so in the colour
+    # the device already uses for a missing link. See em_scenes.no_ha_anim.
+    "no_ha":         "no_ha_anim",
 }
+
+# How long the listening ring is held before the no_ha cue replaces it. The
+# wake word was heard, and an orange fault flashed on its own reads as "the
+# device did nothing"; the ack has to land first. Costs the wake listener the
+# same delay before it restarts, which is the price of the ring saying
+# anything at all on a turn that lasted milliseconds.
+NO_HA_HOLD_S = 0.6
 
 
 async def _leds_turn_end(device: Device):
@@ -1217,6 +1233,10 @@ async def _leds_turn_end(device: Device):
         anim = device.led_scene.get(key)
         if anim:
             log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
+            if outcome == "no_ha":
+                # The listening ring is still lit from turn start (30s TTL),
+                # so this is a hold, not a repaint.
+                await asyncio.sleep(NO_HA_HOLD_S)
             await device.send_led_anim(anim)
             # The cue retires itself on the device's own ticker (1s TTL),
             # which leaves the ring DARK — correct when rest is dark, and a
@@ -1609,13 +1629,29 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     finally:
         device.speaker_busy -= 1
 
-    # The real end of audio, not the end of the socket write. The device reports
-    # playback_stats once its audio channel drains after EOS, and everything
-    # above waits for exactly that — so this is the one place that knows the
-    # speaker has actually stopped. Clearing it in the stream task's finally
-    # instead dropped the tile out of Speaking seconds early, the same mistake
-    # the ring made until 2026-07-24.
-    await device._set_speaking(False)
+        # The real end of audio, not the end of the socket write. The device
+        # reports playback_stats once its audio channel drains after EOS, and
+        # everything above waits for exactly that — so this is the one place
+        # that knows the speaker has actually stopped. Clearing it in the
+        # stream task's finally instead dropped the tile out of Speaking
+        # seconds early, the same mistake the ring made until 2026-07-24.
+        #
+        # IN the finally, for exactly the reason speaker_busy is (#366). This
+        # sat after the try, so a CANCELLED playback never reached it and
+        # `speaking` stayed set for the life of the process. stop_timer_alarm
+        # cancels the ring task, and the chime occupies 1.68s of every 2.3s —
+        # so roughly three dismissals in four land mid-burst and leak it. The
+        # cost is not a wrong tile: the wake listener skips every frame while
+        # `speaking` is set and the alarm is not ringing, so the device goes
+        # permanently deaf, its parked on-device wake never collected and its
+        # ring left to expire on TTL.
+        #
+        # shield so the clear survives the cancellation that caused it, and
+        # suppress so a failure here cannot replace the exception on its way
+        # out. The flag itself is assigned synchronously inside _set_speaking,
+        # so it is cleared even if the dashboard push never lands.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(device._set_speaking(False))
 
 
 # ── Timer alarm ──────────────────────────────────────────────────────────────
@@ -2856,8 +2892,20 @@ async def wake_word_listener(device: Device):
                         # command audio must be flowing from the first
                         # syllable, so we arm optimistically and revert on
                         # loss. Solo fleets skip the window entirely.
+                        # A device with no pipeline behind it stands down
+                        # HERE, before arbitration, and never runs a turn it
+                        # cannot finish. Reads what the turn path reads —
+                        # the same get_server/get_satellite pair
+                        # trigger_voice_turn refuses on — so a device counted
+                        # as able cannot turn out to be unable a tick later
+                        # for any reason the controller already knows about.
+                        serves = esphome.can_serve_turn(device.device_id)
                         won_by = device.device_id
-                        if device.wake_arb_ms > 0 and _reachable_count() > 1:
+                        # One line, and it has to stay one: #383's guard
+                        # matches the literal "if serves and" to prove the
+                        # claim itself is gated rather than merely preceded
+                        # by the check, and a wrap hides that from it.
+                        if serves and device.wake_arb_ms > 0 and _reachable_count() > 1:
                             # Synchronous — the winner starts its turn on
                             # this same tick. The old version awaited the
                             # full window on EVERY wake (~364ms measured)
@@ -2866,22 +2914,12 @@ async def wake_word_listener(device: Device):
                                 device.device_id,
                                 device.wake_arb_ms / 1000.0,
                             )
-                        if won_by != device.device_id:
+                        if not serves or won_by != device.device_id:
+                            wake_info = device.last_wake
                             device.oww_paused.clear()
                             device.oww_paused_since = None
                             device.last_wake = None
                             await device.beam_unlock()
-                            # The loser is lit: since #263 the device draws
-                            # the listening ring at its own crossing, before
-                            # it can possibly know it will lose. Nothing else
-                            # on this path darkens it — leds_off and
-                            # _leds_turn_end both live on the turn path a
-                            # ceding device never reaches — so without this
-                            # the ring burns until listening_anim's 30s TTL
-                            # retires it. Plain off, not _leds_turn_end:
-                            # there was no turn, so an outcome cue would be
-                            # inventing one.
-                            await leds_idle(device)
                             ceded = 0
                             while not device.voice_queue.empty():
                                 try:
@@ -2889,6 +2927,45 @@ async def wake_word_listener(device: Device):
                                     ceded += 1
                                 except asyncio.QueueEmpty:
                                     break
+                            if not serves:
+                                # No pipeline behind this device. The cue is
+                                # about the DEVICE's state, not a turn's
+                                # outcome, so it fires whether or not another
+                                # Echo took the utterance — that is the whole
+                                # point: it says the wake word worked and the
+                                # controller is here (the listening ring the
+                                # device already lit, held briefly) and Home
+                                # Assistant is not (the orange flash). Three
+                                # facts, and none of them is a state light:
+                                # it self-clears on the device's own ticker.
+                                await esphome.record_dropped_wake(
+                                    device, f"wakeword({score:.3f})", wake_info
+                                )
+                                await _leds_turn_end(device)
+                                log.info(
+                                    f"[{device.device_id}] Wake heard but no "
+                                    f"HA connection — standing down "
+                                    f"(score={score:.3f}, discarded {ceded} "
+                                    f"frames)"
+                                )
+                                db.log_device(
+                                    device.device_id, "info", "controller",
+                                    "Wake heard but no HA connection"
+                                )
+                                continue
+                            # The loser is lit: since #263 the device draws
+                            # the listening ring at its own crossing, before
+                            # it can possibly know it will lose. Nothing else
+                            # on this path darkens it — leds_off and
+                            # _leds_turn_end both live on the turn path a
+                            # ceding device never reaches — so without this
+                            # the ring burns until listening_anim's 30s TTL
+                            # retires it. Back to REST, not _leds_turn_end:
+                            # there was no turn, so an outcome cue would be
+                            # inventing one — and rest is dark unless HA's
+                            # light entity has been given a colour, which a
+                            # lost arbitration must not switch off.
+                            await leds_idle(device)
                             log.info(
                                 f"[{device.device_id}] Wake ceded to "
                                 f"{won_by} (arbitration; score={score:.3f}, "
@@ -3032,6 +3109,20 @@ async def handle_button_event(device: Device, event: dict):
             # for exactly the same reason; the button was the one deliberate
             # cancel that did not.
             await device.send_control({"type": "speaker_flush"})
+        elif not esphome.can_serve_turn(device.device_id):
+            # Same stand-down as the wake path, and it needs to be here too:
+            # the button is the control someone reaches for precisely when
+            # the wake word appears to have done nothing, so it is the worst
+            # one to answer with silence. No arbitration to consider — a
+            # press names its device — so this is only the cue and the row.
+            log.info(f"[{device.device_id}] Dot button but no HA connection — standing down")
+            db.log_device(
+                device.device_id, "info", "controller",
+                "Button pressed but no HA connection"
+            )
+            await leds_listening(device)
+            await esphome.record_dropped_wake(device, "button", None)
+            await _leds_turn_end(device)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
@@ -3862,10 +3953,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 _rtt = int((loop.time() - _sent) * 1000)
                                 device.record_rtt(_rtt, _busy)
                                 if _rtt >= RTT_EXCURSION_MS:
-                                    log.info(
-                                        f"[{device_id}] RTT excursion: {_rtt}ms "
-                                        f"({'busy' if _busy else 'idle'})"
-                                    )
+                                    # Busy excursions log one for one; idle
+                                    # ones coalesce into a periodic summary.
+                                    _line = device.rtt_log.record(
+                                        _rtt, _busy, loop.time())
+                                    if _line:
+                                        log.info(_line)
                         pass
 
                     else:
