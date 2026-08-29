@@ -180,6 +180,35 @@ def _live(device_id: str):
     return device
 
 
+# Strong references to fire-and-forget tasks, held until each one finishes.
+#
+# asyncio keeps only a WEAK reference ("Save a reference to the result of
+# this function, to avoid a task disappearing mid-execution" —
+# asyncio.create_task's own documentation), so a task nothing holds can be
+# collected part-way through. Every caller below is a long-running device
+# operation started from a request that has already returned 200: an OTA, a
+# rollback, a wake word model switch. Losing one halfway leaves the device
+# mid-update with nothing said about it.
+_background_tasks: set = set()
+
+
+def _spawn(coro, what: str):
+    """Start a coroutine nobody awaits, hold it, and report its failure."""
+    task = asyncio.ensure_future(coro)
+    task.set_name(what)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    def _report(t, _w=what):
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error(f"Background task failed ({_w}): {exc!r}", exc_info=exc)
+    task.add_done_callback(_report)
+    return task
+
+
 def _live_items():
     """(device_id, device) for every REACHABLE device — see _live()."""
     return [
@@ -1087,7 +1116,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     if pending_model:
         # The device is still on its previous wake word, still scoring
         # locally, still answering. Install, then switch.
-        asyncio.create_task(_install_then_switch(device_id, pending_model))
+        _spawn(_install_then_switch(device_id, pending_model),
+               f"wake model install {device_id}")
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
@@ -1463,7 +1493,8 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if device_id in _updates_in_progress:
         return _error("update_in_progress", "An update is already in progress", 409)
 
-    asyncio.create_task(_run_update(device_id, release, binary_override))
+    _spawn(_run_update(device_id, release, binary_override),
+               f"firmware update {device_id}")
     return _ok({"status": "started", "version": release["version"]}, status=202)
 
 
@@ -1493,7 +1524,8 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if device_id in _updates_in_progress:
         return _error("update_in_progress", "An update is already in progress", 409)
 
-    asyncio.create_task(_run_rollback(device_id, row["firmware_previous"]))
+    _spawn(_run_rollback(device_id, row["firmware_previous"]),
+           f"firmware rollback {device_id}")
     return _ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
 
 
@@ -1530,7 +1562,7 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         async def _expire():
             await asyncio.sleep(600)
             _pending_uploads.pop(token, None)
-        asyncio.create_task(_expire())
+        _spawn(_expire(), "shell session expiry")
 
         return _ok({"upload_token": token, "size": len(binary)})
     except web.HTTPException:
@@ -2742,7 +2774,8 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
-        asyncio.create_task(_run_update(device_id, release, binary_override))
+        _spawn(_run_update(device_id, release, binary_override),
+               f"firmware update {device_id}")
         started.append(device_id)
 
     return _ok({
@@ -4585,7 +4618,7 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
             except Exception as e:
                 log.warning(f"[api] supervisor log fetch failed for {_id}: {e}")
 
-        asyncio.create_task(_collect_soon())
+        _spawn(_collect_soon(), "provision diagnostics")
 
 
 async def notify_device_disconnected(device_id: str) -> None:

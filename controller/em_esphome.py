@@ -344,7 +344,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         def _spawn(coro, what: str, _dev=device_id):
             """
-            Run a coroutine from `handle_message`, which is a plain
+            Run a coroutine from a message handler, which is a plain
             generator and cannot await.
 
             Two things, both of which the timer path already does by hand
@@ -482,6 +482,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             key=LIGHT_KEY,
             color_mode=api_pb2.COLOR_MODE_RGB,
             color_brightness=1.0,
+            # Always "None": an effect here is a one-shot notification that
+            # has already been handed to the device and self-clears on its
+            # TTL. Reporting it as active would leave HA showing an effect
+            # running seconds after the ring went quiet, and — worse —
+            # showing one still selected long afterwards, which is the state
+            # someone would then have to clear by hand.
+            effect=em_ring_light.EFFECT_NONE,
             **fields,
         )
 
@@ -593,6 +600,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     name="Ring",
                     supported_color_modes=[api_pb2.COLOR_MODE_RGB],
                     icon="mdi:circle-outline",
+                    # Notifications, offered as HA light effects — a
+                    # `light.turn_on` with `effect:` is one line in an
+                    # automation and needs no second entity.
+                    #
+                    # Only where the firmware animates locally: these are
+                    # `led_anim` specs the DEVICE renders on its own ticker.
+                    # Advertising them to firmware that cannot run one would
+                    # put a dropdown in front of someone whose selection
+                    # silently does nothing, which is the failure this file
+                    # gates every other optional entity to avoid.
+                    effects=(list(em_ring_light.EFFECTS)
+                             if self._device_has("led_anim") else []),
                 )
             yield api_pb2.ListEntitiesDoneResponse()
             return
@@ -680,7 +699,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 )
                 send_fn = self._owning_server._send_volume_set
                 if send_fn is not None:
-                    asyncio.create_task(send_fn(level))
+                    self._spawn(send_fn(level), "volume set")
                 else:
                     log.warning(f"[{self._log_name}] volume set requested but device not connected")
             if msg.has_media_url and device_id is not None:
@@ -689,18 +708,20 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._play_media_announce(msg.media_url))
+                    self._spawn(self._play_media_announce(msg.media_url),
+                            "play_media announcement")
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
-                    asyncio.create_task(em_player.play(device_id, msg.media_url))
+                    self._spawn(em_player.play(device_id, msg.media_url),
+                            "media play")
             elif msg.has_command and device_id is not None:
                 cmd = msg.command
                 if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
-                    asyncio.create_task(em_player.pause(device_id))
+                    self._spawn(em_player.pause(device_id), "media pause")
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
-                    asyncio.create_task(em_player.resume(device_id))
+                    self._spawn(em_player.resume(device_id), "media resume")
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_STOP:
-                    asyncio.create_task(em_player.stop(device_id))
+                    self._spawn(em_player.stop(device_id), "media stop")
                 else:
                     log.debug(
                         f"[{self._log_name}] MediaPlayerCommandRequest: "
@@ -772,6 +793,35 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if srv is None or not self._leds_capable:
                 yield _HANDLED
                 return
+            # An effect is a NOTIFICATION, not a state, and must not leave
+            # the resting ring changed behind it.
+            #
+            # That needs saying because HA sends `light.turn_on` with
+            # `effect:` — state=on rides along in the same message. Folding
+            # that in the ordinary way would mean every notification also
+            # switched the resting ring on permanently, so an automation
+            # that blinks the ring at sunset would leave it lit all night.
+            # An rgb in the same message IS honoured, as the colour to
+            # notify in, and still not stored.
+            effect = msg.effect if msg.has_effect else em_ring_light.EFFECT_NONE
+            anim   = em_ring_light.effect_anim(
+                effect,
+                "#{:02x}{:02x}{:02x}".format(
+                    *(max(0, min(255, int(round(c * 255.0))))
+                      for c in (msg.red, msg.green, msg.blue))
+                ) if msg.has_rgb else srv.idle_ring,
+            )
+            if anim is not None:
+                log.info(f"[{self._log_name}] Ring effect: {effect}")
+                if srv._play_ring_effect is not None:
+                    self._spawn(
+                        srv._play_ring_effect(
+                            anim, em_ring_light.effect_seconds(effect)),
+                        f"ring effect {effect}",
+                    )
+                yield self._light_state_msg()
+                return
+
             # Every field arrives behind its own has_* flag, so "on", "blue"
             # and "dimmer" are three messages each carrying a fraction of
             # the state. em_ring_light.apply_command owns the folding — it
@@ -845,7 +895,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Measured on HA 2026.8.3, alongside the setup wizard stalling on
             # SatelliteBusyError.
             log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._run_announce(msg.media_id))
+            self._spawn(self._run_announce(msg.media_id), "announcement")
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
@@ -912,7 +962,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # the device's own RMS gate becomes advisory (see review §3.1).
             self._ha_vad_end.set()
             if self._on_thinking and not self._turn_cancelled:
-                asyncio.create_task(self._on_thinking())
+                self._spawn(self._on_thinking(), "thinking transition")
 
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
@@ -960,7 +1010,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 task.add_done_callback(self._timer_tasks.discard)
                 task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
-                asyncio.create_task(self._on_stt_end(text))
+                self._spawn(self._on_stt_end(text), "stt end")
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
             # Reliable "STT + intent resolution genuinely finished" marker —
@@ -2118,6 +2168,9 @@ class DeviceESPhomeServer:
         # async callable(colour: str, level: int) — persists and repaints.
         # Provided by em_controller as a closure over the Device.
         self._set_idle_ring = None
+        # async callable(anim: dict, seconds: float) — plays a notification
+        # and puts the resting ring back. Also a controller closure.
+        self._play_ring_effect = None
         # Injected by device_connected() — async callable(level: int) that
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
@@ -2830,6 +2883,7 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     set_idle_ring=None,
+    play_ring_effect=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -2868,6 +2922,7 @@ async def device_connected(
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
     server._set_idle_ring = set_idle_ring
+    server._play_ring_effect = play_ring_effect
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
     if server._server is not None:

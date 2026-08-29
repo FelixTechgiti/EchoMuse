@@ -476,6 +476,32 @@ is where the tests are — this file is not importable by the suite, and the
 failure mode is not a crash but a colour wheel that resets the dimmer, which
 nobody reports because it reads as their own mistake.
 
+**Notifications ride the same entity, as light EFFECTS.** A notification is
+not a state — it plays, it ends, and the ring goes back to resting — which is
+exactly the shape HA's `effect` already has, so it needs no second entity:
+`light.turn_on` with `effect:` is one line in an automation and renders as a
+dropdown on the card. `Notify` / `Alert` / `Sweep` are `led_anim` specs the
+DEVICE renders on its own ticker, so they are advertised only where
+`led_anim` is announced; each carries a TTL as a dead-man switch, and the
+controller's wait before repainting equals that TTL so the ring is never
+dark in a gap between the two.
+
+**An effect must not change the resting ring, and the handler returns before
+the state folding to make sure of it.** HA sends `light.turn_on` with
+`effect:`, so `state=on` rides in the same message — folded in the ordinary
+way, every notification would also switch the resting ring on permanently,
+and an automation that blinks the ring at sunset would leave it lit all
+night. An `rgb_color` in that same message IS honoured, as the colour to
+notify in, and still not stored. The state message always reports
+`effect="None"`: the one-shot is already with the device and self-clears, and
+reporting it as running leaves HA showing an effect selected long after the
+ring went quiet.
+
+**A notification stands down while a turn owns the ring**, checked before
+playing and again after the wait. Painting over the listening ring tells the
+user the device stopped listening when it did not, and the ring is the only
+thing saying so.
+
 ### HA entities beyond the voice satellite
 
 Both are advertised **only when the device declares the capability** — an
@@ -557,6 +583,35 @@ directions.
 - **Ambient Light** (`ListEntitiesSensorResponse` / `SensorStateResponse`,
   `ambient_light`) — lux. A device with no sensor sends `missing_state`, not
   0, because 0 lux is a real reading.
+
+## Background tasks are held, never fired and forgotten
+
+asyncio keeps only a **weak** reference to a task — "Save a reference to the
+result of this function, to avoid a task disappearing mid-execution", from
+`asyncio.create_task`'s own documentation — so a task nothing else holds can
+be collected part-way through. The failure is silent and load-dependent,
+which is the worst pair this tree deals with: the work does not finish, with
+no exception and no log line.
+
+Sixteen call sites were bare until 2026-08-27, and the consequences were not
+uniform. Losing the wake word listener's **restart** leaves a device
+permanently deaf — the one path whose whole job is recovering from a crash;
+losing an OTA leaves a device half-updated; losing a media command leaves
+HA's entity showing something the speaker is not doing.
+
+Each module has a `_spawn(coro, what)` that holds the task in a set until it
+finishes and reports its failure instead of leaving it to surface as "Task
+exception was never retrieved" at some later collection. `em_esphome`'s
+lives on the satellite rather than at module level, because its message
+handlers are plain generators that cannot await and the tasks they start
+belong to one connection.
+
+`tests/test_background_tasks.py` is an **AST** guard, not a grep: what makes
+a call safe is what happens to its RESULT — assigned, returned, awaited, or
+chained to a done-callback — and no regex can see that. Its module list is
+written out rather than globbed, so a new module that starts background work
+has to be added deliberately, which is the moment to think about who holds
+its references.
 
 ## Schema migrations
 

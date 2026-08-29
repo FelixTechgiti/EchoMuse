@@ -157,3 +157,64 @@ def apply_command(idle_ring, brightness, *,
         return color, (level if level > 0 else 255)
 
     return color, level
+
+
+# ── Notifications, as light EFFECTS ───────────────────────────────────────
+#
+# A notification is not a state, so it must not be stored like one: it plays,
+# it ends, and the ring goes back to whatever it was resting at. Home
+# Assistant's light model already has exactly that shape in `effect`, so this
+# needs no second entity — `light.turn_on` with `effect:` is a one-liner in
+# any automation, and the effect list renders as a dropdown on the card.
+#
+# The specs below are the device's own `led_anim` vocabulary (em_scenes uses
+# the same patterns for turn outcomes). The device renders them on its own
+# ticker with a TTL as a dead-man switch, so a controller that dies mid-
+# notification leaves a ring that clears itself rather than one stuck on.
+
+EFFECT_NONE = "None"
+
+# name -> (pattern, periodMs, seconds). `seconds` is both the anim's TTL and
+# how long the controller waits before repainting the resting colour.
+_EFFECTS: dict[str, tuple[str, int, int]] = {
+    # Three unhurried throbs — "something wants you".
+    "Notify": ("pulse", 700, 3),
+    # Agitated — "something is wrong". Deliberately the same rhythm as the
+    # turn-outcome error cue, so the two read as one vocabulary.
+    "Alert":  ("pulse", 220, 3),
+    # A sweep, for a notification that should catch the eye without the
+    # urgency a fast blink carries.
+    "Sweep":  ("rotate", 80, 3),
+}
+
+EFFECTS: tuple[str, ...] = (EFFECT_NONE, *_EFFECTS)
+
+
+def effect_anim(name: str, idle_ring) -> dict | None:
+    """
+    The `led_anim` spec for an effect, or None for "None" and for anything
+    unknown — an effect list is API surface HA caches, so a stale name from
+    an older controller must read as "nothing to play" rather than raise.
+
+    Played at the stored colour but at FULL brightness, and the second half
+    of that is deliberate: a notification is meant to be noticed, and a ring
+    resting at 10% would deliver one nobody sees. It is also what lets a
+    notification work on a ring that is switched OFF — the colour is stored
+    independently of the brightness precisely so there is always one to use.
+    """
+    spec = _EFFECTS.get(name)
+    if spec is None:
+        return None
+    pattern, period_ms, seconds = spec
+    return {
+        "pattern":  pattern,
+        "colors":   [list(parse_color(idle_ring))],
+        "periodMs": period_ms,
+        "ttlSec":   seconds,
+    }
+
+
+def effect_seconds(name: str) -> float:
+    """How long an effect runs before the ring returns to rest. 0 if unknown."""
+    spec = _EFFECTS.get(name)
+    return float(spec[2]) if spec else 0.0
