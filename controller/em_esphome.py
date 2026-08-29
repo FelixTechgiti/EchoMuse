@@ -2428,6 +2428,12 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     no HA connection). Without this, wakes during an HA outage would vanish
     from the activity history — exactly the "device woke but nothing
     happened" events worth seeing in a trend review.
+
+    Also surfaces the outcome to the turn loop's ring cleanup, the same way a
+    completed turn does — the user standing in front of the device is the one
+    with no other way to find out. Without it the ring lit and cleared inside
+    a few milliseconds, which is the "looked like a glitch" failure ack_anim
+    was added for, on a device that will not answer until HA connects.
     """
     wi = wake_info or {}
     turn_record = {
@@ -2442,6 +2448,7 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     }
     await _persist_turn(device, turn_record)
     device.turn_history.append(turn_record)
+    device.last_turn_outcome = turn_record["outcome"]
 
 
 async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
