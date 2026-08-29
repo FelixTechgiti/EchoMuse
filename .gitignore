@@ -39,3 +39,6 @@ controller/models/
 # predicted. A key must never be committable from any of them.
 tls/
 *.key
+
+# speaker_profile generates its test signals; generate_signals.py is the source
+device/tools/speaker_profile/*.wav
