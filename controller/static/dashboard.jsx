@@ -5171,7 +5171,37 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     { value: 'pride',      label: 'Pride',      swatches: ['#bf0000', '#bf7700', '#a9bf00', '#00bf2c', '#0055bf', '#8b00bf'] },
     { value: 'custom',     label: 'Custom',     swatches: null },
   ];
-  const EQ_PRESETS = [['Flat',[0,0,0,0,0,0,0,0]], ['Clarity',[0,0,0,0,0,7,4,2]], ['Warmth',[0,3,2,0,-2,0,0,0]]];
+  // Measured, not chosen (2026-08-29). The driver was swept in three
+  // placements against the hardware echo reference, and the result agrees with
+  // stock's own FIR to 0.1dB at 315Hz and 0.0dB at 630Hz — two methods sharing
+  // no assumptions (#247). Relative to 1kHz the driver is ~18dB down at 250Hz
+  // and peaks ~+8.9dB at 3150Hz.
+  //
+  // The old presets predate that measurement and one of them was backwards:
+  // 'Clarity' put +7dB on band 5 (3500Hz), which is exactly where the driver
+  // already peaks, landing around +16dB at 3150 — sibilance, not clarity.
+  // 'Warmth' had the right shape and a fraction of the size.
+  //
+  // Bands are [125 shelf, 250, 500, 1000, 2000, 3500, 5500, 8000 shelf].
+  // 125 stays 0 in every preset: it is a SHELF, so lifting it pushes
+  // everything below into the bass guard, which then removes it — the boost
+  // belongs at 250 where the band is a peaking filter. 5500 and 8000 stay 0
+  // on evidence rather than omission: those bands moved up to 13.8dB between
+  // placements, which is more than the whole ±12dB range, so anything set
+  // there tunes one room.
+  const EQ_PRESETS = [
+    // The bypass, and the reference for any A/B. Keep it exactly zero.
+    ['Flat',   [0, 0, 0, 0,  0,  0, 0, 0]],
+    // Gentler low-mid lift than Music: speech carries little energy below
+    // 300Hz, and the boost spends headroom the limiter then reclaims from the
+    // midrange. Keeps most of the driver's natural presence — 2-4kHz carries
+    // consonants — while taking the harsh edge off the 3150 peak.
+    ['Speech', [0, 4, 2, 0, -2, -5, 0, 0]],
+    // The full measured correction, bounded by what this driver will stand.
+    // Stock puts +19.9dB at 250Hz; +8 is the honest fraction our ±12 range and
+    // the limiter leave room for, and it is a value to walk up by ear.
+    ['Music',  [0, 8, 3, 0, -3, -6, 0, 0]],
+  ];
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
   const [advMics, setAdvMics] = useState(false);
