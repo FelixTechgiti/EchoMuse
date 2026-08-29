@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.22.0-ea.5 (Early Access)
+
+**The Echo now tells you when there is nothing to answer you.** Two fixes, both
+about what happens when Home Assistant is not connected.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring went dark instead of saying Home Assistant was missing
+
+Say the wake word — or press the button — while Home Assistant is not connected
+to that Echo, and the ring lit for a fraction of a second and went out. The Echo
+had heard you perfectly and had nowhere to send it, but from across the room it
+looked like a device that had failed to notice you at all.
+
+It now holds the listening ring briefly, to say it heard you, and then flashes
+orange twice. Orange is the colour the Echo already uses when it cannot find its
+controller, so it reads the same way one step further along: the problem is not
+this device, it is what sits above it.
+
+This happens more often than it sounds. An Echo comes back from a restart or a
+power cut in well under a minute, but Home Assistant can take another minute to
+reconnect to it — and in that gap the wake word works, the microphone works, and
+nothing can answer. Measured on our own hardware this week: fifty-six seconds
+between the Echo being ready and Home Assistant arriving.
+
+### With several Echoes, the one that could answer stood down
+
+When one utterance wakes more than one Echo, the first to hear it answers and
+the others stay quiet — otherwise they all reply at once. But "first to hear it"
+is about which one you are standing nearest, and that has nothing to do with
+whether Home Assistant is connected to it. So an Echo with no Home Assistant
+behind it could win, silence the one that was ready, and then fail.
+
+The Echoes Home Assistant is not connected to no longer take that decision away
+from the ones it is.
+
 ## 2.22.0-ea.4 (Early Access)
 
 **The ring now tells you it has stopped listening, whichever way you started
