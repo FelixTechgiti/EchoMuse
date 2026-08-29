@@ -1811,6 +1811,63 @@ def test_a_dropped_turn_surfaces_its_outcome_to_the_ring():
     )
 
 
+def test_a_device_with_no_ha_stands_down_before_it_can_claim():
+    """
+    Detection order is a PROXIMITY proxy: the nearest Echo crosses threshold
+    first whether or not HA has ever dialled its satellite port. So an
+    unlinked device must stand down before `_wake_arbiter.claim`, or it wins
+    on nearness, silences the device that could have answered, and then dies
+    no_ha — nothing answers, and the one that was ready is the one that went
+    dark.
+
+    Source-shape because the suite cannot import em_controller, and the
+    ordering is the whole guard: a check placed after the claim would leave
+    the claim taken.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def wake_word_listener"):]
+    serves = body.index("can_serve_turn")
+    claim  = body.index("_wake_arbiter.claim")
+    assert serves < claim, (
+        "the capability check must come BEFORE the arbitration claim — "
+        "after it, the unlinked device has already taken the window"
+    )
+    guard = body[serves:claim]
+    assert "if serves and" in guard, (
+        "the claim itself must be gated on it, not merely preceded by it"
+    )
+
+
+def test_the_button_path_stands_down_the_same_way():
+    """
+    The button is what someone reaches for when the wake word appeared to do
+    nothing, so answering it with silence is the worst version of this bug.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert src.count("esphome.can_serve_turn") >= 2, (
+        "both the wake path and the button path must ask; a turn that cannot "
+        "reach HA should never hold the voice lock"
+    )
+
+
+def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
+    """
+    The cue reports the DEVICE's state, not a turn's outcome — it says the
+    wake word works and the controller is here and HA is not. Firing it only
+    when no other Echo took the utterance would make it disappear exactly on
+    the multi-device fleets where the confusion is worst.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def wake_word_listener"):]
+    stand = body.index("if not serves:")
+    tail  = body[stand:stand + 2000]
+    assert "_leds_turn_end(device)" in tail, "no cue on the stand-down path"
+    assert "record_dropped_wake" in tail, (
+        "the wake must still reach the activity history, or an HA outage is "
+        "indistinguishable from a device that heard nothing"
+    )
+
+
 def test_every_outcome_cue_names_a_scene_key_that_exists():
     """
     `device.led_scene.get(key)` falls through to a dark ring when the key is

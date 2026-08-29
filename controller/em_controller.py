@@ -2736,29 +2736,63 @@ async def wake_word_listener(device: Device):
                         # command audio must be flowing from the first
                         # syllable, so we arm optimistically and revert on
                         # loss. Solo fleets skip the window entirely.
+                        # A device with no pipeline behind it stands down
+                        # HERE, before arbitration, and never runs a turn it
+                        # cannot finish. Reads what the turn path reads —
+                        # the same get_server/get_satellite pair
+                        # trigger_voice_turn refuses on — so a device counted
+                        # as able cannot turn out to be unable a tick later
+                        # for any reason the controller already knows about.
+                        serves = esphome.can_serve_turn(device.device_id)
                         won_by = device.device_id
-                        if device.wake_arb_ms > 0 and len(_devices) > 1:
+                        if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
                             # Synchronous — the winner starts its turn on
                             # this same tick. The old version awaited the
                             # full window on EVERY wake (~364ms measured)
                             # even when no other device was contending.
-                            # Read what the turn path reads — esphome's
-                            # get_status is the same get_server/get_satellite
-                            # pair trigger_voice_turn refuses on, so a device
-                            # counted as able here cannot turn out to be
-                            # unable a tick later for any reason the
-                            # controller already knows about.
-                            ha = esphome.get_status(device.device_id)
                             won_by = _wake_arbiter.claim(
                                 device.device_id,
                                 device.wake_arb_ms / 1000.0,
-                                can_answer=bool(ha and ha["haConnected"]),
                             )
-                        if won_by != device.device_id:
+                        if not serves or won_by != device.device_id:
+                            wake_info = device.last_wake
                             device.oww_paused.clear()
                             device.oww_paused_since = None
                             device.last_wake = None
                             await device.beam_unlock()
+                            ceded = 0
+                            while not device.voice_queue.empty():
+                                try:
+                                    device.voice_queue.get_nowait()
+                                    ceded += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            if not serves:
+                                # No pipeline behind this device. The cue is
+                                # about the DEVICE's state, not a turn's
+                                # outcome, so it fires whether or not another
+                                # Echo took the utterance — that is the whole
+                                # point: it says the wake word worked and the
+                                # controller is here (the listening ring the
+                                # device already lit, held briefly) and Home
+                                # Assistant is not (the orange flash). Three
+                                # facts, and none of them is a state light:
+                                # it self-clears on the device's own ticker.
+                                await esphome.record_dropped_wake(
+                                    device, f"wakeword({score:.3f})", wake_info
+                                )
+                                await _leds_turn_end(device)
+                                log.info(
+                                    f"[{device.device_id}] Wake heard but no "
+                                    f"HA connection — standing down "
+                                    f"(score={score:.3f}, discarded {ceded} "
+                                    f"frames)"
+                                )
+                                db.log_device(
+                                    device.device_id, "info", "controller",
+                                    "Wake heard but no HA connection"
+                                )
+                                continue
                             # The loser is lit: since #263 the device draws
                             # the listening ring at its own crossing, before
                             # it can possibly know it will lose. Nothing else
@@ -2770,13 +2804,6 @@ async def wake_word_listener(device: Device):
                             # there was no turn, so an outcome cue would be
                             # inventing one.
                             await leds_off(device)
-                            ceded = 0
-                            while not device.voice_queue.empty():
-                                try:
-                                    device.voice_queue.get_nowait()
-                                    ceded += 1
-                                except asyncio.QueueEmpty:
-                                    break
                             log.info(
                                 f"[{device.device_id}] Wake ceded to "
                                 f"{won_by} (arbitration; score={score:.3f}, "
@@ -2920,6 +2947,20 @@ async def handle_button_event(device: Device, event: dict):
             # for exactly the same reason; the button was the one deliberate
             # cancel that did not.
             await device.send_control({"type": "speaker_flush"})
+        elif not esphome.can_serve_turn(device.device_id):
+            # Same stand-down as the wake path, and it needs to be here too:
+            # the button is the control someone reaches for precisely when
+            # the wake word appears to have done nothing, so it is the worst
+            # one to answer with silence. No arbitration to consider — a
+            # press names its device — so this is only the cue and the row.
+            log.info(f"[{device.device_id}] Dot button but no HA connection — standing down")
+            db.log_device(
+                device.device_id, "info", "controller",
+                "Button pressed but no HA connection"
+            )
+            await leds_listening(device)
+            await esphome.record_dropped_wake(device, "button", None)
+            await _leds_turn_end(device)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
