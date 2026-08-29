@@ -1786,3 +1786,43 @@ def test_deleting_a_device_drops_its_satellite():
         "stopping the listener is not enough — the registry entry is what "
         "device_connected finds and reuses"
     )
+
+
+# ── The ring must say something when there is nothing to talk to ──────────────
+#
+# Source-shape, because the suite cannot import em_controller. A turn with no
+# HA behind it ends in milliseconds, so without a cue the ring lights and
+# clears too fast to register and the device reads as broken at exactly the
+# moment it is working — the same failure ack_anim was added for, and the one
+# the ESPHome port-collision incident presented as ("the wake word stopped
+# working", while every part of it worked).
+
+def test_a_dropped_turn_surfaces_its_outcome_to_the_ring():
+    """
+    `last_turn_outcome` is what `_leds_turn_end` reads. A completed turn sets
+    it; a turn that never started has to as well, or the cleanup finds None
+    and blacks the ring with no signal at all.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    fn  = _fn_body(src, "_record_dropped_turn")
+    assert "device.last_turn_outcome" in fn, (
+        "a turn dropped for no HA must tell the ring cleanup why, or the "
+        "user gets a ring that flashes and clears"
+    )
+
+
+def test_every_outcome_cue_names_a_scene_key_that_exists():
+    """
+    `device.led_scene.get(key)` falls through to a dark ring when the key is
+    wrong, so a typo here costs the cue silently — and only on the outcome
+    that is already the unusual one.
+    """
+    import em_scenes
+    src = (CONTROLLER / "em_controller.py").read_text()
+    block = src[src.index("_OUTCOME_ANIM = {"):]
+    block = block[:block.index("\n}")]
+    keys = re.findall(r':\s*"(\w+_anim)"', block)
+    assert keys, "no cue mappings found — did _OUTCOME_ANIM move?"
+    scene = em_scenes.resolve({})
+    for key in keys:
+        assert key in scene, f"_OUTCOME_ANIM names {key}, which no scene defines"

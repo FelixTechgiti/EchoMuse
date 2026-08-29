@@ -1077,7 +1077,20 @@ _OUTCOME_ANIM = {
     # and clears too fast to register, and a device that worked perfectly
     # looks like it glitched.
     "pipeline_refused": "ack_anim",
+    # Nothing upstream to answer: no ESPHome server, or HA has never dialled
+    # this device's port. The turn dies in milliseconds like the refusal
+    # above, but the causes are opposite — there the pipeline answered and
+    # declined, here there is no pipeline — so the cue says so in the colour
+    # the device already uses for a missing link. See em_scenes.no_ha_anim.
+    "no_ha":         "no_ha_anim",
 }
+
+# How long the listening ring is held before the no_ha cue replaces it. The
+# wake word was heard, and an orange fault flashed on its own reads as "the
+# device did nothing"; the ack has to land first. Costs the wake listener the
+# same delay before it restarts, which is the price of the ring saying
+# anything at all on a turn that lasted milliseconds.
+NO_HA_HOLD_S = 0.6
 
 
 async def _leds_turn_end(device: Device):
@@ -1099,6 +1112,10 @@ async def _leds_turn_end(device: Device):
         anim = device.led_scene.get(key)
         if anim:
             log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
+            if outcome == "no_ha":
+                # The listening ring is still lit from turn start (30s TTL),
+                # so this is a hold, not a repaint.
+                await asyncio.sleep(NO_HA_HOLD_S)
             await device.send_led_anim(anim)
             return
     await leds_off(device)
@@ -2725,9 +2742,17 @@ async def wake_word_listener(device: Device):
                             # this same tick. The old version awaited the
                             # full window on EVERY wake (~364ms measured)
                             # even when no other device was contending.
+                            # Read what the turn path reads — esphome's
+                            # get_status is the same get_server/get_satellite
+                            # pair trigger_voice_turn refuses on, so a device
+                            # counted as able here cannot turn out to be
+                            # unable a tick later for any reason the
+                            # controller already knows about.
+                            ha = esphome.get_status(device.device_id)
                             won_by = _wake_arbiter.claim(
                                 device.device_id,
                                 device.wake_arb_ms / 1000.0,
+                                can_answer=bool(ha and ha["haConnected"]),
                             )
                         if won_by != device.device_id:
                             device.oww_paused.clear()
