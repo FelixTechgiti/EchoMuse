@@ -644,6 +644,10 @@ Two guards sit in front of that, both tested by reintroducing the bug:
 ## Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, `em_arbiter.py` applies **first-detector-wins** suppression: the first device to cross threshold answers *immediately* (no added latency, the claim is synchronous) and any other device detecting within `wakeArbitrationMs` (default 700, 0 = off) stands down and logs "Wake ceded". The claim is released at turn end. Do NOT reinstate the original best-SNR-after-a-wait design: it taxed every wake ~364ms (it gated on devices *connected*, not in earshot) and field data showed SNR at detection was indistinguishable across devices (0.9/1.15/0.93) while the SNR winner produced a worse transcript than the first detector.
+
+    **A device with no HA behind it stands down BEFORE arbitration, and never runs the turn at all** (`em_esphome.can_serve_turn`, the same `get_server`/`get_satellite` pair `trigger_voice_turn` refuses on, so a device counted as able cannot turn out to be unable a tick later). Detection order is a **proximity** proxy and says nothing about whether HA has ever dialled that device's satellite port, so unqualified first-detector-wins hands the utterance to an unlinked Echo, stands down the linked one, and the winner then dies `no_ha` in milliseconds: nothing answers, and the device that could have is the one that went dark. Measured on the fleet 2026-08-29 — a device scoring **0.912** lost to one scoring 0.609 that crossed 449ms earlier, so loudness and detection order do genuinely disagree; that is one observation and not a case for reopening best-SNR, which stays settled. The ordering is the guard: a check after the claim leaves the claim taken, and `tests/test_deploy.py` pins that `can_serve_turn` precedes `_wake_arbiter.claim` and gates it. `em_arbiter` deliberately does **not** know about any of this — a second copy of the rule is one that can disagree with the first.
+
+    **The stand-down still records the wake and still plays the cue, every time** (`em_esphome.record_dropped_wake` + `_leds_turn_end`). Both matter for the same reason the row exists on the turn path: a wake during an HA outage that leaves no trace is indistinguishable from a device that heard nothing. And the cue reports the **device's state, not a turn's outcome**, so it fires whether or not another Echo took the utterance — gating it on losing would make it vanish exactly on the multi-device fleets where the confusion is worst. That is the correction to the first version of this, which only cued when the device ran its own doomed turn: standing in front of an unlinked Echo, you got a ring that lit and went dark while another room answered, which reads as a broken cue (Wil, 2026-08-29). The button path stands down identically — it is the control someone reaches for when the wake word appeared to do nothing, so silence there is the worst version of the bug.
 2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames. `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
 
 ## The output chain: EQ → bass guard → limiter
@@ -845,6 +849,30 @@ holds the matchers and constants; `start_timer_alarm` / `stop_timer_alarm` /
 `device.speaker_busy`, dismissal sends `speaker_flush` (or the ring plays out of
 ~5.5s of device buffer after it has been stopped), and an unanswered ring stops
 at `MAX_RING_S` = 120s.
+
+**The ring asks before writing the plane; the announcement does not, and that
+is #373.** `_ring_timer_alarm` gates every burst on `speaker_busy` because two
+writers would interleave frames on `0x02` — but `_standalone_play` performs no
+such check and streams straight into a chime already in flight. Measured
+2026-08-28: an announcement landing between bursts plays, one landing during a
+burst is **inaudible**. Both paths also share a single `device.playback_done`
+Event, so one device report satisfies two waiters (observed as two `Playback
+complete` lines in the same millisecond, and an announcement whose wait ended
+after a chime's duration rather than its own). **The exclusion being
+one-directional is the bug** — do not "fix" it by blocking announcements while
+ringing, because HA blocks on the announce call holding `_is_announcing` and a
+120s `MAX_RING_S` would fail every other announcement to that satellite. See
+`docs/audio-states.md` §6 Q4 for the options, including the longer-term move of
+the alarm onto the music plane (which needs `audio_mix` gating, or the alarm is
+silent on firmware that cannot mix).
+
+**A cancelled playback must release `speaking` (#366).** `_run_post_turn_playback`
+clears it in the `finally`, beside `speaker_busy`, and shielded — it used to sit
+after the try, so `stop_timer_alarm`'s cancel skipped it and the flag stayed set
+for the life of the process. That is not a cosmetic tile: the wake listener
+skips every frame while `speaking` is set and no alarm is ringing, so the device
+went **permanently deaf** after a mid-chime dismissal. Roughly three dismissals
+in four hit it, the chime being 1.68s of every 2.3s.
 
 **HA hands ringing to the satellite and expects the satellite to own dismissal**
 — the same shape its own Voice PE hardware has. So the dismissal is recognised
@@ -1419,6 +1447,20 @@ caller is `stream_speaker`'s `finally`, which is also reached when barge-in
 cancels the task mid-send; a plain `except Exception` does not catch the
 `CancelledError` that arises there, and a dashboard push is not worth failing a
 speaker stream over. The assignment is synchronous and always happens.
+
+**Every route that ends a turn's speech must call `_enter_thinking`, and there
+are two (#370).** HA's `STT_VAD_END` event and the device VAD sentinel in
+`_stream_mic_audio` both mean "the user stopped talking"; only the first was
+wired to `on_thinking`, so a turn ending on the sentinel held the listening ring
+through the whole STT/intent/TTS window — ~11s measured. It presented as "the
+button is slower than the wake word" and the trigger is a red herring: there is
+exactly ONE deliberate branch on it in the turn path (`preroll_discard`), and
+which endpoint route wins is a race. 33/33 wake turns ended on HA's VAD, 11/11
+button turns on the sentinel, but nothing holds that on a slower link.
+`_enter_thinking` is idempotent because on a slow turn both routes fire.
+`tests/test_thinking_transition.py` pins that `_on_thinking` has exactly **one
+call site**, so a third endpoint route gets the ring right for free — and that
+the no-speech timeout deliberately does NOT enter it, since nothing was said.
 
 Note `em_player` must **not** set `device.speaking` for music — it makes the
 wake loop drop frames, deafening the device for the length of a song.

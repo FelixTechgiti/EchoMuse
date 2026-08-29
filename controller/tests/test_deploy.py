@@ -1786,3 +1786,100 @@ def test_deleting_a_device_drops_its_satellite():
         "stopping the listener is not enough — the registry entry is what "
         "device_connected finds and reuses"
     )
+
+
+# ── The ring must say something when there is nothing to talk to ──────────────
+#
+# Source-shape, because the suite cannot import em_controller. A turn with no
+# HA behind it ends in milliseconds, so without a cue the ring lights and
+# clears too fast to register and the device reads as broken at exactly the
+# moment it is working — the same failure ack_anim was added for, and the one
+# the ESPHome port-collision incident presented as ("the wake word stopped
+# working", while every part of it worked).
+
+def test_a_dropped_turn_surfaces_its_outcome_to_the_ring():
+    """
+    `last_turn_outcome` is what `_leds_turn_end` reads. A completed turn sets
+    it; a turn that never started has to as well, or the cleanup finds None
+    and blacks the ring with no signal at all.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    fn  = _fn_body(src, "_record_dropped_turn")
+    assert "device.last_turn_outcome" in fn, (
+        "a turn dropped for no HA must tell the ring cleanup why, or the "
+        "user gets a ring that flashes and clears"
+    )
+
+
+def test_a_device_with_no_ha_stands_down_before_it_can_claim():
+    """
+    Detection order is a PROXIMITY proxy: the nearest Echo crosses threshold
+    first whether or not HA has ever dialled its satellite port. So an
+    unlinked device must stand down before `_wake_arbiter.claim`, or it wins
+    on nearness, silences the device that could have answered, and then dies
+    no_ha — nothing answers, and the one that was ready is the one that went
+    dark.
+
+    Source-shape because the suite cannot import em_controller, and the
+    ordering is the whole guard: a check placed after the claim would leave
+    the claim taken.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def wake_word_listener"):]
+    serves = body.index("can_serve_turn")
+    claim  = body.index("_wake_arbiter.claim")
+    assert serves < claim, (
+        "the capability check must come BEFORE the arbitration claim — "
+        "after it, the unlinked device has already taken the window"
+    )
+    guard = body[serves:claim]
+    assert "if serves and" in guard, (
+        "the claim itself must be gated on it, not merely preceded by it"
+    )
+
+
+def test_the_button_path_stands_down_the_same_way():
+    """
+    The button is what someone reaches for when the wake word appeared to do
+    nothing, so answering it with silence is the worst version of this bug.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert src.count("esphome.can_serve_turn") >= 2, (
+        "both the wake path and the button path must ask; a turn that cannot "
+        "reach HA should never hold the voice lock"
+    )
+
+
+def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
+    """
+    The cue reports the DEVICE's state, not a turn's outcome — it says the
+    wake word works and the controller is here and HA is not. Firing it only
+    when no other Echo took the utterance would make it disappear exactly on
+    the multi-device fleets where the confusion is worst.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def wake_word_listener"):]
+    stand = body.index("if not serves:")
+    tail  = body[stand:stand + 2000]
+    assert "_leds_turn_end(device)" in tail, "no cue on the stand-down path"
+    assert "record_dropped_wake" in tail, (
+        "the wake must still reach the activity history, or an HA outage is "
+        "indistinguishable from a device that heard nothing"
+    )
+
+
+def test_every_outcome_cue_names_a_scene_key_that_exists():
+    """
+    `device.led_scene.get(key)` falls through to a dark ring when the key is
+    wrong, so a typo here costs the cue silently — and only on the outcome
+    that is already the unusual one.
+    """
+    import em_scenes
+    src = (CONTROLLER / "em_controller.py").read_text()
+    block = src[src.index("_OUTCOME_ANIM = {"):]
+    block = block[:block.index("\n}")]
+    keys = re.findall(r':\s*"(\w+_anim)"', block)
+    assert keys, "no cue mappings found — did _OUTCOME_ANIM move?"
+    scene = em_scenes.resolve({})
+    for key in keys:
+        assert key in scene, f"_OUTCOME_ANIM names {key}, which no scene defines"

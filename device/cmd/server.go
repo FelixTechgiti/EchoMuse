@@ -184,7 +184,20 @@ func main() {
 	}
 
 	// Disconnected — orange pulse
-	var pulseCancel context.CancelFunc
+	//
+	// pulseKind is what the ring is CURRENTLY showing, and restarting a pulse
+	// that is already running is the bug it exists to prevent. OnDisconnected
+	// fires once per reconnect-loop iteration, not once per disconnection —
+	// so every retry used to cancel the goroutine mid-cycle and start a new
+	// one from phase zero, which is mid-brightness and rising. The ring ran
+	// roughly two smooth cycles and then hard-cut back to the middle, at an
+	// interval that is not a multiple of the pulse period, so the jump landed
+	// somewhere different each time. Reported as "like a poorly repeating
+	// gif" and it is exactly that: a loop being restarted, not a loop.
+	var (
+		pulseCancel context.CancelFunc
+		pulseKind   string
+	)
 	// Watch the ambient light sensor for step changes (a lamp switching on)
 	// and report them immediately; the steady-state value rides the ~30s
 	// stats tick. No-ops on a device without the sensor.
@@ -211,23 +224,34 @@ func main() {
 
 	controlClient.OnDisconnected(func() {
 		// Stop any device-local animation: the controller that owned it is
-		// gone, and the pulse below would otherwise fight its ticker.
+		// gone, and the pulse below would otherwise fight its ticker. Safe to
+		// repeat — StopAnim only bumps the animator generation, and the pulse
+		// paints through SetLEDs rather than the animator, so it is not what
+		// this cancels.
 		s.StopAnim()
+		if pulseKind == "orange" {
+			return // already pulsing; restarting is what breaks the cycle
+		}
 		if pulseCancel != nil {
 			pulseCancel()
 		}
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
+		pulseKind = "orange"
 		go pulseOrange(pulseCtx, s)
 	})
 
 	// Pending approval — slow white pulse
 	controlClient.OnPending(func() {
+		if pulseKind == "white" {
+			return
+		}
 		if pulseCancel != nil {
 			pulseCancel()
 		}
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
+		pulseKind = "white"
 		go pulseWhite(pulseCtx, s)
 	})
 
@@ -238,6 +262,7 @@ func main() {
 			pulseCancel()
 			pulseCancel = nil
 		}
+		pulseKind = ""
 		// Always report mute state on (re)connect — the controller may have
 		// restarted and lost its record of our state. Volume is only
 		// reported once the device holds an authoritative level (seeded
@@ -1021,26 +1046,40 @@ func allLEDs(r, g, b uint8) []led.Led {
 
 // ─── LED animations ───────────────────────────────────────────────────────────
 
+// pulsePhase returns the current point in a cycle of `period` that began at
+// `start`, as a fraction in [0,1).
+//
+// Elapsed time, not a step counter: a counter advances one step per tick
+// whether or not the tick was on time, so a delayed tick stretches that cycle
+// rather than skipping ahead within it — the ring slows down under load and
+// never catches up. animator.go's runPulse already works this way.
+func pulsePhase(start time.Time, period time.Duration) float64 {
+	return math.Mod(float64(time.Since(start))/float64(period), 1.0)
+}
+
 // pulseOrange — sine-wave orange pulse while disconnected from server.
+//
+// Started ONCE per disconnection, not once per reconnect attempt — see
+// pulseKind at the OnDisconnected call site. Cancelling and relaunching this
+// resets the phase to mid-brightness, which is visible as a stutter.
 func pulseOrange(ctx context.Context, s *server.Server) {
 	const (
-		minBr    = 0.05
-		maxBr    = 0.6
-		periodMs = 2000
-		stepMs   = 50
+		minBr  = 0.05
+		maxBr  = 0.6
+		period = 2000 * time.Millisecond
+		stepMs = 50
 	)
 	ticker := time.NewTicker(stepMs * time.Millisecond)
 	defer ticker.Stop()
-	step := 0
+	start := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t := float64(step) / float64(periodMs/stepMs)
+			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
-			step = (step + 1) % (periodMs / stepMs)
 		}
 	}
 }
@@ -1049,24 +1088,23 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 // Slower and dimmer than orange to be visually distinct.
 func pulseWhite(ctx context.Context, s *server.Server) {
 	const (
-		minBr    = 0.02
-		maxBr    = 0.35
-		periodMs = 3000 // slower than orange
-		stepMs   = 50
+		minBr  = 0.02
+		maxBr  = 0.35
+		period = 3000 * time.Millisecond // slower than orange
+		stepMs = 50
 	)
 	ticker := time.NewTicker(stepMs * time.Millisecond)
 	defer ticker.Stop()
-	step := 0
+	start := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t := float64(step) / float64(periodMs/stepMs)
+			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			v := uint8(255 * br)
 			s.SetLEDs(allLEDs(v, v, v), nil)
-			step = (step + 1) % (periodMs / stepMs)
 		}
 	}
 }

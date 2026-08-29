@@ -1743,3 +1743,72 @@ are **append-only and in ascending date order** — new work goes at the end.
   **A review finding was raised without checking what the code renders.** `recoveryHint()`'s `[3, 10, 11]` was flagged on #344 as a possible off-by-one because `install_magisk` "has no input". It has a file picker for the Magisk zip, and its error state already reads `SELECT A DIFFERENT FILE` (`dashboard.jsx:4482`). The contributor kept the indices and was right to; the correction went in the thread. The named-constant half of the suggestion stood, the correctness half did not.
 
   **#354, from reviewing #320 rather than from a failure.** The control-plane grace defers the four service releases but leaves `_devices.pop` running immediately, so for the length of the grace the device is absent from the registry while its ESPHome satellite is still registered with HA and accepting turns. A turn HA starts in that window ends `no_speech` — the outcome `pipeline_refused` exists specifically to avoid, since `no_speech` is persisted and reads as a silent user. The deeper point is that **the data plane's grace, which #320 says it mirrors, never removes the device at all**: it waits inside `send_data`. Deferring an action and simulating absence are different things, and only the first was wanted.
+
+---
+
+## 2026-08-29 — the echo reference we already had
+
+**Ch7 and Ch8 are not unconnected. They are a stereo loopback of the device's
+own playback — a hardware echo reference, always on, needing no mixer change.**
+Full measurements and the numbers are in SETUP.md's Mic Array section; this is
+the story of how it was found, because the shape of the mistake is worth more
+than the result.
+
+The investigation started from the wrong hypothesis and got there anyway.
+`Audio_ExtCodec_EchoRef_Switch` (mixer control 41, `Off`) looked like a
+hardware echo-reference route somebody had left disabled, and the plan was to
+flip it and see whether a dead channel woke up. **The switch turned out to be
+irrelevant** — every measurement was taken with it `Off` and flipping it moved
+the reference by 0.00001 RMS. What made the experiment work was not the switch
+but the control that came with it: play a tone, capture all nine channels, and
+look at what the two "unconnected" channels do. They were carrying the tone at
+full digital scale the whole time.
+
+**Three months of a wrong line in SETUP.md, on evidence that could not have
+said anything else.** The 2026-05 channel mapping used a phone pressed against
+each mic hole — an external source, with the Dot's own speaker silent. Ch7 and
+Ch8 read bit-exact zero under exactly those conditions, at every angle. The
+tell was arithmetic rather than acoustics and it had been sitting in the tool's
+own README since the beginning: four stereo TLV320ADC3101s give eight channels,
+and the capture is nine wide. Nobody had asked what the ninth was for.
+
+The proof is a coincidence too large to be one. The probe tone was generated at
+amplitude 20000 of 32767, so a sine at that scale has RMS `20000/32767/√2` =
+0.43160. Ch7 and Ch8 measured **0.43159**. That is the digital signal itself,
+five significant figures deep — it never went through a speaker, the air or a
+microphone. And with nothing playing they read bit-exact zero, which no
+microphone can do.
+
+**What it is worth is alignment, not signal quality.** The reference is the
+same bytes we already tap in software at the speaker ALSA write. The difference
+is that it arrives *in the same TDM frame as the mic samples*, so the
+far-end/near-end offset is fixed by hardware — measured at +33 samples (2.06ms,
+polarity-inverted) — instead of being inferred. `aecDelayMs`, the occupancy
+governor and the capture-stall trim logic all exist to approximate a number the
+hardware has been handing us for free.
+
+**The clipping test was the one that paid for itself, and it exonerated an
+earlier decision.** At DAC index 170 the centre mic's loudest component is
+3080Hz — the *seventh harmonic* of the 440Hz tone — while the reference stays a
+clean 439.9Hz. So above unity gain the reference shares almost no energy with
+the real echo, and an AEC built on it would collapse exactly where the echo is
+loudest. That regime is already unreachable: `DEVICE_VOLUME_MAX` caps the
+control at 127 for the distortion reason recorded under Volume. The ceiling put
+there to protect the ear turns out to protect the AEC as well.
+
+**Method note.** The analysis script was self-tested against a synthetic
+capture with a planted 96-sample delay and a known L/R split before it was
+allowed near hardware, and it recovered all three planted answers. It also
+carried a multi-line f-string that only parses on Python 3.12+, which would
+have failed on the machine it was written for — worth the two minutes it cost
+to check, given the alternative was a syntax error arriving in the middle of
+someone else's hardware session.
+
+**Still open:** what the hardware does with a genuine stereo input. With
+L=440Hz and R=1200Hz the centre mic was dominated by 1200Hz, which fits both
+"takes R, discards L" and "sums, and the driver strongly favours 1200Hz". The
+analyser prints only the top three FFT bins and one strong peak fills those
+with its own leakage, so a weaker 440Hz component would not have shown. It
+does not affect production — the wire is mono and the device duplicates L=R —
+but it decides which channel is the correct reference if that ever changes.
+
