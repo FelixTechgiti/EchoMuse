@@ -2422,6 +2422,37 @@ def get_status(device_id: str) -> Optional[dict]:
 
 # ─── Voice turn trigger ───────────────────────────────────────────────────────
 
+def can_serve_turn(device_id: str) -> bool:
+    """
+    Whether a voice turn started on this device right now could reach Home
+    Assistant.
+
+    THE SAME TWO CALLS `_start_esphome_voice_turn` REFUSES ON, deliberately —
+    a caller standing a device down on a second opinion assembled from flags
+    beside them could disagree with the decision it is predicting, which is
+    the `get_status` rule one step further out. Callers use it to stand a
+    device down BEFORE it takes an arbitration claim or holds the voice lock,
+    so an Echo with nothing behind it cannot silence one that could answer.
+    """
+    server = _servers.get(device_id)
+    return server is not None and server.get_satellite() is not None
+
+
+async def record_dropped_wake(device, trigger_label: str, wake_info) -> None:
+    """
+    Record a wake that never became a turn because the device has no HA
+    behind it, and arm the ring cue for it.
+
+    The turn path reaches `_record_dropped_turn` by starting a turn and
+    finding nothing there; this is the same event caught one step earlier,
+    where the device stands down before holding the voice lock. Both must
+    record it, or wakes during an HA outage vanish from the activity history
+    depending on which path noticed — the events most worth seeing in a trend
+    review, distinguishable from a device that heard nothing only by this row.
+    """
+    await _record_dropped_turn(device, trigger_label, wake_info)
+
+
 async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     """
     Persist a stub record for a turn that never started (no ESPHome server /

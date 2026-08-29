@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.22.0-ea.6 (Early Access)
+
+**An Echo with no Home Assistant connection now says so every time you speak to
+it.** One fix, correcting ea.5.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The orange flash did not appear if another Echo answered
+
+ea.5 added an orange double flash for an Echo that hears you with no Home
+Assistant behind it. It only appeared when that Echo was the one running the
+turn — so on a house with more than one, the flash vanished exactly when it was
+most needed. Stand in front of the disconnected Echo, say the wake word, and if
+a second Echo elsewhere took the utterance, the one in front of you lit its ring
+and went dark with no explanation, while a different room answered.
+
+The flash is not a report on the turn. It is the Echo telling you three things
+about itself: the wake word is working, the controller is connected, and Home
+Assistant is not. None of that depends on what any other Echo did, so it now
+shows every time, and still clears itself after a second rather than sitting
+there lit.
+
+The button does the same. It is the control people reach for when the wake word
+seems to have done nothing, so it was the worst one to answer with silence.
+
+### An Echo without Home Assistant no longer takes the turn at all
+
+It now steps aside as soon as it hears the wake word, before deciding which Echo
+answers, rather than claiming the utterance and failing a moment later. On a
+single-Echo setup you will see no difference beyond the flash. On several, it
+means a disconnected Echo can no longer take an answer away from one that was
+ready — including when it is the nearer of the two, which is the case that used
+to lose you the reply entirely.
+
+The wake still appears in the device's activity history, so an outage remains
+visible afterwards rather than looking like an Echo that never heard anything.
+
 ## 2.22.0-ea.5 (Early Access)
 
 **The Echo now tells you when there is nothing to answer you.** Two fixes, both
