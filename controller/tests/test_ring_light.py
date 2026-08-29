@@ -216,3 +216,115 @@ def test_the_shipped_default_leaves_the_ring_dark():
     """
     assert R.painted_rgb(em_db.DEFAULT_DEVICE_CONFIG["idleRing"],
                          em_db.DEFAULT_DEVICE_CONFIG["idleRingBrightness"]) is None
+
+
+# ── notifications, as light effects ───────────────────────────────────────
+
+def test_none_and_unknown_effects_play_nothing():
+    """
+    The effect list is API surface HA caches, so a name from an older or
+    newer controller can arrive at any time. It has to read as "nothing to
+    play" rather than raise inside a message handler.
+    """
+    assert R.effect_anim(R.EFFECT_NONE, "#ff0000") is None
+    assert R.effect_anim("Disco Inferno", "#ff0000") is None
+    assert R.effect_seconds("Disco Inferno") == 0.0
+    assert R.EFFECTS[0] == R.EFFECT_NONE, \
+        "HA expects the no-effect entry first"
+
+
+def test_every_effect_carries_a_ttl_the_device_can_clear_itself_on():
+    """
+    The TTL is a dead-man switch: a controller that dies mid-notification
+    must leave a ring that clears itself, not one stuck pulsing. 1s is the
+    floor the firmware supports (see em_scenes' ack_anim).
+    """
+    for name in R.EFFECTS[1:]:
+        anim = R.effect_anim(name, "#00ff00")
+        assert anim is not None, f"{name} is advertised but plays nothing"
+        assert anim["ttlSec"] >= 1, f"{name} has no dead-man TTL"
+        assert anim["ttlSec"] == R.effect_seconds(name), (
+            f"{name}: the controller waits {R.effect_seconds(name)}s before "
+            f"repainting but the device clears at {anim['ttlSec']}s — the "
+            f"ring would be dark in the gap"
+        )
+
+
+def test_a_notification_uses_the_stored_colour_at_full_brightness():
+    """
+    A notification is meant to be noticed. A ring resting at 10% would
+    deliver one nobody sees, and one that is switched OFF would deliver
+    nothing at all — which is why the colour is stored independently of the
+    brightness in the first place.
+    """
+    assert R.effect_anim("Notify", "#ff8000")["colors"] == [[255, 128, 0]]
+    # Brightness is not an input here at all: there is nothing to pass.
+    assert R.painted_rgb("#ff8000", 0) is None, \
+        "the ring is off, and the notification still plays at full colour"
+
+
+def test_effects_are_advertised_only_where_the_device_can_render_them():
+    """
+    These are led_anim specs the DEVICE renders on its own ticker. Offering
+    the dropdown to firmware that cannot run one puts a control in front of
+    someone whose selection silently does nothing.
+    """
+    # Anchored on `effects=` and read forward, not on a bracket match: the
+    # first ")" after it closes `list(em_ring_light.EFFECTS)`, not the
+    # entity declaration, so bracket-counting here found the wrong end and
+    # failed as BROKEN rather than as this invariant being violated. The
+    # invariant has no opinion about how the list is spelled.
+    src   = _strip_py_comments((CONTROLLER / "em_esphome.py").read_text())
+    decl  = src.index("ListEntitiesLightResponse(")
+    field = src.index("effects=", decl)
+    assert 'self._device_has("led_anim")' in src[field:field + 250], \
+        "the effect list must be gated on led_anim"
+
+
+def test_an_effect_does_not_change_the_resting_ring():
+    """
+    HA sends `light.turn_on` with `effect:` — state=on rides in the same
+    message. Folding that in the ordinary way would mean every notification
+    also switched the resting ring on permanently, so an automation that
+    blinks the ring at sunset would leave it lit all night.
+    """
+    src = _strip_py_comments((CONTROLLER / "em_esphome.py").read_text())
+    handler = src[src.index("LightCommandRequest)"):]
+    handler = handler[:handler.index("VoiceAssistantAnnounceRequest")]
+    effect_at = handler.index("effect_anim(")
+    fold_at   = handler.index("apply_command(")
+    assert effect_at < fold_at, \
+        "the effect branch must be decided before the state is folded"
+    between = handler[effect_at:fold_at]
+    assert "return" in between, \
+        "an effect must RETURN, not fall through into the state folding"
+
+
+def test_the_light_state_never_reports_a_running_effect():
+    """
+    A one-shot already handed to the device and self-clearing on its TTL.
+    Reporting it as active leaves HA showing an effect selected long after
+    the ring went quiet — a state someone then has to clear by hand.
+    """
+    src = _strip_py_comments((CONTROLLER / "em_esphome.py").read_text())
+    body = src[src.index("def _light_state_msg"):]
+    body = body[:body.index("def ", body.index("LightStateResponse"))]
+    assert "effect=em_ring_light.EFFECT_NONE" in body, \
+        "the state must report no effect running"
+
+
+def test_a_notification_stands_down_while_a_turn_owns_the_ring():
+    """
+    Painting over the listening ring tells the user the device stopped
+    listening when it did not, and the ring is the only thing saying so.
+    Checked twice: before playing, and again after the wait, so a
+    notification that overlapped the start of a turn does not paint over
+    that turn's ring on its way out.
+    """
+    src  = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def _play_ring_effect"):]
+    body = _strip_py_comments(body[:body.index("esphome.device_connected")])
+    assert body.count("_d.speaking or _d.thinking or _d.listening") == 2, \
+        "the turn check belongs both before the anim and after the wait"
+    assert "_d.led_anim_capable" in body, \
+        "firmware that cannot animate locally must be refused, not sent one"

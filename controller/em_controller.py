@@ -3358,6 +3358,35 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     f"[{_d.device_id}] Ring light not persisted: {e}")
             if not (_d.speaking or _d.thinking or _d.listening):
                 await leds_idle(_d)
+        async def _play_ring_effect(anim: dict, seconds: float,
+                                    _d=_device_ref) -> None:
+            """
+            Play a one-shot notification on the ring, then put it back.
+
+            Refused while a turn owns the ring. A notification that paints
+            over the listening ring tells the user the device stopped
+            listening when it did not, and the ring is the ONLY thing saying
+            so — there is no second indicator to fall back on. Refusing is
+            visible in the log; stomping would not be.
+
+            The anim carries its own TTL, so the device clears it whatever
+            happens here. The sleep is only about when the RESTING colour
+            comes back, and the re-check after it is what stops a
+            notification that overlapped the start of a turn from painting
+            over that turn's ring on the way out.
+            """
+            if not _d.led_anim_capable:
+                return
+            if _d.speaking or _d.thinking or _d.listening:
+                log.info(
+                    f"[{_d.device_id}] Ring effect skipped — a turn owns "
+                    f"the ring"
+                )
+                return
+            await _d.send_led_anim(anim)
+            await asyncio.sleep(seconds)
+            if not (_d.speaking or _d.thinking or _d.listening):
+                await leds_idle(_d)
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -3370,6 +3399,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             set_idle_ring=_set_idle_ring,
+            play_ring_effect=_play_ring_effect,
         )
         # Seed HA's light entity from the stored row, so it reads the colour
         # the ring is actually resting at rather than the default.
