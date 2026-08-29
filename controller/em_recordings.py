@@ -75,8 +75,23 @@ def recordings_dir(db_path: str | None = None) -> Path:
 
 
 def safe_device_id(device_id: str) -> str | None:
-    """The device id as a path component, or None if it isn't one."""
-    if device_id and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", device_id):
+    """
+    The device id as a path component, or None if it isn't one.
+
+    "." and ".." are rejected explicitly. They pass the character class —
+    both are made only of dots — and they are the two strings that are not
+    path components at all but directory references.
+
+    Nothing today would escape on them: every caller embeds the result in
+    `<id>_<turn>.wav` rather than using it as a path segment, so ".." became
+    the ordinary filename ".._7.wav". This closes the gap between what the
+    function PROMISES and what it checks, because the first caller to do the
+    obvious thing — `recordings_dir() / safe` — would climb out of the
+    recordings directory, and would look correct doing it.
+    """
+    if not device_id or device_id in (".", ".."):
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", device_id):
         return device_id
     return None
 

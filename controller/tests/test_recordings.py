@@ -171,3 +171,31 @@ def test_delete_device_removes_only_its_own(tmp_path):
     assert rec.delete_device("dev1", db) == 3
     assert rec.list_for("dev1", db) == []
     assert len(rec.list_for("dev2", db)) == 3
+
+
+def test_dot_and_dotdot_are_not_device_ids():
+    """
+    Both pass the character class — they are made only of dots — and both
+    are directory references rather than path components, which is what
+    this function claims to return.
+
+    Nothing escapes on them today: every caller embeds the result in
+    `<id>_<turn>.wav`, so ".." became the ordinary filename ".._7.wav".
+    The rejection closes the gap between the promise and the check, because
+    the first caller to do the obvious thing — `recordings_dir() / safe` —
+    would climb out of the recordings directory and look correct doing it.
+    """
+    assert rec.safe_device_id("..") is None
+    assert rec.safe_device_id(".") is None
+    # Dots elsewhere are still fine — real ids contain them.
+    assert rec.safe_device_id("...") == "..."
+    assert rec.safe_device_id("a..b") == "a..b"
+    assert rec.safe_device_id("G090LF11.7460.0MDT") == "G090LF11.7460.0MDT"
+
+
+def test_a_dotdot_device_id_can_name_no_file_at_all():
+    """The whole surface, not just the helper: nothing downstream may build
+    a name from a rejected id."""
+    assert rec.filename("..", 7) is None
+    assert rec.resolve("..", ".._7.wav") is None
+    assert rec.list_for("..") == []
