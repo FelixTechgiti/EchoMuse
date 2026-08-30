@@ -197,6 +197,29 @@ type DataClient struct {
 	shadowMu     sync.Mutex
 	shadowScorer *shadow.Scorer
 
+	// Hardware echo reference detection (#385). Ch8 of the mic capture is a
+	// loopback of the device's own playback on biscuit, arriving in the same
+	// TDM frame as the mic samples, which makes it a far-end reference that
+	// needs no alignment. Touched only from the mic goroutine.
+	//
+	// DETECTED, NEVER ASSUMED, and the discriminator is deliberately narrow:
+	// a reference channel is BIT-EXACT ZERO when nothing is playing and
+	// carries audio when something is, and only both facts together confirm
+	// it. "Has energy" alone would promote a genuine microphone on a board
+	// that wires ch8 differently, and cancelling the near-end against
+	// another mic is far worse than not cancelling at all. A board that
+	// fails either test simply keeps the software tap.
+	hwRefSeenSilent bool
+	hwRefSeenAudio  bool
+	hwRefOn         bool
+
+	// hwRefMode is the operator's override, config.AecRef{Auto,HW,SW}. It
+	// is the ONE field here written from another goroutine — the control
+	// plane, on every config push — so it is atomic while the rest stay
+	// plain: they are the detector's own state and never leave the mic
+	// goroutine.
+	hwRefMode atomic.Int32
+
 	// pipeMu serialises access to beam and proc, which hold unsynchronised
 	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
 	// Both are normally touched by a single streamMic goroutine, but a
@@ -214,7 +237,7 @@ type DataClient struct {
 // runs its near-end side on the mono mic stream. Disabled cancellers pass
 // audio through untouched.
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
-	return &DataClient{
+	d := &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
 		spk:      spk,
@@ -223,6 +246,101 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		proc:     processor.New(),
 		aec:      canceller,
 	}
+	// Seeded from the env default so a device that never reaches a
+	// controller still honours EM_AEC_HW_REF; the first config push
+	// supersedes it (SetAecRefSource).
+	d.hwRefMode.Store(aecRefModeOf(config.Get().Snapshot().AecRefSource))
+	return d
+}
+
+// Far-end reference override, as an int so it can be atomic. Mirrors
+// config.AecRef{Auto,HW,SW} — converted once on the control goroutine rather
+// than string-compared per period on the mic goroutine.
+const (
+	hwRefAuto int32 = iota
+	hwRefForceHW
+	hwRefForceSW
+)
+
+func aecRefModeOf(v string) int32 {
+	switch v {
+	case config.AecRefHW:
+		return hwRefForceHW
+	case config.AecRefSW:
+		return hwRefForceSW
+	default:
+		return hwRefAuto
+	}
+}
+
+// SetAecRefSource applies the operator's far-end reference override. Called
+// from the control goroutine on every config push; a no-op when unchanged.
+//
+// The SWITCH itself is left to the mic goroutine (noteEchoRef), which owns
+// the canceller's source. Flipping it here would race a period already
+// mid-flight: ProcessWithRef checks the canceller's own hwRef flag, and
+// changing that between the caller's extraction and the call turns a
+// perfectly good reference into a "missing or mismatched" pass-through.
+func (d *DataClient) SetAecRefSource(v string) {
+	mode := aecRefModeOf(v)
+	if d.hwRefMode.Swap(mode) == mode {
+		return
+	}
+	log.Printf("[aec] far-end reference source: %s", v)
+}
+
+// noteEchoRef feeds one period of the candidate reference channel to the
+// detector and reports whether the hardware path should be used for it.
+//
+// Confirmation is one-way. Once ch8 has been seen both bit-exact silent and
+// carrying audio, it is a reference and stays one: the alternative is a
+// device that flips sources mid-stream every time the room goes quiet, which
+// throws away a converged filter for nothing.
+func (d *DataClient) noteEchoRef(ref []byte) bool {
+	switch d.hwRefMode.Load() {
+	case hwRefForceSW:
+		// Reversible, unlike the auto latch below: this is somebody running
+		// an A/B, and a pin that could not be undone without a reboot would
+		// make the comparison a one-way trip.
+		if d.hwRefOn {
+			d.hwRefOn = false
+			d.aec.SetHardwareRef(false)
+		}
+		return false
+	case hwRefForceHW:
+		if !d.hwRefOn {
+			d.hwRefOn = true
+			d.aec.SetHardwareRef(true)
+		}
+		return true
+	}
+	if d.hwRefOn {
+		return true
+	}
+	if ref == nil {
+		return false
+	}
+	silent := true
+	for _, b := range ref {
+		if b != 0 {
+			silent = false
+			break
+		}
+	}
+	if silent {
+		d.hwRefSeenSilent = true
+	} else {
+		d.hwRefSeenAudio = true
+	}
+	if d.hwRefSeenSilent && d.hwRefSeenAudio {
+		d.hwRefOn = true
+		d.aec.SetHardwareRef(true)
+		log.Printf("[aec] ch8 confirmed as the playback loopback " +
+			"(bit-exact silent when idle, audio when playing) — " +
+			"using the frame-aligned hardware reference")
+		return true
+	}
+	return false
 }
 
 // OnDirectionChanged registers a callback invoked when the estimated dominant
@@ -768,12 +886,30 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
 
-			// AEC — subtract the speaker's own output (reference tapped at
-			// the ALSA write, aligned by aecDelayMs) before anything
+			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
 			// (Has its own mutex — inside pipeMu only for lock ordering
 			// simplicity; aec.mu is a leaf lock, no inversion possible.)
-			mono = d.aec.Process(mono)
+			//
+			// Two far-end sources (#385). The hardware reference is ch8 of
+			// THIS SAME PERIOD — the device's own playback, looped back in
+			// the same TDM frame — so near and far end are aligned by
+			// construction and aecDelayMs, the ring and the occupancy
+			// governor are all bypassed. The software tap at the speaker
+			// ALSA write remains the fallback for any board where ch8 does
+			// not prove itself; see noteEchoRef for what counts as proof.
+			// Only extract when cancellation is actually armed: the AEC
+			// defaults to off, and this is an allocation and a copy per
+			// period on the deadline-bound mic goroutine.
+			var echoRef []byte
+			if d.aec.Enabled() {
+				echoRef = d.beam.EchoRef(raw)
+			}
+			if echoRef != nil && d.noteEchoRef(echoRef) {
+				mono = d.aec.ProcessWithRef(mono, echoRef)
+			} else {
+				mono = d.aec.Process(mono)
+			}
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is

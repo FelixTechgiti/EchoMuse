@@ -108,7 +108,7 @@ func main() {
 	ctx := context.Background()
 
 	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller) // arm from env defaults before any config push
+	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
 	dataClient.OnDirectionChanged(func(angle float64) {
@@ -290,6 +290,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -314,7 +315,7 @@ func main() {
 		if msg.StartupVolume > 0 {
 			s.SeedVolume(msg.StartupVolume)
 		}
-		applyAecConfig(canceller)
+		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
@@ -425,7 +426,23 @@ func main() {
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
+		// The hardware echo reference is tapped upstream of the DAC volume
+		// control, so it holds full scale whatever the user sets. Tell the
+		// canceller the scalar it cannot see, or every volume change is an
+		// echo-path gain step the adaptive filter can only find by
+		// re-converging — measured on 2026-08-29 as cancellation dropping to
+		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
+		canceller.SetPlaybackLevel(level)
 	})
+	// Seed it from where the device actually is, right now. The callback
+	// above only fires on a CHANGE, and the two things that would produce
+	// one at startup both have holes: SeedVolume is skipped entirely when
+	// the controller pushes startupVolume=0 (a device it has no record
+	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
+	// it and refScale stays 0 — read as unity — while the codec sits at
+	// whatever level the previous run left behind, which is round one's
+	// 33dB-hot reference reappearing on a device nobody touched.
+	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
 	// Calls Set() which applies tinymix, updates LEDs, and fires the change
@@ -487,6 +504,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -870,7 +888,7 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
 // filter state is meaningless across a timing change anyway).
-func applyAecConfig(canceller *aec.Canceller) {
+func applyAecConfig(canceller *aec.Canceller, dataClient *client.DataClient) {
 	snap := config.Get().Snapshot()
 	enabled := snap.AecEnabled != nil && *snap.AecEnabled
 	delayMs := 250
@@ -878,6 +896,10 @@ func applyAecConfig(canceller *aec.Canceller) {
 		delayMs = *snap.AecDelayMs
 	}
 	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+	// The reference SOURCE lives on the data client, not the canceller: it
+	// is the mic goroutine that extracts ch8 and decides per period whether
+	// to hand it over, so that goroutine has to own the switch.
+	dataClient.SetAecRefSource(snap.AecRefSource)
 }
 
 // applyBleConfig starts/stops the BLE proxy scanner from the current
