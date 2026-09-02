@@ -32,7 +32,7 @@ const (
 	// device announcing "audio_mix".
 	frameTypeMusic    = byte(0x04)
 	frameTypeMusicEOS = byte(0x05)
-	frameTypeVADEnd  = byte(0x04)
+	frameTypeVADEnd   = byte(0x04)
 	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
 	// was ever detected — distinct from frameTypeVADEnd (speech detected,
 	// then ended). Sent when noSpeechTimeout elapses with active==false the
@@ -43,6 +43,21 @@ const (
 	// why the controller had no way to short-circuit the former without
 	// risking mishandling the latter.
 	frameTypeNoSpeechTimeout = byte(0x05)
+	// frameTypeBleAdverts carries a batch of scanned BLE advertisements to
+	// the controller, as the same JSON body the control plane used to take
+	// (#404). It is here rather than there because the control WebSocket is
+	// where liveness is measured: SendBleAdverts wrote through connMu on the
+	// control connection, the same mutex and TCP stream as the RTT echo and
+	// the keepalive pong, so bulk telemetry head-of-line-blocked the channel
+	// we judge a device's health on. Measured by crossover on 2026-09-01 —
+	// the proxy moved between two Dots on one desk and took the excursions
+	// with it, 2.64/min against 2.49/min on different hardware.
+	//
+	// Only sent when the controller announced `ble_adverts_data` on the ack.
+	// An older controller ignores unknown frame types, so sending it
+	// unnegotiated would drop every advertisement in silence — a worse fault
+	// than the one being fixed.
+	frameTypeBleAdverts = byte(0x06)
 )
 
 // ─── WebSocket keepalive (data + control) ─────────────────────────────────────
@@ -400,6 +415,74 @@ func (d *DataClient) RequestBeamLock() {
 // return to ch6 omni. Safe to call from any goroutine.
 func (d *DataClient) RequestBeamUnlock() {
 	atomic.StoreInt32(&d.beamReq, beamReqUnlock)
+}
+
+// SendBleAdverts writes one batch of scanned advertisements to the data plane
+// as a frameTypeBleAdverts frame. Returns false when the batch was not sent,
+// which the caller uses to decide nothing further — adverts are ephemeral and
+// there is no retry worth building for them.
+//
+// Two refusals, both deliberate:
+//
+//   - No connection. The batch is DROPPED, never failed back to the control
+//     plane. Falling back would put bulk telemetry onto the liveness channel
+//     exactly when the link is already struggling, which is the fault this
+//     moved to avoid. The device's own scanner will not go quiet for longer
+//     than emitGlobalMaxSilence (30s) and Home Assistant retires a scanner
+//     after 90s of silence, against a data reconnect measured in seconds.
+//   - A BOUNDED TURN is streaming (lockMic). A turn's audio is worth more
+//     than a beacon refresh Home Assistant tolerates for 195 seconds, and a
+//     turn lasts seconds, so nothing downstream notices.
+//
+// The second one must test lockMic and NOT micActive, and the difference is
+// the whole proxy. The always-on wake stream is exactly that — always on, for
+// every device scoring its wake word controller-side — so `micActive` is true
+// essentially permanently and gating on it drops every batch forever, with no
+// error at either end. That is the silent failure the ack negotiation exists
+// to prevent, one branch below it.
+//
+// It is a narrow rule on purpose. An advert batch is a few hundred bytes
+// against ~32KB/s of mic audio, so the yield buys little; the control plane
+// suffered because adverts contended for `connMu` with the keepalive pong and
+// because RTT is MEASURED on that stream, and neither is true here. This is
+// admission control, not a scheduler: within one TCP stream a frame already
+// written cannot be preempted, so the only real choice is what to write and
+// when.
+// advertsYieldToTurn reports whether a BOUNDED turn is streaming, in which
+// case adverts wait. Split out so the decision can be tested without a
+// socket — and because testing a copy of it in the test file would pass
+// while this one said something else.
+func (d *DataClient) advertsYieldToTurn() bool {
+	d.micMu.Lock()
+	defer d.micMu.Unlock()
+	// micActive alone is NOT the question: the always-on wake stream keeps it
+	// true permanently on any device scoring controller-side.
+	return d.micActive && d.micWantedLock
+}
+
+func (d *DataClient) SendBleAdverts(payload []byte) bool {
+	if d.advertsYieldToTurn() {
+		return false
+	}
+
+	d.connMu.Lock()
+	defer d.connMu.Unlock()
+	if d.conn == nil {
+		return false
+	}
+	frame := make([]byte, 1+len(payload))
+	frame[0] = frameTypeBleAdverts
+	copy(frame[1:], payload)
+	d.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	if err := d.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		log.Printf("[data] ble adverts: send error: %v", err)
+		// Same reasoning as streamMic's sendFrame: a write error leaves the
+		// gorilla conn permanently broken, so close it and let Run() redial
+		// rather than waiting out the read deadline.
+		d.conn.Close()
+		return false
+	}
+	return true
 }
 
 func (d *DataClient) StartMic(lockMic bool) {
