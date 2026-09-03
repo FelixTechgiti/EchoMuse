@@ -23,8 +23,8 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
-	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
@@ -95,6 +95,13 @@ func main() {
 	srvPtr.Store(s)
 
 	buttonController.SetVolumeCallback(func(direction string) {
+		// Inert without a controller: nothing is playing to be louder or
+		// quieter, and showing the arc would acknowledge a device that
+		// cannot act. The mute button stays live — see Server.SetLinkDown.
+		if s.LinkDown() {
+			log.Println("[cmd] volume button ignored — no controller session")
+			return
+		}
 		if direction == "up" {
 			s.VolumeStepUp()
 		} else {
@@ -108,7 +115,7 @@ func main() {
 	ctx := context.Background()
 
 	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller) // arm from env defaults before any config push
+	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
 	dataClient.OnDirectionChanged(func(angle float64) {
@@ -146,10 +153,28 @@ func main() {
 		s.StartAnim(spec)
 	})
 
-	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded
-	// to the controller on the control plane. Armed from env defaults here
-	// and toggled live on config push (bleProxyEnabled, applyBleConfig).
+	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded to
+	// the controller on the DATA plane where the controller can read them
+	// there, and on the control plane otherwise (#404). Armed from env
+	// defaults here and toggled live on config push (bleProxyEnabled,
+	// applyBleConfig).
+	//
+	// The plane is chosen per batch rather than once at registration: the
+	// control connection can drop and re-register against a different
+	// controller without this callback being rebuilt, and a stale choice
+	// would either strand the adverts or put them back on the liveness
+	// channel. It is two map reads on a path that runs a few times a second.
 	bleScanner := bluetooth.NewScanner(func(batch []bluetooth.Advert) {
+		if controlClient.HasFeature(client.FeatureBleAdvertsData) {
+			payload, err := json.Marshal(map[string]interface{}{"adverts": batch})
+			if err != nil {
+				log.Printf("[cmd] ble adverts: marshal failed: %v", err)
+				return
+			}
+			// Dropped rather than falling back: see DataClient.SendBleAdverts.
+			dataClient.SendBleAdverts(payload)
+			return
+		}
 		controlClient.SendBleAdverts(batch)
 	})
 	applyBleConfig(bleScanner)
@@ -157,6 +182,15 @@ func main() {
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Inert without a controller session: the dot cannot start a turn
+		// with nothing to send it to, and the ring flash CancelVolumeDisplay
+		// produces would acknowledge a press that achieves nothing. Dropped
+		// here rather than at the binding — the binding is the portable
+		// hardware layer and knows nothing about sessions.
+		if s.LinkDown() {
+			log.Println("[cmd] action button ignored — no controller session")
+			return
+		}
 		// Muted presses are FORWARDED, with the mute state attached, and the
 		// controller decides what the gesture is allowed to do. Dropping them
 		// here was right while the dot button meant only "start a voice turn";
@@ -238,6 +272,10 @@ func main() {
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
 		pulseKind = "orange"
+		// Ring belongs to the link state from here, and the action/volume
+		// buttons go inert. Set BEFORE the pulse starts, or its first frames
+		// are swallowed by the mute suppression on a muted device.
+		s.SetLinkDown(true)
 		go pulseOrange(pulseCtx, s)
 	})
 
@@ -252,6 +290,10 @@ func main() {
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
 		pulseKind = "white"
+		// Pending approval is the same condition one step earlier: there is
+		// nothing above this device, so the white pulse owns the ring and the
+		// buttons do nothing.
+		s.SetLinkDown(true)
 		go pulseWhite(pulseCtx, s)
 	})
 
@@ -263,6 +305,9 @@ func main() {
 			pulseCancel = nil
 		}
 		pulseKind = ""
+		// Session restored: the ring goes back to the controller, the mute
+		// ring reasserts below if it applies, and the buttons work again.
+		s.SetLinkDown(false)
 		// Always report mute state on (re)connect — the controller may have
 		// restarted and lost its record of our state. Volume is only
 		// reported once the device holds an authoritative level (seeded
@@ -290,6 +335,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -314,7 +360,7 @@ func main() {
 		if msg.StartupVolume > 0 {
 			s.SeedVolume(msg.StartupVolume)
 		}
-		applyAecConfig(canceller)
+		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
@@ -425,7 +471,23 @@ func main() {
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
+		// The hardware echo reference is tapped upstream of the DAC volume
+		// control, so it holds full scale whatever the user sets. Tell the
+		// canceller the scalar it cannot see, or every volume change is an
+		// echo-path gain step the adaptive filter can only find by
+		// re-converging — measured on 2026-08-29 as cancellation dropping to
+		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
+		canceller.SetPlaybackLevel(level)
 	})
+	// Seed it from where the device actually is, right now. The callback
+	// above only fires on a CHANGE, and the two things that would produce
+	// one at startup both have holes: SeedVolume is skipped entirely when
+	// the controller pushes startupVolume=0 (a device it has no record
+	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
+	// it and refScale stays 0 — read as unity — while the codec sits at
+	// whatever level the previous run left behind, which is round one's
+	// 33dB-hot reference reappearing on a device nobody touched.
+	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
 	// Calls Set() which applies tinymix, updates LEDs, and fires the change
@@ -487,6 +549,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -870,7 +933,7 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
 // filter state is meaningless across a timing change anyway).
-func applyAecConfig(canceller *aec.Canceller) {
+func applyAecConfig(canceller *aec.Canceller, dataClient *client.DataClient) {
 	snap := config.Get().Snapshot()
 	enabled := snap.AecEnabled != nil && *snap.AecEnabled
 	delayMs := 250
@@ -878,6 +941,10 @@ func applyAecConfig(canceller *aec.Canceller) {
 		delayMs = *snap.AecDelayMs
 	}
 	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+	// The reference SOURCE lives on the data client, not the canceller: it
+	// is the mic goroutine that extracts ch8 and decides per period whether
+	// to hand it over, so that goroutine has to own the switch.
+	dataClient.SetAecRefSource(snap.AecRefSource)
 }
 
 // applyBleConfig starts/stops the BLE proxy scanner from the current

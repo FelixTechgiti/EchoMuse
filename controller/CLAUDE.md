@@ -415,6 +415,43 @@ wizard timing out — it would not have: the wizard's connection test does not
 wait on this message, it fires when the device fetches
 `CONNECTION_TEST_URL_BASE`.
 
+**Announce-then-listen is the SAME message with field 4 set** (#335, #396).
+`assist_satellite.start_conversation` and `assist_satellite.ask_question` both
+reach us as `VoiceAssistantAnnounceRequest` with `start_conversation=True`;
+`preannounce_media_id` (field 3) is the attention chime, and both were carried
+by the vendored protobuf and read by nothing. Four rules:
+
+- **HA filters eligible targets on `VoiceAssistantFeature.START_CONVERSATION`**,
+  so without that bit the device does not appear in the action's target picker
+  at all — no error, an empty list. It is advertised **per device**, gated on
+  the `mic` capability (`_voice_assistant_flags`), which is the only reason the
+  rest of `VOICE_ASSISTANT_FLAGS` being a module constant is a gap rather than a
+  bug. That gating works only because `set_device_capabilities` bounces the HA
+  connection when the set changes: the flags ride `DeviceInfoResponse`, a
+  one-shot at connect.
+- **Listen AFTER `AnnounceFinished`, not before.** HA blocks on it for the whole
+  announcement, and `async_internal_ask_question` arms its answer future only
+  once `async_start_conversation` returns.
+- **`ask_question` truncates HA's own pipeline at STT** — it sets
+  `end_stage = STT`, keyed on that future — so the run ends after `STT_END` with
+  **no `INTENT_END` and no TTS**, which the `RUN_END` guard above waits for.
+  Without `_answer_only`, every question was answered correctly and then parked
+  the device on the 30s TTS wait and recorded a timeout. The flag is derived
+  from the trace's own trigger label so it cannot disagree with the stats, and
+  the outcome is `answered`, not `no_tts`: the transcript IS the deliverable.
+- **A muted device runs the turn anyway, and that is deliberate.**
+  `async_internal_ask_question` awaits its answer future with **no timeout**, so
+  a satellite that refuses by staying silent hangs the caller's script for good.
+  The mute is enforced where it always was — the device rejects every
+  `mic_start` while muted and the ADC is muted in hardware — so nothing is
+  captured, the streaming phase gives up at its cap, and HA ends the run with no
+  answer. Refusing controller-side is the change that looks safer and is worse.
+
+The turn is the button turn with a different label (`CONVERSATION_TRIGGER`,
+`preroll_discard=0`, `is_wakeword=False`). It must **not** borrow "button" or a
+"wakeword(…)" label — the dashboard groups wake statistics by it, and
+`wake_word_phrase` is keyed on the prefix.
+
 **`cancel_event` must be cleared by anything that starts playing, not just a
 voice turn.** It is set by a cancel (a button press mid-turn, a mute) and was
 cleared *only* at voice-turn start, so a cancelled turn silently killed every
@@ -648,7 +685,54 @@ Two guards sit in front of that, both tested by reintroducing the bug:
     **A device with no HA behind it stands down BEFORE arbitration, and never runs the turn at all** (`em_esphome.can_serve_turn`, the same `get_server`/`get_satellite` pair `trigger_voice_turn` refuses on, so a device counted as able cannot turn out to be unable a tick later). Detection order is a **proximity** proxy and says nothing about whether HA has ever dialled that device's satellite port, so unqualified first-detector-wins hands the utterance to an unlinked Echo, stands down the linked one, and the winner then dies `no_ha` in milliseconds: nothing answers, and the device that could have is the one that went dark. Measured on the fleet 2026-08-29 — a device scoring **0.912** lost to one scoring 0.609 that crossed 449ms earlier, so loudness and detection order do genuinely disagree; that is one observation and not a case for reopening best-SNR, which stays settled. The ordering is the guard: a check after the claim leaves the claim taken, and `tests/test_deploy.py` pins that `can_serve_turn` precedes `_wake_arbiter.claim` and gates it. `em_arbiter` deliberately does **not** know about any of this — a second copy of the rule is one that can disagree with the first.
 
     **The stand-down still records the wake and still plays the cue, every time** (`em_esphome.record_dropped_wake` + `_leds_turn_end`). Both matter for the same reason the row exists on the turn path: a wake during an HA outage that leaves no trace is indistinguishable from a device that heard nothing. And the cue reports the **device's state, not a turn's outcome**, so it fires whether or not another Echo took the utterance — gating it on losing would make it vanish exactly on the multi-device fleets where the confusion is worst. That is the correction to the first version of this, which only cued when the device ran its own doomed turn: standing in front of an unlinked Echo, you got a ring that lit and went dark while another room answered, which reads as a broken cue (Wil, 2026-08-29). The button path stands down identically — it is the control someone reaches for when the wake word appeared to do nothing, so silence there is the worst version of the bug.
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames. `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames, **paced to `VOICE_LEAD_S`=4.0s ahead of realtime** (see below). `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+
+## Pacing: why the voice stream is held 4s ahead, not sent as fast as it can go
+
+**The voice path used to send every period as fast as the socket accepted, and
+that cut long responses off mid-sentence.** The chain is mechanical, and every
+link is in the code:
+
+1. `stream_speaker_chunks` drains every available period back to back, with TCP
+   backpressure as the only brake
+2. the device's WebSocket read goroutine calls `PumpPeriod` **inline** per
+   `0x02` frame (`data.go`)
+3. `pump()` ends in a **blocking** channel send, on a channel `audioChanDepth`
+   = 128 periods ≈ **5.5s** deep (`stream.go`)
+4. once full, that goroutine blocks inside `PumpPeriod` and stops calling
+   `ReadMessage`
+5. gorilla fires the pong handler only **inside** `ReadMessage`, so a blocked
+   device **cannot answer a keepalive ping**
+6. the controller pings every 20s and closes after 10s without a pong
+   (`websockets.serve(ping_interval=20, ping_timeout=10)`)
+7. the buffer drains at realtime, so the block outlasts the timeout
+8. `1011 keepalive ping timeout`, mid-response
+
+Measured on Test Echo 1, 2026-08-30: 3,397,174 bytes — **35.4s of audio sent in
+21.3s**, 9.8s of it blocked in socket writes, connection closed five seconds
+later. Short responses never reproduce it because they never fill 5.5s, which
+is exactly why it read as intermittent for three sessions.
+
+**Sending faster bought nothing.** The device holds ~5.5s and no more;
+everything beyond that sat in TCP buffers, which are lost on a reconnect
+exactly like audio that was never sent. The excess never improved stall
+resilience — it only bought the block.
+
+**`VOICE_LEAD_S` = 4.0 matches `em_player.LEAD_S`**, which reached the same
+number from the same constraint for the music plane. Music had been paced since
+2026-07-25; voice never was, and that asymmetry was the bug. `tests/
+test_voice_pacing.py` guards the lead against `audioChanDepth` **read from the
+Go source**, so raising one without the other fails in CI rather than on
+hardware.
+
+Three properties keep it safe: a stream behind realtime computes a **zero**
+delay (`em_pacing.lead_delay`), so a slow HA or a stalled link is never made
+worse; the **first period is exempt** and the lead builds at full speed, so the
+prime gate is as prompt as it ever was; and the wait is **raced against
+`cancel_event`** rather than a bare sleep, or pacing would add its own latency
+to barge-in. `send_ms` deliberately still excludes the pacing wait — it is
+documented as socket-write time, and folding a deliberate wait into it would
+recreate the misreading that cost an investigation on 2026-07-20.
 
 ## The output chain: EQ → bass guard → limiter
 
@@ -1145,6 +1229,46 @@ The device runs an A/B slot binary system:
 
 OTA is triggered from the dashboard — the controller pushes the new binary via the `/shell` WebSocket.
 
+**Updates are SERIALISED across the whole controller, and the queue is
+bounded.** Three concurrent OTAs stalled the event loop for 11.1 seconds
+(measured 2026-09-02 updating three devices to v2.14.0, in the `[loop] event
+loop stalled` warnings — the reliable source, since the reported peak reads 0
+under the add-on, #306). That loop sends speaker periods and LED frames, so a
+device answering someone pays for a device being updated.
+`_updates_in_progress` could never have prevented it: it stops ONE device
+being updated twice and says nothing about two at once. So `_ota_lock` is
+global and both entry points go through it — the fleet deploy and a
+hand-clicked single update collide identically, and only the first was ever
+going to be noticed.
+
+- **The binary is fetched inside the lock**, so a queued device holds nothing
+  but its place in line, and the lock is released in a `finally` — an update
+  that raises would otherwise hold it for the life of the process and no
+  device could be updated again without a restart.
+- **A failure does not stop the queue.** Mark it, carry on, report at the end:
+  one device that will not come back must not strand a fleet update behind it.
+- **`OTA_MAX_HOLD_S` (300s) caps the hold**, because serialising turns a
+  device-local stall into a fleet-wide one. Every `recv` in
+  `_stream_file_to_device` is `wait_for`-bounded but `await ws.send(line)` in
+  the base64 loop is not, and a device that stops reading applies backpressure
+  and can hang there. `_run_update` is a thin wrapper around
+  `_run_update_locked` so the whole of the update sits under one timeout.
+- **Queued is reported separately from in-progress** (`update_queued`), and
+  rendered as "queued": a device that has been started and not yet touched is
+  not having a transfer, and claiming otherwise is the same failure as any
+  control that appears to work.
+
+**Every payload reconciles on OTA or on a click, and nothing reconciles on
+CONNECT — which is the wrong trigger and is why devices drift.**
+`_sync_start_script` and `_sync_debloat` run inside `_run_update_locked` and
+from the Maintenance button; `reconcile_oww_assets` does run on connect but
+returns early unless `owwOnDevice` is on, and then checks only the SELECTED
+classifier. So a device can sit for weeks missing three of the four stock wake
+words — measured on Office 2026-09-02, provisioned 17 Aug with `hey_jarvis`
+alone — while every panel reports it healthy. A device arriving is exactly the
+moment we know what it has. Wil's call, same day: reconcile all three payloads
+on connect, debounced per device.
+
 **md5 decides whether a transfer succeeded, not the shell's exit status.**
 `TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`
 exited 0 — never that the bytes on the device match the bytes sent. Bytes
@@ -1197,6 +1321,36 @@ block updates on any device whose `df` we have not seen. Note binary growth
 is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
 v2.10.0 is 10.3MB.
 
+**Installing the version a device already runs is refused, and the guard that
+existed could not fire.** `_post_deploy_all` has skipped `already_current`
+since it was written — but gated on `not upload_token`, and it labelled every
+uploaded binary `local-<timestamp>` instead of reading the version out of it.
+So an upload always looked like a version no device had ever run, and a fleet
+deploy would have re-flashed the whole fleet with exactly what it was already
+running. `_post_device_update` checked nothing at all on either path. The case
+most likely to happen by accident — an engineering build pushed by hand,
+twice — was the one case nothing guarded, and it took a person doing it
+(2026-09-03) to find that.
+
+Both endpoints now read the binary's own version via
+`_extract_binary_version`. Three rules:
+
+- **The single-device path REFUSES** (`already_running`) rather than skipping
+  silently: someone pressed a button, and a no-op reported as success is how
+  they press it again. The fleet path keeps skipping, which is what a fleet
+  operation should do.
+- **`force` overrides both and is not optional.** Writing the same version
+  again is how a corrupt slot is repaired, so this must never become a wall
+  between an operator and their own device.
+- **The upload token is PEEKED, and popped only once the update is
+  committed.** Popping first meant a refusal consumed the binary, so acting on
+  the advice the refusal had just given cost an 11MB re-upload.
+
+`/api/releases/upload` returns the extracted version so the dashboard can warn
+at the point of deciding rather than after the operator has committed; it
+sends `force` when they say yes. That check is a convenience — the server
+refuses either way.
+
 **The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
 the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
 a fleet update pulled it once per device and the provisioning wizard again per
@@ -1221,6 +1375,15 @@ digest filename that never matches its payload — every read a miss, the cache
 doing nothing, and nothing saying so.
 
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
+
+**All three payloads reconcile when the device CONNECTS** (`em_api.reconcile_on_connect`, called from the register handler). A device arriving is the one moment we know what it has, and until 2026-09-02 nothing used it: the wake word assets reconciled here but returned early unless the device scored locally and then checked only the selected classifier, while `_sync_start_script` and `_sync_debloat` ran **only** inside an OTA or from the Maintenance button. So a device already on the latest firmware never received a payload change at all — Office sat without three of the four stock classifiers for a fortnight with every panel calling it healthy. Four rules:
+
+- **Sequential, never gathered.** All three talk to one device over one shell plane; concurrency contends for a single session and none of them is on the critical path of anything.
+- **One failure must not skip the other two.** Unrelated payloads — a device with a stale debloat list should still get its wake word models — so each step is caught individually, not the loop.
+- **Debounced per device** (`RECONCILE_DEBOUNCE_S`, 15 min), because reconnects are routine on this fleet and the payloads are not; they change when someone deploys or edits a config, which is minutes to days apart. The stamp is claimed **before** the work, so a device reconnecting mid-run cannot start a second one against the same shell plane. `_delete_device` calls `forget_reconcile` — a re-added device is the one whose payloads are least likely to be right.
+- **A silent device is not a missing file.** `_shell_run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `_SHELL_OK` to the probe and return untouched without it. Same shape as `reconcile_oww_assets`'s "failure to LOOK is not evidence of absence".
+
+Note the mode gate is deliberately kept: with `owwOnDevice=off` the device scores nothing and the 12.3MB runtime is irrelevant, so the assets reconcile still returns early there. The other two payloads are md5 compares and run regardless.
 
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
 

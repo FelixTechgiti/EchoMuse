@@ -232,6 +232,36 @@ _event_clients: set[web.WebSocketResponse] = set()
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
 
+# Firmware updates are SERIALISED across the whole controller, not just per
+# device. Three concurrent OTAs stalled the event loop for 11.1 seconds on
+# 2026-09-02 — measured, in the `[loop] event loop stalled` warnings — and
+# that loop is what sends speaker periods and LED frames, so a device mid
+# response pays for a device being updated. The transfer is base64 over the
+# shell plane and CPU-bound in this process; the fix is to stop doing several
+# at once, not to make one cheaper.
+#
+# A device-level guard cannot do this: `_updates_in_progress` stops one device
+# being updated twice, and says nothing about two devices being updated at
+# once. So the lock is global and BOTH entry points go through it — the fleet
+# deploy and a hand-clicked single update, which collide identically.
+#
+# A failure does NOT stop the queue. Wil's call, 2026-09-02: mark it, carry on,
+# report at the end — one device that will not come back should not strand the
+# rest of a fleet update behind it.
+_ota_lock = asyncio.Lock()
+
+# Longest one device may hold the OTA queue. A real update is a ~10MB transfer,
+# a reboot and a 90s reconnect watch, so this is a deadlock cap rather than a
+# performance budget: it exists because serialising made one wedged device able
+# to block the whole fleet's updates until the controller restarted.
+OTA_MAX_HOLD_S = 300.0
+
+# Devices waiting on `_ota_lock`. Reported separately from
+# `update_in_progress` so the dashboard says "queued" rather than claiming
+# work that has not started — the same rule as everywhere else here: a control
+# that cannot act must say so rather than appear to work.
+_updates_queued: set[str] = set()
+
 # Last OTA failure per device, surfaced as `update_error` in /api/devices so
 # the dashboard (fleet deploy modal + per-device update log) can show *why* a
 # tile stopped progressing instead of sitting at "updating…" forever. Set by
@@ -1021,6 +1051,10 @@ async def _delete_device(request: web.Request) -> web.Response:
     # silently. Lazy import — em_esphome imports em_api at module level.
     import em_esphome
     await em_esphome.device_deleted(device_id)
+    # A re-added device is the one whose payloads are least likely to be
+    # right, so it must not inherit the deleted row's debounce and skip its
+    # first reconcile — the bounce below has it redialling within seconds.
+    forget_reconcile(device_id)
     # ...and the device is told to redial, or it never notices it was deleted.
     # Link auth is decided once, at register time, so a connected device keeps
     # running on the socket it already has: it vanishes from the dashboard and
@@ -1470,7 +1504,11 @@ async def _post_device_update(request: web.Request) -> web.Response:
     release = None
 
     if upload_token:
-        binary_override = _pending_uploads.pop(upload_token, None)
+        # PEEKED, not popped. Every refusal below leaves the token usable, so
+        # re-deciding — or forcing — costs nothing. Popping first meant an
+        # 11MB re-upload to get past a check that had just told the operator
+        # something useful.
+        binary_override = _pending_uploads.get(upload_token)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
         _embedded = _extract_binary_version(binary_override)
@@ -1490,11 +1528,35 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
+    # Installing what the device is already running costs a transfer, a
+    # reboot and a slot — and the fleet endpoint has always skipped it for
+    # releases (`already_current`), while this endpoint checked nothing and
+    # the upload path could not check anything, because it labelled every
+    # uploaded binary `local-<timestamp>` instead of reading the version out
+    # of it. So the case most likely to happen by accident was the one case
+    # nothing guarded: an engineering build uploaded by hand, twice.
+    #
+    # Refused rather than silently skipped, because someone pressed a button
+    # here and a no-op reported as success is how they press it again.
+    # `force` exists because re-flashing the SAME version is a real repair —
+    # a corrupt slot is fixed by writing it again — so this must never become
+    # a wall between an operator and their own device.
+    if (release["version"] and row["firmware_ver"] == release["version"]
+            and not body.get("force")):
+        return _error(
+            "already_running",
+            f"This device is already running {release['version']}. "
+            f"Pass force to install it again.",
+            409,
+        )
+
+    if upload_token:
+        _pending_uploads.pop(upload_token, None)
     _spawn(_run_update(device_id, release, binary_override),
-               f"firmware update {device_id}")
+           f"firmware update {device_id}")
     return _ok({"status": "started", "version": release["version"]}, status=202)
 
 
@@ -1521,7 +1583,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
     _spawn(_run_rollback(device_id, row["firmware_previous"]),
@@ -1557,14 +1619,23 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
-        log.info(f"[api] Binary uploaded: {len(binary):,} bytes token={token[:8]}…")
+        version = _extract_binary_version(binary)
+        log.info(f"[api] Binary uploaded: {len(binary):,} bytes "
+                 f"version={version or 'unknown'} token={token[:8]}…")
 
         async def _expire():
             await asyncio.sleep(600)
             _pending_uploads.pop(token, None)
         _spawn(_expire(), "shell session expiry")
 
-        return _ok({"upload_token": token, "size": len(binary)})
+        # The version rides back so the dashboard can say what was uploaded,
+        # and warn against a device already running it BEFORE the operator
+        # commits. The update endpoint refuses it either way; this is what
+        # makes the refusal something you see coming instead of something you
+        # find out afterwards. None means the binary carries no recognisable
+        # version — shown as unknown rather than guessed at.
+        return _ok({"upload_token": token, "size": len(binary),
+                    "version": version})
     except web.HTTPException:
         # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
         # transport before this handler sees a byte. Swallowing it into a 500
@@ -1750,8 +1821,54 @@ async def _run_update(device_id: str, release: dict,
     5. Restart service and monitor reconnect.
     6. Detect auto-rollback (start_server.sh retry exhausted).
     """
-    _updates_in_progress.add(device_id)
     _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
+
+    # Wait for any other device's update to finish before touching this one.
+    # Queued state is visible while waiting (see `_updates_queued`), and the
+    # binary is fetched INSIDE the lock so a queued device is holding nothing
+    # but its place in line.
+    _updates_queued.add(device_id)
+    try:
+        await _ota_lock.acquire()
+    finally:
+        _updates_queued.discard(device_id)
+
+    _updates_in_progress.add(device_id)
+    try:
+        # Bounded, because serialising turned a device-local stall into a
+        # fleet-wide one. Every `recv` in the transfer is wait_for-bounded but
+        # `await ws.send(line)` in the base64 loop is not: a device that stops
+        # reading applies backpressure and can hang there. Before the lock that
+        # stalled one device; now it would hold the queue and NOTHING could be
+        # updated until the controller restarted.
+        #
+        # Generous on purpose — a real update is a ~10MB transfer plus a reboot
+        # and a 90s reconnect watch, so this is a deadlock cap, not a
+        # performance budget. A device that trips it has failed anyway.
+        await asyncio.wait_for(
+            _run_update_locked(device_id, release, binary_override),
+            timeout=OTA_MAX_HOLD_S,
+        )
+    except asyncio.TimeoutError:
+        await _update_failed(
+            device_id,
+            f"Update abandoned after {OTA_MAX_HOLD_S:.0f}s so the queue "
+            f"could continue — the device may still be mid-update",
+        )
+    finally:
+        _updates_in_progress.discard(device_id)
+        # Release LAST, so the next queued device does not start its transfer
+        # while this one is still being cleaned up.
+        _ota_lock.release()
+
+
+async def _run_update_locked(device_id: str, release: dict,
+                             binary_override: bytes | None = None) -> None:
+    """
+    The update itself, run with `_ota_lock` already held. Split from
+    `_run_update` so the whole of it can sit under one timeout — the queue is
+    only as safe as its slowest member.
+    """
     loop = asyncio.get_event_loop()
     version = release["version"]
 
@@ -1934,8 +2051,6 @@ async def _run_update(device_id: str, release: dict,
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
-    finally:
-        _updates_in_progress.discard(device_id)
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
@@ -2426,6 +2541,13 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
 
 
 
+# Appended to a probe command so an empty _shell_run result can be told apart
+# from a command that ran and printed nothing. _shell_run swallows every
+# exception and returns "", so without this "the file is missing" and "the
+# device never answered" are the same string — and they want opposite actions.
+_SHELL_OK = "__EM_SHELL_OK__"
+
+
 async def _sync_start_script(live, device_id: str) -> None:
     """
     OTA-time payload sync: heal /data/local/bin/start_server.sh drift.
@@ -2449,7 +2571,17 @@ async def _sync_start_script(live, device_id: str) -> None:
         return
     want = hashlib.md5(script).hexdigest()
 
-    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null")
+    # The trailing marker separates "the file differs" from "the device did not
+    # answer". _shell_run returns "" for both — it swallows the exception — and
+    # an absent md5 was read as out-of-date, so a shell plane that is not up
+    # yet produced a push attempt and a user-visible "out of date" event that
+    # was not true. That was harmless while this only ran mid-OTA, with a shell
+    # already proven; it is not, now that it also runs seconds after connect.
+    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null; echo {_SHELL_OK}")
+    if _SHELL_OK not in out:
+        log.info(f"[api] [{device_id}] start_server.sh: no answer from the "
+                 f"device — leaving it alone")
+        return
     if want in out:
         return  # in sync — the common case
     await asyncio.sleep(1.0)  # let the md5 shell session close cleanly
@@ -2533,9 +2665,19 @@ async def _sync_debloat(live, device_id: str) -> None:
 
     if script is not None:
         want = hashlib.md5(script).hexdigest()
-        out = await _shell_run(live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null")
+        # The marker is what makes an empty result readable — see
+        # _sync_start_script. It gates BOTH halves below: a device that did not
+        # answer the md5 will not answer `pm` either, and half 2 would
+        # otherwise report a hide-list sync failure that is really a shell
+        # that was never up.
+        out = await _shell_run(
+            live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null; echo {_SHELL_OK}")
+        if _SHELL_OK not in out:
+            log.info(f"[api] [{device_id}] debloat: no answer from the device "
+                     f"— leaving it alone")
+            return
         if want not in out:
-            # An empty result also lands here — a device provisioned before the
+            # An empty md5 also lands here — a device provisioned before the
             # script existed has no file at all, and installing it is right.
             await asyncio.sleep(1.0)
             await _push_log_event(device_id, "info", "controller",
@@ -2752,7 +2894,17 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         binary_override = _pending_uploads.pop(upload_token, None)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
-        release = {"version": f"local-{time.strftime('%Y%m%d-%H%M')}", "url": None}
+        # Read the version OUT of the binary, as the single-device path does.
+        # Labelling it `local-<timestamp>` made every uploaded binary look
+        # like a version no device had ever run, so the already_current skip
+        # below could never fire for an upload and the whole fleet re-flashed
+        # what it was already running. The timestamp remains the fallback for
+        # a binary carrying no recognisable version.
+        _embedded = _extract_binary_version(binary_override)
+        release = {
+            "version": _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}",
+            "url": None,
+        }
     else:
         release = await _get_cached_release()
         if release is None:
@@ -2767,10 +2919,15 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
             continue
-        if not upload_token and row["firmware_ver"] == release["version"]:
+        # No longer `not upload_token and …`: an uploaded binary now carries a
+        # real version, so this skip finally covers the fleet-wide re-flash of
+        # an engineering build too. `force` overrides it for the repair case,
+        # matching the single-device endpoint.
+        if (release["version"] and row["firmware_ver"] == release["version"]
+                and not body.get("force")):
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
-        if device_id in _updates_in_progress:
+        if device_id in _updates_in_progress or device_id in _updates_queued:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
@@ -3893,6 +4050,99 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
+# How long a device is left alone after a connect-time reconcile. Devices on
+# this fleet reconnect constantly — a data-plane blip, an OTA, a controller
+# restart — and none of those change what is installed on the device, so
+# without a debounce the shell plane would carry three round trips every time.
+# Fifteen minutes is chosen against how the payloads actually change: they
+# change when someone deploys a controller or edits a config, which is minutes
+# to days apart, never seconds.
+RECONCILE_DEBOUNCE_S = 15 * 60
+
+# device_id -> monotonic time of the last connect-time reconcile.
+_last_reconcile: dict[str, float] = {}
+
+
+def _reconcile_due(device_id: str, now: float,
+                   debounce_s: float = RECONCILE_DEBOUNCE_S) -> bool:
+    """Whether this device's connect-time reconcile should run, and claim it."""
+    last = _last_reconcile.get(device_id)
+    if last is not None and (now - last) < debounce_s:
+        return False
+    # Stamped BEFORE the work rather than after: the run takes shell round
+    # trips and possibly a multi-megabyte push, and a device that reconnects
+    # mid-run must not start a second one against the same shell plane.
+    _last_reconcile[device_id] = now
+    return True
+
+
+async def reconcile_on_connect(device_id: str, live) -> None:
+    """
+    Bring a freshly-connected device's three installed payloads back in line.
+
+    A device arriving is the one moment we know what it has, and until
+    2026-09-02 nothing used it: `reconcile_oww_assets` ran here but returned
+    early unless the device scored locally and then checked only the SELECTED
+    classifier, while `_sync_start_script` and `_sync_debloat` ran ONLY inside
+    an OTA or from the Maintenance button. So a device already on the latest
+    firmware never received a payload change at all — Office sat without three
+    of the four stock classifiers for a fortnight with every panel calling it
+    healthy.
+
+    Three rules:
+
+    - **Sequential, never gathered.** All three talk to the same device over
+      the same shell plane; running them concurrently contends for one session
+      for no gain, since none of them is on the critical path of anything.
+    - **One failure must not skip the other two.** They are unrelated payloads
+      and a device with a stale debloat list should still get its wake word
+      models. Each is best-effort in its own right, and this only stops them
+      taking each other down.
+    - **Debounced per device** (`RECONCILE_DEBOUNCE_S`), because reconnects are
+      routine on this fleet and the payloads are not.
+
+    Runs as a background task off the connect handler: nothing about the
+    handshake should wait on a shell round trip over a link measured at 5-7%
+    packet loss.
+    """
+    if not _reconcile_due(device_id, time.monotonic()):
+        return
+
+    # Held as callables, not coroutines: building all three up front and
+    # abandoning two of them leaves un-awaited coroutines to warn about later.
+    steps = (
+        ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
+        ("start script", lambda: _sync_start_script(live, device_id)),
+        ("debloat", lambda: _sync_debloat(live, device_id)),
+    )
+    for name, make in steps:
+        # Re-read each time, and compare IDENTITY rather than presence: these
+        # take seconds, and a device that dropped and redialled part-way
+        # through is a different object in the registry. The one we are
+        # holding then has a shell plane nobody is on the other end of, so
+        # "still connected" would be true of the registry and false of us.
+        if _devices.get(device_id) is not live:
+            log.info(f"[api] [{device_id}] reconcile: device went away — "
+                     f"stopping before {name}")
+            return
+        try:
+            await make()
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] reconcile: {name} failed ({e}) "
+                        f"— continuing with the rest")
+
+
+def forget_reconcile(device_id: str) -> None:
+    """
+    Drop a device's debounce stamp, so its next connect reconciles immediately.
+
+    Called when a device is deleted: a re-added device is exactly the one whose
+    payloads are least likely to be right, and it would otherwise inherit the
+    silence of the row that was removed.
+    """
+    _last_reconcile.pop(device_id, None)
+
+
 async def reconcile_oww_assets(device_id: str, live) -> None:
     """
     On connect: make sure a locally-scoring device HAS the model it was told
@@ -3954,6 +4204,23 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
             effective.get("owwOnDevice"), live.oww_trigger_capable,
             model_ready=True,
         )
+        # The device can score TODAY, so nothing is degraded and no warning is
+        # owed — but it may still be short of the other stock classifiers, in
+        # which case selecting one of them tomorrow is the deaf device this
+        # whole path exists to prevent. Repair quietly; see missing_assets.
+        gaps = em_oww_assets.missing_assets(desired, state["installed"])
+        if gaps:
+            log.info(f"[api] [{device_id}] oww reconcile: {len(gaps)} asset(s) "
+                     f"missing ({', '.join(gaps)}) — installing")
+            try:
+                result = await _sync_oww_assets(live, device_id)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            if not result.get("ok"):
+                # Not an error event: the device is scoring correctly and the
+                # user has lost nothing today. A log line is the right weight.
+                log.warning(f"[api] [{device_id}] oww reconcile: could not install "
+                            f"the missing assets ({result.get('error')})")
         return
 
     live.oww_model_ready = False
@@ -4806,6 +5073,13 @@ def _merge_device(row) -> dict:
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Gates the AEC delay slider, which only means anything on the
+        # software tap. Paired with aecRef because the capability says the
+        # firmware KNOWS how to use a hardware reference and aecRef says
+        # whether this board turned out to have one — a device can be
+        # capable and still be running on the software tap.
+        "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
+        "aecRef":          getattr(live, "aec_ref", None) if live else None,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
@@ -4819,6 +5093,10 @@ def _merge_device(row) -> dict:
         "wifi":             wifi_state(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
+        # Waiting on the global OTA lock — started, but nothing has been sent
+        # to this device yet. Distinct from update_in_progress so the panel
+        # does not report a transfer that has not begun.
+        "update_queued":      device_id in _updates_queued,
         # Last OTA/rollback failure (None when the last attempt succeeded or
         # none was made) — lets the dashboard show a terminal ✗ state instead
         # of "updating…" forever when an update aborts.
