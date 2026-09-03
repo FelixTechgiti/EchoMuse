@@ -691,9 +691,10 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     from pathlib import Path
     api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
 
-    # The failure paths live in _run_update, which is what awaits
-    # _monitor_reconnect and decides what its result means.
-    monitor = api[api.index("async def _run_update"):]
+    # The failure paths live in _run_update_locked, which is what awaits
+    # _monitor_reconnect and decides what its result means. (_run_update is
+    # now the queue wrapper in front of it.)
+    monitor = api[api.index("async def _run_update_locked"):]
     monitor = monitor[:monitor.index("\nasync def ", 1)]
     assert monitor.count("_supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
@@ -1883,3 +1884,383 @@ def test_every_outcome_cue_names_a_scene_key_that_exists():
     scene = em_scenes.resolve({})
     for key in keys:
         assert key in scene, f"_OUTCOME_ANIM names {key}, which no scene defines"
+
+
+def _strip_prose(src: str) -> str:
+    """
+    Drop comments and string literals from a source slice.
+
+    A guard that greps for the thing it forbids finds the comment explaining
+    it and passes anyway — three separate tests in this tree have done exactly
+    that. The prose below this function's subject is unusually chatty about
+    locks, so strip it before asserting on code.
+    """
+    src = re.sub(r'""".*?"""', "", src, flags=re.S)
+    src = re.sub(r"#.*", "", src)
+    return src
+
+
+def test_firmware_updates_are_serialised_across_the_whole_controller():
+    """
+    Three concurrent OTAs stalled the event loop for 11.1 seconds (measured
+    2026-09-02, `[loop] event loop stalled` in the GA log) — and that loop is
+    what sends speaker periods and LED frames, so a device answering someone
+    pays for a device being updated.
+
+    `_updates_in_progress` cannot prevent it: it stops ONE device being
+    updated twice and says nothing about two devices at once. The serialiser
+    has to be a global lock taken inside `_run_update`, so both entry points —
+    the fleet deploy and a hand-clicked single update — go through it.
+    """
+    src  = (CONTROLLER / "em_api.py").read_text()
+    body = _strip_prose(_fn_body(src, "_run_update"))
+
+    assert "_ota_lock.acquire()" in body, (
+        "_run_update must take the global OTA lock — a per-device guard does "
+        "not stop two devices updating at once"
+    )
+    assert "_ota_lock.release()" in body, "the lock must be released"
+
+    # Nothing may reach the device before the lock is held, or the serialising
+    # is decorative: the transfer is the expensive part, and it all lives
+    # inside _run_update_locked.
+    acquire = body.index("_ota_lock.acquire()")
+    work    = body.index("_run_update_locked")
+    assert acquire < work, (
+        "the lock must be acquired BEFORE the update work starts"
+    )
+    inner = _strip_prose(_fn_body(src, "_run_update_locked"))
+    assert "_stream_binary_to_slot" in inner, (
+        "the transfer must live inside the locked half"
+    )
+    assert "_ota_lock" not in inner, (
+        "the locked half must not touch the lock — one owner, or a release "
+        "on a path that never acquired frees somebody else's turn"
+    )
+
+    # Bounded, or one wedged device holds the whole fleet's queue: the base64
+    # send loop has no timeout of its own.
+    assert "OTA_MAX_HOLD_S" in body and "wait_for" in body, (
+        "the locked half must run under a timeout — serialising turns a "
+        "device-local stall into a fleet-wide one"
+    )
+
+    # Released in the finally, not on the success path — an update that raises
+    # would otherwise hold the lock for the life of the process and no device
+    # could ever be updated again without a restart.
+    tail = body[body.rindex("finally:"):]
+    assert "_ota_lock.release()" in tail, (
+        "release the lock in the finally — a failed update must not strand "
+        "every later one behind it"
+    )
+
+
+def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
+    """
+    Serialising means a device can be started and not yet touched. Reporting
+    that as `update_in_progress` claims a transfer that has not begun, which
+    is the same failure as any control that appears to work and does not.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    assert '"update_queued":' in src, (
+        "/api/devices must expose update_queued, or the dashboard cannot tell "
+        "waiting from working"
+    )
+
+    body = _strip_prose(_fn_body(src, "_run_update"))
+    add     = body.index("_updates_queued.add")
+    acquire = body.index("_ota_lock.acquire()")
+    assert add < acquire, "a device must be marked queued BEFORE it waits"
+    assert "_updates_queued.discard" in body, (
+        "queued state must be cleared once the lock is held, or a device "
+        "reads as queued for the whole of its own update"
+    )
+
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    assert "update_queued" in jsx, (
+        "the fleet deploy modal must render the queued state it is sent"
+    )
+
+
+def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
+    """
+    Adverts moved to the data plane because the control plane is where
+    liveness is measured — `SendBleAdverts` wrote under the same mutex and TCP
+    stream as the RTT echo and the keepalive pong (#404, proven by crossover
+    on 2026-09-01).
+
+    The negotiation is the half that fails SILENTLY if it is dropped: an older
+    controller ignores unknown frame types, so a device sending 0x06
+    unannounced loses every advertisement with no error at either end.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    assert "BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
+    # Double-quoted: the prose around it uses backticks, so this matches the
+    # announcement itself rather than the comment explaining it.
+    assert '"ble_adverts_data"' in src, (
+        "the controller must announce the feature, or no device will ever "
+        "use the data plane"
+    )
+    # Anchored on the CALL, not on the first mention: the module docstring
+    # documents the ack too, and a body-wide search passes on the prose while
+    # the field itself is gone.
+    ack = re.search(r"send_control\(\{[^}]*\"type\": \"ack\"[^}]*\}", src, re.S)
+    assert ack, "could not find the ack send_control call — did it move?"
+    assert "CONTROLLER_FEATURES" in ack.group(0), (
+        "the ack must carry the controller's feature list"
+    )
+
+    # The advert branch must precede the mic guards, which would otherwise
+    # drop a 0x06 frame on the mic header-length test and lose it silently.
+    handler = src[src.index("async def handle_data"):]
+    ble = handler.index("BLE_ADVERTS_TYPE")
+    mic = handler.index("!= MIC_FRAME_TYPE")
+    assert ble < mic, (
+        "the BLE frame branch must come before the mic-frame guards, or the "
+        "frame is dropped by a length check written for PCM"
+    )
+
+
+def test_the_control_plane_advert_message_is_still_handled():
+    """
+    Firmware in the field predates the data plane for this, and firmware
+    negotiates rather than assuming. Removing the old handler would silently
+    deafen every proxy running an older build — degrade to old behaviour,
+    never to a wrong answer.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert 'msg_type == "ble_adverts"' in src, (
+        "the control-plane ble_adverts message must stay handled for firmware "
+        "that cannot use the data plane"
+    )
+
+
+def test_a_barge_in_is_arbitrated_like_any_other_wake():
+    """
+    Until 2026-09-02 the barge path claimed nothing, so on a fleet with two
+    Echoes in earshot a barge-in produced TWO answers: the barged device
+    started its interrupting turn while an idle neighbour heard the same
+    utterance on its ordinary wake listener and claimed an unopposed arbiter.
+    Reported by Wil, reproduced in the source.
+
+    The original wake's claim cannot cover it — `claim()` is bounded by
+    `window_s` (300-700ms), not held until `release()`, so it expired seconds
+    before anyone talked over the answer.
+    """
+    src  = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def _barge_watcher"):]
+    body = body[:body.index("\nasync def ", 1)]
+
+    assert "_wake_arbiter.claim" in body, (
+        "the barge watcher must arbitrate — without it a second Echo answers "
+        "the same interrupting utterance"
+    )
+    # Same ordering rule as the wake path: a device that cannot finish a turn
+    # must not take the window first.
+    serves = body.index("can_serve_turn")
+    claim  = body.index("_wake_arbiter.claim")
+    assert serves < claim, (
+        "can_serve_turn must precede the claim, or an unlinked device takes "
+        "the window and then dies no_ha"
+    )
+
+
+def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
+    """
+    The two halves answer different questions. Playback must stop whoever
+    ends up answering — the user spoke over THIS device. Running the
+    interrupting turn as well is the part that must not happen.
+
+    Folding them into one flag is how both devices answered.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "barge_ceded" in src, "the ceded case needs its own flag"
+
+    # The ceded branch must be tested BEFORE the branch that starts the
+    # interrupting turn, or the turn starts regardless and the flag is
+    # decoration.
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    assert ceded < start, (
+        "the ceded branch must come before the one that starts the turn"
+    )
+    branch = src[ceded:start]
+    assert "break" in branch, (
+        "a ceded barge must leave the turn loop rather than fall through "
+        "into the interrupting turn"
+    )
+
+
+# ─── Connect-time reconcile ───────────────────────────────────────────────────
+#
+# Three payloads reach a device: the wake word assets, start_server.sh and the
+# debloat pair. Until 2026-09-02 the first ran on connect but returned early
+# unless the device scored locally, and the other two ran ONLY inside an OTA or
+# from the Maintenance button — so a device already on the latest firmware
+# never received a payload change. Office sat without three of the four stock
+# classifiers from 17 August with every panel reporting it healthy.
+
+def test_the_connect_handler_reconciles_all_three_payloads():
+    """
+    The handler must call the umbrella, not one payload's reconcile. Calling
+    reconcile_oww_assets directly is what left the other two with no trigger
+    that reaches a device on current firmware.
+    """
+    src = _strip_prose((CONTROLLER / "em_controller.py").read_text())
+    assert "api.reconcile_on_connect(" in src, (
+        "the connect handler must call api.reconcile_on_connect"
+    )
+    assert "api.reconcile_oww_assets(" not in src, (
+        "call the umbrella, not one payload — the other two then have no "
+        "trigger that reaches a device already on the latest firmware"
+    )
+
+
+def test_the_reconcile_runs_the_three_payloads_sequentially():
+    """
+    All three talk to one device over one shell plane. Gathering them contends
+    for a single session for no gain — nothing is on a critical path here.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+
+    for step in ("reconcile_oww_assets", "_sync_start_script", "_sync_debloat"):
+        assert step in fn, f"{step} must run on connect"
+    assert "asyncio.gather" not in fn, (
+        "the three payloads share one shell plane — run them in order"
+    )
+
+
+def test_one_failing_payload_does_not_skip_the_others():
+    """
+    Unrelated payloads. A device with a stale debloat list must still get its
+    wake word models, so each step is caught individually rather than the loop
+    being wrapped in one try.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    body = fn[fn.index("for name"):]
+    assert "try:" in body and "except Exception" in body, (
+        "each step must be caught inside the loop, not around it"
+    )
+
+
+def test_the_reconcile_is_debounced_and_claimed_before_the_work():
+    """
+    Reconnects are routine on this fleet and the payloads are not. The stamp
+    goes in BEFORE the work: a run takes shell round trips and possibly a
+    multi-megabyte push, and a device that reconnects mid-run must not start a
+    second one against the same shell plane.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _strip_prose(_fn_body(src, "reconcile_on_connect"))
+    assert "_reconcile_due(" in fn, "the reconcile must be debounced per device"
+
+    decide = src[src.index("def _reconcile_due"):]
+    decide = _strip_prose(decide[:decide.index("\nasync def ")])
+    stamp  = decide.index("_last_reconcile[device_id] = now")
+    ret    = decide.index("return True")
+    assert stamp < ret, "claim the debounce before returning, not after the work"
+
+
+def test_deleting_a_device_forgets_its_debounce():
+    """
+    A re-added device is the one whose payloads are least likely to be right;
+    inheriting the deleted row's stamp would skip its first reconcile.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_delete_device"))
+    assert "forget_reconcile(device_id)" in fn
+
+
+def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
+    """
+    _shell_run swallows every exception and returns "" — so an absent md5 and
+    a device that never answered are the same string, and they want opposite
+    actions. Without the marker, a shell plane that is not up yet (likely,
+    seconds after connect) produces a push attempt and a user-visible "out of
+    date" event that is not true.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    for name in ("_sync_start_script", "_sync_debloat"):
+        fn = _strip_prose(_fn_body(src, name))
+        assert "_SHELL_OK" in fn, (
+            f"{name} must be able to tell a missing file from a silent device"
+        )
+        # The guard has to precede the push decision, or it guards nothing.
+        assert fn.index("_SHELL_OK not in out") < fn.index("_stream_file_to_device"), (
+            f"{name} must check the device answered BEFORE deciding to push"
+        )
+
+
+# ─── Installing what a device already runs ────────────────────────────────────
+#
+# Hit by hand on 2026-09-03: the same engineering build uploaded to a device
+# twice, costing a transfer, a reboot and a slot. The fleet endpoint had
+# skipped this for releases since it was written; the single-device endpoint
+# checked nothing, and neither could check an UPLOAD, because an uploaded
+# binary was labelled `local-<timestamp>` rather than being read for its
+# version. So the case most likely to happen by accident was the one case
+# nothing guarded.
+
+def test_the_update_endpoint_refuses_a_version_the_device_already_runs():
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+
+    assert 'row["firmware_ver"] == release["version"]' in fn, (
+        "the update endpoint must compare the target against what the device "
+        "is already running"
+    )
+    assert "already_running" in fn, "the refusal needs a named error code"
+    assert 'body.get("force")' in fn, (
+        "re-flashing the same version repairs a corrupt slot — force must "
+        "exist, or this is a wall between an operator and their own device"
+    )
+
+
+def test_a_refused_update_does_not_consume_the_uploaded_binary():
+    """
+    The token is peeked and only popped once the update is actually started.
+    Popping first meant a refusal cost an 11MB re-upload to act on the very
+    advice the refusal had just given.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+
+    assert "_pending_uploads.get(upload_token)" in fn, (
+        "peek the token — every refusal below it must leave it usable"
+    )
+    pop = fn.index("_pending_uploads.pop")
+    run = fn.index("_run_update(")
+    refuse = fn.index("already_running")
+    assert refuse < pop, "the duplicate check must come before the token is consumed"
+    assert pop < run, "consume the token only once the update is committed"
+
+
+def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
+    """
+    While an upload was labelled `local-<timestamp>`, it looked like a version
+    no device had ever run — so `already_current` could never fire for one and
+    a fleet push re-flashed every device with what it was already running.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _strip_prose(_fn_body(src, "_post_deploy_all"))
+
+    assert "_extract_binary_version(binary_override)" in fn, (
+        "the fleet path must read the uploaded binary's own version"
+    )
+    assert "not upload_token and" not in fn, (
+        "the already_current skip must no longer exclude uploads"
+    )
+
+
+def test_the_upload_endpoint_reports_what_was_uploaded():
+    """
+    The version rides back so the dashboard can warn at the point of deciding
+    rather than after the operator has committed.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
+    assert "_extract_binary_version(binary)" in fn
+    assert '"version": version' in fn

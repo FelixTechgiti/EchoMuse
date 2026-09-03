@@ -1812,3 +1812,342 @@ with its own leakage, so a weaker 440Hz component would not have shown. It
 does not affect production — the wire is mono and the device duplicates L=R —
 but it decides which channel is the correct reference if that ever changes.
 
+## 2026-08-29 (evening) — the reference was right, the volume was the problem
+
+Built the hardware reference into the mic path (#385) and ran it on Test Echo
+1. Two rounds, and the first one is the instructive half.
+
+**Round one: it worked mechanically and cancelled worse than what it
+replaced.** The detector fired correctly — ch8 is bit-exact silent at idle even
+with our own silence loop running, so the thing most likely to sink it did not
+— and every frame went through `src=hw(ch8)`. Attenuation was **5.9dB mean
+against the software tap's ~14dB, with one frame at −1.7dB**, i.e. the AEC
+making the signal worse.
+
+**The cause was in the timestamps rather than the DSP.** Cancellation collapsed
+immediately after every volume change and took 3–4 seconds to climb back, over
+and over. The reference confirmed it directly: `ref` sat at 4000–8000 through a
+`mic` swing of 1263→16766. The tap is upstream of the DAC volume control, so a
+volume change is a step in echo path gain the filter can only find by
+re-converging. That limitation was *documented* when the reference was
+discovered — measured as unchanged across a commanded 33.5dB cut — and still
+read as a footnote until it was the whole result.
+
+**The fix is a scalar the device already knows.** It SETS that volume, so
+`SetPlaybackLevel` takes it off the existing volume-change callback and scales
+the reference by `10^((level−127)/40)`, the control's own 0.5dB-per-step law.
+Round two: **14.2dB mean, median 14.2, range 11.1–16.7** — against 5.9dB mean
+and a 14dB-wide spread before.
+
+**And that is parity, not victory.** 14.2dB against a documented ~14dB is the
+same number. The case for this change is that it reaches it with the ring, the
+decimator, `aecDelayMs` and the occupancy governor deleted, and that it holds
+across volume changes where the software path structurally cannot (its ring
+holds pre-change audio, so the correction would land on the wrong samples). A
+like-for-like A/B in one session is still owed before claiming even parity,
+since ~14dB comes from different conditions.
+
+**A wake-word outage during the test was not ours, and one line proved it.**
+`[mic] clock: 180.6s audio over 180.2s wall (deficit −443ms, stalls=0,
+sub_drops=0)` — the capture path was perfectly healthy throughout. What
+happened was a 9.2-second gap in frame delivery (`maxGap=9168ms`,
+`minDepth=0`), the controller killing the data plane on a keepalive timeout,
+and the device then sitting deaf for **34 seconds** because nothing restarted
+the mic stream until the controller's zombie ladder did. Network-scale, not
+scheduling-scale, and the ~1KB per 160ms batch this change adds cannot produce
+it. Worth noting separately: a data-plane reconnect that does not restart the
+mic stream is a real deaf window the ladder bounds rather than prevents.
+
+**EQ presets rebuilt from the measurement** (#386). The old `Clarity` put +7dB
+on band 5 (3500Hz) — exactly where the driver peaks +8.9dB — landing around
++16dB at 3150 relative to 1kHz. It was making a harsh speaker harsher, and
+nobody could have known without the sweep. `Warmth` had the right shape at a
+fraction of the size, which is a good ear arriving at the same answer without
+the numbers. Now Flat / Speech / Music, with 125 left at zero because it is a
+shelf that would push everything below it into the bass guard, and 5500/8000
+left at zero because they moved up to 13.8dB between placements.
+
+**On band count**, asked and answered: eight octave-spaced bands at Q≈1.4 is
+the right resolution for a *taste* control and matches convention. It cannot do
+driver correction and neither could eighty, because that needs +26dB at 150Hz
+against our ±12dB range. Stock does not ship a user EQ at all — it applies a
+1024-tap FIR invisibly. The answer to #247 is a fixed measured correction
+stage with the eight-band EQ on top, which is what that issue already said.
+Note `eqBands` stores bare gains with no frequency metadata, so changing band
+centres silently reinterprets every saved curve.
+## 2026-08-30 — the long-response cutout, root-caused; and why the AEC is stuck at ~10dB
+
+Two answers today, both of which had been mistaken for other things.
+
+### Long responses were cutting off mid-sentence, and it was never the network
+
+Three sessions of testing had been ruined by the same drop, and it kept
+reading as a link fault because that is what the symptom looks like. It is
+not. The chain is mechanical, and every link is in our own code:
+
+1. the voice path sent every period as fast as the socket accepted, with TCP
+   backpressure as the only brake
+2. the device's WebSocket read goroutine calls `PumpPeriod` **inline** per
+   `0x02` frame
+3. `pump()` ends in a **blocking** channel send, on a channel 128 periods
+   (~5.5s) deep
+4. once full, that goroutine blocks inside `PumpPeriod` and stops calling
+   `ReadMessage`
+5. gorilla fires the pong handler only **inside** `ReadMessage` — a blocked
+   device cannot answer a keepalive ping
+6. we ping every 20s and close after 10s without a pong
+7. the buffer drains at realtime, so the block outlasts the timeout
+8. `1011 keepalive ping timeout`, mid-response
+
+Measured: **3,397,174 bytes — 35.4s of audio — sent in 21.3s**, 9.8s of it
+blocked in socket writes, connection closed five seconds later. Short
+responses never reproduce it because they never fill 5.5s, which is why six
+weeks of it read as intermittent.
+
+**The music plane had already solved this and voice never got the fix.**
+`em_player.LEAD_S` has been 4.0s since 2026-07-25, sized against the device's
+own depth with ~1.4s of headroom, and its comment states the constraint
+exactly. Voice queued the whole response. That asymmetry was the bug, and
+`VOICE_LEAD_S` = 4.0 now matches.
+
+**Sending faster bought nothing** — the point worth keeping. The device holds
+~5.5s and no more, so everything beyond that sat in TCP buffers, which are
+lost on a reconnect exactly like audio never sent. The excess never improved
+stall resilience. It only bought the block.
+
+**Two diagnostics had to be built before this was findable.** Every drop had
+logged `Data connection closed: <id>` and nothing else, because
+`except ConnectionClosed: pass` discarded the close frames and
+`websockets.server` is pinned to CRITICAL. Three sessions had timing to
+reason from and no stated cause. `em_wsclose` now renders the frames, and
+says which SIDE closed — we gave up on the device, the device went first, or
+the socket died with nobody saying anything are three different
+investigations.
+
+### The AEC is not limited by its reference, and never was
+
+**We vendored `mdf.c` and not `preprocess.c`.** speexdsp's own documented AEC
+is two stages: `speex_echo_cancellation` then `speex_preprocess_run` with
+`SPEEX_PREPROCESS_SET_ECHO_STATE` for residual echo suppression. We run the
+first and skip the second.
+
+That explains the number. A linear adaptive filter cancels only the *linear*
+part of an echo path, and a speaker 4cm from the mics in a small plastic
+enclosure, coupling mechanically through the chassis, is substantially
+nonlinear. **10–14dB is the textbook ceiling for linear-only AEC against a
+nonlinear loudspeaker**, and it is where we sit whichever reference we use.
+
+**So the hardware reference (#385) reaching parity is the correct result, not
+a disappointment.** The reference was never the limiting factor. What ch7/ch8
+buys is *alignment* — which is precisely what we measured, deleting the ring,
+the decimator, `aecDelayMs` and the occupancy governor while holding the same
+attenuation. Amazon's extra dB comes from the AFE's post-processing, not from
+the loopback.
+
+Caveat before anyone reaches for `preprocess.c`: a residual suppressor is
+gain-based and attenuates near-end speech during double-talk, which is
+exactly what barge-in needs preserved. It would very likely improve the `att`
+number and could make barge-in worse. Measure it, do not assume it.
+
+### Also today
+
+**The device went deaf for 34–41 seconds after any data-plane drop the
+control plane survived.** `StartMic` had two callers — the controller's
+`mic_start` and unmute — so nothing restarted a stream that died with its
+socket, and the controller had no reconnect event to fire a fresh
+`mic_start` from because its own connection never dropped. Fixed by
+separating the controller's INTENT from the stream's STATE; recovery is now
+~5s, verified on hardware. The same fault from the other side closed a
+39-second hole at boot, where the first `mic_start` could beat the data
+connection into existence and was discarded.
+
+**A BLE transport reset is a candidate for a total link drop**, and the
+counters proving it were being thrown away. `/dev/stpbt` is the MT8163's
+combo radio behind MediaTek's WMT stack, shared with WiFi, and the scanner's
+own recovery reopens it — triggering a BT function-on and firmware patch
+download on the chip carrying the link. Seen once (stpbt read failure,
+reopen 5s later, `network is unreachable` 2s after that). The device had
+counted `restarts`/`hciErrors` since the proxy shipped;
+`em_ble_proxy.update_stats` read `advertsSeen` and dropped both. Now stored
+per hour as gauges. **This does NOT explain the connectivity history
+generally** — the proxy defaults off, #139 root-caused the RTT excursions to
+packet loss and TCP RTO, and the Lounge/Office swap showed those follow the
+location. Different symptom, kept apart deliberately.
+
+**Seven AEC instances would fit.** "One canceller per mic won't run on an
+A53" had been asserted without measuring. Benchmarked: one canceller is
+95.7µs per 32ms period and seven are 674µs on an i5-12500 — 0.30% and 2.1%
+of one core, so roughly 30–55% of an A53 core. Affordable. Whether it is
+*worth* it depends on how much the beamformer's channel switching actually
+costs the filter, which is one dashboard toggle away and still unmeasured.
+Also: tail 150ms is only 17% cheaper than 300ms, because the cost is
+dominated by fixed per-frame FFT work rather than filter length — so a tail
+sweep is nearly free either way.
+
+**Three test helpers failed the same way in one day**: source-slicing guards
+that used an unanchored `index()` or dropped only their own migration column,
+so any unrelated addition broke them with no clue why. Worth watching for as
+a class.
+
+
+## 2026-09-01 — the BLE proxy degrades its own device's control plane
+
+**Crossover, not correlation.** Two Dots on one desk, same room as the AP,
+so RF and link quality are matched by construction. The one running the BLE
+proxy logged **3615 idle RTT excursions in 24h against its neighbour's 2**,
+worst 20049ms against 4792ms, 5 keepalive timeouts against 0. Moving the
+proxy to the other device moved the fault within minutes and reproduced the
+same *rate* on different hardware — 2.64/min against 2.49/min. Wil's
+pushback is what forced this: "both echos are sat next to each other on my
+desk" killed the lazy "bad link" story I had been repeating.
+
+**The mechanism is our own traffic on the liveness channel.**
+`SendBleAdverts` writes through `writeJSON`, which takes `connMu` on the
+CONTROL WebSocket — the same mutex and TCP stream as the RTT echo, the
+keepalive pong, wake events and stats. Bulk telemetry head-of-line-blocks
+the channel we measure health on, so the excursions partly measure the
+adverts themselves. Not RF coexistence: stock FireOS drove a Bluetooth
+speaker while streaming over WiFi, and the July recon measured coex clean.
+
+**What Home Assistant actually needs, read rather than assumed.**
+`habluetooth` tolerates 195s (connectable) to 900s per device before an
+advertisement is stale, retires a *scanner* only after 90s of silence,
+smooths RSSI itself at alpha=0.3, and switches proxy ownership on 16dB with a
+6dB deadband. Bermuda re-decides area every second. So the requirement is
+about one advertisement per device per second — ten to twenty times less than
+we were sending. Two things that look like fixes and are not: lowering the
+scan duty cycle (320/30 IS `esp32_ble_tracker`'s default, what Bermuda is
+tuned against) and the chip's `filter_duplicates=1` (it suppresses identical
+adverts, but RSSI is the field that varies and the field Bermuda consumes).
+
+**A first sighting is not an arrival.** The gate's first version flushed
+immediately on any unseen (address, payload). BLE privacy addresses rotate
+every ~15 minutes, so that branch fires continuously in a room with phones,
+and flush runs synchronously on the goroutine that reads HCI — a change
+built to reduce control-plane writes could emit more of them than the plain
+250ms batching it replaced. Urgency now needs a KNOWN address whose payload
+changed, and an early flush resets the tick so it moves a write earlier
+rather than adding one.
+
+**Then C95 threw the first HCI transport resets ever seen** — two in ~40
+minutes on gate builds, against zero on EFF in 23.5h with the proxy and no
+gate, and zero for the seven weeks the Status tab has displayed the counter.
+`read /dev/stpbt: ENOTSOCK`, then ~30s of `network is unreachable`.
+Unresolved; the detail and the two surviving hypotheses are in
+`device/CLAUDE.md`.
+
+**Three wrong calls in one evening, all the same shape.** I asserted the
+reopen of `/dev/stpbt` took the WiFi down (the timestamps show WiFi failing
+four seconds BEFORE the reopen — and the warning text I wrote for #388 is
+what led me there, a hypothesis printed as a fact). I told Wil he "couldn't
+have known" about HCI restarts (the counter has been on the Status tab since
+2026-07-12; his "never seen it" was evidence, and I used a false claim to
+discount it). And I floated GC pressure from the gate's table, when
+`pause_total` moved 2ms → 22ms over five minutes against mic stalls of
+465-2481ms — three orders of magnitude short, in a log I had already read.
+Each time the refuting number was already in hand.
+
+Also today: the streaming teardown fix (#402, closing #252) — killing ffmpeg
+before cancelling its feeder, since the old ordering could not terminate when
+nobody was draining stdout; measured 20/20 hung against 0/20. EA 2.22.0-ea.10
+cut and published. And the Echo ref row came back off the Status tab (#406) —
+conditional rows in a fixed layout give devices different panel heights.
+
+## 2026-09-02 — the gate measured in a real room, and controller 2.22.0
+
+**Overnight, C95 (gate) against EFF (no gate), both with the proxy:** 949 idle
+RTT excursions in 36 windows against 1765 in 39 — 26.4 against 45.3 per 10m —
+and a worst RTT of 4431ms against 21025ms. Lower in ten hours of eleven, so not
+one quiet stretch. **Zero HCI transport resets** after 20:27:38, twelve hours
+clean; both of last night's fired within ~20s of the BLE proxy starting on a
+device flashed four times that evening, and both logged `1/1 total`.
+
+**Two clean reboots reproduced the stall and not the reset.** ~35s boots, then
+at +2m48s and +2m29s the same precursor — `no mic frames for 10s` — and a
+keepalive timeout, once on control and once on data. So the stall is the common
+event and the chip reset is a rare escalation of it, not its own fault. What the
+controller log cannot say is whether ALSA stalls before the network or they stop
+together; that needs `/tmp/server.log` from the device at the moment it happens,
+and is still owed.
+
+**The emission gate drops 9% in this room, not the 2x-10x the synthetic tests
+suggested.** Two Status tab readings 459s apart: 941 adverts seen, 856
+forwarded. The office produces ~2 adverts/s across ~29 devices — one broadcast
+per device every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything and there is no firehose left to
+filter. Which means 9% fewer adverts cannot explain 42% fewer excursions: the
+coupling is the fault, not the quantity, and #404 half 2 is the fix rather than
+more tuning. Recorded on #404.
+
+The two advert counters on the Status tab are not comparable and invite exactly
+that comparison — `advertsSeen` resets with the device, `adverts_forwarded`
+lives on the controller's proxy object and survives every reconnect. #410.
+
+**Controller 2.22.0 cut**, rolling the ten Early Access builds into GA: timers,
+announce-then-listen, the long-answer pacing fix, the no-HA ring cue, the
+delete/re-add fix. Cut at HEAD rather than at ea.10's commit, so it also carries
+#406 — the Echo ref row coming off the Status tab, a layout fix that had never
+been in an EA build. The notes carry the Bluetooth proxy as a known issue, since
+most deployments appear to run it and #404 is not closed by this release.
+
+## 2026-09-02 — GA 2.22.0 and v2.14.0 shipped; the stall is the link, not ALSA
+
+**Released both halves.** Controller 2.22.0 (ten EA builds rolled into GA) and
+device v2.14.0, the first firmware since v2.13.0. GA carries the Bluetooth
+proxy as a stated known issue rather than silently, because most deployments
+appear to run it and #404 was not closed by the release. Five PRs landed on
+top: OTA serialisation (#412), adverts onto the data plane (#413), barge
+arbitration (#414), the link-state ring (#415), and @DennisGaida's
+`aiohttp.access` quieting (#376).
+
+**The advert gate drops 9% in a real room, not the 2x-10x the synthetic tests
+suggested.** Two Status readings 459s apart: 941 seen, 856 forwarded. The
+office produces ~2 adverts/s across ~29 devices — one broadcast per device
+every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything. Which means 9% fewer adverts cannot
+explain the 42% fewer excursions measured overnight: the coupling is the
+fault, not the quantity, and #404 half 2 was the fix rather than more tuning.
+
+**`no mic frames for 10s` is a BLOCKED SOCKET WRITE, not an ALSA stall**, and
+this had been recorded the wrong way round since 2026-09-01. Device log from
+SPJ during a live event: `[mic] clock: 180.5s audio over 180.3s wall
+(deficit -158ms, stalls=0)` — capture kept perfect pace — while
+`streamMic: send error: write tcp …: i/o timeout` names the real blockage. The
+order is write blocks → `streamMic` stops draining the mic subscriber channel
+→ `subscriber channel full — batch dropped` → the controller sees nothing.
+Only the DATA plane died; control survived on the same host and port and the
+controller logged no event-loop stall. That is per-socket TCP retransmission,
+i.e. #139's 4.6-7.1% loss driving RTO to 500-800ms, and #140 is the answer.
+
+**A hypothesis built on n=3 and falsified in ten minutes.** Three stalls landed
+at +2m29s, +2m34s and +2m48s after connect; `linkInfoInterval` is 2 minutes and
+its expiry spawns two `wpa_cli` processes, so the first refresh looked like the
+trigger. A debug build at 45s ran nine refreshes at **12-36ms each with zero
+stalls**, and did not reproduce the 2m30s event either. Three points in a
+20-second band were over-read; the fault is intermittent (8 events in 7h on
+SPJ), not periodic. Office now carries a logging-only build that times every
+mic frame write and logs past 250ms, so the next natural stall shows its onset
+rather than only its 10-second deadline.
+
+**Two OTAs of the same shape, found by using the thing.** Three concurrent
+updates stalled the controller's event loop for 11.1s — the loop that sends
+speaker periods — which is what made serialising them worth doing. And Office
+turned out to be missing three of the four stock wake word classifiers since
+17 August: `reconcile_oww_assets` runs on connect but returns early unless
+on-device scoring is on, and then checks only the SELECTED model. Same shape
+for the other two payloads: `_sync_start_script` and `_sync_debloat` reconcile
+on OTA or on a click and never on connect. A device arriving is exactly the
+moment we know what it has.
+
+**Barge-in was not arbitrated at all**, reported by Wil and reproduced in the
+source: `_wake_arbiter.claim` had one call site, in the wake listener, so an
+idle neighbour answered the same interrupting utterance unopposed. The
+original wake's claim cannot cover it — `claim()` is bounded by `window_s`,
+not held until `release()`.
+
+**Three corrections of mine, all the same shape as yesterday's.** I merged
+#411 with checks still pending (Wil: "only merge on green"); I told Wil #414
+was branched off main when it and #415 were sitting uncommitted on #413's
+branch; and I twice reported a local test run that my own branch-switching had
+contaminated. The pattern is claiming a verification I had not actually
+performed.

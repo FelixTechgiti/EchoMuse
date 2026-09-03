@@ -59,8 +59,8 @@ message (`device/internal/client/control.go`):
 }
 ```
 
-`capabilities` is the negotiation signal. The Dot announces nine unconditionally
-plus one conditional (`capabilities()` in `control.go:738`):
+`capabilities` is the negotiation signal. The Dot announces ten unconditionally
+plus one conditional (`capabilities()` in `control.go`):
 
 | Capability | Condition | Meaning |
 |------------|-----------|---------|
@@ -73,7 +73,27 @@ plus one conditional (`capabilities()` in `control.go:738`):
 | `oww_trigger` | always | Can **act** on its own wake detection — kept separate from `oww_shadow` on purpose (see below) |
 | `button_hold` | always | Emits long-press (`heldMs`) |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
+| `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
+
+**`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
+The capability says the firmware knows *how* to use a hardware echo reference.
+Whether the board actually has one is answered by `aecRef` on the periodic
+`stats` message — `"hw"`, `"sw"` or `"off"`, and **absent** from firmware too
+old to say, which must not be read as `"sw"`.
+
+The split exists because the proof is only available at runtime: a channel is
+confirmed as a playback loopback by being bit-exact silent at idle *and*
+carrying audio while the speaker plays, and nothing has played at registration
+time. It matters for the AEC delay control, which compensates write-to-ear
+latency for the software tap and means nothing on a frame-aligned hardware
+reference. Gating that control on the capability would grey it out on every
+current device, including those that fall back to the tap and need it; gating
+it on `aecRef == "hw"` disables it exactly where it does nothing.
+
+A board with no loopback announces `aec_hw_ref` and reports `aecRef: "sw"`
+forever, which is the correct degraded behaviour and needs no controller
+change.
 
 **`oww_shadow` and `oww_trigger` are two capabilities, not one, and that split
 is load-bearing.** Shadow shipped first, so there is firmware in the field that
@@ -85,7 +105,8 @@ that only relays scoring announces `oww_shadow` alone.
 
 The controller reads capabilities via `@property` gates on the `Device` class
 (`controller/em_controller.py`): `led_anim_capable`, `audio_mix_capable`,
-`button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`, plus direct
+`button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`,
+`aec_hw_ref_capable`, plus direct
 membership checks for the base four (`mic`/`speaker`/`leds`/`buttons`). Every
 string the controller checks must be one the device can send, and every string
 the device sends must be one the controller understands — both directions are
@@ -108,12 +129,14 @@ absent optional fields take prior/default behaviour.
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |
 | `oww_wake` | score, effective threshold, age | On-device trigger fired (`owwOnDevice=on`); lands in `Device.pending_wake` |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
+| `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `pong` | — | Keepalive reply |
 
 **Controller → Device**
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
+| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0 |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
 | `led_anim` | `{pattern, colors, periodMs, ttlSec}` | Local animation spec; sent only if `led_anim` |
 | `mic_start` | `lock_mic?` | Start mic stream. `lock_mic:false`/absent = always-on ungated wake stream; `true` = bounded, VAD-gated turn |
@@ -149,6 +172,7 @@ board implementer must not read a single global table.
 | `0x01` | mic | Mic PCM chunk (mono `S16_LE`, 16 kHz) |
 | `0x04` | VAD-end | Bounded turn: speech was detected, then ended |
 | `0x05` | no-speech-timeout | Bounded turn: no speech ever detected before the timeout |
+| `0x06` | ble adverts | Batch of scanned BLE advertisements — **only if the controller announced `ble_adverts_data`** |
 
 `0x04`/`0x05` are safe to reuse because playback frames only ever flow to the
 device and capture frames only ever flow from it. The two capture sentinels are
@@ -163,6 +187,35 @@ Mic stream shapes (`device/CLAUDE.md`, Device audio pipeline):
 - **Bounded turn stream** (`lock_mic:true`) is VAD-gated with a preroll ring,
   ends with a `0x04` sentinel when the gate closes after speech, and ends with
   `0x05` if no speech arrived within the timeout.
+
+### `0x06` — BLE advertisements
+
+Payload is UTF-8 JSON, `{"adverts": [ ... ]}`, each entry as described under
+`ble_adverts` above. It carries no sequence header: a batch is self-contained
+and a lost one is not worth retransmitting.
+
+**Send these only when the controller announced `ble_adverts_data` in its
+`ack`.** A controller that did not will ignore the frame — unknown frame types
+are ignored in both directions — and every advertisement disappears with no
+error anywhere. Fall back to the `ble_adverts` control message instead.
+
+Two sender-side rules, neither of which the controller can enforce for you:
+
+- **Do not send while a BOUNDED TURN is streaming** (`mic_start` with
+  `lock_mic:true`). The data plane is one TCP stream, so a frame already
+  written cannot be preempted; the only way a turn's audio is not queued
+  behind telemetry is not to write the telemetry. A turn lasts seconds and
+  Home Assistant tolerates 195s of staleness per device, so nothing
+  downstream notices.
+
+  **Do not extend that to the always-on wake stream.** It is always on for
+  any device whose wake word is scored controller-side, so holding adverts
+  back whenever the mic is streaming drops every batch forever and the proxy
+  dies with no error at either end.
+- **Drop a batch you cannot send, rather than falling back to the control
+  plane.** Falling back puts bulk telemetry onto the liveness channel exactly
+  when the link is already in trouble, which is what this frame exists to
+  avoid.
 
 ## Config push — `ConfigMessage`
 

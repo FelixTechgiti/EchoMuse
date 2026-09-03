@@ -48,23 +48,36 @@ def test_no_handler_reads_the_registry_directly():
     every existing test, and it hands out a device with a closed socket for
     five seconds at a time.
 
-    Two direct reads are legitimate and both live inside the helpers
-    themselves, plus the one in _merge_device that exists precisely to
-    REPORT the link-down state rather than act on it.
+    Three shapes are legitimate and are named rather than counted, because a
+    bare count is a guard that stops meaning anything the first time someone
+    bumps it:
+
+      - the helpers' own internals,
+      - the `linkDown` readout, which exists to REPORT the state,
+      - identity comparisons (`is live` / `is not live`), which ask "is this
+        still the same object" rather than "give me a device". Those must
+        read the registry directly: a long-running sync holds a device across
+        seconds, and a redial in between replaces the object — presence would
+        be true of the registry and false of the thing being held.
     """
     code = _api_code()
-    reads = [
-        line.strip()
-        for line in code.splitlines()
-        if "_devices.get(" in line or "_devices.items()" in line
-    ]
-    # _live(), _live_items(), and _merge_device's "linkDown" readout.
-    assert len(reads) == 3, (
-        "a new direct registry read appeared — route it through _live() "
-        f"unless it is reporting link state: {reads}"
-    )
-    assert any("link_down" in r for r in reads), (
-        "the reporting read must be the one asking for link_down"
+    offenders = []
+    for line in code.splitlines():
+        if "_devices.get(" not in line and "_devices.items()" not in line:
+            continue
+        stripped = line.strip()
+        legitimate = (
+            "link_down" in stripped                      # the linkDown readout
+            or " is live" in stripped                    # identity comparison
+            or " is not live" in stripped                # identity comparison
+            or stripped.startswith("device = _devices.get(device_id)")   # _live
+            or stripped.startswith("(did, d) for did, d in list(_devices.items())")  # _live_items
+        )
+        if not legitimate:
+            offenders.append(stripped)
+    assert not offenders, (
+        "route these through _live() — a direct registry read hands out a "
+        f"device whose socket is shut: {offenders}"
     )
 
 

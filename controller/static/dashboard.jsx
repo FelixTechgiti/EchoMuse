@@ -1405,8 +1405,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     try {
       const up = await API.upload('/api/releases/upload', localFile);
       setUploading(false);
-      setPushLog(l => [...l, '✓ Upload complete — deploying…']);
-      const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token });
+      setPushLog(l => [...l, `✓ Upload complete${up.version ? ` — ${up.version}` : ''}`]);
+
+      // Ask BEFORE spending a reboot and a slot on a binary the device is
+      // already running. The server refuses this too, so declining here is a
+      // convenience rather than the guard; what it buys is being told at the
+      // point of deciding instead of after. Re-flashing the same version is a
+      // real repair for a corrupt slot, so it is a question and not a wall.
+      let force = false;
+      if (up.version && up.version === device.firmware_ver) {
+        if (!confirm(`${device.label || device.device_id} is already running ${up.version}.\n\nInstall it again anyway?`)) {
+          setPushLog(l => [...l, 'Cancelled — device already running this build.']);
+          setPushing(false);
+          return;
+        }
+        force = true;
+      }
+
+      setPushLog(l => [...l, 'Deploying…']);
+      const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token, force });
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
       _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {
@@ -1835,7 +1852,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           {row('Home Assistant', haState, bp.haSubscribed ? 'var(--ok)' : undefined)}
                           {row('Forwarded to HA', String(bp.advertsForwarded ?? 0))}
                           {row('ESPHome port', String(bp.port))}
-                          {row('HCI errors / restarts', b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—')}
+                          {/* Amber on any non-zero: reopening /dev/stpbt
+                              re-initialises the combo radio WiFi shares, so
+                              this is the first thing to check against an
+                              unexplained link drop on this device. */}
+                          {row('HCI errors / restarts',
+                               b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—',
+                               b && ((b.hciErrors ?? 0) > 0 || (b.restarts ?? 0) > 0)
+                                 ? 'var(--warn)' : undefined)}
                         </div>
                       </div>
                     </Panel>
@@ -1917,6 +1941,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
+                hwEchoRef={device.connected && device.aecRef === 'hw'}
+                hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -4940,7 +4966,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"]
@@ -5065,7 +5091,13 @@ function onDeviceMode(config) {
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
-                            holdCapable = true, triggerCapable = true }) {
+                            holdCapable = true, triggerCapable = true,
+                            hwEchoRef = false, hwRefCapable = true }) {
+  // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
+  // is the only one that DISABLES a control rather than enabling one. The
+  // fleet view has no single device to ask, so it keeps the AEC delay
+  // slider live — which is right either way: the value is still pushed, and
+  // still used by any device that falls back to the software tap.
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5448,8 +5480,35 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <Toggle label="Beamforming" sub="perimeter mic lock during turns" value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
             <Toggle label="Echo cancel (AEC)" sub="subtracts the device's own playback — wake + turns" value={config.aecEnabled ?? false} onChange={v => set('aecEnabled', v)}/>
             <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
-            <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
+            <Slider label="AEC delay"
+              sub={hwEchoRef
+                ? 'not used — this device has a hardware echo reference'
+                : 'playback write-to-ear latency compensation'}
+              disabled={hwEchoRef}
+              value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
             <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
+            {/* Three values, so a select. "Auto" is right almost always —
+                these exist so the two reference paths can be compared on one
+                device without editing an init script on it and restarting
+                the server, which is how that measurement stayed undone. */}
+            <Select
+              label="Echo reference"
+              sub={!hwRefCapable
+                ? 'needs newer firmware on this Echo — the software tap is the only source it has'
+                : (config.aecRefSource ?? 'auto') === 'hw'
+                  ? 'pinned to the playback loopback in the mic capture — no delay to compensate, but a board without one cancels nothing'
+                  : (config.aecRefSource ?? 'auto') === 'sw'
+                    ? 'pinned to the tap at the speaker write — uses the AEC delay above, and re-converges after every volume change'
+                    : hwEchoRef
+                      ? 'detected: using the hardware loopback on this Echo'
+                      : 'detects the hardware loopback, falls back to the software tap'}
+              value={String(config.aecRefSource ?? 'auto').toLowerCase()}
+              options={[
+                { value: 'auto', label: 'Auto' },
+                { value: 'hw',   label: 'Hardware', disabled: !hwRefCapable },
+                { value: 'sw',   label: 'Software tap' },
+              ]}
+              onChange={v => set('aecRefSource', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
         </StageAdvanced>
@@ -5622,6 +5681,10 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
     // A recorded failure is terminal — without this the row (and the header
     // progress pill) sat at "updating…" forever after an aborted update.
     if (d.update_error)                  return { text: `✗ ${d.update_error}`, color: 'var(--error)' };
+    // Queued outranks "rebooting…": a device waiting its turn has had nothing
+    // sent to it, and a disconnected one in the queue is offline for its own
+    // reasons, not because we restarted it.
+    if (d.update_queued)                 return { text: 'queued',       color: 'var(--muted)' };
     if (!d.connected)                    return { text: 'rebooting…',   color: 'var(--warn)' };
     return { text: 'updating…', color: 'var(--accent)' };
   }
