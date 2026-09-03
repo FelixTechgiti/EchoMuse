@@ -1222,6 +1222,36 @@ block updates on any device whose `df` we have not seen. Note binary growth
 is not a plausible cause of a space failure here — v2.9.8 is 10.1MB and
 v2.10.0 is 10.3MB.
 
+**Installing the version a device already runs is refused, and the guard that
+existed could not fire.** `_post_deploy_all` has skipped `already_current`
+since it was written — but gated on `not upload_token`, and it labelled every
+uploaded binary `local-<timestamp>` instead of reading the version out of it.
+So an upload always looked like a version no device had ever run, and a fleet
+deploy would have re-flashed the whole fleet with exactly what it was already
+running. `_post_device_update` checked nothing at all on either path. The case
+most likely to happen by accident — an engineering build pushed by hand,
+twice — was the one case nothing guarded, and it took a person doing it
+(2026-09-03) to find that.
+
+Both endpoints now read the binary's own version via
+`_extract_binary_version`. Three rules:
+
+- **The single-device path REFUSES** (`already_running`) rather than skipping
+  silently: someone pressed a button, and a no-op reported as success is how
+  they press it again. The fleet path keeps skipping, which is what a fleet
+  operation should do.
+- **`force` overrides both and is not optional.** Writing the same version
+  again is how a corrupt slot is repaired, so this must never become a wall
+  between an operator and their own device.
+- **The upload token is PEEKED, and popped only once the update is
+  committed.** Popping first meant a refusal consumed the binary, so acting on
+  the advice the refusal had just given cost an 11MB re-upload.
+
+`/api/releases/upload` returns the extracted version so the dashboard can warn
+at the point of deciding rather than after the operator has committed; it
+sends `force` when they say yes. That check is a convenience — the server
+refuses either way.
+
 **The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
 the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
 a fleet update pulled it once per device and the provisioning wizard again per
