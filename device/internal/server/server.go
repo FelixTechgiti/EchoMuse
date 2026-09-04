@@ -143,10 +143,11 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		}
 
 		// A muted state restored from state.json was applied to the ADC
-		// before the LED hardware was ready — paint the red ring and
-		// button LED now.
+		// before the LED hardware was ready — light the button LED now.
+		// The RING is not touched: mute has no claim on it any more, and
+		// painting one here would fight whatever Home Assistant has set as
+		// the ring's resting colour.
 		if server.mute.IsMuted() {
-			server.mute.showMuteLEDs()
 			setMuteButtonLED(true)
 		}
 	}()
@@ -219,6 +220,14 @@ func (s *Server) SetMuteChangeCallback(cb func(muted bool)) {
 	s.mute.SetOnMuteChange(cb)
 }
 
+// MuteFromController mutes the microphone on a request that arrived over the
+// network. One-way by design — there is no UnmuteFromController, and adding
+// one would defeat the point: only the physical button gives the microphone
+// back. See the mute_set case in internal/client/control.go.
+func (s *Server) MuteFromController() {
+	s.mute.MuteOnly()
+}
+
 // IsMuted returns true when the mic is muted — used to block dot button.
 func (s *Server) IsMuted() bool {
 	return s.mute.IsMuted()
@@ -228,12 +237,6 @@ func (s *Server) IsMuted() bool {
 // turn's listening frame can paint immediately. See volumeController.
 func (s *Server) CancelVolumeDisplay() {
 	s.volume.CancelDisplay()
-}
-
-// RestoreMuteRing re-applies the red mute ring. Called on reconnect to
-// recover the visual state that the orange pulse animation overwrote.
-func (s *Server) RestoreMuteRing() {
-	s.mute.showMuteLEDs()
 }
 
 // SetLinkDown records whether the device currently has a controller session.
@@ -317,9 +320,10 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 	if angleDeg < 0 {
 		return
 	}
-	// Same paint suppressions as SetLEDs: the volume arc owns the ring for
-	// its display window, and the mute ring is device-sovereign.
-	if s.volume.DisplayActive() || s.mute.IsMuted() {
+	// Same paint suppression as SetLEDs: the volume arc owns the ring for
+	// its display window. Mute no longer suppresses anything — see
+	// suppressPaint.
+	if s.volume.DisplayActive() {
 		return
 	}
 
@@ -426,7 +430,7 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 	}
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
-	if suppressPaint(s.volume.DisplayActive(), s.mute.IsMuted(), s.LinkDown()) {
+	if suppressPaint(s.volume.DisplayActive()) {
 		return
 	}
 	s.paintBaseLEDs()
@@ -436,20 +440,28 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 // truth table can be tested without hardware — the same reason the
 // controller keeps its link-auth and barge decisions out of their callers.
 //
+// One rule is left, and the two that went are worth recording because the
+// second only existed to work around the first:
+//
 //   - volumeActive: the arc owns the ring for its 2s window against
-//     animations, which repaint ~every 100ms and would stomp it in one frame.
-//   - muted: the red ring is device-sovereign, so a cancelled turn's LED
-//     cleanup cannot clear it.
-//   - linkDown: ...unless there is no controller, in which case the ring
-//     belongs to the link pulse. Red on a device with nothing above it is
-//     not less informative than orange, it is false — it says "muted and
-//     working". The mute BUTTON's own LED keeps reporting the mic, so
-//     nothing about the mute state stops being visible.
-func suppressPaint(volumeActive, muted, linkDown bool) bool {
-	if volumeActive {
-		return true
-	}
-	return muted && !linkDown
+//     animations, which repaint ~every 100ms and would stomp it in one
+//     frame. It is protection from repaint churn, not from the user.
+//
+//   - muted used to suppress every paint, because the red mute ring was the
+//     mute indicator and a cancelled turn's LED cleanup would otherwise
+//     clear it. The ring is no longer a mute indicator — the button's own
+//     GPIO LED is, and always was in parallel — so there is nothing left to
+//     defend and the ring belongs to whoever asks for it.
+//
+//   - linkDown was the exception to that exception: the orange "no
+//     controller" pulse had to paint THROUGH the mute suppression, because a
+//     muted device with nothing above it showing red says "muted and
+//     working", which is false. With mute no longer suppressing, the pulse
+//     paints like any other frame and the special case dissolves. Removing
+//     the cause removed the workaround — worth noticing, because the
+//     workaround looked like the load-bearing part.
+func suppressPaint(volumeActive bool) bool {
+	return volumeActive
 }
 
 // paintBaseLEDs paints the ring from the stored controller state.

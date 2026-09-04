@@ -2,37 +2,45 @@ package server
 
 import "testing"
 
-// A muted device that lost its controller sat there showing the red mute
-// ring — which does not merely say less than the orange link pulse, it says
-// something false: red means "muted and working". Reported by Wil,
-// 2026-09-02.
+// The ring is no longer a mute indicator (2026-09-03). Mute lives on the
+// button's own GPIO LED, which was always in parallel and cannot be
+// overpainted, and the twelve-LED ring belongs to whoever asks for it —
+// which is what lets Home Assistant own it completely.
 //
-// The reapply half was always present: OnConnected calls RestoreMuteRing
-// with the comment "orange pulse overwrote the red ring — restore it". The
-// pulse never overwrote it, because the paint suppression could not tell a
-// controller frame from the device's own link pulse.
+// The history is worth keeping, because the removed rule and its exception
+// were a matched pair. Mute used to suppress every paint so a cancelled
+// turn's LED cleanup could not clear the red ring; linkDown then had to be
+// an exception to THAT, because a muted device with no controller sat
+// showing red, and red says "muted and working" — false, not merely less
+// useful. Taking the ring away from mute removed the reason for both.
 
-func TestTheLinkPulsePaintsThroughTheMuteRing(t *testing.T) {
+func TestOnlyTheVolumeArcHoldsTheRing(t *testing.T) {
 	cases := []struct {
-		name                          string
-		volumeActive, muted, linkDown bool
-		want                          bool
+		name         string
+		volumeActive bool
+		want         bool
 	}{
-		{"idle and connected", false, false, false, false},
-		{"muted and connected — mute is sovereign", false, true, false, true},
-		{"muted and disconnected — the pulse wins", false, true, true, false},
-		{"unmuted and disconnected", false, false, true, false},
-		// The arc outranks both. It cannot arise while link-down, since the
-		// volume buttons are inert there, but the ordering must not depend
-		// on that being true elsewhere.
-		{"volume arc holds the ring", true, false, false, true},
-		{"volume arc outranks link-down too", true, false, true, true},
+		{"idle", false, false},
+		// The arc repaints once and animations repaint ~every 100ms, so
+		// without this the arc is stomped within a frame. Protection from
+		// repaint churn, not from the user: a dot press still cancels it.
+		{"volume arc holds the ring", true, true},
 	}
 	for _, c := range cases {
-		if got := suppressPaint(c.volumeActive, c.muted, c.linkDown); got != c.want {
-			t.Errorf("%s: suppressPaint(%v,%v,%v) = %v, want %v",
-				c.name, c.volumeActive, c.muted, c.linkDown, got, c.want)
+		if got := suppressPaint(c.volumeActive); got != c.want {
+			t.Errorf("%s: suppressPaint(%v) = %v, want %v",
+				c.name, c.volumeActive, got, c.want)
 		}
+	}
+}
+
+func TestMuteDoesNotHoldTheRing(t *testing.T) {
+	// The invariant, stated as itself rather than as a row in the table
+	// above: there is no input to suppressPaint by which mute can hold the
+	// ring back, because mute is no longer one of its inputs. A future
+	// change that re-adds one has to delete this test to do it.
+	if suppressPaint(false) {
+		t.Fatal("nothing but the volume arc may hold the ring")
 	}
 }
 

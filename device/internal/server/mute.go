@@ -71,6 +71,33 @@ func (m *muteController) Toggle() {
 	}
 }
 
+// MuteOnly mutes, and can only mute. Idempotent: muting an already-muted
+// device does nothing at all rather than toggling it back.
+//
+// This is the entry point for a mute arriving over the network (Home
+// Assistant). Toggle() stays the button's, and remains the ONLY way back to
+// a live microphone. See the mute_set case in internal/client/control.go for
+// why unmuting is a physical act.
+func (m *muteController) MuteOnly() {
+	m.mu.Lock()
+	if m.muted {
+		m.mu.Unlock()
+		return
+	}
+	m.muted = true
+	cb := m.onMuteChange
+	persist := m.persist
+	m.mu.Unlock()
+
+	m.applyMute()
+	if persist != nil {
+		persist()
+	}
+	if cb != nil {
+		cb(true)
+	}
+}
+
 // adcMuteCtls are the per-chip ADC mute control pairs, all four codecs
 // (A: ch0/ch1 … D: ch6 + unused). C5 hardware fix (2026-07-07): only chip
 // A (105/106) was muted before, leaving chips B–D — including ch6, the mic
@@ -103,17 +130,29 @@ func (m *muteController) RestoreMuted() {
 	setAdcMute("1")
 }
 
+// applyMute / applyUnmute deliberately do NOT touch the ring.
+//
+// Mute used to paint all twelve LEDs red and suppress every other paint,
+// which made the ring the mute indicator and left it unavailable for
+// anything else. The button's own LED has reported mute since v2.9.5 —
+// stock parity, and the comment on setMuteButtonLED already said "the
+// button itself shows muted, NOT JUST THE RING" — so the ring was the
+// second copy of a signal that has dedicated hardware.
+//
+// Giving it up buys a ring that Home Assistant can own completely. What it
+// costs is that a glance at the ring no longer tells you the mic is off;
+// the red button LED does, and it is the one indicator that cannot be
+// overpainted, because it is a GPIO rather than part of the ring driver.
+// That is a deliberate trade, asked for and made with the cost stated.
 func (m *muteController) applyMute() {
 	log.Println("Mute: mic muted")
 	setAdcMute("1")
-	m.showMuteLEDs()
 	setMuteButtonLED(true)
 }
 
 func (m *muteController) applyUnmute() {
 	log.Println("Mute: mic unmuted")
 	setAdcMute("0")
-	m.clearLEDs()
 	setMuteButtonLED(false)
 }
 
@@ -127,26 +166,4 @@ func setMuteButtonLED(on bool) {
 	if err := internalLed.SetMuteButtonLED(on); err != nil {
 		log.Printf("Mute button LED: %v", err)
 	}
-}
-
-func (m *muteController) showMuteLEDs() {
-	lc := m.ledCtrl()
-	if lc == nil {
-		return
-	}
-	leds := make([]led.Led, numLEDs)
-	for i := 0; i < numLEDs; i++ {
-		leds[i] = led.Led{ID: i, R: 180, G: 0, B: 0} // red ring
-	}
-	if err := lc.SetLEDs(leds...); err != nil {
-		log.Printf("Mute LED set failed: %v", err)
-	}
-}
-
-func (m *muteController) clearLEDs() {
-	lc := m.ledCtrl()
-	if lc == nil {
-		return
-	}
-	clearLeds(lc)
 }

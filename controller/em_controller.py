@@ -3695,6 +3695,22 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     f"[{_d.device_id}] Ring light not persisted: {e}")
             if not (_d.speaking or _d.thinking or _d.listening):
                 await leds_idle(_d)
+        async def _set_mute(_d=_device_ref) -> None:
+            """
+            Home Assistant asked to mute this device's microphone.
+
+            One-way by construction, at three levels: this closure has no
+            unmute counterpart, the control message carries no boolean, and
+            the device's MuteOnly refuses to toggle. Any one of the three
+            would do; all three are there because the cost of getting it
+            wrong is a microphone that opens in someone's home without
+            anybody in the room touching it.
+
+            The device reports the change back on its own `mute_state`
+            message, exactly as it does for a button press, so nothing here
+            needs to update state or notify anyone.
+            """
+            await _d.send_control({"type": "mute_set"})
         async def _play_ring_effect(anim: dict, seconds: float,
                                     _d=_device_ref) -> None:
             """
@@ -3779,6 +3795,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             stop_alarm=_stop_alarm,
             set_idle_ring=_set_idle_ring,
             play_ring_effect=_play_ring_effect,
+            set_mute=_set_mute,
             start_conversation=_start_conversation,
         )
         # Seed HA's light entity from the stored row, so it reads the colour
@@ -3861,15 +3878,21 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
                     elif msg_type == "mute_state":
                         device.muted = msg.get("muted", False)
+                        esphome.update_device_mute(device_id, device.muted)
                         if device.muted and device.voice_lock.locked():
                             # Mute during an active turn terminates it — same
                             # cancel as the dot button, plus speaker_flush so
-                            # any in-flight TTS goes silent immediately (the
-                            # device shows the red ring the moment the button
-                            # is pressed; audio carrying on would contradict
-                            # it). The device guards its LED ring while muted,
-                            # so the cancelled turn's LED cleanup can't clear
-                            # the red ring.
+                            # any in-flight TTS goes silent immediately. The
+                            # button's own LED goes red the instant it is
+                            # pressed, and audio carrying on would contradict
+                            # it.
+                            #
+                            # The ring is no longer part of this. Mute used
+                            # to paint it red and suppress every other paint,
+                            # which is what stopped the cancelled turn's LED
+                            # cleanup clearing it; the ring now belongs to
+                            # Home Assistant and mute is shown on the
+                            # button's GPIO LED, which nothing can overpaint.
                             log.info(
                                 f"[{device_id}] Muted during active turn — "
                                 f"cancelling"
