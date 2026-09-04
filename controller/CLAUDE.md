@@ -539,6 +539,50 @@ playing and again after the wait. Painting over the listening ring tells the
 user the device stopped listening when it did not, and the ring is the only
 thing saying so.
 
+### Muting from Home Assistant is one-way
+
+`MUTE_SWITCH_KEY` exposes the microphone mute as a switch that **only
+closes**. Turning it on mutes the device; turning it off does not unmute it —
+the switch snaps back and the microphone stays shut.
+
+That is the feature rather than a limitation. Unmuting is a physical act:
+somebody muted this device by pressing the button on it, and the red LED
+under that button is a promise. Handing the microphone back over the network
+would let a mistaken automation, a shared Home Assistant login or a
+compromised controller break that promise while the LED still makes it, in a
+room where nobody touched anything. It is the same reasoning that already
+makes mute device-sovereign — the controller cannot start the mic while
+muted, and the ADC mute is enforced in hardware regardless.
+
+**Enforced three times, and the outermost one cannot be forgotten.** The
+`mute_set` control message carries **no boolean**: there is nothing on the
+wire that could ask for an unmute. A `{"muted": bool}` field would have read
+more naturally and moved the rule into a runtime branch, which a later
+handler or a well-meaning refactor can drop with nothing failing. Behind it,
+the device's `MuteOnly` never toggles, and the controller has no unmute
+closure at all — `tests/test_mute_one_way.py` pins that the word does not
+appear as anything callable in either module.
+
+**The device is the authority on the state.** The button changes mute with no
+controller involved, so the entity mirrors `mute_state` reports rather than
+what HA last asked for; a push driven by the command would leave the entity
+wrong after every button press. A refused `off` echoes the real state back,
+so HA's toggle lands where the microphone actually is rather than showing a
+position it never took — and logs a warning, because someone pressed it and a
+control that silently does nothing is the failure this codebase names most
+often.
+
+**Gated on the `mute_set` capability.** Older firmware ignores unknown control
+messages silently, so an ungated switch would report success and mute
+nothing.
+
+That guard file also carries the sixth instance of this tree's recurring
+source-guard trap, one step further along than the previous five: it is not
+enough to strip comments and docstrings, because the guard matched the
+REFUSAL ITSELF — `log.warning("Unmute refused …")` is the code doing exactly
+what the guard demands. A guard about what the code CAN DO must not read what
+the code SAYS, so `_code_only` strips string literals too.
+
 ### HA entities beyond the voice satellite
 
 Both are advertised **only when the device declares the capability** — an

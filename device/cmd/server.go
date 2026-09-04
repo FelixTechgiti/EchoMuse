@@ -322,13 +322,14 @@ func main() {
 			controlClient.SendVolumeState(s.VolumeLevel())
 		}
 		s.StopAnim() // fresh controller session owns the ring from here
-		if muted {
-			// Orange pulse overwrote the red ring — restore it.
-			s.RestoreMuteRing()
-		} else {
-			s.SetLEDs(allLEDs(0, 0, 0), nil)
-			s.LEDModeDirection()
-		}
+		// No mute branch any more: the ring is not a mute indicator, so
+		// there is nothing to restore for a muted device — the button LED
+		// carried the state throughout and was never overpainted. Clear the
+		// ring and hand it back either way; the controller's own frame,
+		// including the resting colour Home Assistant owns, lands within an
+		// RTT.
+		s.SetLEDs(allLEDs(0, 0, 0), nil)
+		s.LEDModeDirection()
 		// Send an immediate stats snapshot so the dashboard populates on
 		// (re)connect rather than waiting up to 30s for the first tick.
 		go func() {
@@ -494,6 +495,15 @@ func main() {
 	// callback above — so SendVolumeState fires automatically, closing the loop.
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
+	})
+
+	// Muting from Home Assistant. MuteFromController is one-way — there is
+	// no unmute counterpart, and the control message has no boolean that
+	// could carry one. Mute goes out through the existing change callback,
+	// so the dashboard and HA both see it exactly as they see a button
+	// press; nothing here has to report it separately.
+	controlClient.OnMuteSet(func() {
+		s.MuteFromController()
 	})
 
 	// Heap-profile dump on SIGUSR1 — the ~1MB/h leak hunt (2026-07-17).

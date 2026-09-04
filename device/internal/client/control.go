@@ -84,6 +84,7 @@ type ControlClient struct {
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 	volumeSetCallback     VolumeSetCallback
+	muteSetCallback       StateCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
 	musicFlushCallback    StateCallback
@@ -136,6 +137,7 @@ func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedC
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
+func (c *ControlClient) OnMuteSet(cb StateCallback)               { c.muteSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
@@ -450,6 +452,32 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 			if err := json.Unmarshal(raw, &msg); err == nil && c.volumeSetCallback != nil {
 				c.volumeSetCallback(msg.Level)
+			}
+
+		case "mute_set":
+			// Home Assistant muting the microphone. It can MUTE and it
+			// cannot unmute, and the message shape is what enforces that:
+			// there is no boolean here to set to false.
+			//
+			// A `{"muted": bool}` field would have read more naturally and
+			// been wrong, because the one-way rule would then live in a
+			// runtime check somewhere — one that a later handler, a retry
+			// path or a well-meaning refactor can drop without anything
+			// failing. A message that cannot express "unmute" cannot have
+			// that check forgotten.
+			//
+			// The reason for the rule: unmuting is a PHYSICAL act. Someone
+			// muted this microphone by pressing the button on the device,
+			// and giving it back over the network means a mistaken
+			// automation, a shared Home Assistant login or a compromised
+			// controller can reopen a microphone in someone's home while
+			// the room believes it is off. The button LED is the promise
+			// and only the button may take it back. This is the same
+			// reasoning that already makes mute device-sovereign: the
+			// controller cannot start the mic while muted, and the ADC mute
+			// is enforced in hardware regardless.
+			if c.muteSetCallback != nil {
+				c.muteSetCallback()
 			}
 
 		case "config":
@@ -778,9 +806,19 @@ func capabilities() []string {
 	// "is it" split as oww_shadow against shadow.active, and for the same
 	// reason: proving ch8 is a loopback needs the speaker to have played,
 	// which has not happened at registration.
+	//
+	// "mute_set": this firmware accepts a mute command over the control
+	// plane. Announced rather than assumed for the reason every entry here
+	// is: older firmware ignores unknown message types silently, so a
+	// controller that sent mute_set to it would offer Home Assistant a
+	// switch that reports success and closes no microphone — the exact
+	// shape of "a control that cannot act must say so" this list exists to
+	// prevent. Note the capability says the device can be muted remotely
+	// and says nothing about unmuting, because no firmware will ever do
+	// that: the message carries no boolean for it.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref"}
+		"aec_hw_ref", "mute_set"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

@@ -232,6 +232,7 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 LIGHT_KEY        = 4   # the LED ring's RESTING colour, as an HA light
+MUTE_SWITCH_KEY  = 5   # microphone mute — closes only, never opens
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -546,6 +547,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _leds_capable(self) -> bool:
         return self._device_has("leds")
 
+    @property
+    def _mute_set_capable(self) -> bool:
+        return self._device_has("mute_set")
+
+    def _mute_state_msg(self):
+        """
+        The microphone mute, as HA sees it.
+
+        Read off the owning server, which mirrors the device's own
+        `mute_state` reports — the device is the authority here and always
+        has been, since the button can change this with no controller
+        involved at all.
+        """
+        srv = self._owning_server
+        return api_pb2.SwitchStateResponse(
+            key=MUTE_SWITCH_KEY,
+            state=bool(srv.muted) if srv else False,
+        )
+
     def _light_state_msg(self):
         """
         The ring's resting state as HA sees it (em_ring_light).
@@ -694,6 +714,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     effects=(list(em_ring_light.EFFECTS)
                              if self._device_has("led_anim") else []),
                 )
+            # Microphone mute, as a switch that only closes.
+            #
+            # Turning it ON mutes the device. Turning it OFF does NOT unmute
+            # it: the switch snaps back and the microphone stays shut, and
+            # that is the feature rather than a limitation. Unmuting is a
+            # physical act — somebody pressed the button on the device, and
+            # handing the microphone back over the network would let a
+            # mistaken automation, a shared HA login or a compromised
+            # controller reopen a microphone in someone's home while the
+            # button's red LED still promises it is off.
+            #
+            # Gated on `mute_set` because older firmware ignores unknown
+            # control messages silently, which would make this a switch that
+            # reports success and mutes nothing.
+            if self._mute_set_capable:
+                yield api_pb2.ListEntitiesSwitchResponse(
+                    object_id="microphone_mute",
+                    key=MUTE_SWITCH_KEY,
+                    name="Microphone Mute",
+                    icon="mdi:microphone-off",
+                    device_class="switch",
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -703,6 +745,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield self._media_state_msg()
             if self._leds_capable:
                 yield self._light_state_msg()
+            if self._mute_set_capable:
+                yield self._mute_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -867,6 +911,31 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 task.add_done_callback(self._timer_tasks.discard)
                 task.add_done_callback(self._log_timer_task_error)
             yield _HANDLED
+            return
+
+        if isinstance(msg, api_pb2.SwitchCommandRequest):
+            if msg.key != MUTE_SWITCH_KEY or not self._mute_set_capable:
+                yield _HANDLED
+                return
+            srv = self._owning_server
+            if msg.state:
+                log.info(f"[{self._log_name}] Mute requested by Home Assistant")
+                if srv is not None and srv._set_mute is not None:
+                    self._spawn(srv._set_mute(), "mute")
+            else:
+                # REFUSED, and the state is echoed back unchanged so HA's
+                # toggle snaps to where the microphone actually is rather
+                # than sitting in a position the device never took.
+                #
+                # Refused loudly, not silently: someone pressed this, and a
+                # control that quietly does nothing is the failure this
+                # codebase names most often. The log line is the only record
+                # of the attempt, since nothing changes state.
+                log.warning(
+                    f"[{self._log_name}] Unmute refused — the microphone is "
+                    f"opened at the device, by the button, and nowhere else"
+                )
+            yield self._mute_state_msg()
             return
 
         if isinstance(msg, api_pb2.LightCommandRequest):
@@ -2363,6 +2432,13 @@ class DeviceESPhomeServer:
         # async callable(anim: dict, seconds: float) — plays a notification
         # and puts the resting ring back. Also a controller closure.
         self._play_ring_effect = None
+        # Microphone mute, mirrored from the device's own mute_state
+        # reports. The device is the authority: its button changes this with
+        # no controller involved.
+        self.muted: bool = False
+        # async callable() — asks the device to mute. No unmute counterpart
+        # exists anywhere in this chain, deliberately.
+        self._set_mute = None
         # Injected by device_connected() — async callable(level: int) that
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
@@ -3121,6 +3197,7 @@ async def device_connected(
     set_idle_ring=None,
     play_ring_effect=None,
     start_conversation=None,
+    set_mute=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3165,6 +3242,7 @@ async def device_connected(
     server._send_volume_set = send_volume_set
     server._set_idle_ring = set_idle_ring
     server._play_ring_effect = play_ring_effect
+    server._set_mute = set_mute
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
     server._start_conversation = start_conversation
@@ -3324,6 +3402,27 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def update_device_mute(device_id: str, muted: bool) -> None:
+    """
+    Called by em_controller on every `mute_state` report from the device.
+
+    The device is the authority — its button changes mute with no controller
+    involved — so this mirrors rather than commands, and it fires for a
+    button press exactly as it does for a mute Home Assistant asked for.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.muted = bool(muted)
+    satellite = server.get_satellite()
+    if satellite is None or not satellite._mute_set_capable:
+        return
+    try:
+        satellite._send_one(satellite._mute_state_msg())
+    except Exception as e:
+        log.debug(f"[esphome.{device_id[-8:]}] mute state push failed: {e}")
 
 
 def update_device_ring(device_id: str, idle_ring: str, brightness: int) -> None:

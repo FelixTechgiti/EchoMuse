@@ -825,11 +825,11 @@ reaches audible.
 
 Volume is **state, not a setting** — it rides the config channel but has no dashboard control (the slider was removed 2026-07-25: `SeedVolume` ignores later pushes, so moving it did nothing until the device restarted and any real volume change overwrote it). It is listed in `em_config_sections.STATE_KEYS`, exempt from section scoping, and shown read-only on the Status tab.
 
-Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, red ring/button LED after LED init).
+Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, button LED after LED init; the ring is not touched).
 
 ## LED priority system
 
-Turn-state ring colours (listening ring, thinking spinner) come from **LED scenes** (`em_scenes.py`), configurable per device (`ledScene` + custom colours). Firmware with the `led_anim` capability (v2.9+) **animates locally**: the controller sends one `led_anim` message per state change ({pattern: solid|spin|rotate|pulse|meter|off, colors, periodMs, ttlSec}) and the device renders frames on its own ticker (`internal/server/animator.go`) — controller/WiFi jitter can't judder the ring. `meter` throbs with the live speaker RMS (tapped at the ALSA write, so it tracks audible audio, not the ~5.5s-ahead send) — measured on the **voice plane only, before the music mix**, unlike the AEC far-end tap which deliberately sees the mixed output; a meter fed the mix throbs to the music bed before the response has started; its response curve is config-tunable (`meter*` keys → `AnimSpec` pointer fields → `resolveMeter`, which clamps independently of the dashboard ranges) because it is a taste parameter that needs iterating in a real room, not a firmware OTA per pass. `ttlSec` is bounded per phase — 30s listening, 135s spinner (**coupled to `_fetch_tts_audio`'s 60s timeout ×2 attempts, since the spinner spans HA think time AND the fetch — move one and move the other**), and computed per response for `meter` via `em_scenes.meter_ttl` so a long TTS cannot self-clear mid-answer. Loss-resilience: newer spec or raw `leds` frame atomically replaces the animation (generation counter), and `ttlSec` is a dead-man that self-clears the ring if the controller dies mid-turn. Legacy firmware falls back to controller-streamed frames. Controller `leds` messages carry an explicit `listening: true` flag on listening-ring frames — the device's direction overlay keys off it (pre-scene firmware inferred "listening" from an all-green ring, which breaks for any other scene; the heuristic remains as fallback for old controllers). The direction overlay brightens the base ring colour instead of painting green. Mute ring (red) and volume arc (cyan) are device-local and scene-independent by design.
+Turn-state ring colours (listening ring, thinking spinner) come from **LED scenes** (`em_scenes.py`), configurable per device (`ledScene` + custom colours). Firmware with the `led_anim` capability (v2.9+) **animates locally**: the controller sends one `led_anim` message per state change ({pattern: solid|spin|rotate|pulse|meter|off, colors, periodMs, ttlSec}) and the device renders frames on its own ticker (`internal/server/animator.go`) — controller/WiFi jitter can't judder the ring. `meter` throbs with the live speaker RMS (tapped at the ALSA write, so it tracks audible audio, not the ~5.5s-ahead send) — measured on the **voice plane only, before the music mix**, unlike the AEC far-end tap which deliberately sees the mixed output; a meter fed the mix throbs to the music bed before the response has started; its response curve is config-tunable (`meter*` keys → `AnimSpec` pointer fields → `resolveMeter`, which clamps independently of the dashboard ranges) because it is a taste parameter that needs iterating in a real room, not a firmware OTA per pass. `ttlSec` is bounded per phase — 30s listening, 135s spinner (**coupled to `_fetch_tts_audio`'s 60s timeout ×2 attempts, since the spinner spans HA think time AND the fetch — move one and move the other**), and computed per response for `meter` via `em_scenes.meter_ttl` so a long TTS cannot self-clear mid-answer. Loss-resilience: newer spec or raw `leds` frame atomically replaces the animation (generation counter), and `ttlSec` is a dead-man that self-clears the ring if the controller dies mid-turn. Legacy firmware falls back to controller-streamed frames. Controller `leds` messages carry an explicit `listening: true` flag on listening-ring frames — the device's direction overlay keys off it (pre-scene firmware inferred "listening" from an all-green ring, which breaks for any other scene; the heuristic remains as fallback for old controllers). The direction overlay brightens the base ring colour instead of painting green. The volume arc (cyan) is device-local and scene-independent by design. There is no mute ring: mute is shown on the button's own GPIO LED, so the ring stays available (see the LED priority bullets below).
 
 Turn *outcomes* are distinguished by rhythm, not colour (red/orange/cyan are taken by mute/link/volume): `no_speech` gets one slow throb, `no_tts`/`tts_error`/`timeout` fast blinks, everything else ends silently. Both ride the existing `pulse` pattern with a 1s TTL so they retire on the device's own ticker — no follow-up message to lose. Driven by `device.last_turn_outcome` (set in `em_esphome._persist_turn` **and in `_record_dropped_turn`**, consumed once by `_leds_turn_end`).
 
@@ -839,25 +839,36 @@ Turn *outcomes* are distinguished by rhythm, not colour (red/orange/cyan are tak
 
 Playback ring clearing waits for the device's `playback_stats` (`device.playback_done`), NOT a wall-clock estimate. The old estimate subtracted socket-write time — which completes near-instantly however slow the wire is — so it cleared the ring up to 6.1s early on exactly the links that needed longest. `playback_stats` is emitted once the audio channel drains after EOS, i.e. the real end of audio; the timeout is only a backstop for the report never arriving.
 
-`server.go` maintains a `ledMode` (direction arc vs. system). System-level LEDs (controller commands, mute ring, pulse animations) always win over the beamformer direction arc. Two paint suppressions in `SetLEDs`/`SetDirectionLEDs` (state is still recorded in `baseLEDs` so the ring can be restored):
+`server.go` maintains a `ledMode` (direction arc vs. system). System-level LEDs (controller commands, pulse animations) always win over the beamformer direction arc. ONE paint suppression is left in `SetLEDs`/`SetDirectionLEDs` — state is still recorded in `baseLEDs` so the ring can be restored:
 
-- **The ring belongs to the LINK STATE, and mute yields to it.** `linkDown`
-  (disconnected OR pending approval) is set by the connection callbacks, and
-  `suppressPaint` — pure, truth-tabled — lets the device's own orange/white
-  pulse paint through the mute suppression. A muted device that lost its
-  controller used to sit showing red, which is not merely less useful than the
-  pulse, it is FALSE: red says "muted and working". `OnConnected` has always
-  called `RestoreMuteRing` with the comment "orange pulse overwrote the red
-  ring — restore it", and the pulse never overwrote it, because the
-  suppression below could not tell a controller frame from the device's own.
-  The same bug hid the white pending pulse.
-  **The action and volume buttons go inert while `linkDown`**, gated at the
-  consumers in `cmd` rather than in the evdev binding, which is the portable
-  hardware layer and knows nothing about sessions. **The MUTE button stays
-  live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
-  one control that works with no controller at all — and making it inert would
-  hand back a live mic on reconnect, since mute is persisted in `state.json`.
-- **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
+- **The ring is NOT a mute indicator, and mute holds nothing back.** Mute
+  lives on the button's own LED (sysfs gpio444), which is a GPIO rather than
+  part of the ring driver — it cannot be overpainted, survives every LED-mode
+  transition for free, and has reported mute in parallel since v2.9.5. So the
+  twelve-LED ring belongs to whoever asks for it, which is what lets Home
+  Assistant own it completely (`em_ring_light`).
+
+  **The rule that went and its exception went together, and that is the part
+  worth remembering.** Mute used to suppress every paint, so that a cancelled
+  turn's LED cleanup could not clear the red ring. `linkDown` then had to be
+  an exception to *that*: the device's own orange/white pulse had to paint
+  THROUGH the mute suppression, because a muted device with no controller sat
+  showing red, and red says "muted and working" — false, not merely less
+  useful. Taking the ring away from mute removed the reason for both, and
+  `suppressPaint` is down to one input. The exception looked like the
+  load-bearing part right up until its cause was removed.
+
+  **The cost is stated rather than hidden**: a glance at the ring no longer
+  tells you the microphone is off. The red button LED does, it is the
+  indicator stock FireOS uses, and it is the only one nothing can overpaint.
+
+  **The action and volume buttons still go inert while `linkDown`**, gated at
+  the consumers in `cmd` rather than in the evdev binding, which is the
+  portable hardware layer and knows nothing about sessions. **The MUTE button
+  stays live**: the ADC mute is hardware and its button LED is a GPIO, so it
+  is the one control that works with no controller at all — and making it
+  inert would hand back a live mic on reconnect, since mute is persisted in
+  `state.json`.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 
 ## cgo dependency
