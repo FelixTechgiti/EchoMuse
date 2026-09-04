@@ -123,16 +123,20 @@ def test_normalise_is_canonically_ordered():
 
 
 def test_summarise_reads_naturally():
+    # Counted from SECTION_IDS rather than written out: adding a section is
+    # a normal thing to do, and a test that has to be edited alongside it
+    # gets edited without being read.
+    n = len(cs.SECTION_IDS)
     assert cs.summarise([]) == "Fleet"
     assert cs.summarise(["ring"]).startswith("Local override")
-    assert "1 of 6" in cs.summarise(["ring"])
-    assert "6 of 6" in cs.summarise(list(cs.SECTION_IDS))
+    assert f"1 of {n}" in cs.summarise(["ring"])
+    assert f"{n} of {n}" in cs.summarise(list(cs.SECTION_IDS))
 
 
 # ─── Migration equivalence ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, 6)])
-def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
+@pytest.mark.parametrize("use_global", [1, 0])
+def test_v8_backfill_is_lossless(tmp_path, use_global):
     """
     The v8 migration must leave every device's effective config unchanged:
     inherit-everything -> no sections, override-everything -> all sections.
@@ -149,6 +153,7 @@ def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
             "UPDATE devices SET config_sections = ? WHERE device_id = 'dev1'",
             (json.dumps([] if use_global else list(cs.SECTION_IDS)),),
         )
+    expected = 0 if use_global else len(cs.SECTION_IDS)
     assert len(em_db.get_device_config_sections("dev1")) == expected
     eff = em_db.get_effective_device_config("dev1")
     if use_global:

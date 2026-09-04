@@ -866,6 +866,22 @@ class Device:
         return "audio_mix" in (self.capabilities or [])
 
     @property
+    def sendspin_capable(self) -> bool:
+        """
+        Whether this firmware can join a Music Assistant group by itself.
+
+        Gates the setting in the dashboard: offering it to firmware that
+        ignores the key would be a toggle that saves, says "pushed", and
+        changes nothing — the failure this codebase names most often.
+
+        It also says something the controller cannot otherwise know: a
+        device that speaks Sendspin has a SECOND producer of its music
+        plane, so "music is playing" no longer implies the controller is
+        playing it.
+        """
+        return "sendspin" in (self.capabilities or [])
+
+    @property
     def output_chain_capable(self) -> bool:
         """
         Whether this firmware runs the EQ, bass guard and limiter itself.

@@ -32,6 +32,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -187,6 +188,38 @@ func main() {
 		controlClient.SendBleAdverts(batch)
 	})
 	applyBleConfig(bleScanner)
+
+	// Sendspin — the device joins a Music Assistant group directly, with no
+	// controller hop, and becomes a SECOND producer of the music plane.
+	// Off by default and toggled live on config push (sendspinEnabled,
+	// applySendspinConfig).
+	//
+	// The arbiter is the data client's, not a second one: two arbiters each
+	// believe their own source owns the plane, and the mixer hands the
+	// speaker the sum of two songs. Registering the leave callback here is
+	// what makes "leaving is not ignoring" true — a preemption by Home
+	// Assistant ends the Sendspin session properly rather than leaving the
+	// server streaming to a client that went quiet.
+	sendspinClient := sendspin.NewClient(sendspin.Options{
+		Identity: sendspin.Identity{
+			Name:     deviceID,
+			ClientID: deviceID,
+			DeviceInfo: sendspin.DeviceInfo{
+				ProductName:     "EchoMuse",
+				Manufacturer:    "EchoMuse",
+				SoftwareVersion: client.Version,
+			},
+		},
+		// The music plane's own depth, so buffer_capacity is derived from
+		// the device rather than guessed. See sendspin.BufferCapacity.
+		BufferSeconds:      speaker.MusicBufferSeconds,
+		MinBufferMs:        1000,
+		RequiredLeadTimeMs: 100,
+	}, "wlan0", pcmSpeaker, dataClient.MusicPlane().For(musicplane.Sendspin))
+	dataClient.MusicPlane().Register(musicplane.Sendspin, func(why musicplane.Reason) {
+		sendspinClient.Leave(string(why))
+	})
+	applySendspinConfig(sendspinClient)
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
@@ -373,6 +406,7 @@ func main() {
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
+		applySendspinConfig(sendspinClient)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1137,6 +1171,27 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		}
 	}
 	cc.SendOwwWake(score, crossed, ageMs)
+}
+
+// applySendspinConfig starts or stops the Sendspin client from the current
+// effective config.
+//
+// Stopping SAYS GOODBYE rather than dropping the socket: a server told why a
+// client left keeps its group view correct, where one that merely stopped
+// hearing from it holds this device as a member until its own timeout — so
+// turning the setting off in Home Assistant would leave a speaker listed in
+// the group and silent for minutes.
+//
+// Called on every config apply including the connect-time one, and both
+// halves are idempotent, because the controller re-sends the whole config on
+// every reconnect.
+func applySendspinConfig(c *sendspin.Client) {
+	snap := config.Get().Snapshot()
+	if snap.SendspinEnabled != nil && *snap.SendspinEnabled {
+		c.Start()
+		return
+	}
+	c.Stop(sendspin.GoodbyeUserRequest)
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

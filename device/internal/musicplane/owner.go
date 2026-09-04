@@ -231,3 +231,51 @@ func (o *Owner) Shutdown() {
 		cb(ReasonStopped)
 	}
 }
+
+// Scoped is one source's view of the arbiter.
+//
+// It exists so a producer can be handed something that only speaks for
+// itself. Passing the whole Owner around means every call site names its own
+// Source, and the failure mode of naming the wrong one is a producer that
+// releases somebody else's claim — silent, and visible only as music that
+// stops for no reason.
+//
+// A value type, so it can be copied freely; the arbiter behind it is shared.
+type Scoped struct {
+	owner *Owner
+	src   Source
+}
+
+// For returns a source's view.
+func (o *Owner) For(src Source) Scoped { return Scoped{owner: o, src: src} }
+
+// Source reports which producer this view speaks for.
+func (s Scoped) Source() Source { return s.src }
+
+// Claim asks for the plane on this source's behalf.
+func (s Scoped) Claim() bool {
+	if s.owner == nil {
+		return false
+	}
+	return s.owner.Claim(s.src)
+}
+
+// Release gives it up, if this source still holds it.
+func (s Scoped) Release() {
+	if s.owner == nil {
+		return
+	}
+	s.owner.Release(s.src)
+}
+
+// MayWrite reports whether this source may fill the plane right now.
+//
+// A zero Scoped answers false rather than panicking: it is what a producer
+// constructed before the arbiter would hold, and refusing to write is the
+// safe answer to "I do not know who owns this".
+func (s Scoped) MayWrite() bool {
+	if s.owner == nil {
+		return false
+	}
+	return s.owner.MayWrite(s.src)
+}

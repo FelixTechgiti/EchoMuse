@@ -143,6 +143,13 @@ type Device struct {
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
 
+	// Sendspin (internal/sendspin) — the device joins a Music Assistant
+	// group directly, with no controller hop. Pointer typed so false is
+	// expressible over the wire; default OFF, because it is a second
+	// producer of the music plane and a second thing on the network, and
+	// nobody who has not asked for it should acquire either.
+	SendspinEnabled *bool
+
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
 	// light it locally at its OWN wake crossing (#263) instead of waiting
@@ -210,6 +217,8 @@ func (d *Device) loadDefaults() {
 	d.AecRefSource = normaliseAecRef(envStr("EM_AEC_HW_REF", AecRefAuto))
 	bleProxyEnabled := envBool("BLE_PROXY_ENABLED", false)
 	d.BleProxyEnabled = &bleProxyEnabled
+	sendspinEnabled := envBool("SENDSPIN_ENABLED", false)
+	d.SendspinEnabled = &sendspinEnabled
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -314,6 +323,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.SendspinEnabled != nil {
+		d.SendspinEnabled = msg.SendspinEnabled
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -385,6 +397,10 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
+	sendspinEnabled := false
+	if d.SendspinEnabled != nil {
+		sendspinEnabled = *d.SendspinEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -406,6 +422,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecTailMs:          d.AecTailMs,
 		AecRefSource:       d.AecRefSource,
 		BleProxyEnabled:    &bleProxyEnabled,
+		SendspinEnabled:    &sendspinEnabled,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -447,6 +464,7 @@ type ConfigMessage struct {
 	AecTailMs          int       `json:"aecTailMs,omitempty"`
 	AecRefSource       string    `json:"aecRefSource,omitempty"`
 	BleProxyEnabled    *bool     `json:"bleProxyEnabled,omitempty"`
+	SendspinEnabled    *bool     `json:"sendspinEnabled,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

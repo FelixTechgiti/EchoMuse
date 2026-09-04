@@ -825,9 +825,16 @@ func capabilities() []string {
 	// It is announced separately from "audio_mix" even though both concern
 	// the same ALSA write, because the fleet already contains firmware that
 	// mixes and does not shape.
+	// "sendspin": this firmware can join a Music Assistant group directly,
+	// with no controller hop. Announced so the controller can offer the
+	// setting only where it does something — and because it changes what
+	// the controller can assume about the music plane: a device that speaks
+	// Sendspin has a second producer of that plane, so a controller reading
+	// "music is playing" can no longer conclude that it is the one playing
+	// it.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "mute_set", "output_chain"}
+		"aec_hw_ref", "mute_set", "output_chain", "sendspin"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

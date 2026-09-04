@@ -1941,6 +1941,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
+                sendspinCapable={!device.connected || !!device.sendspinCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
@@ -4969,7 +4970,8 @@ const CONFIG_SECTIONS = {
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
-  "bluetooth": ["bleProxyEnabled"]
+  "bluetooth": ["bleProxyEnabled"],
+  "streaming": ["sendspinEnabled"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -5092,7 +5094,8 @@ function onDeviceMode(config) {
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
                             holdCapable = true, triggerCapable = true,
-                            hwEchoRef = false, hwRefCapable = true }) {
+                            hwEchoRef = false, hwRefCapable = true,
+                            sendspinCapable = true }) {
   // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
   // is the only one that DISABLES a control rather than enabling one. The
   // fleet view has no single device to ask, so it keeps the AEC delay
@@ -5635,6 +5638,25 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
+        </div>
+      </Stage>
+
+      {/* 07 STREAMING */}
+      <Stage n="07" title="Streaming"
+        chips={<><ScopeChip tone="device">Device</ScopeChip></>}
+        desc="Protocols the Echo speaks for itself, with no controller in the path. Music reaches the speaker straight from the source, so it keeps playing through a controller restart — and it is mixed with voice on the device, so a spoken question ducks it rather than stopping it. A voice request through Home Assistant always wins: the Echo leaves the group and plays what it was asked for, and does not rejoin by itself."
+        scope={scopeEl('streaming')} dim={secStyle('streaming')}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          {/* Offered only where the firmware announces it. The value reads
+              through sendspinCapable so an incapable device shows the
+              switch off rather than a stored true it cannot honour — the
+              same shape as the tap-as-event toggle above. */}
+          <Toggle label="Sendspin" disabled={!sendspinCapable}
+            sub={sendspinCapable
+              ? "join Music Assistant groups directly — synchronised multi-room, no controller hop. The Echo appears as a speaker in Music Assistant once enabled"
+              : 'needs newer firmware on this Echo — it has no Sendspin client'}
+            value={sendspinCapable && (config.sendspinEnabled ?? false)}
+            onChange={v => set('sendspinEnabled', v)}/>
         </div>
       </Stage>
     </div>

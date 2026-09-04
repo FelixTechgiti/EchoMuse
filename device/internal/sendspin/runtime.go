@@ -71,6 +71,12 @@ const periodFrames = 2048
 const bytesPerFrame = 2
 
 // Runtime implements Handler: it is what a Conn hands its chunks to.
+//
+// Asserted rather than assumed: Handler has eight methods and a rename on
+// either side produces a Conn that compiles and calls nothing.
+var _ Handler = (*Runtime)(nil)
+
+// Runtime implements Handler: it is what a Conn hands its chunks to.
 type Runtime struct {
 	sink   MusicSink
 	plane  PlaneOwner
@@ -336,6 +342,20 @@ func (r *Runtime) correctLocked(pcm []byte, playAt, now int64, rate int) []byte 
 	}
 	// Where the next sample pushed will actually play: now, plus everything
 	// already queued, plus what is waiting in `pending`.
+	//
+	// ADDING `pending` IS WHAT MAKES THIS SIGNAL SMOOTH, and without it the
+	// corrector would chase a sawtooth. `delay` jumps by a whole period
+	// (2048 frames, 42.7ms) every time a period is pushed, which is far
+	// outside the 24-sample deadband — but the same push removes exactly
+	// those frames from `pending`, so the sum does not move. Consumption is
+	// smooth on this hardware for a separate reason: hw_ptr is a real DMA
+	// position advancing in 112–144 frame steps every ~2.4ms, not software
+	// bookkeeping that would step a whole period at a time.
+	//
+	// So no smoothing is applied here, deliberately. An EMA over a signal
+	// that is already clean would only add lag to the one measurement the
+	// correction depends on, and the deadband already absorbs the jitter
+	// that remains (a procfs read and a scheduling delay).
 	queued := delay + int64(len(r.pending)/bytesPerFrame)
 	wouldPlayAt := now + queued*1_000_000/int64(rate)
 	// THE SIGN. CorrectionPolicy takes a POSITION error — where playback is

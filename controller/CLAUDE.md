@@ -1119,6 +1119,40 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
 
+## Streaming the device does itself
+
+`sendspinEnabled` (Config → Streaming) turns on the device's own Sendspin
+client (`device/internal/sendspin`): the Echo joins a Music Assistant group
+directly, Music Assistant → device, with no controller hop at all.
+
+**It makes the device a SECOND producer of its own music plane**, and that is
+the fact everything else here follows from. Until now the controller's `0x04`
+frames were the only thing that could reach `PumpMusic`, so "music is playing"
+and "the controller is playing music" were the same statement. They are not
+any more.
+
+- **Home Assistant wins, and the device enforces it** (`internal/musicplane`).
+  A `play_media`, a spoken "play some jazz", anything routed through HA takes
+  the plane, and the Sendspin session is ENDED rather than merely starved — a
+  server still streaming to a client that went quiet keeps a speaker listed in
+  the group and silent. Nothing rejoins when HA's music finishes.
+- **Gated on the `sendspin` capability**, like every other setting whose
+  feature the firmware may not have.
+- **Default off.** It puts a second client on the network advertising itself
+  to any Sendspin server that will have it, and it changes what the controller
+  can assume about its own speaker. Neither should happen to somebody who did
+  not ask.
+- **⚠ `em_player`'s entity does not know about it.** With Sendspin on the
+  device can be playing music the controller never sent, and the HA
+  `media_player` would report idle over audible audio — the "control that
+  lies" failure this file names most often (#53, twice). Closing it needs the
+  device to report its Sendspin playback state; until then the note in
+  `em_db.DEFAULT_DEVICE_CONFIG` is what carries the warning.
+
+Its own config section (`streaming`) rather than a line in `playback`:
+playback is about how audio sounds once it arrives and this is about where it
+comes from, and a device overriding one has no reason to override the other.
+
 ## Fleet vs device scoping (schema v8)
 
 The wire contract for the config push — which keys exist and which the device

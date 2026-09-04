@@ -5082,6 +5082,10 @@ def _merge_device(row) -> dict:
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
+        # Gates the Sendspin toggle. A device that ignores sendspinEnabled
+        # would show a switch that saves, says "pushed", and changes
+        # nothing.
+        "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
         # dashboard can tell "no sensor" apart from "sensor present, no reading
         # yet" — which is the question #90 had to be answered by hand, because

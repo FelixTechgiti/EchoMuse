@@ -217,6 +217,27 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
+    # sendspinEnabled: the DEVICE joins a Music Assistant group directly
+    # over Sendspin, with no controller hop (device/internal/sendspin).
+    # Default off, for two reasons that are both about surprise: it makes
+    # the device a second producer of its own music plane — so "music is
+    # playing" no longer implies the controller is playing it — and it puts
+    # a second client on the network advertising itself to any Sendspin
+    # server that will have it. Neither should happen to somebody who did
+    # not ask.
+    #
+    # Carried, not consumed: the device acts on it and the controller only
+    # stores and pushes it, same as bleProxyEnabled — so it needs no mirror
+    # onto Device and has none.
+    #
+    # ⚠ THE GAP THAT LEAVES: with Sendspin on, the device can be playing
+    # music the controller never sent, and em_player's media_player entity
+    # would report idle over audible audio — the exact "control that lies"
+    # this codebase names most often (#53, twice). Closing it needs the
+    # device to report its Sendspin playback state, which is a separate
+    # change; until then the setting is off by default and this is what the
+    # note is for.
+    "sendspinEnabled":  False,
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake
