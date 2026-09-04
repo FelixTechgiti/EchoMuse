@@ -198,8 +198,7 @@ connection state machine (`conn.go`) driven by a scripted server over an
 in-memory transport, the drift-correction policy (`sync.go`), and the
 music-plane arbitration every one of these protocols needs
 (`device/internal/musicplane`). **Still to build:** the Noise handshake behind
-the `Crypto` interface, FLAC decoding, and the lifecycle in `cmd/server.go`
-(config key, capability, reconnect loop).
+the `Crypto` interface.
 
 **Alignment is by silence at the start and by sample-level correction
 afterwards, and both halves are needed.** Nothing on the device controls when

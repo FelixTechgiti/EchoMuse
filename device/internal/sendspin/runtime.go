@@ -1,7 +1,6 @@
 package sendspin
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -91,6 +90,10 @@ type Runtime struct {
 	mu sync.Mutex
 	// format of the stream in flight, nil when none is.
 	format *StreamStart
+	// flacDec is built at stream start for a FLAC stream and nil otherwise.
+	// It holds the STREAMINFO the server sent out of band, which the chunks
+	// do not carry.
+	flacDec *flacDecoder
 	// pending holds bytes not yet forming a whole period.
 	pending []byte
 	// anchored is set once the first real sample has been placed. Until
@@ -169,17 +172,25 @@ func (r *Runtime) OnStreamStart(s StreamStart) {
 	defer r.mu.Unlock()
 	f := s
 	r.format = &f
+	r.flacDec = nil
 	r.pending = r.pending[:0]
 	r.anchored = false
 	r.pushedFrames = 0
 	log.Printf("[sendspin] stream: %s %dHz %dch %dbit",
 		s.Codec, s.SampleRate, s.Channels, s.BitDepth)
-	if s.Codec == CodecFLAC && s.CodecHeader != "" {
-		// Decoded here rather than ignored so a malformed header is a log
-		// line at stream start instead of noise from the speaker.
-		if _, err := base64.StdEncoding.DecodeString(s.CodecHeader); err != nil {
-			log.Printf("[sendspin] the FLAC codec header is not base64: %v", err)
+
+	if s.Codec == CodecFLAC {
+		// Built HERE rather than lazily on the first chunk, so a malformed
+		// or missing header is one log line at stream start instead of the
+		// same failure 23 times a second — and so the stream is refused
+		// before any audio is placed against a timestamp.
+		dec, err := newFLACDecoder(s)
+		if err != nil {
+			log.Printf("[sendspin] %v — dropping this stream", err)
+			r.format = nil
+			return
 		}
+		r.flacDec = dec
 	}
 }
 
@@ -203,6 +214,7 @@ func (r *Runtime) OnStreamClear() {
 func (r *Runtime) OnStreamEnd() {
 	r.mu.Lock()
 	r.format = nil
+	r.flacDec = nil
 	tail := len(r.pending)
 	r.pending = r.pending[:0]
 	r.mu.Unlock()
@@ -232,12 +244,19 @@ func (r *Runtime) OnAudio(c AudioChunk) {
 
 	r.mu.Lock()
 	format := r.format
+	dec := r.flacDec
 	r.mu.Unlock()
 	if format == nil {
 		return
 	}
 
-	pcm, err := decodeChunk(*format, c.Data)
+	var pcm []byte
+	var err error
+	if dec != nil {
+		pcm, err = dec.decode(c.Data)
+	} else {
+		pcm, err = decodeChunk(*format, c.Data)
+	}
 	if err != nil {
 		log.Printf("[sendspin] decode: %v", err)
 		return
@@ -487,11 +506,9 @@ func decodeChunk(f StreamStart, data []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("sendspin: %d channels", f.Channels)
 	case CodecFLAC:
-		// Advertised behind PCM precisely so this cannot be reached: the
-		// server picks the client's highest priority it can encode, and it
-		// can encode all three. Reaching it means the ordering rule in
-		// SupportedFormats was broken.
-		return nil, fmt.Errorf("sendspin: FLAC has no decoder yet")
+		// Handled by the stream's own decoder — it holds the STREAMINFO the
+		// server sent out of band, which a per-chunk function cannot.
+		return nil, fmt.Errorf("sendspin: FLAC needs the stream decoder")
 	}
 	return nil, fmt.Errorf("sendspin: codec %q", f.Codec)
 }
