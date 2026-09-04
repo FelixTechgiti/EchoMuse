@@ -163,7 +163,41 @@ process.
 
 ---
 
-## 6. Sendspin **[proposed — #89]**
+## 6. Sendspin **[in progress — #89]**
+
+**Read the specification, not this section, for wire detail.** It is published
+at `github.com/Sendspin/spec` and it settled several things this design got
+from second-hand sources. The corrections, because each would have been found
+the expensive way:
+
+- **The handshake is longer than "client/hello first".** It is `client/init`
+  (cleartext) → `server/init` + Noise message 1 → Noise message 2 →
+  transport mode → `server/hello` → `client/hello` → `server/activate`. So
+  `client/hello` — the message carrying the format list, and the one-shot
+  that cannot be revised — is sent **after** encryption is up and after the
+  server has introduced itself, not as the opening move.
+- **The server is the Noise INITIATOR and the client the responder**, which
+  is backwards from the usual reading of "client connects".
+- **Unpaired access has a published constant.** The Sentinel PSK is
+  `SHA-256("sendspin-sentinel-psk-v1")`, so a plaintext-equivalent path
+  exists inside the encrypted transport rather than beside it. The August
+  finding that Music Assistant implemented no encryption at all does not mean
+  the handshake can be skipped; it means the PSK on that path is public.
+- **Fragmentation exists and audio can use it.** Any message over 65518 bytes
+  splits across type-1 frames, first-flag and last-flag in a byte of flags
+  whose remaining bits MUST be zero. The threshold is 16 bytes below 64KiB
+  because fragmenting happens BEFORE encryption and the tag has to fit.
+- **The audio chunk header is fixed and small**: type byte, big-endian int64
+  timestamp in µs, big-endian uint32 `send_ahead`. The timestamp is when the
+  first sample must LEAVE THE SPEAKER, not when the chunk should be decoded.
+
+**Built and tested on the host, not yet heard:** the time filter
+(`device/internal/sendspin/timefilter.go`), the framing (`frame.go`), the
+player-role shapes (`player.go`), and the music-plane arbitration every one of
+these protocols needs (`device/internal/musicplane`). **Still to build:** the
+connection state machine, the Noise handshake, FLAC decoding, mDNS, and the
+wiring to `PumpMusic`.
+
 
 Synchronised multi-room playback via the Open Home Foundation's Sendspin
 protocol, which Music Assistant speaks natively (WebSocket, port 8927,

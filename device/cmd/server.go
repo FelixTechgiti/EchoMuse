@@ -30,6 +30,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
@@ -385,6 +386,10 @@ func main() {
 	// instead and must never send this.
 	controlClient.OnMusicFlush(func() {
 		pcmSpeaker.FlushMusic()
+		// The user stopped or paused, so the plane is free — and stays free.
+		// Nothing rejoins; whoever had a local session before HA took the
+		// plane starts it again themselves.
+		dataClient.MusicPlane().Release(musicplane.Controller)
 	})
 
 	// Duck — music is attenuated under a voice turn and restored at the end.

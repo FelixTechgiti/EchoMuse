@@ -14,6 +14,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -152,6 +153,13 @@ type DataClient struct {
 	deviceID string
 	mic      mic.Subscribable
 	spk      speaker.Speaker
+	// music arbitrates who fills the music plane. The controller's 0x04
+	// stream is one producer among several now — a Sendspin group, a
+	// Spotify Connect session and an AirPlay session are the others — and
+	// summing two of them is noise, not a mix. Held here because this is
+	// where the controller's frames arrive; every other producer takes a
+	// reference through MusicPlane().
+	music *musicplane.Owner
 
 	readyCh chan string
 
@@ -260,6 +268,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		beam:     beamformer.New(),
 		proc:     processor.New(),
 		aec:      canceller,
+		music:    &musicplane.Owner{},
 	}
 	// Seeded from the env default so a device that never reaches a
 	// controller still honours EM_AEC_HW_REF; the first config push
@@ -726,6 +735,17 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			}
 		case frameTypeMusic:
 			if len(data) > 1 && d.spk != nil {
+				// Home Assistant wins. A request routed through HA is the
+				// direct request made to this device, so it takes the plane
+				// from a local session rather than being mixed into one —
+				// two music sources are two songs, not two instruments. The
+				// displaced session is told to LEAVE, not merely stopped
+				// writing: a server still streaming to a client that went
+				// quiet keeps filling a buffer nobody hears and the group's
+				// view of this device stays wrong. Claiming per frame is one
+				// uncontended mutex per ~42ms period and returns early once
+				// the plane is already ours.
+				d.music.Claim(musicplane.Controller)
 				if err := d.spk.PumpMusic(data[1:]); err != nil {
 					log.Printf("[data] PumpMusic error: %v", err)
 				}
@@ -735,6 +755,10 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			if d.spk != nil {
 				d.spk.EndMusicStream()
 			}
+			// The plane goes FREE, and nothing rejoins. A silent rejoin puts
+			// audio in the room nobody asked for at that moment; whoever
+			// started the group can start it again.
+			d.music.Release(musicplane.Controller)
 		default:
 			log.Printf("[data] Unknown binary frame type: 0x%02x", data[0])
 		}
@@ -1173,3 +1197,10 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		}
 	}
 }
+
+// MusicPlane returns the arbiter deciding who fills the music plane.
+//
+// Every producer of that plane takes its reference from here — there must be
+// exactly one arbiter, or two of them each believe their own source owns it
+// and the mixer hands the speaker the sum of two songs.
+func (d *DataClient) MusicPlane() *musicplane.Owner { return d.music }
