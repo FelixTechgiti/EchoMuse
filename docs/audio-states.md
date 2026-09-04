@@ -201,6 +201,17 @@ music-plane arbitration every one of these protocols needs
 the `Crypto` interface, FLAC decoding, mDNS discovery, and the wiring to
 `PumpMusic`.
 
+**The advertised format list is ordered decodable-first, and that ordering is
+a safety property rather than a preference.** The server picks the client's
+highest priority it can encode, and the spec requires it to encode all three —
+so the first entry *is* the one chosen. FLAC is worth having on measurement
+(3.68% of a core against 0.97%, saving 929 kbps on a link measured at 4.6–7.1%
+loss) and is advertised *behind* PCM until its decoder exists: advertising it
+first would guarantee a stream this device turns into noise, with no error
+anywhere — the frames arrive, something interprets them, and the speaker plays
+the result. It stays in the list because `client/hello` is a one-shot and
+dropping it would make adding the decoder need a reconnect to take effect.
+
 **Landing the first sample is the easy half.** The speaker's crystal runs at
 47973 fps against 48000 — 560ppm — so a stream that starts perfectly is 0.56ms
 out after a second and 34ms out after a minute, against a ±1ms spec floor.

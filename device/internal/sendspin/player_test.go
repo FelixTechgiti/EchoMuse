@@ -37,21 +37,57 @@ func TestEveryFormatWeMightAskForIsAdvertised(t *testing.T) {
 	}
 }
 
-func TestFlacIsAdvertisedFirst(t *testing.T) {
-	// Priority order, and it is a measurement: 3.68% of one core against
-	// 0.97% for PCM, saving 929 kbps on links measured at 4.6–7.1% loss.
-	if got := SupportedFormats()[0].Codec; got != CodecFLAC {
-		t.Fatalf("first advertised codec = %q, want flac", got)
+func TestNothingUndecodableIsAdvertisedAhead(t *testing.T) {
+	// The whole safety property of the list. The server picks the client's
+	// highest priority it can encode, and the spec requires it to encode all
+	// three — so the first entry IS the one that will be chosen. A codec
+	// advertised first with no decoder behind it does not leave the option
+	// open; it guarantees a stream this device turns into noise, with no
+	// error anywhere: the frames arrive, something interprets them, and the
+	// speaker plays the result.
+	seenUndecodable := false
+	for i, f := range SupportedFormats() {
+		if !Decodable(f.Codec) {
+			seenUndecodable = true
+			continue
+		}
+		if seenUndecodable {
+			t.Fatalf("format %d (%s) is decodable but sits behind one that "+
+				"is not — the server will pick the undecodable one", i, f.Codec)
+		}
 	}
 }
 
-func TestThePreferredFormatIsOneWeAdvertised(t *testing.T) {
-	if !Supports(PreferredFormat()) {
-		t.Fatalf("we would request %+v without advertising it", PreferredFormat())
+func TestThePreferredFormatIsAdvertisedAndDecodable(t *testing.T) {
+	f := PreferredFormat()
+	if !Supports(f) {
+		t.Fatalf("we would request %+v without advertising it", f)
 	}
-	if PreferredFormat().Channels != 1 {
+	if !Decodable(f.Codec) {
+		t.Fatalf("we would request %s, which nothing can decode", f.Codec)
+	}
+	if f.Channels != 1 {
 		t.Fatalf("preferred channels = %d, want mono — the music plane is "+
-			"mono end to end", PreferredFormat().Channels)
+			"mono end to end", f.Channels)
+	}
+}
+
+func TestFlacIsStillAdvertisedEvenThoughItCannotBeDecodedYet(t *testing.T) {
+	// client/hello is a one-shot: a format absent from it can never be
+	// requested for the life of the connection, and a later request for an
+	// unadvertised format fails silently. So the list names everything this
+	// device might ever ask for while the ORDER names what it can serve
+	// today. Dropping FLAC because "we cannot decode it" would mean a
+	// reconnect is required to ever use it.
+	found := false
+	for _, f := range SupportedFormats() {
+		if f.Codec == CodecFLAC {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("FLAC was dropped from the advertised set — adding the " +
+			"decoder would then also need a reconnect to take effect")
 	}
 }
 

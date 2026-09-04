@@ -59,43 +59,94 @@ const (
 	BitDepth   = 16
 )
 
+// Decodable reports whether this firmware can actually turn a codec into
+// samples.
+//
+// THE ADVERTISED LIST IS IN PRIORITY ORDER AND THE SERVER PICKS THE FIRST
+// ONE IT CAN ENCODE — and it can encode all three, because the spec requires
+// that of every server. So the first entry is the one that will be chosen,
+// and advertising a codec with no decoder behind it does not "leave the
+// option open": it guarantees a stream this device turns into noise.
+//
+// Split out from the list so the two cannot disagree. FLAC joins this set in
+// the same change that adds its decoder, and a test pins that the preferred
+// format is decodable — because the failure has no error in it. The frames
+// arrive, something interprets them, and the speaker plays the result.
+func Decodable(codec string) bool {
+	switch codec {
+	case CodecPCM:
+		// Raw little-endian signed samples. Nothing to decode.
+		return true
+	case CodecFLAC:
+		// Advertised, deliberately, and not yet decodable — see
+		// SupportedFormats.
+		return false
+	}
+	return false
+}
+
 // SupportedFormats returns what this device advertises, in priority order.
 //
-// FLAC first, and that is a measurement rather than a preference. On this
-// hardware, per second of audio: FLAC decode 3.28% of one core, ChaCha20-
-// Poly1305 at the FLAC rate 0.40%, total 3.68% — against 0.97% for PCM, which
-// costs 929 kbps more on the wire. This fleet's links are measured at 4.6–7.1%
-// packet loss (#139/#140), and trading a link known to be marginal against a
-// core with 3.68% of room on it is not a close call.
+// DECODABLE FORMATS COME FIRST, and that ordering is the whole safety
+// property of this list: the server picks the client's highest priority it
+// can encode, and it can encode everything.
 //
-// PCM is advertised as a fallback for the same reason both channel counts are:
-// unadvertised is unrequestable, and the failure is silent.
+// FLAC is still advertised, below the PCM entries, and that is not a
+// contradiction. client/hello is a ONE-SHOT — a format absent from it can
+// never be requested for the life of the connection, and a later request for
+// an unadvertised format fails SILENTLY, with the server logging the mismatch
+// on its own side and falling back. So the list has to name everything this
+// device might ever ask for, while the ORDER has to name only what it can
+// serve today. When the FLAC decoder lands, moving it to the front is a
+// one-line change with a test behind it.
 //
-// Opus is deliberately absent. Servers MUST support all three, so a client may
-// advertise a subset — and the only Opus decoders worth having are cgo, on a
-// platform (armv7a, API 22) where every cgo dependency is a cross-compilation
-// problem. It is a bandwidth optimisation to take later, not an entry cost.
+// FLAC is worth having: measured on this hardware, per second of audio, FLAC
+// decode is 3.28% of one core and ChaCha20-Poly1305 at the FLAC rate 0.40%,
+// total 3.68% — against 0.97% for PCM, which costs 929 kbps more on the wire.
+// This fleet's links are measured at 4.6-7.1% packet loss (#139/#140), and
+// trading a link known to be marginal against a core with 3.68% of room on it
+// is not a close call. It is simply not a decision that can be acted on
+// before the decoder exists.
 //
-// STEREO IS ADVERTISED THOUGH NOTHING REQUESTS IT YET. The music plane is mono
-// end to end — PumpMusic takes mono periods and the ALSA write duplicates L=R,
-// which is an I2S constraint rather than a wire one — so this client asks for
-// mono. Stereo becomes worth asking for when a plug appears in the jack, and
-// mid-stream renegotiation is implemented server-side, so the request will be
-// honoured. It would be honoured silently and wrongly if the format were not
-// already in this list, and by then the hello is long gone.
+// STEREO IS ADVERTISED THOUGH NOTHING REQUESTS IT YET, for the same one-shot
+// reason. The music plane is mono end to end — PumpMusic takes mono periods
+// and the ALSA write duplicates L=R, which is an I2S constraint rather than a
+// wire one — so this client asks for mono. Stereo becomes worth asking for
+// when a plug appears in the jack, mid-stream renegotiation is implemented
+// server-side, and the request will be honoured silently and wrongly if the
+// format is not already in this list.
+//
+// Opus is deliberately absent from the list altogether. Servers MUST support
+// all three, so a subset is legal, and the only Opus decoders worth having
+// are cgo on a platform (armv7a, API 22) where every cgo dependency is a
+// cross-compilation problem. It is a bandwidth optimisation to take later,
+// not an entry cost — and unlike FLAC there is no pure-Go path to it, so
+// advertising it would be advertising something that cannot arrive.
 func SupportedFormats() []Format {
 	return []Format{
-		{Codec: CodecFLAC, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
-		{Codec: CodecFLAC, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
 		{Codec: CodecPCM, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
 		{Codec: CodecPCM, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
+		{Codec: CodecFLAC, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
+		{Codec: CodecFLAC, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
 	}
 }
 
 // PreferredFormat is the one this client asks for while the speaker is the
-// only output: mono FLAC. It must be present in SupportedFormats, and a test
-// pins that rather than trusting the two to be edited together.
-func PreferredFormat() Format { return SupportedFormats()[0] }
+// only output: the first advertised format it can actually decode. It must be
+// present in SupportedFormats and must be Decodable, and tests pin both
+// rather than trusting three things to be edited together.
+func PreferredFormat() Format {
+	for _, f := range SupportedFormats() {
+		if Decodable(f.Codec) && f.Channels == 1 {
+			return f
+		}
+	}
+	// Unreachable while PCM is in the list. Returning the first advertised
+	// format rather than a zero value keeps a bad edit to SupportedFormats
+	// producing a stream nobody asked for instead of a handshake that
+	// advertises nothing.
+	return SupportedFormats()[0]
+}
 
 // Supports reports whether a format is one this client advertised — the same
 // four-field match the server performs. Used to check a stream/start before
