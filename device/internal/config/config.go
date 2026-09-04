@@ -162,6 +162,14 @@ type Device struct {
 	// picks out of a list.
 	SpotifyName string
 
+	// AirPlay (internal/airplay) — shairport-sync as a subprocess, the Echo
+	// appearing in the AirPlay list. Default OFF, and like Spotify it needs
+	// a binary this firmware does not contain.
+	AirplayEnabled *bool
+	// AirplayName is what the receiver is called in the AirPlay list, pushed
+	// by the controller for SpotifyName's reason.
+	AirplayName string
+
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
 	// light it locally at its OWN wake crossing (#263) instead of waiting
@@ -234,6 +242,9 @@ func (d *Device) loadDefaults() {
 	spotifyEnabled := envBool("SPOTIFY_ENABLED", false)
 	d.SpotifyEnabled = &spotifyEnabled
 	d.SpotifyName = envStr("SPOTIFY_NAME", "")
+	airplayEnabled := envBool("AIRPLAY_ENABLED", false)
+	d.AirplayEnabled = &airplayEnabled
+	d.AirplayName = envStr("AIRPLAY_NAME", "")
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -347,6 +358,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.SpotifyName != "" {
 		d.SpotifyName = msg.SpotifyName
 	}
+	if msg.AirplayEnabled != nil {
+		d.AirplayEnabled = msg.AirplayEnabled
+	}
+	if msg.AirplayName != "" {
+		d.AirplayName = msg.AirplayName
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -426,6 +443,10 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.SpotifyEnabled != nil {
 		spotifyEnabled = *d.SpotifyEnabled
 	}
+	airplayEnabled := false
+	if d.AirplayEnabled != nil {
+		airplayEnabled = *d.AirplayEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -450,6 +471,8 @@ func (d *Device) Snapshot() ConfigMessage {
 		SendspinEnabled:    &sendspinEnabled,
 		SpotifyEnabled:     &spotifyEnabled,
 		SpotifyName:        d.SpotifyName,
+		AirplayEnabled:     &airplayEnabled,
+		AirplayName:        d.AirplayName,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -494,6 +517,8 @@ type ConfigMessage struct {
 	SendspinEnabled    *bool     `json:"sendspinEnabled,omitempty"`
 	SpotifyEnabled     *bool     `json:"spotifyEnabled,omitempty"`
 	SpotifyName        string    `json:"spotifyName,omitempty"`
+	AirplayEnabled     *bool     `json:"airplayEnabled,omitempty"`
+	AirplayName        string    `json:"airplayName,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

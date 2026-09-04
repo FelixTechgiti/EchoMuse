@@ -1965,6 +1965,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 spotifyCapable={!device.connected || !!device.spotifyCapable}
                 spotifyStatus={device.spotifyStatus}
+                airplayCapable={!device.connected || !!device.airplayCapable}
+                airplayStatus={device.airplayStatus}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
@@ -4994,7 +4996,7 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"],
-  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName"]
+  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -5119,13 +5121,17 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             holdCapable = true, triggerCapable = true,
                             hwEchoRef = false, hwRefCapable = true,
                             sendspinCapable = true,
-                            spotifyCapable = true, spotifyStatus = null }) {
+                            spotifyCapable = true, spotifyStatus = null,
+                            airplayCapable = true, airplayStatus = null }) {
   // null means "we have not heard from this device", which is neither
   // "installed" nor "missing" — an offline device must not be told its
   // binary is absent.
   const spotifyReady = spotifyStatus === null || spotifyStatus === undefined
     ? true : !!spotifyStatus.ok;
   const spotifyWhy = (spotifyStatus && spotifyStatus.reason) || 'not installed';
+  const airplayReady = airplayStatus === null || airplayStatus === undefined
+    ? true : !!airplayStatus.ok;
+  const airplayWhy = (airplayStatus && airplayStatus.reason) || 'not installed';
   // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
   // is the only one that DISABLES a control rather than enabling one. The
   // fleet view has no single device to ask, so it keeps the AEC delay
@@ -5703,6 +5709,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <TextField label="Spotify name" sub="what this Echo is called in the Spotify app. Blank uses its serial, which nobody picks out of a list"
             value={config.spotifyName ?? ''} disabled={!spotifyCapable || !spotifyReady}
             onChange={v => set('spotifyName', v)}/>
+          {/* Classic AirPlay, and the sub-label says so rather than letting
+              somebody discover it. AirPlay 2 needs Avahi (a D-Bus daemon
+              Android does not have), nqptp doing PTP against a 2015 kernel,
+              and twelve native libraries including ffmpeg — against three or
+              four for classic, which decodes ALAC in-tree. */}
+          <Toggle label="AirPlay" disabled={!airplayCapable || !airplayReady}
+            sub={!airplayCapable
+              ? 'needs newer firmware on this Echo — it has no AirPlay receiver'
+              : (airplayReady
+                ? 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet'
+                : `shairport-sync is not installed on this Echo (${airplayWhy})`)}
+            value={airplayCapable && airplayReady && (config.airplayEnabled ?? false)}
+            onChange={v => set('airplayEnabled', v)}/>
+          <TextField label="AirPlay name" sub="what this Echo is called in the AirPlay list. Blank uses its serial"
+            value={config.airplayName ?? ''} disabled={!airplayCapable || !airplayReady}
+            onChange={v => set('airplayName', v)}/>
         </div>
       </Stage>
     </div>

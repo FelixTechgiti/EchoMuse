@@ -1175,6 +1175,23 @@ change nothing until the next reboot.
 against the same libc at the same API level as the binary it runs beside.
 ⚠ It has never been executed.
 
+### AirPlay
+
+`airplayEnabled` / `airplayName` run shairport-sync on the device, with the
+same two-gate arrangement as Spotify (`airplay` capability + `airplayStatus`).
+
+**⚠ It is CLASSIC AirPlay, and the sub-label in the dashboard says so** rather
+than letting somebody discover it. AirPlay 2 needs twelve native libraries
+including the ffmpeg trio, it needs Avahi — a D-Bus daemon Android does not
+have — and it needs nqptp doing PTP against a 2015 MediaTek kernel with no
+hardware timestamps, against shairport-sync's own stated minimum of a 2018
+Linux and "a Raspberry Pi B or better". Classic needs three or four libraries,
+decodes ALAC in-tree, and uses the bundled tinysvcmdns.
+
+The device side is version-agnostic: both put PCM on stdout, and the only
+difference that reaches the firmware is the sample rate. When an AirPlay 2
+build lands it is a config value and a binary, not a rewrite.
+
 Its own config section (`streaming`) rather than a line in `playback`:
 playback is about how audio sounds once it arrives and this is about where it
 comes from, and a device overriding one has no reason to override the other.

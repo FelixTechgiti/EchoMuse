@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/airplay"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
@@ -238,6 +239,18 @@ func main() {
 	})
 	applySpotifyConfig(spotifyClient)
 
+	// AirPlay — shairport-sync as a subprocess. A fourth producer of the
+	// same music plane, on the same arbiter, with the same kill-on-preempt
+	// rule as Spotify: AirPlay offers no goodbye from outside the receiver
+	// either, and a receiver that is listed, selected and silent is worse
+	// than one that is not listed.
+	airplayClient := airplay.New(airplay.Options{Name: deviceID},
+		pcmSpeaker, dataClient.MusicPlane().For(musicplane.AirPlay))
+	dataClient.MusicPlane().Register(musicplane.AirPlay, func(why musicplane.Reason) {
+		airplayClient.Leave(string(why))
+	})
+	applyAirplayConfig(airplayClient)
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
@@ -425,6 +438,7 @@ func main() {
 		applyOutputChainConfig(pcmSpeaker)
 		applySendspinConfig(sendspinClient)
 		applySpotifyConfig(spotifyClient)
+		applyAirplayConfig(airplayClient)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1230,6 +1244,22 @@ func applySpotifyConfig(c *spotify.Client) {
 	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
 		if err := c.Start(); err != nil {
 			log.Printf("[cmd] Spotify Connect is on but cannot run: %v", err)
+		}
+		return
+	}
+	c.Stop()
+}
+
+// applyAirplayConfig starts or stops the AirPlay receiver from the current
+// effective config. Same shape as applySpotifyConfig, and a failure to start
+// is logged with its reason for the same purpose: it is almost always "the
+// binary is not on this device", and that is a thing somebody can fix.
+func applyAirplayConfig(c *airplay.Client) {
+	snap := config.Get().Snapshot()
+	c.SetName(snap.AirplayName)
+	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
+		if err := c.Start(); err != nil {
+			log.Printf("[cmd] AirPlay is on but cannot run: %v", err)
 		}
 		return
 	}

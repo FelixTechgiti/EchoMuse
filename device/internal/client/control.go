@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/airplay"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
@@ -296,6 +297,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// is a missing file, nobody can tell that from a broken feature
 		// without a shell session on the user's own hardware.
 		"spotify_status": spotify.Report(),
+		"airplay_status": airplay.Report(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -848,7 +850,11 @@ func capabilities() []string {
 	// removed, long after registration.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "mute_set", "output_chain", "sendspin", "spotify"}
+		"aec_hw_ref", "mute_set", "output_chain", "sendspin", "spotify",
+		// "airplay": this firmware knows how to run an AirPlay receiver. Same
+		// firmware-versus-binary split as "spotify" — airplay_status on the
+		// register message says whether shairport-sync is actually here.
+		"airplay"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

@@ -71,7 +71,8 @@ SECTIONS: dict[str, dict] = {
     # other.
     "streaming": {
         "label": "Streaming",
-        "keys": ["sendspinEnabled", "spotifyEnabled", "spotifyName"],
+        "keys": ["sendspinEnabled", "spotifyEnabled", "spotifyName",
+                 "airplayEnabled", "airplayName"],
     },
 }
 

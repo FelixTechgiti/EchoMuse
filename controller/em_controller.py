@@ -423,6 +423,7 @@ class Device:
         # None means "we have not heard", which is a third state the
         # dashboard has to be able to say.
         self.spotify_status: dict | None = None
+        self.airplay_status: dict | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -868,6 +869,17 @@ class Device:
         behaviour.
         """
         return "audio_mix" in (self.capabilities or [])
+
+    @property
+    def airplay_capable(self) -> bool:
+        """Whether this firmware knows how to run an AirPlay receiver."""
+        return "airplay" in (self.capabilities or [])
+
+    @property
+    def airplay_ready(self) -> bool:
+        """Whether shairport-sync is actually installed on the device."""
+        st = getattr(self, "airplay_status", None) or {}
+        return bool(st.get("ok"))
 
     @property
     def spotify_capable(self) -> bool:
@@ -3605,6 +3617,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # reads as "not reported" rather than as a fault.
         device.ambient_light_status = msg.get("ambient_light_status")
         device.spotify_status = msg.get("spotify_status")
+        device.airplay_status = msg.get("airplay_status")
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure

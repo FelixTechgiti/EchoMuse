@@ -251,6 +251,25 @@ DEFAULT_DEVICE_CONFIG = {
     # "G090LF1180570SPJ" is not a speaker anybody picks out of a list.
     "spotifyEnabled":   False,
     "spotifyName":      "",
+    # airplayEnabled / airplayName: an AirPlay receiver ON THE DEVICE —
+    # shairport-sync as a subprocess (device/internal/airplay). Same shape as
+    # Spotify, including the separate airplay_status that says whether the
+    # binary is actually installed.
+    #
+    # ⚠ CLASSIC AirPlay, not AirPlay 2, and the difference is not a setting.
+    # AirPlay 2 needs twelve native libraries (the ffmpeg trio for AAC-ELD,
+    # plus libplist, libsodium, libgcrypt, uuid, libsoxr), it needs Avahi —
+    # which is a D-Bus daemon Android does not have — and it needs nqptp
+    # doing PTP against a 2015 MediaTek kernel with no hardware timestamps.
+    # shairport-sync's own stated minimum is a 2018 Linux and "a Raspberry Pi
+    # B or better"; this is a 2015 MT8163 on Android 5.1. Classic needs three
+    # or four libraries, decodes ALAC in-tree, and can use the bundled
+    # tinysvcmdns instead of Avahi.
+    #
+    # The device side does not care which it gets: both put PCM on stdout and
+    # the only difference that reaches the firmware is the sample rate.
+    "airplayEnabled":   False,
+    "airplayName":      "",
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake
