@@ -165,7 +165,7 @@ func TestTheDownmixHappensBeforeTheResample(t *testing.T) {
 		binary.LittleEndian.PutUint16(in[i*4:], uint16(int16(1000)))
 		binary.LittleEndian.PutUint16(in[i*4+2:], uint16(int16(3000)))
 	}
-	out := c.convert(nil, in)
+	out := c.convert(resample.NewStreamConverter(48000), in)
 	if len(out) != 16 {
 		t.Fatalf("8 stereo frames gave %d mono bytes, want 16", len(out))
 	}
@@ -181,7 +181,7 @@ func TestTheResampledOutputIsClampedNotWrapped(t *testing.T) {
 	// int16 that wraps turns a peak into full-scale opposite polarity — a
 	// crack rather than clipping.
 	c := New(Options{Binary: "/bin/true"}, &fakeSink{}, &fakePlane{})
-	rs := resample.New()
+	rs := resample.NewStreamConverter(44100)
 	in := make([]byte, 4*4096)
 	for i := 0; i < 4096; i++ {
 		binary.LittleEndian.PutUint16(in[i*4:], uint16(int16(32767)))

@@ -39,11 +39,21 @@ value and a binary, not a rewrite.
 
 ## Not yet run
 
-⚠ **This recipe has never been executed.** Like the librespot one, it is
-written from the cross-compilation constraints rather than from a successful
-build. The likely friction is OpenSSL: shairport-sync can use mbedtls instead
-(`--with-mbedtls`), which cross-compiles far more easily than OpenSSL, and the
-recipe takes that route.
+⚠ **This recipe has never been executed** — the NDK cannot be downloaded from
+the environment it was written in (`dl.google.com` is refused by the network
+policy). The likely friction is OpenSSL, which is why the recipe takes the
+mbedtls route (`--with-mbedtls`) instead: it cross-compiles far more easily.
+
+### The 4.3.7 pin is load-bearing — do not bump it casually
+
+**shairport-sync 5.x removed `--with-tinysvcmdns`.** Checked against 5.5's
+`configure.ac`: the only mDNS options left are Avahi (a D-Bus daemon Android
+does not have), `dns_sd`, and `--with-external-mdns`, which shells out to a
+publishing helper that does not exist here either.
+
+tinysvcmdns is the bundled responder that needs nothing, and it is the only
+reason this builds for Android at all. 4.3.x has it; 5.x does not. Bumping the
+version to "keep up" removes the feature.
 
 The device side is complete and tested without it: with no binary installed
 the firmware reports `airplay_status: {ok: false, reason: "not_installed"}`,

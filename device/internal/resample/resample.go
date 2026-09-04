@@ -232,3 +232,69 @@ func (r *Resampler) Reset() {
 // OutputLen is roughly how many samples `n` inputs produce. For sizing
 // buffers, not for exact accounting.
 func OutputLen(n int) int { return n * L / M }
+
+// StreamConverter turns interleaved stereo 16-bit PCM at a source rate into
+// mono 16-bit PCM at the device's 48kHz.
+//
+// It exists because THREE things needed the same five steps and two of them
+// had already written it: unmarshal, downmix, resample, clamp, remarshal.
+// AirPlay needs it because classic AirPlay is 44.1kHz by definition, and
+// Spotify needs it because no released librespot — nor its `dev` branch — has
+// a `--sample-rate` option at all. The resampling pull request was never
+// merged, so the pipe backend emits 44,100 frames a second and that is that.
+//
+// One per stream. It carries filter history, and a fresh instance mid-stream
+// restarts from silence and clicks.
+type StreamConverter struct {
+	rs *Resampler
+}
+
+// NewStreamConverter builds one for a source rate. At 48000 it skips the
+// filter entirely rather than converting 48000 to 48000, which would cost
+// 4-8% of a core to change nothing.
+func NewStreamConverter(sourceRate int) *StreamConverter {
+	if sourceRate == 48000 {
+		return &StreamConverter{}
+	}
+	return &StreamConverter{rs: New()}
+}
+
+// Convert takes whole stereo frames and returns mono 16-bit at 48kHz.
+//
+// DOWNMIX FIRST, THEN RESAMPLE. Resampling two channels costs twice the
+// filter for a result that is about to be summed anyway — the same audio for
+// double the CPU, on the two sources that cannot hand the job to somebody
+// else.
+func (c *StreamConverter) Convert(stereo []byte, downmix func([]byte) []byte) []byte {
+	mono := downmix(stereo)
+	if c.rs == nil {
+		return mono
+	}
+	in := make([]float64, len(mono)/2)
+	for i := range in {
+		in[i] = float64(int16(uint16(mono[i*2]) | uint16(mono[i*2+1])<<8))
+	}
+	out := c.rs.Process(in)
+	res := make([]byte, len(out)*2)
+	for i, v := range out {
+		// Clamped, not wrapped. The filter overshoots slightly on a signal
+		// already at full scale, and an int16 that wraps turns a peak into
+		// full-scale opposite polarity — a crack rather than clipping. The
+		// same rule the mixer follows.
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		s := uint16(int16(v))
+		res[i*2], res[i*2+1] = byte(s), byte(s>>8)
+	}
+	return res
+}
+
+// Reset clears the filter for a new stream.
+func (c *StreamConverter) Reset() {
+	if c.rs != nil {
+		c.rs.Reset()
+	}
+}

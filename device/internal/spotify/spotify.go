@@ -27,13 +27,17 @@
 // 512MB shared with Android: a Spotify client that leaks or crashes takes
 // nothing with it, and the supervisor restarts it.
 //
-// # The pipe backend, at 48kHz
+// # The pipe backend, at 44.1kHz — and a resampler after it
 //
-// `--backend pipe --sample-rate 48000 --format S16` gives raw stereo 16-bit
-// PCM on stdout at the rate the speaker already runs. Asking librespot to
-// resample is what avoids a resampler HERE: it has a windowed-sinc
-// implementation and the CPU it costs is spent in a process that can be
-// killed, rather than on the audio path of the voice assistant.
+// `--backend pipe --format S16` gives raw stereo 16-bit PCM on stdout. It
+// gives it at 44,100 frames a second and there is no way to ask for anything
+// else: no released librespot has a `--sample-rate` option, and neither does
+// `dev`. This was designed the other way round first, on the assumption that
+// librespot could resample for us — it cannot, and passing the flag is not a
+// silent fallback, it makes librespot refuse to start.
+//
+// So the conversion happens here, through internal/resample, the same path
+// AirPlay uses. It costs 4-8% of one A53 core while Spotify is playing.
 //
 // **The pipe backend is famously "too fast", and here that is the feature.**
 // librespot writes as fast as the pipe accepts, with no pacing of its own —
@@ -63,6 +67,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/pcm"
+	"github.com/wilbowes/EchoMuse/internal/resample"
 )
 
 // BinaryPath is where the controller installs librespot.
@@ -78,12 +83,14 @@ const BinaryPath = "/data/local/bin/librespot"
 const CacheDir = "/data/local/etc/echomuse/spotify"
 
 const (
-	// SampleRate and Channels are what we ask librespot to produce. Mono is
-	// NOT requested: librespot's pipe backend is stereo and the downmix here
-	// is one add and a shift per frame, where asking for mono would mean
-	// asking for a feature it does not have.
-	SampleRate = 48000
-	Channels   = 2
+	// SourceRate is what librespot's pipe backend emits, and it is not
+	// negotiable: no released version has a --sample-rate option. DeviceRate
+	// is what the speaker runs at, so everything is resampled.
+	SourceRate = 44100
+	DeviceRate = 48000
+	// Channels: librespot's pipe backend is stereo and mono cannot be
+	// requested either. The downmix here is one add and a shift per frame.
+	Channels = 2
 
 	// bytesPerFrame for stereo 16-bit input.
 	bytesPerFrame = Channels * 2
@@ -141,6 +148,11 @@ type Options struct {
 	// offered because the wire is a LAN and the constraint on this device is
 	// CPU rather than bandwidth.
 	Bitrate int
+	// SourceRate is the rate the binary emits. Zero means librespot's own
+	// 44,100. Present so a future librespot that CAN be asked for 48kHz
+	// needs a config value rather than a code change — the same seam
+	// internal/airplay has for AirPlay 2.
+	SourceRate int
 	// ExtraArgs are appended verbatim, for a device that needs something
 	// this package does not model.
 	ExtraArgs []string
@@ -169,6 +181,9 @@ func New(opts Options, sink MusicSink, plane PlaneOwner) *Client {
 	}
 	if opts.Bitrate == 0 {
 		opts.Bitrate = 160
+	}
+	if opts.SourceRate == 0 {
+		opts.SourceRate = SourceRate
 	}
 	return &Client{opts: opts, sink: sink, plane: plane}
 }
@@ -312,9 +327,13 @@ func (c *Client) name() string {
 //     device already owns the speaker, and two things opening it is the #80
 //     failure (a blocking open with no timeout, eighteen minutes of a
 //     stranded device).
-//   - `--sample-rate 48000` makes librespot do the resampling, in a process
-//     that can be killed, rather than putting a resampler on the voice
-//     assistant's audio path.
+//   - THERE IS NO `--sample-rate`. It was designed in on the assumption that
+//     librespot could resample for us; it cannot. No released version has the
+//     option and neither does `dev` — the resampling pull request was never
+//     merged. The pipe backend emits 44,100 frames a second, so the
+//     conversion happens here, through internal/resample, exactly as it does
+//     for AirPlay. Passing the flag anyway is not a silent fallback: librespot
+//     rejects an unknown option and refuses to start.
 //   - `--format S16` matches the plane. The default is also S16; naming it
 //     means a librespot that changes its default does not silently start
 //     sending 32-bit floats into a 16-bit mixer.
@@ -328,7 +347,6 @@ func (c *Client) args() []string {
 	a := []string{
 		"--name", c.name(),
 		"--backend", "pipe",
-		"--sample-rate", fmt.Sprint(SampleRate),
 		"--format", "S16",
 		"--bitrate", fmt.Sprint(c.opts.Bitrate),
 		"--cache", c.opts.CacheDir,
@@ -414,6 +432,9 @@ func (c *Client) session(ctx context.Context) error {
 func (c *Client) pump(r io.Reader) {
 	br := bufio.NewReaderSize(r, readChunkFrames*bytesPerFrame)
 	buf := make([]byte, readChunkFrames*bytesPerFrame)
+	// One converter per SESSION: it carries filter history, and a fresh
+	// instance mid-stream restarts from silence and clicks.
+	conv := resample.NewStreamConverter(c.opts.SourceRate)
 	claimed := false
 
 	for {
@@ -440,9 +461,12 @@ func (c *Client) pump(r io.Reader) {
 				claimed = false
 				continue
 			}
-			if perr := c.sink.PumpMusic(pcm.DownmixStereo(buf[:n-n%bytesPerFrame])); perr != nil {
-				log.Printf("[spotify] PumpMusic: %v", perr)
-				return
+			out := conv.Convert(buf[:n-n%bytesPerFrame], pcm.DownmixStereo)
+			if len(out) > 0 {
+				if perr := c.sink.PumpMusic(out); perr != nil {
+					log.Printf("[spotify] PumpMusic: %v", perr)
+					return
+				}
 			}
 		}
 		if err != nil {
