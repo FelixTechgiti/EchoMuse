@@ -143,6 +143,33 @@ type Device struct {
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
 
+	// Sendspin (internal/sendspin) — the device joins a Music Assistant
+	// group directly, with no controller hop. Pointer typed so false is
+	// expressible over the wire; default OFF, because it is a second
+	// producer of the music plane and a second thing on the network, and
+	// nobody who has not asked for it should acquire either.
+	SendspinEnabled *bool
+
+	// Spotify Connect (internal/spotify) — librespot as a subprocess, the
+	// Echo appearing in the Spotify app as a speaker. Default OFF for the
+	// same reasons as Sendspin, plus one of its own: it needs a binary this
+	// firmware does not contain, so enabling it on a device without one is
+	// a control that cannot act.
+	SpotifyEnabled *bool
+	// SpotifyName is what the speaker is called in the Spotify app. Pushed
+	// by the controller, which knows the device's LABEL — the device knows
+	// only its serial, and "G090LF1180570SPJ" is not a speaker anybody
+	// picks out of a list.
+	SpotifyName string
+
+	// AirPlay (internal/airplay) — shairport-sync as a subprocess, the Echo
+	// appearing in the AirPlay list. Default OFF, and like Spotify it needs
+	// a binary this firmware does not contain.
+	AirplayEnabled *bool
+	// AirplayName is what the receiver is called in the AirPlay list, pushed
+	// by the controller for SpotifyName's reason.
+	AirplayName string
+
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
 	// light it locally at its OWN wake crossing (#263) instead of waiting
@@ -210,6 +237,14 @@ func (d *Device) loadDefaults() {
 	d.AecRefSource = normaliseAecRef(envStr("EM_AEC_HW_REF", AecRefAuto))
 	bleProxyEnabled := envBool("BLE_PROXY_ENABLED", false)
 	d.BleProxyEnabled = &bleProxyEnabled
+	sendspinEnabled := envBool("SENDSPIN_ENABLED", false)
+	d.SendspinEnabled = &sendspinEnabled
+	spotifyEnabled := envBool("SPOTIFY_ENABLED", false)
+	d.SpotifyEnabled = &spotifyEnabled
+	d.SpotifyName = envStr("SPOTIFY_NAME", "")
+	airplayEnabled := envBool("AIRPLAY_ENABLED", false)
+	d.AirplayEnabled = &airplayEnabled
+	d.AirplayName = envStr("AIRPLAY_NAME", "")
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -314,6 +349,21 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.SendspinEnabled != nil {
+		d.SendspinEnabled = msg.SendspinEnabled
+	}
+	if msg.SpotifyEnabled != nil {
+		d.SpotifyEnabled = msg.SpotifyEnabled
+	}
+	if msg.SpotifyName != "" {
+		d.SpotifyName = msg.SpotifyName
+	}
+	if msg.AirplayEnabled != nil {
+		d.AirplayEnabled = msg.AirplayEnabled
+	}
+	if msg.AirplayName != "" {
+		d.AirplayName = msg.AirplayName
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -385,6 +435,18 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
+	sendspinEnabled := false
+	if d.SendspinEnabled != nil {
+		sendspinEnabled = *d.SendspinEnabled
+	}
+	spotifyEnabled := false
+	if d.SpotifyEnabled != nil {
+		spotifyEnabled = *d.SpotifyEnabled
+	}
+	airplayEnabled := false
+	if d.AirplayEnabled != nil {
+		airplayEnabled = *d.AirplayEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -406,6 +468,11 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecTailMs:          d.AecTailMs,
 		AecRefSource:       d.AecRefSource,
 		BleProxyEnabled:    &bleProxyEnabled,
+		SendspinEnabled:    &sendspinEnabled,
+		SpotifyEnabled:     &spotifyEnabled,
+		SpotifyName:        d.SpotifyName,
+		AirplayEnabled:     &airplayEnabled,
+		AirplayName:        d.AirplayName,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -447,6 +514,11 @@ type ConfigMessage struct {
 	AecTailMs          int       `json:"aecTailMs,omitempty"`
 	AecRefSource       string    `json:"aecRefSource,omitempty"`
 	BleProxyEnabled    *bool     `json:"bleProxyEnabled,omitempty"`
+	SendspinEnabled    *bool     `json:"sendspinEnabled,omitempty"`
+	SpotifyEnabled     *bool     `json:"spotifyEnabled,omitempty"`
+	SpotifyName        string    `json:"spotifyName,omitempty"`
+	AirplayEnabled     *bool     `json:"airplayEnabled,omitempty"`
+	AirplayName        string    `json:"airplayName,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

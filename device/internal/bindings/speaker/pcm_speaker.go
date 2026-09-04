@@ -40,6 +40,16 @@ const monoPeriodBytes = periodSize * 2 // 4096
 // within the first half of playback.
 const audioChanDepth = 128
 
+// MusicBufferSeconds is how much audio the music plane holds, in seconds.
+//
+// Exported because a device that speaks a scheduled protocol has to TELL a
+// server how much it will hold — Sendspin's `buffer_capacity` — and the
+// server paces against it. Deriving it here rather than writing a number into
+// the protocol code means the two cannot drift: raising audioChanDepth without
+// telling the server would let it overrun the buffer, and lowering it would
+// have the server starve us.
+const MusicBufferSeconds = float64(audioChanDepth) * float64(periodSize) / 48000.0
+
 // primePeriods — playback holds on silence until this many periods are
 // queued (or the stream's EOS has arrived, for clips shorter than the
 // prime). Protects the opening seconds of playback, when the sender's
@@ -475,4 +485,32 @@ func periodRMS(period []byte) float64 {
 		return 0
 	}
 	return math.Sqrt(float64(sum)/float64(n)) / 32768.0
+}
+
+// PlaybackDelay reports frames handed to the hardware and not yet played, and
+// whether the hardware is actually running.
+//
+// Read from procfs on every call rather than cached, and the reason is the
+// question being asked: a scheduled protocol needs to know where playback IS,
+// and buffer occupancy changes continuously. A cached value stale by 100ms is
+// stale by more than two ALSA periods, which is larger than the whole error
+// the corrector is trying to hold. The read costs tens of microseconds and
+// happens once per audio chunk (~23/s), which is the same cost class as the
+// per-stream instrumentation this file already carries.
+//
+// Returns running=false when there is nothing to measure — a closed or
+// prepared substream, or a procfs shape we do not recognise. Callers must
+// treat that as "no measurement", never as a delay of zero: on a running
+// stream a zero read as real says the buffer is empty, and the corrector
+// would try to make up time that was never lost.
+func (p *PcmSpeaker) PlaybackDelay() (int64, bool) {
+	data, err := os.ReadFile(statusPath(cardNr, deviceNr))
+	if err != nil {
+		return 0, false
+	}
+	pos := parsePlaybackPos(string(data))
+	if !pos.Running() {
+		return 0, false
+	}
+	return pos.Delay, true
 }

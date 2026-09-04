@@ -78,9 +78,10 @@ func Decodable(codec string) bool {
 		// Raw little-endian signed samples. Nothing to decode.
 		return true
 	case CodecFLAC:
-		// Advertised, deliberately, and not yet decodable — see
-		// SupportedFormats.
-		return false
+		// Pure Go (github.com/mewkiz/flac), no cgo — which is why FLAC and
+		// not Opus: the codec choice here is constrained by what
+		// cross-compiles for armv7a/API 22 without a toolchain problem.
+		return true
 	}
 	return false
 }
@@ -91,22 +92,18 @@ func Decodable(codec string) bool {
 // property of this list: the server picks the client's highest priority it
 // can encode, and it can encode everything.
 //
-// FLAC is still advertised, below the PCM entries, and that is not a
-// contradiction. client/hello is a ONE-SHOT — a format absent from it can
-// never be requested for the life of the connection, and a later request for
-// an unadvertised format fails SILENTLY, with the server logging the mismatch
-// on its own side and falling back. So the list has to name everything this
-// device might ever ask for, while the ORDER has to name only what it can
-// serve today. When the FLAC decoder lands, moving it to the front is a
-// one-line change with a test behind it.
+// FLAC LEADS, and that is a measurement rather than a preference. Per second
+// of audio on this hardware: FLAC decode 3.28% of one core, ChaCha20-Poly1305
+// at the FLAC rate 0.40%, total 3.68% — against 0.97% for PCM, which costs
+// 929 kbps more on the wire. This fleet's links measure 4.6-7.1% packet loss
+// (#139/#140), and trading a link known to be marginal against a core with
+// 3.68% of room on it is not a close call.
 //
-// FLAC is worth having: measured on this hardware, per second of audio, FLAC
-// decode is 3.28% of one core and ChaCha20-Poly1305 at the FLAC rate 0.40%,
-// total 3.68% — against 0.97% for PCM, which costs 929 kbps more on the wire.
-// This fleet's links are measured at 4.6-7.1% packet loss (#139/#140), and
-// trading a link known to be marginal against a core with 3.68% of room on it
-// is not a close call. It is simply not a decision that can be acted on
-// before the decoder exists.
+// PCM stays advertised, below it. client/hello is a ONE-SHOT — a format
+// absent from it can never be requested for the life of the connection, and a
+// later request for an unadvertised format fails SILENTLY, with the server
+// logging the mismatch on its own side and falling back — so the list names
+// everything this device might ever ask for even when nothing asks today.
 //
 // STEREO IS ADVERTISED THOUGH NOTHING REQUESTS IT YET, for the same one-shot
 // reason. The music plane is mono end to end — PumpMusic takes mono periods
@@ -124,10 +121,10 @@ func Decodable(codec string) bool {
 // advertising it would be advertising something that cannot arrive.
 func SupportedFormats() []Format {
 	return []Format{
-		{Codec: CodecPCM, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
-		{Codec: CodecPCM, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
 		{Codec: CodecFLAC, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
 		{Codec: CodecFLAC, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
+		{Codec: CodecPCM, Channels: 1, SampleRate: SampleRate, BitDepth: BitDepth},
+		{Codec: CodecPCM, Channels: 2, SampleRate: SampleRate, BitDepth: BitDepth},
 	}
 }
 

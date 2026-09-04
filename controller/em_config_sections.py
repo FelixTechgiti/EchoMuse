@@ -64,6 +64,16 @@ SECTIONS: dict[str, dict] = {
         "label": "Bluetooth",
         "keys": ["bleProxyEnabled"],
     },
+    # Streaming protocols the DEVICE speaks for itself, with no controller
+    # hop. Its own section rather than a line in playback: playback is about
+    # how audio sounds once it arrives, and this is about where it comes
+    # from — and a device overriding one has no reason to override the
+    # other.
+    "streaming": {
+        "label": "Streaming",
+        "keys": ["sendspinEnabled", "spotifyEnabled", "spotifyName",
+                 "airplayEnabled", "airplayName"],
+    },
 }
 
 # Keys that live in the config dict but are NOT user-facing settings, and so

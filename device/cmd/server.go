@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/airplay"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
@@ -32,7 +33,9 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/spotify"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
@@ -187,6 +190,66 @@ func main() {
 		controlClient.SendBleAdverts(batch)
 	})
 	applyBleConfig(bleScanner)
+
+	// Sendspin — the device joins a Music Assistant group directly, with no
+	// controller hop, and becomes a SECOND producer of the music plane.
+	// Off by default and toggled live on config push (sendspinEnabled,
+	// applySendspinConfig).
+	//
+	// The arbiter is the data client's, not a second one: two arbiters each
+	// believe their own source owns the plane, and the mixer hands the
+	// speaker the sum of two songs. Registering the leave callback here is
+	// what makes "leaving is not ignoring" true — a preemption by Home
+	// Assistant ends the Sendspin session properly rather than leaving the
+	// server streaming to a client that went quiet.
+	sendspinClient := sendspin.NewClient(sendspin.Options{
+		Identity: sendspin.Identity{
+			Name:     deviceID,
+			ClientID: deviceID,
+			DeviceInfo: sendspin.DeviceInfo{
+				ProductName:     "EchoMuse",
+				Manufacturer:    "EchoMuse",
+				SoftwareVersion: client.Version,
+			},
+		},
+		// The music plane's own depth, so buffer_capacity is derived from
+		// the device rather than guessed. See sendspin.BufferCapacity.
+		BufferSeconds:      speaker.MusicBufferSeconds,
+		MinBufferMs:        1000,
+		RequiredLeadTimeMs: 100,
+	}, "wlan0", pcmSpeaker, dataClient.MusicPlane().For(musicplane.Sendspin))
+	dataClient.MusicPlane().Register(musicplane.Sendspin, func(why musicplane.Reason) {
+		sendspinClient.Leave(string(why))
+	})
+	applySendspinConfig(sendspinClient)
+
+	// Spotify Connect — librespot as a subprocess, the Echo appearing in the
+	// Spotify app as a speaker. A third producer of the same music plane, on
+	// the same arbiter for the same reason as Sendspin, and its leave
+	// callback KILLS the session: Spotify Connect offers no way to say
+	// goodbye from outside the client, and a speaker that is listed,
+	// selected and silent is worse than one that is not listed.
+	// The serial is the FALLBACK name, not the name: the controller pushes
+	// the device's label, and "G090LF1180570SPJ" is not a speaker anybody
+	// picks out of a list in the Spotify app.
+	spotifyClient := spotify.New(spotify.Options{Name: deviceID},
+		pcmSpeaker, dataClient.MusicPlane().For(musicplane.Spotify))
+	dataClient.MusicPlane().Register(musicplane.Spotify, func(why musicplane.Reason) {
+		spotifyClient.Leave(string(why))
+	})
+	applySpotifyConfig(spotifyClient)
+
+	// AirPlay — shairport-sync as a subprocess. A fourth producer of the
+	// same music plane, on the same arbiter, with the same kill-on-preempt
+	// rule as Spotify: AirPlay offers no goodbye from outside the receiver
+	// either, and a receiver that is listed, selected and silent is worse
+	// than one that is not listed.
+	airplayClient := airplay.New(airplay.Options{Name: deviceID},
+		pcmSpeaker, dataClient.MusicPlane().For(musicplane.AirPlay))
+	dataClient.MusicPlane().Register(musicplane.AirPlay, func(why musicplane.Reason) {
+		airplayClient.Leave(string(why))
+	})
+	applyAirplayConfig(airplayClient)
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
@@ -373,6 +436,9 @@ func main() {
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
+		applySendspinConfig(sendspinClient)
+		applySpotifyConfig(spotifyClient)
+		applyAirplayConfig(airplayClient)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1137,6 +1203,67 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		}
 	}
 	cc.SendOwwWake(score, crossed, ageMs)
+}
+
+// applySendspinConfig starts or stops the Sendspin client from the current
+// effective config.
+//
+// Stopping SAYS GOODBYE rather than dropping the socket: a server told why a
+// client left keeps its group view correct, where one that merely stopped
+// hearing from it holds this device as a member until its own timeout — so
+// turning the setting off in Home Assistant would leave a speaker listed in
+// the group and silent for minutes.
+//
+// Called on every config apply including the connect-time one, and both
+// halves are idempotent, because the controller re-sends the whole config on
+// every reconnect.
+func applySendspinConfig(c *sendspin.Client) {
+	snap := config.Get().Snapshot()
+	if snap.SendspinEnabled != nil && *snap.SendspinEnabled {
+		c.Start()
+		return
+	}
+	c.Stop(sendspin.GoodbyeUserRequest)
+}
+
+// applySpotifyConfig starts or stops the Spotify Connect endpoint from the
+// current effective config.
+//
+// A failure to start is LOGGED WITH ITS REASON rather than swallowed, because
+// the reason is almost always "librespot is not on this device" and that is a
+// thing somebody can fix. The controller learns the same fact from
+// spotify_status on the register message, which is what lets the dashboard
+// disable the toggle rather than offering a switch that saves and plays
+// nothing.
+func applySpotifyConfig(c *spotify.Client) {
+	snap := config.Get().Snapshot()
+	// Before start/stop, so a rename that arrives with the enable is
+	// applied to the session that enable creates rather than to the next
+	// one.
+	c.SetName(snap.SpotifyName)
+	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
+		if err := c.Start(); err != nil {
+			log.Printf("[cmd] Spotify Connect is on but cannot run: %v", err)
+		}
+		return
+	}
+	c.Stop()
+}
+
+// applyAirplayConfig starts or stops the AirPlay receiver from the current
+// effective config. Same shape as applySpotifyConfig, and a failure to start
+// is logged with its reason for the same purpose: it is almost always "the
+// binary is not on this device", and that is a thing somebody can fix.
+func applyAirplayConfig(c *airplay.Client) {
+	snap := config.Get().Snapshot()
+	c.SetName(snap.AirplayName)
+	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
+		if err := c.Start(); err != nil {
+			log.Printf("[cmd] AirPlay is on but cannot run: %v", err)
+		}
+		return
+	}
+	c.Stop()
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

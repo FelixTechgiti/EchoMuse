@@ -294,3 +294,55 @@ func TestSourceNamesAreStable(t *testing.T) {
 		}
 	}
 }
+
+func TestAScopedViewSpeaksOnlyForItsOwnSource(t *testing.T) {
+	// The reason the view exists. Handing a producer the whole arbiter means
+	// every call site names its own Source, and naming the wrong one is a
+	// producer that releases somebody else's claim — silent, and visible
+	// only as music that stops for no reason.
+	var o Owner
+	o.Register(Sendspin, nil)
+	o.Register(Spotify, nil)
+	ss := o.For(Sendspin)
+	sp := o.For(Spotify)
+
+	if !ss.Claim() {
+		t.Fatal("the scoped claim was refused")
+	}
+	if !ss.MayWrite() {
+		t.Fatal("the owner may not write through its own view")
+	}
+	if sp.MayWrite() {
+		t.Fatal("another source's view reported it may write")
+	}
+
+	sp.Release() // a non-owner releasing must change nothing
+	if !ss.MayWrite() {
+		t.Fatal("another source's release took the plane away")
+	}
+
+	ss.Release()
+	if o.Owner() != None {
+		t.Fatalf("owner = %v after its own release", o.Owner())
+	}
+}
+
+func TestAZeroScopedRefusesRatherThanPanicking(t *testing.T) {
+	// What a producer constructed before the arbiter holds. Refusing to
+	// write is the safe answer to "I do not know who owns this".
+	var s Scoped
+	if s.Claim() {
+		t.Fatal("a zero view claimed the plane")
+	}
+	if s.MayWrite() {
+		t.Fatal("a zero view reported it may write")
+	}
+	s.Release() // must not panic
+}
+
+func TestTheScopedViewNamesItsSource(t *testing.T) {
+	var o Owner
+	if got := o.For(AirPlay).Source(); got != AirPlay {
+		t.Fatalf("Source() = %v", got)
+	}
+}

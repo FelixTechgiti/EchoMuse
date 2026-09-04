@@ -217,6 +217,59 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
+    # sendspinEnabled: the DEVICE joins a Music Assistant group directly
+    # over Sendspin, with no controller hop (device/internal/sendspin).
+    # Default off, for two reasons that are both about surprise: it makes
+    # the device a second producer of its own music plane — so "music is
+    # playing" no longer implies the controller is playing it — and it puts
+    # a second client on the network advertising itself to any Sendspin
+    # server that will have it. Neither should happen to somebody who did
+    # not ask.
+    #
+    # Carried, not consumed: the device acts on it and the controller only
+    # stores and pushes it, same as bleProxyEnabled — so it needs no mirror
+    # onto Device and has none.
+    #
+    # ⚠ THE GAP THAT LEAVES: with Sendspin on, the device can be playing
+    # music the controller never sent, and em_player's media_player entity
+    # would report idle over audible audio — the exact "control that lies"
+    # this codebase names most often (#53, twice). Closing it needs the
+    # device to report its Sendspin playback state, which is a separate
+    # change; until then the setting is off by default and this is what the
+    # note is for.
+    "sendspinEnabled":  False,
+    # spotifyEnabled / spotifyName: Spotify Connect ON THE DEVICE — librespot
+    # as a subprocess, the Echo appearing in the Spotify app as a speaker
+    # (device/internal/spotify). Default off for Sendspin's reasons plus one
+    # of its own: it needs a binary the firmware does not contain, so the
+    # device reports separately (spotify_status on the register message)
+    # whether librespot is actually installed. The capability says the
+    # firmware CAN run it; the status says whether it can right now.
+    #
+    # spotifyName is pushed rather than left to the device because the
+    # controller knows the LABEL and the device knows only its serial, and
+    # "G090LF1180570SPJ" is not a speaker anybody picks out of a list.
+    "spotifyEnabled":   False,
+    "spotifyName":      "",
+    # airplayEnabled / airplayName: an AirPlay receiver ON THE DEVICE —
+    # shairport-sync as a subprocess (device/internal/airplay). Same shape as
+    # Spotify, including the separate airplay_status that says whether the
+    # binary is actually installed.
+    #
+    # ⚠ CLASSIC AirPlay, not AirPlay 2, and the difference is not a setting.
+    # AirPlay 2 needs twelve native libraries (the ffmpeg trio for AAC-ELD,
+    # plus libplist, libsodium, libgcrypt, uuid, libsoxr), it needs Avahi —
+    # which is a D-Bus daemon Android does not have — and it needs nqptp
+    # doing PTP against a 2015 MediaTek kernel with no hardware timestamps.
+    # shairport-sync's own stated minimum is a 2018 Linux and "a Raspberry Pi
+    # B or better"; this is a 2015 MT8163 on Android 5.1. Classic needs three
+    # or four libraries, decodes ALAC in-tree, and can use the bundled
+    # tinysvcmdns instead of Avahi.
+    #
+    # The device side does not care which it gets: both put PCM on stdout and
+    # the only difference that reaches the firmware is the sample rate.
+    "airplayEnabled":   False,
+    "airplayName":      "",
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake
