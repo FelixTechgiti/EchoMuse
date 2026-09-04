@@ -163,7 +163,76 @@ process.
 
 ---
 
-## 6. Sendspin **[proposed — #89]**
+## 6. Sendspin **[in progress — #89]**
+
+**Read the specification, not this section, for wire detail.** It is published
+at `github.com/Sendspin/spec` and it settled several things this design got
+from second-hand sources. The corrections, because each would have been found
+the expensive way:
+
+- **The handshake is longer than "client/hello first".** It is `client/init`
+  (cleartext) → `server/init` + Noise message 1 → Noise message 2 →
+  transport mode → `server/hello` → `client/hello` → `server/activate`. So
+  `client/hello` — the message carrying the format list, and the one-shot
+  that cannot be revised — is sent **after** encryption is up and after the
+  server has introduced itself, not as the opening move.
+- **The server is the Noise INITIATOR and the client the responder**, which
+  is backwards from the usual reading of "client connects".
+- **Unpaired access has a published constant.** The Sentinel PSK is
+  `SHA-256("sendspin-sentinel-psk-v1")`, so a plaintext-equivalent path
+  exists inside the encrypted transport rather than beside it. The August
+  finding that Music Assistant implemented no encryption at all does not mean
+  the handshake can be skipped; it means the PSK on that path is public.
+- **Fragmentation exists and audio can use it.** Any message over 65518 bytes
+  splits across type-1 frames, first-flag and last-flag in a byte of flags
+  whose remaining bits MUST be zero. The threshold is 16 bytes below 64KiB
+  because fragmenting happens BEFORE encryption and the tag has to fit.
+- **The audio chunk header is fixed and small**: type byte, big-endian int64
+  timestamp in µs, big-endian uint32 `send_ahead`. The timestamp is when the
+  first sample must LEAVE THE SPEAKER, not when the chunk should be decoded.
+
+**Built and tested on the host, not yet heard:** the time filter
+(`device/internal/sendspin/timefilter.go`), the framing (`frame.go`), the
+player-role shapes (`player.go`), the message shapes (`messages.go`), the
+connection state machine (`conn.go`) driven by a scripted server over an
+in-memory transport, the drift-correction policy (`sync.go`), and the
+music-plane arbitration every one of these protocols needs
+(`device/internal/musicplane`). **Still to build:** the Noise handshake behind
+the `Crypto` interface, FLAC decoding, mDNS discovery, and the wiring to
+`PumpMusic`.
+
+**The advertised format list is ordered decodable-first, and that ordering is
+a safety property rather than a preference.** The server picks the client's
+highest priority it can encode, and the spec requires it to encode all three —
+so the first entry *is* the one chosen. FLAC is worth having on measurement
+(3.68% of a core against 0.97%, saving 929 kbps on a link measured at 4.6–7.1%
+loss) and is advertised *behind* PCM until its decoder exists: advertising it
+first would guarantee a stream this device turns into noise, with no error
+anywhere — the frames arrive, something interprets them, and the speaker plays
+the result. It stays in the list because `client/hello` is a one-shot and
+dropping it would make adding the decoder need a reconnect to take effect.
+
+**Landing the first sample is the easy half.** The speaker's crystal runs at
+47973 fps against 48000 — 560ppm — so a stream that starts perfectly is 0.56ms
+out after a second and 34ms out after a minute, against a ±1ms spec floor.
+Correction is by dropping and duplicating whole samples rather than
+resampling: a variable-rate resampler is inaudible and costs CPU this device
+does not have spare, while at one sample in 1786, spread rather than applied
+in a lump, dropping is inaudible for a different reason. Two numbers carry the
+policy — a **deadband**, without which the corrector hunts around zero forever
+and modulates pitch continuously, and a correction **rate that must exceed the
+crystal's own error**. The first version was capped at 500ppm against the
+crystal's 560 and could never catch up; it presents identically to no
+corrector at all, and the test comparing the two rates is what found it.
+
+**`client/init` and `server/init` are the only shapes taken from prose.**
+Everything else was read off `aiosendspin`, the implementation Music Assistant
+runs, because prose does not say which fields are optional and a field sent as
+`null` where the server expects it absent is a different message. Those two
+belong to the pre-encryption exchange and are unverified until the handshake
+has completed against a live server once; the rest of the protocol is not the
+risk.
+
 
 Synchronised multi-room playback via the Open Home Foundation's Sendspin
 protocol, which Music Assistant speaks natively (WebSocket, port 8927,
