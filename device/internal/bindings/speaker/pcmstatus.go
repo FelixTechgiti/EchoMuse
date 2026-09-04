@@ -67,3 +67,106 @@ func pcmOwner(status string) int {
 	}
 	return 0
 }
+
+// ── Playback position ─────────────────────────────────────────────────────
+//
+// The same status file answers a question nothing else on this device can:
+// where playback ACTUALLY is. A scheduled protocol needs it. Our own
+// bookkeeping — frames handed to ALSA, divided by the nominal rate — is
+// perfect by construction and therefore useless as an error signal: it cannot
+// see that the hardware is consuming 47973 frames a second rather than 48000,
+// which is the whole of the drift a synchronised group has to correct.
+//
+// `delay` is the number the corrector wants. It is appl_ptr minus hw_ptr —
+// frames handed over and not yet played — so it GROWS when we push faster
+// than the hardware consumes and shrinks when we push slower. On the captured
+// sample it is exactly 1570880 − 1562816 = 8064, and it is accurate to well
+// below a period: hw_ptr on this hardware is a real DMA position that
+// advances in 112–144 frame steps every ~2.4ms, not software bookkeeping that
+// would jump a whole 2048-frame period every 42.7ms.
+//
+// `tstamp` is deliberately NOT used, though it looks like the more precise
+// answer. It is in the kernel's own clock domain, and mixing that with the
+// clock the time filter estimates against would be a domain error of exactly
+// the kind that produces a plausible constant offset — the hardest sort to
+// notice. The read is stamped by the caller instead, which costs the file
+// read's own duration (microseconds) and stays in one clock.
+
+// PlaybackPos is a reading of the playback substream's position.
+type PlaybackPos struct {
+	// State is the ALSA state: RUNNING, PREPARED, XRUN, SETUP …
+	State string
+	// HwPtr is total frames the hardware has played.
+	HwPtr int64
+	// ApplPtr is total frames handed to it.
+	ApplPtr int64
+	// Delay is frames queued and not yet played. THE error signal.
+	Delay int64
+	// Avail is free frames in the ring buffer.
+	Avail int64
+	// Valid is false when the file did not contain a position at all — a
+	// closed substream, or a procfs shape we have not seen. Callers must
+	// check it: a zero Delay read as real says the buffer is empty, which
+	// on a running stream would make the corrector chase a rate it cannot
+	// reach.
+	Valid bool
+}
+
+// Running reports whether the hardware is actually consuming frames. A
+// PREPARED substream has appl_ptr and hw_ptr both at zero and a Delay that
+// means nothing yet.
+func (p PlaybackPos) Running() bool { return p.Valid && p.State == "RUNNING" }
+
+// parsePlaybackPos reads a status file's body.
+//
+// Every field is optional and a missing one leaves its zero: this file's
+// shape differs across kernel versions and the fields we need have been
+// present on everything seen, but a parser that refuses the whole reading
+// because one line moved would take the corrector offline rather than
+// degrade it. Valid is keyed on the two fields the position is actually
+// derived from.
+func parsePlaybackPos(status string) PlaybackPos {
+	var p PlaybackPos
+	var sawHw, sawAppl bool
+	for _, line := range strings.Split(status, "\n") {
+		key, val, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		switch key {
+		case "state":
+			p.State = val
+		case "hw_ptr":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				p.HwPtr, sawHw = n, true
+			}
+		case "appl_ptr":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				p.ApplPtr, sawAppl = n, true
+			}
+		case "delay":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				p.Delay = n
+			}
+		case "avail":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				p.Avail = n
+			}
+		}
+	}
+	p.Valid = sawHw && sawAppl
+	// Prefer the derived difference over the reported `delay`.
+	//
+	// They agree on every capture, and where they cannot both be right the
+	// pointers are: `delay` is a driver-reported figure that some drivers
+	// adjust for their own pipeline latency, while appl_ptr − hw_ptr is
+	// arithmetic on two counters this file reports directly. A driver's own
+	// idea of latency is a fine thing to know and a bad thing to fold into
+	// a measurement of buffer occupancy without noticing.
+	if p.Valid {
+		p.Delay = p.ApplPtr - p.HwPtr
+	}
+	return p
+}
