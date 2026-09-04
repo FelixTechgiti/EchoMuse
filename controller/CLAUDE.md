@@ -1175,6 +1175,12 @@ change nothing until the next reboot.
 against the same libc at the same API level as the binary it runs beside.
 ⚠ It has never been executed.
 
+**It emits 44.1kHz and there is no way to ask for anything else.** The design
+originally passed `--sample-rate 48000`; no released librespot has that option
+and neither does `dev`, and it refuses to start on an unknown one. The device
+resamples instead, at 4-8% of a core while Spotify plays — the same cost
+AirPlay carries, for the same reason.
+
 ### AirPlay
 
 `airplayEnabled` / `airplayName` run shairport-sync on the device, with the

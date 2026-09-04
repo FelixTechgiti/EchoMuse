@@ -16,10 +16,15 @@ FROM ghcr.io/binozo/echogo@sha256:c9456551c639290b1cc3e1df891177beadb5d0d7621a5c
 ENV NDK=/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64
 ENV PATH=/root/.cargo/bin:$PATH
 
-# A pinned Rust, for the base image's reason. librespot builds on stable, and
-# the version is named so a toolchain change is a commit rather than a
-# surprise on a Tuesday.
-ARG RUST_VERSION=1.83.0
+# A pinned Rust, for the base image's reason. The version is named so a
+# toolchain change is a commit rather than a surprise on a Tuesday.
+#
+# 1.90 rather than 1.83, and that is a CORRECTION: librespot 0.7.1 and 0.8.0
+# both declare `rust-version = "1.85"` and `edition = "2024"`, so the first
+# pin here was below the minimum and the build would have failed on its first
+# line. Found by reading librespot's own Cargo.toml rather than by running
+# this, which has still never happened.
+ARG RUST_VERSION=1.90.0
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y \
         --default-toolchain ${RUST_VERSION} --profile minimal && \
     rustup target add armv7-linux-androideabi

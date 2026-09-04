@@ -40,7 +40,6 @@ package airplay
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -374,13 +373,16 @@ func (c *Client) pump(r io.Reader) {
 	br := bufio.NewReaderSize(r, readFrames*stereoBytesPerFrame)
 	buf := make([]byte, readFrames*stereoBytesPerFrame)
 
-	// One resampler per SESSION, not per chunk: it carries filter history,
-	// and a fresh instance mid-stream restarts from silence and clicks.
-	// Skipped entirely at 48kHz, which is what AirPlay 2 delivers.
-	var rs *resample.Resampler
-	if c.opts.SourceRate != DeviceRate {
-		rs = resample.New()
-	}
+	// One converter per SESSION, not per chunk: it carries filter history,
+	// and a fresh instance mid-stream restarts from silence and clicks. The
+	// filter is skipped entirely at 48kHz, which is what AirPlay 2 delivers.
+	conv := resample.NewStreamConverter(c.opts.SourceRate)
+	// Whole periods only — see pcm.PeriodWriter. The music plane is not a
+	// byte stream: the ALSA loop takes one item off the channel per
+	// iteration and hands it to the hardware as a PERIOD, so a short buffer
+	// becomes a short period — a glitch, counted in the instrumentation as
+	// a whole one. Nothing about a resampled read lands on a boundary.
+	pw := pcm.NewPeriodWriter(pcm.MusicPeriodBytes, c.sink.PumpMusic)
 	claimed := false
 
 	for {
@@ -401,15 +403,19 @@ func (c *Client) pump(r io.Reader) {
 				claimed = false
 				continue
 			}
-			out := c.convert(rs, buf[:n-n%stereoBytesPerFrame])
-			if len(out) > 0 {
-				if perr := c.sink.PumpMusic(out); perr != nil {
-					log.Printf("[airplay] PumpMusic: %v", perr)
-					return
-				}
+			out := c.convert(conv, buf[:n-n%stereoBytesPerFrame])
+			if perr := pw.Write(out); perr != nil {
+				log.Printf("[airplay] PumpMusic: %v", perr)
+				return
 			}
 		}
 		if err != nil {
+			// The tail IS padded: the last milliseconds of a track are
+			// inaudible as a gap and obvious as a click if the period is
+			// left half full.
+			if perr := pw.Flush(); perr != nil {
+				log.Printf("[airplay] final period: %v", perr)
+			}
 			return
 		}
 	}
@@ -417,34 +423,12 @@ func (c *Client) pump(r io.Reader) {
 
 // convert turns stereo 16-bit at the source rate into mono 16-bit at 48kHz.
 //
-// DOWNMIX FIRST, THEN RESAMPLE, and the order is not arbitrary: resampling
-// two channels costs twice the filter for a result that is about to be summed
-// anyway. Doing it the other way round is the same audio for double the CPU,
-// on the one source that cannot hand the job to a subprocess.
-func (c *Client) convert(rs *resample.Resampler, stereo []byte) []byte {
-	mono := pcm.DownmixStereo(stereo)
-	if rs == nil {
-		return mono // already at the device rate — AirPlay 2
-	}
-	in := make([]float64, len(mono)/2)
-	for i := range in {
-		in[i] = float64(int16(binary.LittleEndian.Uint16(mono[i*2:])))
-	}
-	out := rs.Process(in)
-	res := make([]byte, len(out)*2)
-	for i, v := range out {
-		// Clamped, not wrapped. The filter can overshoot slightly on a
-		// signal already at full scale, and an int16 that wraps turns a
-		// peak into full-scale opposite polarity — a crack rather than
-		// clipping. Same rule the mixer follows.
-		if v > 32767 {
-			v = 32767
-		} else if v < -32768 {
-			v = -32768
-		}
-		binary.LittleEndian.PutUint16(res[i*2:], uint16(int16(v)))
-	}
-	return res
+// The five steps live in resample.StreamConverter now, because Spotify needs
+// exactly the same ones: no released librespot has a --sample-rate option
+// either, so both sources arrive at 44.1kHz and both have to be converted
+// here. Three copies of "downmix, resample, clamp" was one too many.
+func (c *Client) convert(conv *resample.StreamConverter, stereo []byte) []byte {
+	return conv.Convert(stereo, pcm.DownmixStereo)
 }
 
 func relayLog(r io.Reader) {

@@ -309,9 +309,6 @@ func TestTheCommandLineCarriesTheDecisions(t *testing.T) {
 		// a blocking open with no timeout, eighteen minutes of a stranded
 		// device.
 		"--backend pipe",
-		// librespot does the resampling, in a process that can be killed,
-		// rather than a resampler on the voice assistant's audio path.
-		"--sample-rate 48000",
 		// Named rather than left to the default, so a librespot that
 		// changes its default does not silently send 32-bit floats into a
 		// 16-bit mixer.
@@ -327,6 +324,100 @@ func TestTheCommandLineCarriesTheDecisions(t *testing.T) {
 			t.Fatalf("missing %q in: %s", want, got)
 		}
 	}
+}
+
+func TestNoSampleRateFlagIsPassed(t *testing.T) {
+	// It does not exist. No released librespot has a --sample-rate option
+	// and neither does dev — the resampling pull request was never merged —
+	// and librespot REFUSES TO START on an unknown option rather than
+	// ignoring it. This was designed the other way round first, so the test
+	// is here to stop it coming back.
+	c := New(Options{Binary: "/bin/true"}, &fakeSink{}, &fakePlane{})
+	for _, a := range c.args() {
+		if strings.Contains(a, "sample-rate") {
+			t.Fatal("--sample-rate reached the command line — librespot has " +
+				"no such option and will refuse to start")
+		}
+	}
+}
+
+func TestTheSourceRateIsLibrespotsOwn(t *testing.T) {
+	// 44,100, and not negotiable. Defaulting to 48000 would skip the
+	// resampler and play everything 8.8% fast, which reads as a broken
+	// client rather than as a rate.
+	c := New(Options{Binary: "/bin/true"}, &fakeSink{}, &fakePlane{})
+	if c.opts.SourceRate != 44100 {
+		t.Fatalf("source rate = %d, want librespot's 44100", c.opts.SourceRate)
+	}
+}
+
+func TestAudioIsResampledOnItsWayToThePlane(t *testing.T) {
+	// 44100 stereo in, 48000 mono out: half the samples for the downmix,
+	// times 160/147 for the rate.
+	const inFrames = readChunkFrames * 4
+	// No trailing sleep: the tail flush runs when the pipe CLOSES, and a
+	// script that lingers holds it open past the point the test samples.
+	bin := fakeLibrespot(t, "dd if=/dev/zero bs="+
+		itoa(inFrames*bytesPerFrame)+" count=1 2>/dev/null\n")
+	sink := &fakeSink{}
+	c := New(Options{Binary: bin}, sink, &fakePlane{})
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	got := waitForStableBytes(t, sink) / 2
+	want := inFrames * 160 / 147
+	// Within ONE PERIOD, not within a percentage: the plane takes whole
+	// periods and the writer holds the remainder until the flush, so the
+	// count is quantised to 2048 samples by construction. A percentage
+	// tolerance would be asserting something the design does not promise.
+	const period = 2048
+	if d := got - want; d > period || d < -period {
+		t.Fatalf("produced %d samples from %d input frames, want %d "+
+			"within one period", got, inFrames, want)
+	}
+	if got == inFrames {
+		t.Fatalf("produced exactly the input count (%d) — nothing was "+
+			"resampled, so playback would be 8.8%% fast", got)
+	}
+}
+
+// waitForStableBytes waits until the sink has taken audio and stopped
+// growing. Checking as soon as the first push lands reads a partial stream.
+func waitForStableBytes(t *testing.T, sink *fakeSink) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last, stable := -1, 0
+	for time.Now().Before(deadline) {
+		n := sink.bytes()
+		if n > 0 && n == last {
+			stable++
+			if stable >= 5 {
+				return n
+			}
+		} else {
+			stable = 0
+		}
+		last = n
+		time.Sleep(20 * time.Millisecond)
+	}
+	if last <= 0 {
+		t.Fatal("no audio reached the music plane")
+	}
+	return last
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }
 
 func TestDiscoveryIsNotDisabled(t *testing.T) {

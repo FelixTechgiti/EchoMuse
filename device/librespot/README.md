@@ -35,12 +35,32 @@ that does not.
 
 ## Not yet run
 
-⚠ **This recipe has never been executed.** It is written from the
-cross-compilation constraints rather than from a successful build, and the
-first run should be expected to need adjustment — the likely places are the
-Rust version against librespot's MSRV, and whether `ring` (rustls's crypto
-backend) needs its own `CC_armv7_linux_androideabi` set. Neither is a design
-problem; both are the ordinary friction of a first cross-compile.
+⚠ **This recipe has never been executed** — the NDK cannot be downloaded from
+the environment it was written in (`dl.google.com` is refused by the network
+policy), so the first real run is still ahead.
+
+**Two things were checked against upstream's own sources and one was wrong.**
+The Rust pin was 1.83.0, and librespot 0.7.1 and 0.8.0 both declare
+`rust-version = "1.85"` with `edition = "2024"` — the build would have failed
+on its first line. Fixed to 1.90.0.
+
+The remaining likely friction is `ring`, rustls's crypto backend, which may
+need its own `CC_armv7_linux_androideabi` in the environment. That is ordinary
+first-cross-compile friction rather than a design problem.
+
+### There is no `--sample-rate`, and that changed the design
+
+The device was originally written to pass `--backend pipe --sample-rate 48000`
+so librespot would resample for us. **It cannot.** No released librespot has
+that option and neither does `dev` — the resampling pull request was never
+merged — and librespot REFUSES TO START on an unknown option rather than
+ignoring it.
+
+So the pipe backend emits 44,100 frames a second and the conversion happens on
+the device, through `internal/resample`, exactly as it does for AirPlay. That
+costs 4–8% of one A53 core while Spotify is playing. Found by reading
+librespot's `src/main.rs`; it would otherwise have presented as a Spotify
+endpoint that never starts.
 
 The device side is complete and tested without it: with no binary installed
 the firmware reports `spotify_status: {ok: false, reason: "not_installed"}`
