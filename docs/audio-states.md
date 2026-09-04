@@ -198,8 +198,19 @@ connection state machine (`conn.go`) driven by a scripted server over an
 in-memory transport, the drift-correction policy (`sync.go`), and the
 music-plane arbitration every one of these protocols needs
 (`device/internal/musicplane`). **Still to build:** the Noise handshake behind
-the `Crypto` interface, FLAC decoding, mDNS discovery, and the wiring to
-`PumpMusic`.
+the `Crypto` interface, FLAC decoding, and the lifecycle in `cmd/server.go`
+(config key, capability, reconnect loop).
+
+**Alignment is by silence at the start and by sample-level correction
+afterwards, and both halves are needed.** Nothing on the device controls when
+the prime gate releases, so without padding the first sample plays at whatever
+moment the buffer happened to fill; the music plane plays what it is given in
+order, so N frames of silence in front of the audio delay it by exactly N
+frames. Afterwards the hardware runs at its own rate, and `delay` is what
+makes that visible. The correction is **spread across the chunk and offset by
+half a step** so no adjustment lands on a chunk boundary — two chunks joined
+at a repeated or missing frame put the whole correction at the seam, which is
+the one place a discontinuity is most likely to be heard.
 
 **The advertised format list is ordered decodable-first, and that ordering is
 a safety property rather than a preference.** The server picks the client's
