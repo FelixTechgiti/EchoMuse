@@ -377,6 +377,12 @@ func (c *Client) pump(r io.Reader) {
 	// and a fresh instance mid-stream restarts from silence and clicks. The
 	// filter is skipped entirely at 48kHz, which is what AirPlay 2 delivers.
 	conv := resample.NewStreamConverter(c.opts.SourceRate)
+	// Whole periods only — see pcm.PeriodWriter. The music plane is not a
+	// byte stream: the ALSA loop takes one item off the channel per
+	// iteration and hands it to the hardware as a PERIOD, so a short buffer
+	// becomes a short period — a glitch, counted in the instrumentation as
+	// a whole one. Nothing about a resampled read lands on a boundary.
+	pw := pcm.NewPeriodWriter(pcm.MusicPeriodBytes, c.sink.PumpMusic)
 	claimed := false
 
 	for {
@@ -398,14 +404,18 @@ func (c *Client) pump(r io.Reader) {
 				continue
 			}
 			out := c.convert(conv, buf[:n-n%stereoBytesPerFrame])
-			if len(out) > 0 {
-				if perr := c.sink.PumpMusic(out); perr != nil {
-					log.Printf("[airplay] PumpMusic: %v", perr)
-					return
-				}
+			if perr := pw.Write(out); perr != nil {
+				log.Printf("[airplay] PumpMusic: %v", perr)
+				return
 			}
 		}
 		if err != nil {
+			// The tail IS padded: the last milliseconds of a track are
+			// inaudible as a gap and obvious as a click if the period is
+			// left half full.
+			if perr := pw.Flush(); perr != nil {
+				log.Printf("[airplay] final period: %v", perr)
+			}
 			return
 		}
 	}

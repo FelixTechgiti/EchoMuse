@@ -113,8 +113,10 @@ func TestAudioReachesThePlaneResampled(t *testing.T) {
 	// 44100 stereo in, 48000 mono out: the byte count should be close to
 	// half (mono) times 160/147 (rate).
 	const inFrames = readFrames * 4
+	// No trailing sleep: the tail flush runs when the pipe CLOSES, and a
+	// script that lingers holds it open past the point the test samples.
 	bin := fakeShairport(t, "dd if=/dev/zero bs="+
-		itoa(inFrames*stereoBytesPerFrame)+" count=1 2>/dev/null\nsleep 1\n")
+		itoa(inFrames*stereoBytesPerFrame)+" count=1 2>/dev/null\n")
 	sink := &fakeSink{}
 	c := New(Options{Binary: bin}, sink, &fakePlane{})
 	if err := c.Start(); err != nil {
@@ -127,9 +129,16 @@ func TestAudioReachesThePlaneResampled(t *testing.T) {
 	if got == 0 {
 		t.Fatal("no audio reached the music plane")
 	}
-	if math.Abs(float64(got-want))/float64(want) > 0.05 {
-		t.Fatalf("produced %d samples from %d input frames, want ~%d "+
-			"(mono at 48kHz)", got, inFrames, want)
+	// Within ONE PERIOD, not within a percentage: the plane takes whole
+	// periods and the writer holds the remainder until the flush.
+	const period = 2048
+	if math.Abs(float64(got-want)) > period {
+		t.Fatalf("produced %d samples from %d input frames, want %d "+
+			"within one period (mono at 48kHz)", got, inFrames, want)
+	}
+	if got == inFrames {
+		t.Fatalf("produced exactly the input count (%d) — nothing was "+
+			"resampled, so playback would be 8.8%% fast", got)
 	}
 }
 
@@ -138,7 +147,7 @@ func TestAt48kHzNothingIsResampled(t *testing.T) {
 	// would cost 4-8% of a core to convert 48000 to 48000.
 	const inFrames = readFrames * 2
 	bin := fakeShairport(t, "dd if=/dev/zero bs="+
-		itoa(inFrames*stereoBytesPerFrame)+" count=1 2>/dev/null\nsleep 1\n")
+		itoa(inFrames*stereoBytesPerFrame)+" count=1 2>/dev/null\n")
 	sink := &fakeSink{}
 	c := New(Options{Binary: bin, SourceRate: 48000}, sink, &fakePlane{})
 	if err := c.Start(); err != nil {
@@ -146,9 +155,12 @@ func TestAt48kHzNothingIsResampled(t *testing.T) {
 	}
 	defer c.Stop()
 
-	if got, want := waitForStableBytes(t, sink)/2, inFrames; got != want {
-		t.Fatalf("produced %d samples from %d frames at 48kHz, want exactly %d",
-			got, inFrames, want)
+	got, want := waitForStableBytes(t, sink)/2, inFrames
+	// At 48kHz the filter is skipped entirely, so the only difference from
+	// the input count is the period quantisation.
+	if d := got - want; d > 2048 || d < -2048 {
+		t.Fatalf("produced %d samples from %d frames at 48kHz, want %d "+
+			"within one period", got, inFrames, want)
 	}
 }
 

@@ -355,8 +355,10 @@ func TestAudioIsResampledOnItsWayToThePlane(t *testing.T) {
 	// 44100 stereo in, 48000 mono out: half the samples for the downmix,
 	// times 160/147 for the rate.
 	const inFrames = readChunkFrames * 4
+	// No trailing sleep: the tail flush runs when the pipe CLOSES, and a
+	// script that lingers holds it open past the point the test samples.
 	bin := fakeLibrespot(t, "dd if=/dev/zero bs="+
-		itoa(inFrames*bytesPerFrame)+" count=1 2>/dev/null\nsleep 1\n")
+		itoa(inFrames*bytesPerFrame)+" count=1 2>/dev/null\n")
 	sink := &fakeSink{}
 	c := New(Options{Binary: bin}, sink, &fakePlane{})
 	if err := c.Start(); err != nil {
@@ -366,9 +368,18 @@ func TestAudioIsResampledOnItsWayToThePlane(t *testing.T) {
 
 	got := waitForStableBytes(t, sink) / 2
 	want := inFrames * 160 / 147
-	if d := float64(got-want) / float64(want); d > 0.05 || d < -0.05 {
-		t.Fatalf("produced %d samples from %d input frames, want ~%d",
-			got, inFrames, want)
+	// Within ONE PERIOD, not within a percentage: the plane takes whole
+	// periods and the writer holds the remainder until the flush, so the
+	// count is quantised to 2048 samples by construction. A percentage
+	// tolerance would be asserting something the design does not promise.
+	const period = 2048
+	if d := got - want; d > period || d < -period {
+		t.Fatalf("produced %d samples from %d input frames, want %d "+
+			"within one period", got, inFrames, want)
+	}
+	if got == inFrames {
+		t.Fatalf("produced exactly the input count (%d) — nothing was "+
+			"resampled, so playback would be 8.8%% fast", got)
 	}
 }
 
