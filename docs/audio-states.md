@@ -197,8 +197,33 @@ player-role shapes (`player.go`), the message shapes (`messages.go`), the
 connection state machine (`conn.go`) driven by a scripted server over an
 in-memory transport, the drift-correction policy (`sync.go`), and the
 music-plane arbitration every one of these protocols needs
-(`device/internal/musicplane`). **Still to build:** the Noise handshake behind
-the `Crypto` interface.
+(`device/internal/musicplane`). **Deliberately not built: the Noise handshake.** The `Crypto` interface is
+there and `Plaintext` implements it; `KKpsk2` does not exist and is not a
+gap being hidden. Three reasons, in the order they carry weight:
+
+- **Nothing on the other side implements it.** Music Assistant's server has
+  no encryption at all — no Noise anywhere in `aiosendspin`, and no crypto
+  library in its dependencies. So the plaintext path is the one that works
+  against a real server today, and a Noise implementation could not be
+  tested against anything.
+- **`KKpsk2` is not the whole job.** `KK` means both parties already hold
+  each other's static keys, so it needs a keypair, its persistence, and the
+  server's public key — which arrives through pairing: `CPACE-X25519-SHA512`,
+  pairing tokens, a failure counter that gesture-gates after five bad
+  attempts. That is a sub-project, and every part of it is unverifiable for
+  the same reason as above.
+- **The two `init` message shapes are still unverified** (see above), and
+  they are the ones the handshake opens with.
+
+The design instruction this follows is the one already written down: build
+the client so the handshake is a LAYER that can be switched on, not an
+assumption baked through the transport. That is done. Writing the layer
+before anything can answer it is the part to leave alone.
+
+**What is still owed, and needs hardware:** the handshake has never completed
+against a live Music Assistant. Until it has, `client/init` / `server/init`
+are the two shapes taken from prose rather than from the reference, and the
+whole connect path is unproven.
 
 **Alignment is by silence at the start and by sample-level correction
 afterwards, and both halves are needed.** Nothing on the device controls when
