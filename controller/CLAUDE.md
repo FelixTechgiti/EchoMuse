@@ -780,6 +780,46 @@ recreate the misreading that cost an investigation on 2026-07-20.
 
 ## The output chain: EQ → bass guard → limiter
 
+**This runs ON THE DEVICE for firmware announcing `output_chain`, and the
+controller stands down for those devices** (#243 — `docs/audio-states.md` §8
+and `device/internal/outchain`). Everything below still describes the
+controller-side chain, which remains the implementation for older firmware,
+the reference the device port is verified bit-for-bit against, and the place
+the parameters are explained.
+
+**Never shape twice, and never shape zero times.** Two chains in series is two
+limiters in series, which is audibly wrong rather than subtly wrong; a
+controller that stands down for a device with no chain of its own ships audio
+in front of the dashboard's ±12dB faders with nothing catching what they
+boost, which is #231 again. `em_outchain.controller_shapes` is the ONLY place
+that decides, and `tests/test_outchain_standdown.py` fails when a function in
+`em_controller.py` or `em_player.py` builds a chain without asking it — a new
+streaming path that shapes unconditionally compiles, passes every other test,
+and is audible only to whoever owns the hardware.
+
+**Standing down is `em_outchain.Bypass`, not a disabled chain.** A bypassed
+`BassGuard` still runs the Linkwitz-Riley crossover and sums the halves, and
+that sum is an **allpass** — magnitude-flat, phase-shifted — so "every stage
+off" is not the input bytes; a bypassed limiter likewise still holds its
+look-ahead tail. Both behaviours are correct where they are and wrong here:
+when the device owns the chain the controller is not a bypassed processor, it
+is not a processor.
+
+**The device-side chain fixes two things this one structurally cannot.** It
+applies POST-MIX, so one limiter finally sees voice and music summed —
+controller-side there are two independent chains (`_run_post_turn_playback`
+and `em_player._feed`) and neither ever does. And a parameter change is heard
+in ~43ms rather than the ~4s `LEAD_S` imposes here, which is what makes tuning
+by ear possible at all. All seven keys (`eqBands`, `eqLoudness`, `limiter*`,
+`bassGuard*`) already rode the config push and were ignored by the device;
+nothing new had to reach the wire.
+
+**Upstream shipped the device half with the controller still shaping.** The
+capability was announced, the documentation said the controller stood down,
+and it did not — two limiters in series on exactly the firmware the port was
+for. It fails no test and raises nothing. That is why the gate is a module
+with tests rather than an `if` at three call sites.
+
 Everything the speaker plays runs through three stages in `em_eq.apply` /
 `StreamingEQ.process`, in this order, all in float so nothing is quantised
 twice. **The order is load-bearing.**
@@ -1062,6 +1102,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_limiter.py` | Look-ahead peak limiter — stops the EQ clipping what it boosts. Pure, unit-tested |
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
+| `em_outchain.py` | Who shapes the audio — the controller or the device. One pure predicate on the `output_chain` capability, plus a `Bypass` that returns the caller's own bytes. Split out because neither `em_controller` nor `em_player` is importable by the suite, and because both failure directions are audible and silent |
 | `em_ring_light.py` | The LED ring as an HA light — the ring's RESTING colour, which every voice state outranks. Owns the partial-update semantics of `LightCommandRequest` (each field rides its own `has_*` flag) and the encoding decision that on/off lives in the brightness, so the colour survives being switched off and HA's card can offer it back |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |

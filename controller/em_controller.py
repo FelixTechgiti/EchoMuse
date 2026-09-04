@@ -77,6 +77,7 @@ import em_rttlog
 import em_eq
 import em_limiter
 import em_mbc
+import em_outchain
 import em_ring_light
 import em_scenes
 import em_shadow
@@ -863,6 +864,24 @@ class Device:
         behaviour.
         """
         return "audio_mix" in (self.capabilities or [])
+
+    @property
+    def output_chain_capable(self) -> bool:
+        """
+        Whether this firmware runs the EQ, bass guard and limiter itself.
+
+        When it does the controller sends UNSHAPED audio and the device
+        shapes it at the ALSA write, post-mix — which is the only place one
+        limiter ever sees voice and music summed, and the only place a
+        parameter change is heard in ~43ms instead of the LEAD_S=4s the feed
+        runs ahead by.
+
+        Announced separately from audio_mix even though both concern the same
+        ALSA write: the fleet already contains firmware that mixes and does
+        not shape, and treating one as evidence of the other puts two
+        limiters in series on those devices.
+        """
+        return em_outchain.CAPABILITY in (self.capabilities or [])
 
     @property
     def timer_alarm_ringing(self) -> bool:
@@ -1717,17 +1736,29 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     # call and can be asked what they actually did — see em_eq.describe_*.
     # One response is one buffer, so these are per-response instances and
     # carry no state between turns.
-    _limiter = _limiter_for(device)
-    _guard   = _guard_for(device)
-    log.info(
-        f"[{device.device_id}] Output chain: "
-        f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard)}"
-    )
+    # Stand down entirely for firmware that shapes its own audio: two chains
+    # in series is two limiters in series. em_outchain.controller_shapes is
+    # the single decision — see that module for why it is not an `if` here.
+    _shapes  = em_outchain.controller_shapes(device.capabilities)
+    _limiter = _limiter_for(device) if _shapes else None
+    _guard   = _guard_for(device)   if _shapes else None
+    if _shapes:
+        log.info(
+            f"[{device.device_id}] Output chain: "
+            f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard)}"
+        )
+    else:
+        log.info(f"[{device.device_id}] Output chain: on the device")
     # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
     # it off the event loop, which otherwise freezes every device's LED
     # frames, shell proxying, and WS handling right as playback starts
     # (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
+        if not _shapes:
+            # em_eq.apply with flat bands and no stages returns its input
+            # object untouched, but going through it at all would decode the
+            # whole response into float64 for nothing. The device shapes it.
+            return voice_response
         return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
                            device.eq_loudness, limiter=_limiter,
                            guard=_guard)
@@ -2098,17 +2129,23 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     Closing any layer at an arbitrary network boundary would corrupt decoding,
     reset the EQ filters, or turn each chunk into a separate announcement.
     """
-    log.info(
-        f"[{device.device_id}] Streaming EQ: bands={device.eq_bands} "
-        f"loudness={device.eq_loudness}"
-    )
-    stream_eq = em_eq.StreamingEQ(
-        SPEAKER_RATE,
-        device.eq_bands,
-        device.eq_loudness,
-        limiter=_limiter_for(device),
-        guard=_guard_for(device),
-    )
+    if em_outchain.controller_shapes(device.capabilities):
+        log.info(
+            f"[{device.device_id}] Streaming EQ: bands={device.eq_bands} "
+            f"loudness={device.eq_loudness}"
+        )
+        stream_eq = em_eq.StreamingEQ(
+            SPEAKER_RATE,
+            device.eq_bands,
+            device.eq_loudness,
+            limiter=_limiter_for(device),
+            guard=_guard_for(device),
+        )
+    else:
+        # The device shapes this one. Bypass rather than a flat StreamingEQ:
+        # a disabled bass guard still sums an allpass through the crossover.
+        log.info(f"[{device.device_id}] Streaming EQ: on the device")
+        stream_eq = em_outchain.Bypass()
     # Cleared BEFORE streaming starts: the device sets it when its audio
     # channel drains after EOS, and a stale set from the previous response
     # would end this turn the moment we started waiting.

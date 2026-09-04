@@ -50,6 +50,7 @@ from collections import deque
 import em_eq
 import em_limiter
 import em_mbc
+import em_outchain
 
 log = logging.getLogger("player")
 
@@ -644,16 +645,25 @@ class MediaSession:
         # head (measured against a listening test on 2026-08-19: no audible
         # difference reported, because none of the changes were reaching the
         # audio at all).
-        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
-                               limiter=em_limiter.Limiter(
-                                   SPEAKER_RATE,
-                                   threshold_db=device.limiter_threshold,
-                                   release_ms=device.limiter_release,
-                                   enabled=device.limiter_enabled),
-                               guard=em_mbc.BassGuard(
-                                   SPEAKER_RATE,
-                                   bass_guard_db=device.bass_guard_db,
-                                   enabled=device.bass_guard_enabled))
+        #
+        # None of that applies to a device that shapes its own audio: there
+        # the settings reach the chain over the config push and are heard in
+        # ~43ms, and shaping here as well would put two limiters in series.
+        # The per-chunk eq.update() below still runs and still does nothing,
+        # which is what keeps this one branch rather than several.
+        if em_outchain.controller_shapes(getattr(device, "capabilities", None)):
+            eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
+                                   limiter=em_limiter.Limiter(
+                                       SPEAKER_RATE,
+                                       threshold_db=device.limiter_threshold,
+                                       release_ms=device.limiter_release,
+                                       enabled=device.limiter_enabled),
+                                   guard=em_mbc.BassGuard(
+                                       SPEAKER_RATE,
+                                       bass_guard_db=device.bass_guard_db,
+                                       enabled=device.bass_guard_enabled))
+        else:
+            eq = em_outchain.Bypass()
         start_pos = self._pos
         proc = None
         seg_start = loop.time()

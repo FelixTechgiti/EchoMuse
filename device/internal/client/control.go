@@ -816,9 +816,18 @@ func capabilities() []string {
 	// prevent. Note the capability says the device can be muted remotely
 	// and says nothing about unmuting, because no firmware will ever do
 	// that: the message carries no boolean for it.
+	//
+	// "output_chain": this firmware applies EQ, bass guard and limiter
+	// itself, POST-MIX, so the controller must stand down and send unshaped
+	// audio. Getting this wrong in either direction is audible: a controller
+	// that keeps shaping puts two limiters in series, and one that stands
+	// down for a device without the capability ships audio nobody shaped.
+	// It is announced separately from "audio_mix" even though both concern
+	// the same ALSA write, because the fleet already contains firmware that
+	// mixes and does not shape.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "mute_set"}
+		"aec_hw_ref", "mute_set", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
