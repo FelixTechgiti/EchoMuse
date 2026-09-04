@@ -34,6 +34,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/spotify"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
@@ -221,6 +222,22 @@ func main() {
 	})
 	applySendspinConfig(sendspinClient)
 
+	// Spotify Connect — librespot as a subprocess, the Echo appearing in the
+	// Spotify app as a speaker. A third producer of the same music plane, on
+	// the same arbiter for the same reason as Sendspin, and its leave
+	// callback KILLS the session: Spotify Connect offers no way to say
+	// goodbye from outside the client, and a speaker that is listed,
+	// selected and silent is worse than one that is not listed.
+	// The serial is the FALLBACK name, not the name: the controller pushes
+	// the device's label, and "G090LF1180570SPJ" is not a speaker anybody
+	// picks out of a list in the Spotify app.
+	spotifyClient := spotify.New(spotify.Options{Name: deviceID},
+		pcmSpeaker, dataClient.MusicPlane().For(musicplane.Spotify))
+	dataClient.MusicPlane().Register(musicplane.Spotify, func(why musicplane.Reason) {
+		spotifyClient.Leave(string(why))
+	})
+	applySpotifyConfig(spotifyClient)
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
@@ -407,6 +424,7 @@ func main() {
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
 		applySendspinConfig(sendspinClient)
+		applySpotifyConfig(spotifyClient)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1192,6 +1210,30 @@ func applySendspinConfig(c *sendspin.Client) {
 		return
 	}
 	c.Stop(sendspin.GoodbyeUserRequest)
+}
+
+// applySpotifyConfig starts or stops the Spotify Connect endpoint from the
+// current effective config.
+//
+// A failure to start is LOGGED WITH ITS REASON rather than swallowed, because
+// the reason is almost always "librespot is not on this device" and that is a
+// thing somebody can fix. The controller learns the same fact from
+// spotify_status on the register message, which is what lets the dashboard
+// disable the toggle rather than offering a switch that saves and plays
+// nothing.
+func applySpotifyConfig(c *spotify.Client) {
+	snap := config.Get().Snapshot()
+	// Before start/stop, so a rename that arrives with the enable is
+	// applied to the session that enable creates rather than to the next
+	// one.
+	c.SetName(snap.SpotifyName)
+	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
+		if err := c.Start(); err != nil {
+			log.Printf("[cmd] Spotify Connect is on but cannot run: %v", err)
+		}
+		return
+	}
+	c.Stop()
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

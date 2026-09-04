@@ -150,6 +150,18 @@ type Device struct {
 	// nobody who has not asked for it should acquire either.
 	SendspinEnabled *bool
 
+	// Spotify Connect (internal/spotify) — librespot as a subprocess, the
+	// Echo appearing in the Spotify app as a speaker. Default OFF for the
+	// same reasons as Sendspin, plus one of its own: it needs a binary this
+	// firmware does not contain, so enabling it on a device without one is
+	// a control that cannot act.
+	SpotifyEnabled *bool
+	// SpotifyName is what the speaker is called in the Spotify app. Pushed
+	// by the controller, which knows the device's LABEL — the device knows
+	// only its serial, and "G090LF1180570SPJ" is not a speaker anybody
+	// picks out of a list.
+	SpotifyName string
+
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
 	// light it locally at its OWN wake crossing (#263) instead of waiting
@@ -219,6 +231,9 @@ func (d *Device) loadDefaults() {
 	d.BleProxyEnabled = &bleProxyEnabled
 	sendspinEnabled := envBool("SENDSPIN_ENABLED", false)
 	d.SendspinEnabled = &sendspinEnabled
+	spotifyEnabled := envBool("SPOTIFY_ENABLED", false)
+	d.SpotifyEnabled = &spotifyEnabled
+	d.SpotifyName = envStr("SPOTIFY_NAME", "")
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -326,6 +341,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.SendspinEnabled != nil {
 		d.SendspinEnabled = msg.SendspinEnabled
 	}
+	if msg.SpotifyEnabled != nil {
+		d.SpotifyEnabled = msg.SpotifyEnabled
+	}
+	if msg.SpotifyName != "" {
+		d.SpotifyName = msg.SpotifyName
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -401,6 +422,10 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.SendspinEnabled != nil {
 		sendspinEnabled = *d.SendspinEnabled
 	}
+	spotifyEnabled := false
+	if d.SpotifyEnabled != nil {
+		spotifyEnabled = *d.SpotifyEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -423,6 +448,8 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecRefSource:       d.AecRefSource,
 		BleProxyEnabled:    &bleProxyEnabled,
 		SendspinEnabled:    &sendspinEnabled,
+		SpotifyEnabled:     &spotifyEnabled,
+		SpotifyName:        d.SpotifyName,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -465,6 +492,8 @@ type ConfigMessage struct {
 	AecRefSource       string    `json:"aecRefSource,omitempty"`
 	BleProxyEnabled    *bool     `json:"bleProxyEnabled,omitempty"`
 	SendspinEnabled    *bool     `json:"sendspinEnabled,omitempty"`
+	SpotifyEnabled     *bool     `json:"spotifyEnabled,omitempty"`
+	SpotifyName        string    `json:"spotifyName,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

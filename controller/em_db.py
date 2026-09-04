@@ -238,6 +238,19 @@ DEFAULT_DEVICE_CONFIG = {
     # change; until then the setting is off by default and this is what the
     # note is for.
     "sendspinEnabled":  False,
+    # spotifyEnabled / spotifyName: Spotify Connect ON THE DEVICE — librespot
+    # as a subprocess, the Echo appearing in the Spotify app as a speaker
+    # (device/internal/spotify). Default off for Sendspin's reasons plus one
+    # of its own: it needs a binary the firmware does not contain, so the
+    # device reports separately (spotify_status on the register message)
+    # whether librespot is actually installed. The capability says the
+    # firmware CAN run it; the status says whether it can right now.
+    #
+    # spotifyName is pushed rather than left to the device because the
+    # controller knows the LABEL and the device knows only its serial, and
+    # "G090LF1180570SPJ" is not a speaker anybody picks out of a list.
+    "spotifyEnabled":   False,
+    "spotifyName":      "",
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake

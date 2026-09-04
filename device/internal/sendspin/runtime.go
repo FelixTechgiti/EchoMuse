@@ -1,11 +1,12 @@
 package sendspin
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/pcm"
 )
 
 // Turning scheduled chunks into sound.
@@ -502,7 +503,7 @@ func decodeChunk(f StreamStart, data []byte) ([]byte, error) {
 			return data, nil
 		}
 		if f.Channels == 2 {
-			return downmixStereo(data), nil
+			return pcm.DownmixStereo(data), nil
 		}
 		return nil, fmt.Errorf("sendspin: %d channels", f.Channels)
 	case CodecFLAC:
@@ -511,21 +512,4 @@ func decodeChunk(f StreamStart, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("sendspin: FLAC needs the stream decoder")
 	}
 	return nil, fmt.Errorf("sendspin: codec %q", f.Codec)
-}
-
-// downmixStereo averages the two channels.
-//
-// Averaged in int32 and halved, never added in int16: two channels near full
-// scale sum past 32767 and wrap to full-scale negative, which is a far worse
-// artefact than the clipping it looks like. Same rule the mixer already
-// follows.
-func downmixStereo(data []byte) []byte {
-	frames := len(data) / 4
-	out := make([]byte, frames*2)
-	for i := 0; i < frames; i++ {
-		l := int32(int16(binary.LittleEndian.Uint16(data[i*4:])))
-		rr := int32(int16(binary.LittleEndian.Uint16(data[i*4+2:])))
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16((l+rr)/2)))
-	}
-	return out
 }

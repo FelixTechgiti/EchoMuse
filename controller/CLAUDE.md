@@ -1149,6 +1149,32 @@ any more.
   device to report its Sendspin playback state; until then the note in
   `em_db.DEFAULT_DEVICE_CONFIG` is what carries the warning.
 
+### Spotify Connect
+
+`spotifyEnabled` / `spotifyName` run librespot on the device, so the Echo
+appears in the Spotify app as a speaker and plays from it with nothing of ours
+in the audio path.
+
+**TWO GATES, NOT ONE, and collapsing them is the mistake to avoid.** The
+`spotify` capability says the FIRMWARE can run an endpoint; `spotifyStatus`
+(from `spotify_status` on the register message) says whether the librespot
+binary is actually on the device. They fail for different reasons and want
+different things said: "your firmware is too old" against "a file was never
+pushed" — and a third state, `None`, means we have not heard from this device
+and must not be reported as either.
+
+`spotifyName` is pushed rather than left to the device because the controller
+knows the LABEL and the device knows only its serial, and
+`G090LF1180570SPJ` is not a speaker anybody picks out of a list. Changing it
+restarts the endpoint, because the name is a librespot command-line argument
+read once — without the restart, renaming would save, report success and
+change nothing until the next reboot.
+
+**librespot has no Android builds and has to be built.** The recipe is
+`device/librespot/`, on top of the firmware's own compiler image so it links
+against the same libc at the same API level as the binary it runs beside.
+⚠ It has never been executed.
+
 Its own config section (`streaming`) rather than a line in `playback`:
 playback is about how audio sounds once it arrives and this is about where it
 comes from, and a device overriding one has no reason to override the other.

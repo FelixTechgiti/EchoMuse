@@ -419,6 +419,10 @@ class Device:
         self.idle_ring_brightness: int = 0
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
+        # Whether librespot is on the device, and why not when it is not.
+        # None means "we have not heard", which is a third state the
+        # dashboard has to be able to say.
+        self.spotify_status: dict | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -864,6 +868,33 @@ class Device:
         behaviour.
         """
         return "audio_mix" in (self.capabilities or [])
+
+    @property
+    def spotify_capable(self) -> bool:
+        """
+        Whether this firmware knows how to run a Spotify Connect endpoint.
+
+        It says the SUPERVISOR exists and says nothing about whether the
+        librespot binary is on the device — that is a runtime answer and
+        arrives as `spotify_status` on the register message, the same
+        "could it" vs "is it" split as aec_hw_ref against aecRef. A
+        capability cannot carry it, because the binary is pushed by the
+        controller and can arrive, or be removed, long after registration.
+        """
+        return "spotify" in (self.capabilities or [])
+
+    @property
+    def spotify_ready(self) -> bool:
+        """
+        Whether librespot is actually installed on the device right now.
+
+        None until a device has reported — which is NOT the same as False,
+        and the dashboard has to be able to tell them apart: "no firmware
+        support", "firmware support, binary missing" and "we have not heard
+        yet" want three different things said to the user.
+        """
+        st = getattr(self, "spotify_status", None) or {}
+        return bool(st.get("ok"))
 
     @property
     def sendspin_capable(self) -> bool:
@@ -3573,6 +3604,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # to tell them apart. Absent on firmware that does not send it, which
         # reads as "not reported" rather than as a fault.
         device.ambient_light_status = msg.get("ambient_light_status")
+        device.spotify_status = msg.get("spotify_status")
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure

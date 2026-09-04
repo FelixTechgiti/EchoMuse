@@ -20,6 +20,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
+	"github.com/wilbowes/EchoMuse/internal/spotify"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -289,6 +290,12 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// the support bundle does not collect. Costs one small object per
 		// registration.
 		"ambient_light_status": als.Report(),
+		// Whether librespot is actually on this device, and why not when it
+		// is not. Same reasoning as ambient_light_status: a capability says
+		// WHAT the firmware can do, and when the answer to "why is this off"
+		// is a missing file, nobody can tell that from a broken feature
+		// without a shell session on the user's own hardware.
+		"spotify_status": spotify.Report(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -832,9 +839,16 @@ func capabilities() []string {
 	// Sendspin has a second producer of that plane, so a controller reading
 	// "music is playing" can no longer conclude that it is the one playing
 	// it.
+	// "spotify": this firmware knows how to run a Spotify Connect endpoint.
+	// It says the SUPERVISOR exists and says nothing about whether the
+	// librespot binary is actually installed — that is a runtime answer and
+	// rides the register message as spotify_status, the same "could it" vs
+	// "is it" split as aec_hw_ref against aecRef. A capability cannot carry
+	// it: the binary is pushed by the controller and can arrive, or be
+	// removed, long after registration.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "mute_set", "output_chain", "sendspin"}
+		"aec_hw_ref", "mute_set", "output_chain", "sendspin", "spotify"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

@@ -352,6 +352,27 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   );
 }
 
+// TextField is Toggle's shape for a free-text setting.
+//
+// `disabled` is honoured in the HANDLER as well as the styling, for Toggle's
+// reason: the capability rule is a claim about what a control DOES, and a
+// field that greys itself while still writing leaves the stored setting
+// disagreeing with what the user sees.
+function TextField({ label, sub, value, onChange, placeholder, disabled = false }) {
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ minWidth: 0, marginBottom: 6 }}>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
+        {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
+      </div>
+      <input type="text" value={value ?? ''} disabled={disabled}
+        placeholder={placeholder}
+        onChange={e => { if (!disabled) onChange(e.target.value); }}
+        style={{ width: '100%', boxSizing: 'border-box', opacity: disabled ? 0.45 : 1 }}/>
+    </div>
+  );
+}
+
 function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
@@ -1942,6 +1963,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
+                spotifyCapable={!device.connected || !!device.spotifyCapable}
+                spotifyStatus={device.spotifyStatus}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
@@ -4971,7 +4994,7 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"],
-  "streaming": ["sendspinEnabled"]
+  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -5095,7 +5118,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
                             holdCapable = true, triggerCapable = true,
                             hwEchoRef = false, hwRefCapable = true,
-                            sendspinCapable = true }) {
+                            sendspinCapable = true,
+                            spotifyCapable = true, spotifyStatus = null }) {
+  // null means "we have not heard from this device", which is neither
+  // "installed" nor "missing" — an offline device must not be told its
+  // binary is absent.
+  const spotifyReady = spotifyStatus === null || spotifyStatus === undefined
+    ? true : !!spotifyStatus.ok;
+  const spotifyWhy = (spotifyStatus && spotifyStatus.reason) || 'not installed';
   // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
   // is the only one that DISABLES a control rather than enabling one. The
   // fleet view has no single device to ask, so it keeps the AEC delay
@@ -5657,6 +5687,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               : 'needs newer firmware on this Echo — it has no Sendspin client'}
             value={sendspinCapable && (config.sendspinEnabled ?? false)}
             onChange={v => set('sendspinEnabled', v)}/>
+          {/* Two gates, not one. The capability says the firmware can run a
+              Spotify endpoint; spotifyStatus says whether librespot is
+              actually on the device. Collapsing them would tell somebody
+              their firmware is too old when the real answer is that a file
+              was never pushed — a different problem with a different fix. */}
+          <Toggle label="Spotify Connect" disabled={!spotifyCapable || !spotifyReady}
+            sub={!spotifyCapable
+              ? 'needs newer firmware on this Echo — it has no Spotify endpoint'
+              : (spotifyReady
+                ? 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path'
+                : `librespot is not installed on this Echo (${spotifyWhy})`)}
+            value={spotifyCapable && spotifyReady && (config.spotifyEnabled ?? false)}
+            onChange={v => set('spotifyEnabled', v)}/>
+          <TextField label="Spotify name" sub="what this Echo is called in the Spotify app. Blank uses its serial, which nobody picks out of a list"
+            value={config.spotifyName ?? ''} disabled={!spotifyCapable || !spotifyReady}
+            onChange={v => set('spotifyName', v)}/>
         </div>
       </Stage>
     </div>
