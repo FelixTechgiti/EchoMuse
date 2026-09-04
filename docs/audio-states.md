@@ -193,10 +193,20 @@ the expensive way:
 
 **Built and tested on the host, not yet heard:** the time filter
 (`device/internal/sendspin/timefilter.go`), the framing (`frame.go`), the
-player-role shapes (`player.go`), and the music-plane arbitration every one of
-these protocols needs (`device/internal/musicplane`). **Still to build:** the
-connection state machine, the Noise handshake, FLAC decoding, mDNS, and the
-wiring to `PumpMusic`.
+player-role shapes (`player.go`), the message shapes (`messages.go`), the
+connection state machine (`conn.go`) driven by a scripted server over an
+in-memory transport, and the music-plane arbitration every one of these
+protocols needs (`device/internal/musicplane`). **Still to build:** the Noise
+handshake behind the `Crypto` interface, FLAC decoding, mDNS discovery, the
+playback scheduler, and the wiring to `PumpMusic`.
+
+**`client/init` and `server/init` are the only shapes taken from prose.**
+Everything else was read off `aiosendspin`, the implementation Music Assistant
+runs, because prose does not say which fields are optional and a field sent as
+`null` where the server expects it absent is a different message. Those two
+belong to the pre-encryption exchange and are unverified until the handshake
+has completed against a live server once; the rest of the protocol is not the
+risk.
 
 
 Synchronised multi-room playback via the Open Home Foundation's Sendspin
