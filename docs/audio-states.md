@@ -195,10 +195,24 @@ the expensive way:
 (`device/internal/sendspin/timefilter.go`), the framing (`frame.go`), the
 player-role shapes (`player.go`), the message shapes (`messages.go`), the
 connection state machine (`conn.go`) driven by a scripted server over an
-in-memory transport, and the music-plane arbitration every one of these
-protocols needs (`device/internal/musicplane`). **Still to build:** the Noise
-handshake behind the `Crypto` interface, FLAC decoding, mDNS discovery, the
-playback scheduler, and the wiring to `PumpMusic`.
+in-memory transport, the drift-correction policy (`sync.go`), and the
+music-plane arbitration every one of these protocols needs
+(`device/internal/musicplane`). **Still to build:** the Noise handshake behind
+the `Crypto` interface, FLAC decoding, mDNS discovery, and the wiring to
+`PumpMusic`.
+
+**Landing the first sample is the easy half.** The speaker's crystal runs at
+47973 fps against 48000 — 560ppm — so a stream that starts perfectly is 0.56ms
+out after a second and 34ms out after a minute, against a ±1ms spec floor.
+Correction is by dropping and duplicating whole samples rather than
+resampling: a variable-rate resampler is inaudible and costs CPU this device
+does not have spare, while at one sample in 1786, spread rather than applied
+in a lump, dropping is inaudible for a different reason. Two numbers carry the
+policy — a **deadband**, without which the corrector hunts around zero forever
+and modulates pitch continuously, and a correction **rate that must exceed the
+crystal's own error**. The first version was capped at 500ppm against the
+crystal's 560 and could never catch up; it presents identically to no
+corrector at all, and the test comparing the two rates is what found it.
 
 **`client/init` and `server/init` are the only shapes taken from prose.**
 Everything else was read off `aiosendspin`, the implementation Music Assistant
