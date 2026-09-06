@@ -178,7 +178,14 @@ one that has been publishing them rather than a second copy that can drift.
 The tag it makes is **annotated**, built from the `## <version>` section of
 `controller/CHANGELOG.md` or `device/CHANGELOG.md` — so the notes exist before
 the release does, and a controller release keeps the annotation its update
-notice reads. Every check that can fail (version shape, tag already exists,
+notice reads. **A `## ` line inside a changelog is a version heading and
+nothing else**; headings within an entry are `###` or deeper. The first
+extractor ended a section at the next `## ` of any kind and truncated
+v2.15.0-fx.1's notes at their own `## What's new` — a release body two thirds
+shorter than the file it came from, with nothing failing, and a tag annotation
+cannot be corrected afterwards. `tests/test_changelog_headings.py` pins the
+convention and the extractor now stops only at `## <digit>`; both, because
+either alone leaves the failure silent. Every check that can fail (version shape, tag already exists,
 add-on pin agrees, changelog section present) runs **before** anything is
 created, because a tag cannot be moved once a workflow has acted on it.
 

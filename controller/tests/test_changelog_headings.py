@@ -1,0 +1,74 @@
+"""
+A changelog's `## ` lines are version headings, and nothing else.
+
+`.github/workflows/cut-release.yml` builds a release tag's annotation from the
+`## <version>` section of a changelog, and a section ends where the NEXT
+version heading begins. So a `## ` line that is not a version silently ends
+the extraction early: the tag carries a fraction of the notes, the release
+body carries that fraction, and a tag annotation cannot be corrected
+afterwards.
+
+That happened to v2.15.0-fx.1, whose notes used `## What's new` — the body
+published two thirds shorter than the file it came from, with nothing failing
+and nothing to fix it with. controller/CHANGELOG.md happened to use `###`
+inside its entries, so the controller release was fine and it read as a
+firmware-only oddity.
+
+The extractor now stops only at `## <digit>`, which makes prose headings safe
+again — and this pins the convention from the other side, because the two
+rules together are what keep a release's notes whole.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+
+CHANGELOGS = [
+    REPO / "controller" / "CHANGELOG.md",
+    REPO / "controller-ea" / "CHANGELOG.md",
+    REPO / "device" / "CHANGELOG.md",
+]
+
+# What the extractor treats as the start of a version section.
+VERSION_HEADING = re.compile(r"^## \d")
+
+
+@pytest.mark.parametrize("path", CHANGELOGS, ids=lambda p: p.parent.name)
+def test_every_level_two_heading_is_a_version(path):
+    assert path.exists(), f"{path} is missing"
+    offenders = [
+        (n, line.rstrip())
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if line.startswith("## ") and not VERSION_HEADING.match(line)
+    ]
+    assert not offenders, (
+        f"{path.relative_to(REPO)} has level-2 headings that are not versions: "
+        f"{offenders}. cut-release.yml ends a section at the next `## <digit>`, "
+        f"so these read as prose today — but a heading like `## 2 things to "
+        f"know` would truncate the release notes with nothing failing. Use "
+        f"`###` or deeper inside an entry."
+    )
+
+
+@pytest.mark.parametrize("path", CHANGELOGS, ids=lambda p: p.parent.name)
+def test_the_newest_entry_extracts_whole(path):
+    """
+    Extract the top section the way the workflow does, and check nothing was
+    lost — the whole file up to the second version heading has to come back.
+    """
+    lines = path.read_text().splitlines()
+    heads = [n for n, line in enumerate(lines) if VERSION_HEADING.match(line)]
+    assert heads, f"{path.relative_to(REPO)} has no version section at all"
+
+    first = heads[0]
+    end = heads[1] if len(heads) > 1 else len(lines)
+    section = [l for l in lines[first + 1:end]]
+
+    assert any(l.strip() for l in section), (
+        f"{path.relative_to(REPO)}'s newest entry is empty — cut-release.yml "
+        f"refuses to tag on that, which is the intended failure, but it means "
+        f"the release cannot be cut."
+    )

@@ -5,6 +5,9 @@ heading is the version WITHOUT the `v` prefix, because that is what
 `.github/workflows/cut-release.yml` matches when it builds the tag
 annotation from this file — `## 2.15.0-fx.1` for the tag `v2.15.0-fx.1`.
 
+Headings INSIDE an entry are `###` or deeper. A `## ` line starts a new
+version section, and that is what the extractor stops at.
+
 Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
@@ -18,7 +21,7 @@ First firmware release from the FelixTechgiti fork. It contains upstream's
 v2.14.0 in full, plus the work below. The `-fx.1` suffix keeps fork tags from
 colliding with upstream's; it has no other meaning.
 
-## What's new
+### What's new
 
 **The ring is an HA light.** Every LED except the one under the microphone
 button is yours — colour, brightness, and three notification effects (Notify,
@@ -42,7 +45,7 @@ sees voice and music summed and a tone change is heard in ~43ms rather than
 ~4s. Pair this with controller 2.23.0-fx.1 or newer — an older controller
 shapes the audio as well, which is two limiters in series and audibly wrong.
 
-## What you need to do
+### What you need to do
 
 **Spotify and AirPlay need a binary that is not in this release.** The
 firmware reports `not_installed` and the dashboard disables both toggles with
@@ -56,7 +59,7 @@ been run yet.
 The protocol is implemented and tested against itself; the first real connect
 is still owed. It is off by default.
 
-## Updating
+### Updating
 
 Nothing is required of you beyond pressing Update. The device keeps its
 previous binary in the other slot and rolls back to it on its own after three
