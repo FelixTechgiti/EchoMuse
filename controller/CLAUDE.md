@@ -1173,7 +1173,8 @@ change nothing until the next reboot.
 **librespot has no Android builds and has to be built.** The recipe is
 `device/librespot/`, on top of the firmware's own compiler image so it links
 against the same libc at the same API level as the binary it runs beside.
-⚠ It has never been executed.
+First run 2026-09-06: it built unmodified — 8.6MB, ELF32/ARM, needing only
+libdl/libm/libc. Getting it onto a device is the section below.
 
 **It emits 44.1kHz and there is no way to ask for anything else.** The design
 originally passed `--sample-rate 48000`; no released librespot has that option
@@ -1198,9 +1199,79 @@ The device side is version-agnostic: both put PCM on stdout, and the only
 difference that reaches the firmware is the sample rate. When an AirPlay 2
 build lands it is a config value and a binary, not a rewrite.
 
+**⛔ There is still no binary, and the blocker is not the one this section
+assumed.** `device/shairport/` was first executed on 2026-09-06. Five
+corrections got `configure` all the way through — two missing required
+libraries, bionic having neither librt nor libpthread, a popt header that
+lies about `glob()`, and two mis-spelled `--with` flags — and then the
+compile fails on **pthread cancellation, which bionic does not implement at
+any API level**. shairport-sync has 164 such call sites in 4.3.7 and 113 in
+3.3.9, so it is not a pin to move; it is a port of the threading model.
+Judged as one, it should be, before anyone starts.
+
+Nothing downstream is degraded by that: `airplayStatus` reports
+`not_installed`, the toggle is disabled and says so, and the install path
+below handles AirPlay identically the day a binary exists. Spotify is
+unaffected — librespot built first time.
+
 Its own config section (`streaming`) rather than a line in `playback`:
 playback is about how audio sounds once it arrives and this is about where it
 comes from, and a device overriding one has no reason to override the other.
+
+### Installing the two binaries (`em_endpoint_bins.py`)
+
+Both endpoints were announced, toggled and unusable until #16, because the
+programs they run were built nowhere and there was no way to put one on a
+device. `adb push` over USB was the only route — a cable on the Dot for every
+install and every update, which is the friction OTA exists to remove.
+
+**The store is fleet-level, the install is per device.** A binary is uploaded
+once into `endpoint_bins/` beside the SQLite DB (inside the data volume, the
+same treatment `oww_models/` gets) and pushed to each device from there.
+Per-device upload would send the same ~9MB up the dashboard once per Dot and
+would leave no way to answer "is this Echo running the binary I built?".
+
+`POST /api/endpoint_binaries/{kind}` uploads, `POST
+/api/devices/{id}/endpoint_binaries/{kind}` installs, both admin-only —
+anything that can put a program on a device is.
+
+**The transport is `_stream_file_to_device` unchanged, with
+`require_verify=True`.** That is the firmware path, and it is exactly right
+here: bytes land in `{dest}.part` and are renamed only once the md5 matches,
+so a failed install leaves the previous binary — the one the endpoint is
+currently falling back on — untouched. These are executables, and a corrupt
+one fails at exec with an error naming nothing.
+
+**Nothing is stopped first, deliberately.** Replacing the file is a rename
+over a directory entry, so a running endpoint keeps the inode it is executing;
+the new binary is picked up next time the supervisor starts it. Killing a
+playing endpoint to update a file nobody has asked to switch to yet is the
+more surprising behaviour.
+
+**The status is RE-READ off the device afterwards, never assumed.** The
+install stats `dest` over the same shell plane (`stat_command` / `parse_stat`,
+mirroring the firmware's own `Report()`) and assigns the answer onto
+`live.spotify_status` / `airplay_status` — which is what turns the Config
+toggle from disabled to usable with no reconnect. Two rules there, both
+learned elsewhere in this file:
+
+- **An unreadable stat leaves the previous status alone.** A verified transfer
+  followed by silence from the shell is a link problem, and recording "not
+  installed" would undo a successful install in the dashboard. The endpoint
+  reports `status: null` and the UI says it could not confirm.
+- **The live Device is re-fetched after the transfer**, because the
+  connection can drop mid-push and assigning onto a replaced object writes
+  where nothing reads.
+
+**The ELF header is checked at upload and the version is not.** The likely
+mistake is a host build — `cargo build --release` without the target, or the
+x86 binary `./configure` produces when it finds the host compiler — a
+plausible file with a plausible name that no device can exec, from a build
+that succeeded. `elf_problem` names which mistake it is. It cannot go further:
+these are upstream programs with no version string of ours in them, so md5 is
+the only identity either end can agree on, and `matches_store` is three-valued
+because the device stats the file rather than hashing it — a size match is
+suggestive, never proof, and `None` means "cannot tell" rather than "no".
 
 ## Fleet vs device scoping (schema v8)
 

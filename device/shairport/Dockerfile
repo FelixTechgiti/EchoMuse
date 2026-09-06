@@ -12,10 +12,21 @@ ENV NDK_ROOT=/opt/android/ndk/21.4.7075529
 ENV NDK=/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64
 ENV PATH=$NDK/bin:$PATH
 
-# autotools and cmake for the two source trees; xxd is in shairport-sync's own
+# autotools and cmake for the source trees; xxd is in shairport-sync's own
 # dependency list and is used by its build to embed a key.
+#
+# flex and bison are for libconfig, and they are here because the build
+# otherwise depends on TIMESTAMP LUCK. libconfig commits its generated
+# scanner.c and grammar.c alongside the scanner.l and grammar.y they come
+# from, and `git clone` writes every file at the same instant — so whether
+# make decides the generated file is out of date is a coin toss settled by
+# the order the checkout happened to touch them. It came up heads on the
+# first run here and tails on the next, in the same image, with nothing
+# changed between them. Carrying the two generators removes the coin toss
+# rather than hoping it lands the right way.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf automake libtool pkg-config cmake xxd git ca-certificates \
+        flex bison \
     && rm -rf /var/lib/apt/lists/*
 
 # The autotools cross-compile triple. shairport-sync's configure needs these

@@ -33,20 +33,35 @@ runs beside. A second toolchain would be a second opinion about what FireOS 5
 provides, and that difference shows up as a device that boots and a subprocess
 that does not.
 
-## Not yet run
+## First run: 2026-09-06, and it needed nothing
 
-⚠ **This recipe has never been executed** — the NDK cannot be downloaded from
-the environment it was written in (`dl.google.com` is refused by the network
-policy), so the first real run is still ahead.
+**The recipe built unmodified on its first execution**, which is worth
+recording precisely because this README predicted otherwise. Result: an 8.6MB
+stripped binary — `ELF32 / ARM / little-endian`, needing only `libdl.so`,
+`libm.so` and `libc.so`, all bionic, nothing to install beside it.
 
-**Two things were checked against upstream's own sources and one was wrong.**
-The Rust pin was 1.83.0, and librespot 0.7.1 and 0.8.0 both declare
-`rust-version = "1.85"` with `edition = "2024"` — the build would have failed
-on its first line. Fixed to 1.90.0.
+**`ring` was expected to need `CC_armv7_linux_androideabi` and did not.**
+Cargo's `[target.armv7-linux-androideabi] linker` in the image is enough:
+`ring`'s build script takes its sysroot from the linker it is given, so naming
+the compiler separately was a precaution against a problem that is not there.
+Nothing was added for it, and nothing should be.
 
-The remaining likely friction is `ring`, rustls's crypto backend, which may
-need its own `CC_armv7_linux_androideabi` in the environment. That is ordinary
-first-cross-compile friction rather than a design problem.
+**The Rust pin was the one real correction, and it was made by reading rather
+than by running.** It was 1.83.0; librespot 0.7.1 and 0.8.0 both declare
+`rust-version = "1.85"` with `edition = "2024"`, so the build would have
+failed on its first line. Fixed to 1.90.0 before the first run — which is why
+the first run worked.
+
+About five minutes of compilation, plus the base image pull. On Apple Silicon
+the image is x86_64 and runs emulated: use Rosetta
+(`colima start --vm-type=vz --vz-rosetta`, or Docker Desktop's equivalent)
+rather than a QEMU-emulated VM, which turns five minutes into hours.
+
+**Still unproven: that it RUNS.** This is a successful cross-compile of the
+right architecture against the right libc, verified by reading the ELF header
+and its needed libraries. Nobody has yet started it on a Dot, so the device's
+own `spotify_status` — which the dashboard reads after every install — remains
+the authority on whether the file is usable.
 
 ### There is no `--sample-rate`, and that changed the design
 

@@ -55,6 +55,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_endpoint_bins
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -435,6 +436,19 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
     app.router.add_get("/api/devices/{id}/oww_assets",    _get_oww_assets)
     app.router.add_post("/api/devices/{id}/oww_assets",   _post_oww_assets)
+
+    # Spotify / AirPlay endpoint binaries (device/librespot, device/shairport
+    # → data/endpoint_bins/ → /data/local/bin on each device). Uploaded once
+    # for the fleet, installed per device — see em_endpoint_bins.
+    # No DELETE: a replacement is an upload over the same name, which is the
+    # only reason to remove one, and a route nothing calls is surface with
+    # nothing keeping it honest.
+    app.router.add_get("/api/endpoint_binaries",           _get_endpoint_binaries)
+    app.router.add_post("/api/endpoint_binaries/{kind}",   _post_endpoint_binary_upload)
+    app.router.add_get("/api/devices/{id}/endpoint_binaries",
+                       _get_device_endpoint_bins)
+    app.router.add_post("/api/devices/{id}/endpoint_binaries/{kind}",
+                        _post_device_endpoint_bin)
 
     # Releases
     app.router.add_get("/api/releases/latest",   _get_latest_release)
@@ -4405,6 +4419,223 @@ async def _post_oww_assets(request: web.Request) -> web.Response:
         return _error("sync_failed", result.get("error", "sync failed"), 500)
     return _ok(result)
 
+
+
+# ─── Spotify / AirPlay endpoint binaries ─────────────────────────────────────
+#
+# librespot and shairport-sync are upstream programs the firmware runs as
+# subprocesses, and neither ships with it. Until #16 the only way onto a
+# device was `adb push` over USB — a cable on the Dot for every install and
+# every update, which is the friction OTA exists to remove.
+#
+# The store is fleet-level and the install is per device (em_endpoint_bins
+# says why). The transport is `_stream_file_to_device` unchanged, with
+# require_verify=True: these are executables, a corrupt one fails at exec
+# with an error that says nothing about why, and the .part-then-rename
+# ordering means a failed install leaves the previous binary — the one the
+# endpoint is currently falling back on — exactly where it was.
+
+
+async def _read_endpoint_status(live, k) -> dict | None:
+    """
+    Ask the device what is at the binary's path, in Report()'s own shape.
+
+    This is a READ, not a claim. An install that assumed its own success
+    would report a file as runnable on the strength of the controller's
+    chmod having exited 0, and the executable bit is the entire gate — so
+    the answer comes from the device, over the same shell plane the bytes
+    went down.
+
+    None means the shell said nothing we understand, and callers must leave
+    the previous status alone rather than record "not installed": a verified
+    transfer followed by an unreadable stat is a link problem, and writing a
+    guess there would undo a successful install in the dashboard.
+    """
+    out = await _shell_run(live, em_endpoint_bins.stat_command(k), timeout=30.0)
+    return em_endpoint_bins.parse_stat(out)
+
+
+@auth.require_admin
+async def _get_endpoint_binaries(request: web.Request) -> web.Response:
+    """
+    GET /api/endpoint_binaries — what the fleet store holds.
+
+    Admin-only, like every other route that can put a program on a device:
+    the response names sizes and md5s of executables, and the POST beside it
+    is the install path.
+    """
+    return _ok({
+        "store": em_endpoint_bins.scan(),
+        "kinds": [
+            {"kind": k.key, "label": k.label, "filename": k.filename,
+             "dest": k.dest, "source": k.source}
+            for k in em_endpoint_bins.KINDS.values()
+        ],
+    })
+
+
+@auth.require_admin
+async def _post_endpoint_binary_upload(request: web.Request) -> web.Response:
+    """
+    POST /api/endpoint_binaries/{kind} (multipart: field name "binary")
+
+    Puts a cross-compiled binary in the fleet store. The file lands
+    atomically (tmp + rename) so a concurrent install can never read a
+    half-written one, and the ELF header is checked first — the likely
+    mistake here is a host build, which is a plausible file with a plausible
+    name that no device can exec.
+    """
+    k = em_endpoint_bins.kind(request.match_info["kind"])
+    if k is None:
+        return _error("unknown_kind", "No such endpoint binary", 404)
+    try:
+        reader = await request.multipart()
+        field  = await reader.next()
+        if field is None or field.name != "binary":
+            return _error("invalid_upload", "Expected multipart field 'binary'", 400)
+        data = await field.read()
+        if not data:
+            return _error("empty_upload", "Uploaded binary is empty", 400)
+        if len(data) > em_endpoint_bins.MAX_BINARY_BYTES:
+            return _error(
+                "too_large",
+                f"Binary is {len(data) / 1024 / 1024:.1f} MB, over the "
+                f"{em_endpoint_bins.MAX_BINARY_BYTES // 1024 // 1024} MB limit",
+                413,
+            )
+        problem = em_endpoint_bins.elf_problem(data)
+        if problem:
+            # Named rather than generic, and refused rather than stored: a
+            # binary the device cannot exec presents as an endpoint that
+            # enables, reports success and plays nothing, which is the
+            # failure this codebase names most often.
+            return _error("not_a_device_binary",
+                          f"This is {problem}. Build it with {k.source}.", 400)
+
+        directory = em_endpoint_bins.store_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.chmod(tmp_path, 0o755)
+            os.replace(tmp_path, em_endpoint_bins.store_path(k))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        entry = em_endpoint_bins.stored(k)
+        log.info(f"[api] {k.label} binary uploaded: {len(data):,} bytes "
+                 f"md5={entry['md5'][:8]}…")
+        return _ok({"kind": k.key, "stored": entry}, status=201)
+    except web.HTTPException:
+        # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
+        # transport before this handler sees a byte. Same reason
+        # _post_upload_binary re-raises it: swallowing it into a 500 turns a
+        # size limit into "an internal error occurred".
+        raise
+    except Exception as e:
+        log.error(f"[api] Endpoint binary upload error: {e}")
+        return _error("upload_failed", str(e), 500)
+
+
+@auth.require_admin
+async def _get_device_endpoint_bins(request: web.Request) -> web.Response:
+    """
+    GET /api/devices/{id}/endpoint_binaries — per device, both kinds.
+
+    Answers from the device's last reported status rather than opening a
+    shell: this is polled while a panel is open, and a shell session per
+    poll would cost the device a connection to say what it already told us
+    on register. The install path re-reads it for real afterwards.
+    """
+    live = _live(request.match_info["id"])
+    return _ok({
+        "connected": live is not None,
+        "endpoints": [em_endpoint_bins.device_state(k, live)
+                      for k in em_endpoint_bins.KINDS.values()],
+    })
+
+
+@auth.require_admin
+async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/endpoint_binaries/{kind} — install it.
+
+    Synchronous, unlike the firmware OTA: there is no reboot, no A/B slot
+    and no rollback to narrate, so the request can simply carry the outcome
+    — including the device's own re-read of the file, which is what turns
+    the toggle from disabled to usable without waiting for a reconnect.
+
+    Nothing is stopped first. Replacing the file is a rename over a
+    directory entry, so a running endpoint keeps the inode it is executing
+    and is unaffected; the new binary is picked up the next time the
+    supervisor starts it. Killing a playing endpoint to update a file
+    nobody has asked to switch to yet would be the more surprising
+    behaviour.
+    """
+    device_id = request.match_info["id"]
+    k = em_endpoint_bins.kind(request.match_info["kind"])
+    if k is None:
+        return _error("unknown_kind", "No such endpoint binary", 404)
+
+    live = _live(device_id)
+    refusal = em_endpoint_bins.refuse_install(k, live)
+    if refusal:
+        # 409 for every one of these: the request is well-formed and the
+        # state is wrong, and the message is the part that matters — each
+        # names something the operator can go and fix.
+        return _error("cannot_install", refusal, 409)
+
+    entry = em_endpoint_bins.stored(k)
+    data  = em_endpoint_bins.store_path(k).read_bytes()
+
+    log.info(f"[api] [{device_id}] installing {k.filename} "
+             f"({len(data):,} bytes, md5={entry['md5'][:8]}…)")
+    await _push_log_event(device_id, "info", "controller",
+                          f"Installing {k.filename} ({len(data) / 1024 / 1024:.1f} MB)")
+
+    result = await _stream_file_to_device(live, data, k.dest,
+                                          mode="755", require_verify=True)
+    if not result:
+        await _push_log_event(device_id, "error", "controller",
+                              f"{k.filename} install failed — {result}")
+        log.error(f"[api] [{device_id}] {k.filename} install failed at "
+                  f"stage {result.stage}: {result}")
+        # str(result) is the STAGE's own detail text, which is the whole
+        # point of TransferResult: "could not open a shell — no data was
+        # sent" and "arrived corrupt" want different next steps, and one
+        # message for both is what sent #121 looking at the wrong half.
+        return _error("install_failed", str(result), 502)
+
+    # The device is still live here in the ordinary case, but the transfer
+    # took a shell session over a lossy link and the connection can have
+    # gone in the middle. Re-fetch rather than reuse: assigning the status
+    # onto a Device object that has since been replaced writes it where
+    # nothing will read it, and the dashboard would show the toggle still
+    # disabled after an install that genuinely worked.
+    live = _live(device_id)
+    status = await _read_endpoint_status(live, k) if live is not None else None
+    if status is not None and live is not None:
+        setattr(live, k.status_attr, status)
+
+    log.info(f"[api] [{device_id}] {k.filename} installed, device reports "
+             f"{status if status is not None else 'nothing readable'}")
+    await _push_log_event(device_id, "info", "controller",
+                          f"{k.filename} installed at {k.dest}")
+
+    return _ok({
+        "kind":     k.key,
+        "installed": entry,
+        # None when the stat could not be read. Reported as-is rather than
+        # filled in, so the dashboard can say "installed, could not confirm"
+        # instead of claiming a device state nobody read.
+        "status":   status,
+        "state":    em_endpoint_bins.device_state(k, live),
+    })
 
 
 @auth.require_auth
