@@ -412,7 +412,15 @@ MIGRATIONS: list[str] = [
     INSERT OR IGNORE INTO system_config VALUES ('device_approval',       'strict');
     INSERT OR IGNORE INTO system_config VALUES ('session_expiry_days',   '30');
     INSERT OR IGNORE INTO system_config VALUES ('update_check_interval', '3600');
-    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'wilbowes/EchoMuse');
+    -- The fork's own repository, so OTA polls releases built from THIS
+    -- tree. Note this is migration v1, so it seeds a FRESH database only
+    -- (INSERT OR IGNORE); a database carried over from an upstream
+    -- install keeps whatever it already stored. That is deliberate — the
+    -- correction is `PATCH /api/system/config`, not a new migration,
+    -- because MIGRATIONS is byte-identical to upstream's and appending
+    -- one here would make this database refuse to start on the upstream
+    -- controller, turning a reversible switch into a one-way door.
+    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'FelixTechgiti/EchoMuse');
     INSERT OR IGNORE INTO system_config VALUES ('latest_version',        NULL);
     INSERT OR IGNORE INTO system_config VALUES ('latest_binary_url',     NULL);
     INSERT OR IGNORE INTO system_config VALUES ('last_update_check',     NULL);
@@ -1005,6 +1013,7 @@ def init(path: str = "echomuse.db") -> None:
     _conn.execute("PRAGMA foreign_keys=ON")
     _conn.commit()
     _migrate(_conn)
+    _adopt_fork_repo(_conn)
     log.info("Database ready")
 
 
@@ -1087,6 +1096,92 @@ def _backup_before_migrating(conn: sqlite3.Connection, current: int) -> None:
             f"on {os.path.dirname(_db_path) or '.'}, or set EM_SKIP_DB_BACKUP=1 "
             f"to proceed without one."
         ) from e
+
+
+# ─── Which repository this build's updates come from ─────────────────────────
+#
+# `github_repo` drives BOTH update paths: the OTA poller reads that
+# repository's releases for device firmware, and the dashboard's controller
+# notice reads its `controller-v*` tags. On this fork it has to name the fork,
+# or the dashboard offers upstream's firmware to devices running this tree's
+# and reports "up to date" while a fork release exists — the "control that
+# lies" failure, arrived at from the update path.
+#
+# A FRESH database gets the right value from migration v1. The case this
+# exists for is the recommended switch-over, which copies the old add-on's
+# /data across (the CA has to come with it, or no fielded device connects) —
+# and that database already ran v1 under upstream and stored upstream's name.
+#
+# Not a migration, deliberately. MIGRATIONS is byte-identical to upstream's,
+# so a database from this fork still starts on the upstream controller;
+# appending one here would trip the downgrade guard and turn a reversible
+# switch into a one-way door. This is a data correction, not a schema change.
+#
+# It runs ONCE, recorded by `fork_repo_adopted`. Re-running it every startup
+# would revert a deliberate later change back to upstream on the next
+# restart, which is the same silent-refusal failure from the other side:
+# somebody who genuinely wants to track upstream's firmware must be able to
+# say so and have it stick.
+UPSTREAM_REPO = "wilbowes/EchoMuse"
+FORK_REPO     = "FelixTechgiti/EchoMuse"
+
+# Release information cached from whichever repository was configured before.
+# It describes the other project's releases, so it is dropped along with the
+# name rather than left to be shown until the next poll.
+_REPO_CACHE_KEYS = (
+    "latest_version",
+    "latest_binary_url",
+    "last_update_check",
+    "latest_controller_version",
+    "latest_controller_notes",
+    "latest_controller_published_at",
+)
+
+
+def repo_to_adopt(stored: Optional[str], already_adopted: bool) -> Optional[str]:
+    """
+    The repository name to write, or None to leave the stored one alone.
+
+    Pure so it can be tested without a database: the interesting cases are
+    "upstream's default, never corrected" (adopt), "adopted once already"
+    (leave), and "somebody chose a repository" (leave, even when that choice
+    is upstream).
+    """
+    if already_adopted:
+        return None
+    if stored is None or stored == UPSTREAM_REPO:
+        return FORK_REPO
+    return None
+
+
+def _adopt_fork_repo(conn: sqlite3.Connection) -> None:
+    """Point a database inherited from upstream at this fork. See above."""
+    def _val(key: str) -> Optional[str]:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    adopt = repo_to_adopt(_val("github_repo"), bool(_val("fork_repo_adopted")))
+    if adopt is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config VALUES ('github_repo', ?)",
+            (adopt,),
+        )
+        for key in _REPO_CACHE_KEYS:
+            conn.execute(
+                "UPDATE system_config SET value = NULL WHERE key = ?", (key,)
+            )
+        log.warning(
+            f"[db] Update source set to {adopt} — this database was created "
+            f"by an upstream controller. Change it with "
+            f"PATCH /api/system/config if you meant to track a different "
+            f"repository; it is only set once."
+        )
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config VALUES ('fork_repo_adopted', '1')"
+    )
+    conn.commit()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

@@ -3670,7 +3670,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     global _release_cache, _release_cache_ts
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    repo = db.get_config("github_repo", "FelixTechgiti/EchoMuse")
     url  = GITHUB_API_URL.format(repo=repo)
 
     log.info(f"[api] Polling GitHub releases: {url}")
@@ -3784,7 +3784,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
             and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
         return _controller_cache
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    repo = db.get_config("github_repo", "FelixTechgiti/EchoMuse")
     headers = {"Accept": "application/vnd.github+json"}
     timeout = aiohttp.ClientTimeout(total=10)
 

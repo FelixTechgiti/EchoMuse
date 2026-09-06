@@ -54,6 +54,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # GHCR repository names must be lowercase, and `github.repository_owner`
+      # is the account's DISPLAY spelling — `FelixTechgiti`, not
+      # `felixtechgiti`. docker/build-push-action does not fold the case for
+      # you; it fails the build with `invalid tag ...: repository name must be
+      # lowercase`, at the push, after every layer has been built. An owner
+      # who happens to be all-lowercase never sees this, which is why the
+      # expression survived here unfolded for as long as it did.
+      - name: Registry owner, lowercased
+        id: owner
+        run: echo "lc=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Identify the channel
         id: channel
         run: |
@@ -132,7 +143,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/echomuse-controller
+          images: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller
           tags: |
             type=raw,value=${{ steps.channel.outputs.image_tag }}
             type=raw,value=latest,enable=${{ steps.channel.outputs.latest }}
@@ -153,7 +164,7 @@ jobs:
       # published layers takes seconds.
       - name: Check the image exists for this commit
         run: |
-          src="ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}"
+          src="ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller:${{ steps.version.outputs.sha }}"
           if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
             echo "::error::No image published for this commit ($src)."
             echo "The main build has not run or did not finish for the commit being tagged."
@@ -186,7 +197,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BASE=ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
+            BASE=ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller:${{ steps.version.outputs.sha }}
             EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -223,7 +234,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller@${{ steps.build.outputs.digest }}
           format: cyclonedx
           output: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json
 
@@ -261,7 +272,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller@${{ steps.build.outputs.digest }}
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true

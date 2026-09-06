@@ -1,8 +1,8 @@
 # EchoMuse controller — deploy from the published image (no build needed).
 #
 #   mkdir echomuse && cd echomuse
-#   curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
-#   curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+#   curl -O https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/docker-compose.deploy.yml
+#   curl -o .env https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/.env.example
 #   # edit .env — at minimum set SERVER_IP to this machine's LAN IP
 #   docker compose -f docker-compose.deploy.yml up -d
 #
@@ -17,7 +17,7 @@
 
 services:
   echomuse-controller:
-    image: ghcr.io/wilbowes/echomuse-controller:latest
+    image: ghcr.io/felixtechgiti/echomuse-controller:latest
     container_name: echomuse-controller
     restart: unless-stopped
     network_mode: host

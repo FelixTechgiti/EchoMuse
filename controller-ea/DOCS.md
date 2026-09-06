@@ -77,8 +77,8 @@ Every option is explained inline in the add-on's Configuration tab. For the
 full picture — rooting a device, the voice pipeline, every configuration
 knob — see the project's own docs:
 
-- [Quickstart](https://github.com/wilbowes/EchoMuse/blob/main/docs/quickstart.md)
-- [Configuration reference](https://github.com/wilbowes/EchoMuse/blob/main/docs/configuration.md)
-- [Rooting a device](https://github.com/wilbowes/EchoMuse/blob/main/docs/rooting.md)
+- [Quickstart](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/quickstart.md)
+- [Configuration reference](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/configuration.md)
+- [Rooting a device](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/rooting.md)
 
 **Note**: restart the add-on after changing configuration.

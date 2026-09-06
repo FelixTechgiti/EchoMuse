@@ -136,7 +136,7 @@ new address when the old one has actually gone away.
 Add the repository (**Settings → Add-ons → Add-on Store → ⋮ → Repositories**):
 
 ```
-https://github.com/wilbowes/EchoMuse
+https://github.com/FelixTechgiti/EchoMuse
 ```
 
 Install **EchoMuse**, then **start it once and stop it again**. That first
