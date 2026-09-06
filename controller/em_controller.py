@@ -56,6 +56,7 @@ import logging
 import os
 import socket
 import struct
+import time
 
 import numpy as np
 from aiohttp import web
@@ -72,6 +73,7 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_pacing
+import em_platform
 import em_wsclose
 import em_rttlog
 import em_eq
@@ -424,6 +426,11 @@ class Device:
         # dashboard has to be able to say.
         self.spotify_status: dict | None = None
         self.airplay_status: dict | None = None
+        # Which userspace the device booted, from its register message.
+        # None until a device registers, and None forever for firmware too
+        # old to say — which em_platform resolves to Android, leaving the
+        # existing fleet exactly as it was.
+        self._base_os: str | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -1030,6 +1037,35 @@ class Device:
         playback_stats stores NULL rather than zero.
         """
         return (self.stats or {}).get("aecRef")
+
+    @property
+    def base_os(self):
+        """
+        The userspace the device booted: "emos", "fireos", or None.
+
+        None means the firmware is too old to report it, NOT FireOS. The
+        distinction is the whole point of the field: `android_userspace`
+        below acts on it, and reading absence as Android would keep pushing
+        the debloat payload at an emOS device that has no package manager.
+
+        Set from the REGISTER message, not the stats tick. It rode the stats
+        report for exactly one commit, which put it 30 seconds too late for
+        its only consumer — the payload reconcile runs on connect, so it read
+        None, pushed the Magisk service.d script at an emOS device, and each
+        attempt sat out the full 120s transfer timeout waiting for a
+        TRANSFER_OK that could never come.
+        """
+        return self._base_os
+
+    @property
+    def android_userspace(self) -> bool:
+        """
+        Whether Android-only payloads mean anything on this device.
+
+        The rule and its asymmetry live in em_platform, where a test can
+        reach them without aiohttp.
+        """
+        return em_platform.android_userspace(self.base_os)
 
     async def send_led_anim(self, anim: dict):
         """
@@ -3618,6 +3654,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.ambient_light_status = msg.get("ambient_light_status")
         device.spotify_status = msg.get("spotify_status")
         device.airplay_status = msg.get("airplay_status")
+        # Static property of the boot, so it arrives with registration
+        # rather than on the stats tick — reconcile_on_connect asks for it
+        # immediately and a stats-borne value is ~30s too late.
+        device._base_os = msg.get(em_platform.REGISTER_KEY)
+        # Persisted as well as held live (schema v21). The live value answers
+        # "what is THIS device", which is all payload gating ever needs; the
+        # stored one answers "what is the fleet", which is a question about
+        # devices that are mostly offline. Written on every register, because a
+        # device reflashed between FireOS and emOS is the case it has to track.
+        if device._base_os:
+            db.set_device_base_os(device_id, device._base_os)
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure
@@ -3645,6 +3692,21 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             "type": "ack",
             "device_id": device_id,
             "features": CONTROLLER_FEATURES,
+            # The device's wall clock. An Echo has no RTC that survives a
+            # power cut and boots reading 2010; under emOS nothing ever
+            # corrects it, because bionic resolves through Android's property
+            # service so no bionic-linked binary there has DNS for an NTP
+            # pool. Telling it over the link it already trusts costs one
+            # integer on a message that already flows — against an NTP server
+            # here, which would mean a listening socket, a second way for the
+            # device to find us, and a daemon to supervise, for an accuracy
+            # nothing in this system reads. Every measurement we take is
+            # monotonic and the device never sends a timestamp.
+            #
+            # Not negotiated, and does not need to be: adding a field is safe
+            # unnegotiated, older firmware ignores it, and a device that gets
+            # no field leaves its clock alone.
+            "time_ms": int(time.time() * 1000),
         })
 
         config = await loop.run_in_executor(

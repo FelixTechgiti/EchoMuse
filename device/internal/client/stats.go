@@ -64,6 +64,10 @@ type DeviceStats struct {
 	// old to report it", and "off" collapsing into that would tell the
 	// dashboard a disarmed AEC is an unknown one.
 	AecRef string `json:"aecRef"`
+	// The base OS deliberately does NOT ride this message — it is a static
+	// property of the boot and goes out once, on registration (control.go).
+	// It was here first and that was the bug: the payload reconcile asks for
+	// it the instant a device connects, ~30s before the first stats tick.
 }
 
 // SendStats sends a stats message to the controller.

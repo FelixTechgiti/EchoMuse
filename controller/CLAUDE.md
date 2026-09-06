@@ -701,6 +701,21 @@ index into it, so appending to a deployed entry corrupts every database that
 already ran it. (Doing exactly that once broke every stats write and
 disconnect-looped the fleet.)
 
+**One deployed entry rewrites itself every time a config default is added, and
+it is fine — but not for a reason the rule above would tell you.** Migration
+**v3 is an f-string interpolating `DEFAULT_DEVICE_CONFIG`**, so adding any key
+to the defaults silently changes v3's text. It has been happening for a long
+time: v3 on main already carries `bleProxyEnabled`, `ledScene` and `agcEnabled`,
+all far newer than schema v3. It is harmless because the statement is
+`INSERT OR IGNORE` and a database past v3 never runs it again, so the only
+effect is that a FRESH database seeds its global config with today's defaults
+rather than 2025's. Noticed 2026-09-05 while adding v21, by diffing the
+migration list against main rather than by any test — `test_migrations_are_
+append_only` pins the LENGTH, which is the mistake worth catching, and says
+nothing about content. Do not "fix" v3 into a literal: that would freeze the
+seed at whatever the defaults were the day it was frozen, and every new install
+would then start with a config missing every key added since.
+
 A controller applies everything it is missing in one startup, so **a user
 several releases behind jumping straight to latest is the normal case**, not
 an exotic one — verified end to end from v11 to v16 with data intact. Each
@@ -1376,6 +1391,57 @@ holes in a saved utterance. That mistake was made and corrected on the day.
 
 **Utterance recordings (schema v12).** Opt-in per device via `saveUtterances` (Config → Microphones): the mic audio streamed to HA for a turn is kept as a 16kHz mono WAV in `recordings/` beside the DB, playable and downloadable from each turn's row in the Activity tab (`GET /api/devices/{id}/turns/{turn}/audio`). Lets you hear what STT heard instead of inferring it from a bad transcript. Buffered in `_stream_mic_audio` **below the denoiser**, so the file is byte-for-byte the ESPHome wire payload — it first shipped tapped pre-NS, which answered "how good is the mic" but could not answer "why was the transcript wrong" on any device with `nsAsr` on, and that is the question people actually ask. **Keep the tap below NS**; if a raw comparison is ever wanted it belongs as a *second* file, not by moving this one. Capped at `MAX_UTTERANCE_BYTES` (30s), written in `_persist_turn` because the filename is keyed on the turn's rowid. Retention is a hard per-device **file count** (`em_recordings.KEEP_PER_DEVICE`=10) — much shorter than `TURN_RETENTION`, so **a non-NULL `audio_file` on an older row is a claim to check, not to trust**; every reader goes through `em_recordings.resolve`, which also re-checks that the file belongs to the device in the URL (the endpoint takes both from the path) and treats a missing file as an ordinary 404. Default OFF and it should stay that way: this is the only feature that writes recognisable speech to disk. `db.delete_device` unlinks a device's recordings explicitly — nothing cascades to the filesystem. Note the dashboard fetches the WAV via `API.blob` rather than an `<a href>`: sessions are Bearer-header-only, no cookie is ever set, so browser-initiated requests would 401.
 
+## The emOS console password
+
+`consolePassword` (Config → Advanced → USB console) puts a prompt in front of
+the USB serial console's root shell on emOS. FireOS is unaffected — adbd
+honours `ro.adb.secure` and is already better than this.
+
+**A nod to security, not Fort Knox**, and it should not be hardened later into
+something more complicated for a threat it was never meant to address: the
+record lives on `/data`, so anyone holding the device deletes it from TWRP.
+
+**The hash therefore does not protect the device. It protects the PASSWORD**,
+which the owner has probably reused somewhere that matters — someone who dumps
+`/data` should get work to do rather than a credential. So `em_console_pw`
+hashes BEFORE the value is stored or pushed, and plaintext exists only in the
+browser and the request body. Salted SHA-256, iterated, because the other half
+of the comparison runs in emOS's init, a static C binary that cannot link a
+crypto library; the count rides the record (`<iterations>:<salt>:<hash>`) so
+raising it later strands nobody. Measured at **0.32s** on the Echo's own A53.
+
+`emos/init/pwcheck.c` includes `init.c` whole and drives the real functions, so
+the two implementations are compared rather than assumed — verified matching at
+1, 2, 3 and 100,000 rounds, on x86 and on the device. A drift here refuses a
+password the dashboard just set, and nothing else in either tree would notice.
+
+Four rules, each of which fails the safe way round:
+
+- **Reads return a sentinel, writes resolve it.** Sentinel means unchanged,
+  empty means remove, anything else is new plaintext to hash. That is what lets
+  a client read-modify-write the config without the record ever being disclosed
+  to it. Removal is an explicit button, not "clear the box and save", so an
+  accidental clear cannot silently unlock the fleet.
+- **An unparseable record means NO password**, at both ends. Refusing every
+  login on the strength of a corrupt string locks the owner out with nothing to
+  type, and the file is all that stands between them and a device they own.
+- **The control is disabled only when every device has POSITIVELY reported
+  Android.** An empty `fleet_base_os` means nothing has ever said, which is not
+  the same answer — the same field takes opposite defaults in its two readers,
+  because absence must keep today's behaviour for payload gating and must not
+  hide a setting from someone configuring their first emOS device.
+- **The record is redacted from support bundles twice**: by key name in
+  `redact_config`, and by shape in the log sanitiser (`_PW_RECORD`). The second
+  was added because the first works on KEY NAMES and a record quoted in a log
+  line has no key attached — found by the test that asserts no part of a record
+  survives a whole serialised bundle, which is the only kind that catches a leak
+  nobody predicted.
+
+`base_os` is persisted for this (schema v21). It rides the register message and
+used to live only on the live `Device`, which answers "what is THIS device" —
+all payload gating ever needs. "What is the fleet" is a question about devices
+that are mostly offline.
+
 ## Support bundles (`em_support.py`)
 
 `GET /api/support/bundle` (admin) produces one JSON file for attaching to a
@@ -1528,6 +1594,12 @@ words — measured on Office 2026-09-02, provisioned 17 Aug with `hey_jarvis`
 alone — while every panel reports it healthy. A device arriving is exactly the
 moment we know what it has. Wil's call, same day: reconcile all three payloads
 on connect, debounced per device.
+
+**The shell lock is released by its OWNER, never by whoever happens to be cleaning up.** `Lock.locked()` answers "is anyone holding this", not "am I", and both cleanup paths used it as though it meant the second — so a caller that merely timed out WAITING ran the same cleanup as one that held the lock, closing the websocket and releasing the lock belonging to a transfer still using them. `_shell_owner` records the task, and every cleanup path is gated on being it. Seen end to end on EFF 2026-09-04: a debloat push hung 108s, the wake word reconcile behind it timed out and released the debloat's lock, and the slot detect that followed died with `Lock is not acquired` and returned `""` — surfacing to the operator as "could not determine active slot", three steps from anything to do with locking.
+
+**A transfer probes that the destination DIRECTORY exists before sending.** The heredoc writes with `>`, so a write into a directory that is not there fails, the trailing `echo TRANSFER_OK` never runs, and the transfer waits out its whole 120s timeout holding the device's shell lock. The probe rides the round trip that already detects the base64 decoder and the md5 tool, so it costs nothing, and it is checked BEFORE the decoder because "nowhere to put the file" is the more specific answer. The case that found it: the debloat payload targets Magisk's `/sbin/.core` overlay, which a device without Magisk has no daemon to create.
+
+**Android-only payloads are gated on `Device.android_userspace`** (`em_platform`, pure and tested), which is False only for a device that has POSITIVELY reported `base_os: emos`. Old firmware, a device that has not registered, and any unrecognised value all keep today's behaviour — the two ways of being wrong are not equal. `_post_debloat` refuses server-side rather than relying on the greyed-out control, since it is a plain POST with a session token; the endpoint and the dashboard read the same derived `androidUserspace` so they cannot disagree. Note the reconcile debounce does NOT cover this: `_sync_debloat` is called directly inside `_run_update_locked`, so every OTA pushes it regardless of the stamp.
 
 **md5 decides whether a transfer succeeded, not the shell's exit status.**
 `TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`
@@ -1735,6 +1807,103 @@ Two device behaviours the wizard works around rather than fixes:
   survives the name differing across SKUs), `stop` it, then kill. Its
   presence is not cosmetic: a run with it running spent 9s cycling
   DISCONNECTED/SCANNING before associating, against 1s on a clean one.
+
+### The emOS flow, and what a run against real hardware found
+
+The nine-step emOS flow ran end to end for the first time on 2026-09-06 and
+failed at four different steps. Every one of those failures was in a CHECK
+rather than in the thing it was checking — the writes and pushes were correct
+throughout — so the rules below are all one rule seen from different angles.
+
+- **Test whether a thing RUNS, never whether a file exists.** TWRP is already
+  root and frequently has no `su`, so the flow installs a shim to let the
+  shared install steps run unchanged. It was written with `#!/bin/sh` and there
+  is no `/bin` in a recovery ramdisk, so it could never execute — and the guard
+  was `command -v su`, which a broken shim satisfies. A failed first attempt
+  therefore handed the retry a shim that was on PATH, executable and unusable,
+  and the retry SKIPPED the verification that had just caught it. Step 3 went
+  green and every `su` in step 4 died. The test is now `su -c "id -u"` returning
+  0, unconditionally.
+- **A check that cannot run must not read as a pass.** `readlink` with stderr
+  discarded returns the same empty string for "the symlink is gone" and for
+  "`su` is not working", and the install step logged `Cleared.` after every
+  command had failed. Probes carry a sentinel (`echo _CLEARCHK`) so the two
+  answers are distinguishable — the same fix `_sync_start_script` needed for
+  `_SHELL_OK`, in a different file.
+- **Verify the bytes you wrote, not the block that contains them.** The flash
+  step read back whole megabytes and compared against the image zero-padded to
+  match, so 425,984 bytes of the PREVIOUS boot image were checked against zeros
+  nobody had written. Every emOS flash failed on a write `dd` reported as
+  complete. It hid because the only path ever exercised was the restore, whose
+  image is the whole 16MB partition — an exact number of blocks, so the padding
+  was empty and the comparison was accidentally right.
+- **The recovery environment is a RAMDISK and every step must build its own.**
+  The `su` shim and the `/sdcard` symlink live in `/sbin` and vanish on a
+  replug — which the wizard actively invites after any failure. Steps 4 and 5
+  call `prepareTwrpForInstall` themselves; it is idempotent and costs three
+  round trips.
+- **Nothing `getprop` returns distinguishes TWRP from Android.** Recovery
+  reports `ro.build.version.release` 5.1.1 and answers every other property
+  with its own values, and `boardOk` passes on `omni_biscuit` because it
+  contains "biscuit" — so step 1 ran to completion against a device in
+  recovery, printed "FireOS 5 confirmed", warned about an untested firmware it
+  had read off the ramdisk, and rebooted recovery into recovery. The BANNER is
+  the only discriminator. The real answers are on `/system`: mount
+  `system_<slot>` read-only, by NAME and by slot rather than as p13, and read
+  `build.prop`. That is also the partition emOS mounts at runtime for bionic
+  and tinyalsa, so it is the build that actually matters.
+- **`_STEP_MODE` is enforced at every step, not only on Reconnect.** It existed
+  and was correct and was consulted in one place, where a mismatch logged a
+  line and left Retry enabled. In Android `/dev/block/other-boot` is amonet's
+  unlock payload, and `classifyBootTarget` was the only thing in front of that
+  write.
+- **A serial console command's completion marker must be assembled ON THE
+  DEVICE.** Sending `cmd; echo __EMxxx__` puts the marker in the shell's echo
+  BEFORE the command runs, so `indexOf` matches instantly and `run()` returns
+  the text of its own request. `uname -a` "answered" with `uname -a; echo `,
+  and the emOS check then received the text of the next command and reported
+  the device was not emOS. `stty -echo` is still sent first but cannot be what
+  correctness rests on: it needs `stty` present and the shell up.
+- **A failed step must release the serial port.** The browser refuses to reopen
+  one that is already open, no retry clears it, and it blocks terminal programs
+  outside the browser too.
+- **Home Assistant's ingress caps a request body far below what the controller
+  accepts** (58MB). Sending the whole 16MB escrow plus the init was refused
+  with a 413 that never reached the add-on at all — no controller log line, so
+  nothing server-side to read. `_bootImageLength` sends the boot image rather
+  than the partition: four little-endian u32s at fixed offsets, verified
+  against real headers, and returning 0 (send everything) on anything it does
+  not understand, because a size optimisation must never be why a build cannot
+  happen.
+- **The emOS flow must leave a `wpa_supplicant.conf` behind.** emOS starts the
+  supplicant with `-c/data/misc/wifi/wpa_supplicant.conf` and the control
+  socket comes from `ctrl_interface` INSIDE that file, so with no file there is
+  no socket and every `wpa_cli` fails — including init's own `reassociate`
+  nudge, which is what association depends on. The device then sits at boot
+  stage 11 for ever. WiFi is configured at the END of this flow, over a console
+  talking to a supplicant that must already be running, so the skeleton is
+  written at step 4 while `/data` is writable and before the flash. **Never
+  overwritten**: a FireOS-provisioned device's conf has real networks in it.
+  It stayed hidden because the first emOS device had crossed from FireOS
+  carrying a good conf on `/data`.
+- **The packer does not require the reference's image id to reproduce.** It is
+  a SHA1 over the kernel and ramdisk, and a tool that repacks a ramdisk while
+  preserving the header verbatim leaves a stale one — f1r30s does, so stock
+  FireOS 5 + f1r30s was refused, which is the state `docs/rooting.md` tells
+  users to be in. The round trip used to double as an integrity check on the
+  escrow through that same id; it now checks the reference's **md5 on
+  arrival**, which covers the whole transfer instead of two of its regions. Do
+  not try to keep both in the id: "stored id does not match the regions" is
+  equally true of a stale id and of a corrupted byte, so any rule tolerating
+  one tolerates the other.
+
+**The restore is the wizard's undo and it is proven.** `_writeBootPartition` is
+shared by the flash and the restore deliberately — it is the only code here
+that can leave a device unbootable, and a second copy is one that drifts from
+its checks. On 2026-09-06 the restore put a device back after two failed
+flashes, verified against the partition, and the device booted. It needs ADB,
+so it only helps while the device is in TWRP — which is where both the flash
+failure and the first-boot failure leave it.
 
 ### The one partition the wizard writes
 
