@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.23.0-ea.9 (Early Access)
+
+**When the emOS build refuses an image, it now says which part it could not
+read.** Setup flow only.
+
+Before flashing anything, the controller takes your Echo's boot image apart and
+puts it back together, and refuses to build if the result is not identical.
+That check is worth keeping — it has caught three real problems — but all it
+said was "could not reproduce this boot image byte for byte", which leaves
+nothing to act on.
+
+It now names the field that differs and shows both values, so a refusal points
+somewhere instead of stopping the conversation.
+
+Also picks up the emOS 0.2 init, which names the USB console after the device
+instead of leaving your computer to guess. That needs the boot image rebuilding
+to take effect.
+
 ## 2.23.0-ea.8 (Early Access)
 
 **Everything found on the first provisioning run to reach the end of the emOS
