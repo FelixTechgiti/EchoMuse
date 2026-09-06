@@ -2825,7 +2825,15 @@ const _EMOS_STEPS = [
 
 // ── WifiPanel ──
 
-function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, networks, onConnect, onSkip, onAbort }) {
+// `ready` is whatever transport this panel is driving — an ADB handle in the
+// FireOS flow, the serial console in the emOS one. Only its truthiness is
+// used, to disable the buttons when there is nothing to talk to.
+//
+// onSkip and onAbort are optional. Neither means anything in the emOS flow:
+// there is no "already connected" to skip to, because registering over this
+// network IS the step, and by then the boot partition is already written so
+// there is no provisioning left to abort.
+function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, networks, onConnect, onSkip, onAbort }) {
   const [scanning, setScanning] = useState(false);
   const [showPsk, setShowPsk]   = useState(false);
 
@@ -2840,7 +2848,7 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
 
       {/* Scan row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Pill small onClick={doScan} disabled={scanning || !adb}>
+        <Pill small onClick={doScan} disabled={scanning || !ready}>
           {scanning ? 'Scanning…' : 'Scan for networks'}
         </Pill>
         {networks.length > 0 && (
@@ -2914,9 +2922,9 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
 
       {/* Actions */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Pill accent onClick={onConnect} disabled={!wifiSsid || !adb}>Connect</Pill>
-        <Pill small onClick={onSkip}>Skip (already connected)</Pill>
-        <Pill small danger onClick={onAbort}>Abort provisioning</Pill>
+        <Pill accent onClick={onConnect} disabled={!wifiSsid || !ready}>Connect</Pill>
+        {onSkip  && <Pill small onClick={onSkip}>Skip (already connected)</Pill>}
+        {onAbort && <Pill small danger onClick={onAbort}>Abort provisioning</Pill>}
       </div>
     </div>
   );
@@ -3112,6 +3120,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // longer has one — a page reload loses emosRef, which is exactly when the
   // restore is needed. See restoreEscrowedBoot.
   const [restoreFile, setRestoreFile] = useState(null);
+  // The serial read at step 1. Step 9 needs it to ask whether THIS
+  // device has connected, rather than inferring it from the device list
+  // having grown.
+  const [provSerial, setProvSerial] = useState('');
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
@@ -3397,6 +3409,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // there, and the only thing this step does afterwards is a reboot that is
     // already unnecessary.
     const inRecovery = _bannerMode(c.banner) === 'twrp';
+    if (serial) setProvSerial(serial);
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
     if (inRecovery) {
       addLog('Device is already in TWRP recovery — reading the FireOS build off '
@@ -3488,8 +3501,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // connection, rather than rebooting recovery into recovery and making the
     // operator re-pick the same device from the USB picker.
     if (inRecovery) {
-      addLog('Already in TWRP — no reboot needed. Continue with "Connect to TWRP" '
-           + '(the device is still connected).', 'ok');
+      addLog('Already in TWRP — no reboot needed, and the next step reuses this '
+           + 'connection.', 'ok');
       return c;
     }
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
@@ -5460,6 +5473,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
          + 'WiFi is configured next.', 'ok');
   }
 
+  // Scan from the DEVICE'S OWN RADIO, over the console.
+  //
+  // The FireOS flow scans over adb; by this point adbd is gone and the console
+  // is all there is. Same wpa_cli, same output, same parser — the only new
+  // part is the transport, which is why parseScanResults is shared rather than
+  // reimplemented.
+  //
+  // The flags column is the reason this is worth having at all: this radio
+  // reports no SAE, so a [SAE] network can never be joined however correct the
+  // password is, and a 5GHz-only one is invisible to it. Both present as an
+  // unexplained failure when someone types a name from memory.
+  async function scanWifiConsole(con) {
+    if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
+    const started = await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan');
+    if (!/OK/.test(started)) {
+      throw new Error(`wpa_cli would not start a scan (said "${started.trim() || 'nothing'}").`);
+    }
+    // A scan takes a few seconds; asking too early returns the previous
+    // results or none at all.
+    await new Promise(r => setTimeout(r, 4000));
+    const raw = await con.run(
+      'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results', 20000);
+    const nets = parseScanResults(raw);
+    if (!nets.length) {
+      addLog('The scan returned no networks. The radio is up — try again, or '
+           + 'type the name if it is hidden.', 'warn');
+    }
+    return nets;
+  }
+
   async function runEmosWifi() {
     const con = emosConsole;
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
@@ -5494,19 +5537,68 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('wpa_cli could not save the network, so this will be forgotten on '
            + 'reboot. Check update_config=1 in wpa_supplicant.conf.', 'warn');
     }
+    // Flush it. save_config returns as soon as wpa_supplicant has written and
+    // closed the file, and the bytes then sit in page cache for up to ~30s —
+    // so a user who unplugs the Echo in that window loses the network they
+    // just configured and has to do it again over a console.
+    //
+    // Pulling the power IS the normal shutdown on a smart speaker; nothing
+    // here may depend on a graceful one, and "run sync first" is not advice we
+    // are entitled to give. wpa_supplicant writes this file, not us, so this
+    // is the only place we can make it durable.
+    await con.run('sync');
+
+    // Prove it associates BEFORE leaving it in the config.
+    //
+    // save_config above has already written it, so a wrong SSID or PSK is
+    // persisted and the device retries it for ever — recoverable only over a
+    // console, which is the thing this step exists to avoid needing. And
+    // retrying the step calls add_network again, so each attempt stacked
+    // another entry.
+    addLog('Waiting for the network to come up…');
+    let joined = false;
+    for (let i = 0; i < 12 && !joined; i++) {
+      await new Promise(r => setTimeout(r, 2500));
+      const st = await con.run(
+        'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state');
+      addLog(`  ${st.trim() || 'no answer'}`);
+      joined = /wpa_state=COMPLETED/.test(st);
+    }
+    if (!joined) {
+      addLog('Not associating — removing the network so the device is not left '
+           + 'retrying it for ever.', 'warn');
+      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 remove_network ${id}`);
+      await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
+      await con.run('sync');
+      throw new Error(
+        `The device did not join "${wifiSsid}" within 30s, and the network has `
+        + 'been removed again. Check the name and password. Note this radio '
+        + 'cannot join WPA3 — it reports no SAE — so a WPA3-only network will '
+        + 'never associate however correct the password is.');
+    }
 
     addLog('Waiting for the device to register with the controller…');
     // Association is not the success condition. A device can be perfectly on
     // the network and running nothing; only registration proves EchoMuse was
     // installed, its credentials are right, and the assistant actually runs.
+    // Success is THIS device being CONNECTED, asked by serial.
+    //
+    // It used to be "a device_id appeared that was not in the list when the
+    // wizard opened", and that is broken in both directions by the wizard's
+    // own behaviour: step 4 mints TLS credentials, which creates a device row
+    // to hold the token whether or not the device ever connects. So the old
+    // test could match a row that proves nothing, and — if the serial was
+    // already on file from an earlier run — never match at all while the
+    // device sat there working perfectly. The second is what happened on
+    // 3611NF, 2026-09-06: associated, registered, and the wizard timed out.
     const deadline = Date.now() + 120000;
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
       let list = [];
       try { list = (await API.get('/api/devices')).devices || []; } catch {}
-      const known = new Set((knownDevices || []).map(d => d.device_id));
-      seen = list.find(d => !known.has(d.device_id));
+      seen = list.find(d => d.connected
+        && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
       const st = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state')).trim();
       addLog(`  ${st || 'no answer'}`);
@@ -5517,8 +5609,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'restore the escrowed boot image if you want to start over.');
     }
     addLog(`Registered as ${seen.label || seen.device_id}.`, 'ok');
-    addLog('Provisioning complete. Approve the device on the dashboard if it is '
-         + 'waiting for approval.', 'ok');
+    addLog('── PROVISIONING COMPLETE ──', 'head');
+    addLog(`This Echo is now running emOS and talking to the controller. `
+         + `${seen.approved ? 'It is already approved and ready to use.'
+                            : 'One thing left: approve it on the Devices page.'}`, 'ok');
   }
 
   // ── Step executor ──
@@ -5741,7 +5835,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // is a partition write or a reboot, and neither should begin while nobody
     // is looking.
     const autoSteps = isEmos ? new Set([2, 4, 5]) : new Set([2, 4, 7, 8, 9, 12]);
-    if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
+    // Connect to TWRP runs itself when the device is ALREADY in TWRP.
+    //
+    // Step 1 keeps its handle when it finds the device in recovery, so step 2
+    // has nothing left to do but confirm what step 1 just said — and asking
+    // for a click to be told "still connected" is a button whose only possible
+    // outcome is yes. It stays manual in every other case, because then it
+    // genuinely means "I have got the device into TWRP, go and look".
+    const alreadyThere = isEmos && step === 1 && adb
+                      && _bannerMode(adb.banner) === 'twrp';
+    if ((!autoSteps.has(step) && !alreadyThere)
+        || running || stepState[step] !== 'pending') return;
     // The emOS build's default source is the release, so the auto path has to
     // say so — `useLatest` is undefined otherwise and it would ask for a file
     // nobody has chosen.
@@ -5980,26 +6084,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
             {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
-              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input
-                  placeholder="Network name (SSID)" value={wifiSsid}
-                  onChange={e => setWifiSsid(e.target.value)}
-                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
-                <input
-                  placeholder="Password (blank for an open network)" type="password" value={wifiPsk}
-                  onChange={e => setWifiPsk(e.target.value)}
-                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
-                  This radio has no SAE, so it cannot join a WPA3-only network.
-                </div>
-                {!!wifiSsid && <Pill accent onClick={() => runStep(8)}>Join and Register</Pill>}
-              </div>
+              <WifiPanel
+                ready={emosConsole}
+                wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
+                wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
+                onScan={() => scanWifiConsole(emosConsole)
+                  .then(nets => setWifiNetworks(nets))
+                  .catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
+                networks={wifiNetworks}
+                onConnect={() => { if (wifiSsid) runStep(8); }}
+              />
             )}
-
             {/* Step 10: WiFi configuration (FireOS flow — emOS configures WiFi over the console at step 8) */}
             {!isEmos && step === 10 && stepState[10] !== 'done' && !running && (
               <WifiPanel
-                adb={adb}
+                ready={adb}
                 wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
                 wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
                 onScan={() => scanWifi(adb).then(nets => setWifiNetworks(nets)).catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
