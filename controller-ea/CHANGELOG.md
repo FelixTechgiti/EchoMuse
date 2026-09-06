@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.23.0-ea.12 (Early Access)
+
+**The end of the emOS setup flow, from the first run that got there.** Setup
+flow only.
+
+### The last step could not tell whether it had worked
+
+It watched for a new device to appear in your device list — but setting up a
+device adds it to that list partway through, before it has ever connected. So
+the wizard sat waiting while the Echo was on the network and working. It now
+asks the question it meant to: is *this* device connected?
+
+### A mistyped network is no longer permanent
+
+The network was saved before anything checked it worked, so a wrong name or
+password was written to the Echo and retried for ever — fixable only over a
+serial cable. It now waits for the connection to come up first, and removes the
+network again if it does not, telling you what to check. It also says outright
+that this Echo cannot join a WPA3-only network, whatever the password is.
+
+### Pick your network instead of typing it
+
+The WiFi step now scans and shows what the Echo's own radio can actually see,
+with signal, band and security. Typing a name from memory made a typo look
+exactly like a network the device cannot reach — and this hardware genuinely
+cannot see 5GHz or join WPA3, which are now visible before you choose rather
+than after it fails.
+
+### Smaller things
+
+The wizard says when it has finished, and whether the device still needs
+approving. Starting with the Echo already in recovery no longer asks you to
+click a button confirming what it just told you. And the network you set is
+flushed to disk immediately, so unplugging the Echo cannot undo it.
+
 ## 2.23.0-ea.11 (Early Access)
 
 **Second fix to the emOS build refusing a stock, freshly-rooted Echo.** Setup
