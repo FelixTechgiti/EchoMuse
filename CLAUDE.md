@@ -146,6 +146,46 @@ commit list by hand, since the PATCH replaces the whole body.
 
 The controller's own version is resolved by `controller/version.py` (env `EM_CONTROLLER_VERSION` — baked into the image from the tag — then `git describe --match 'controller-v*'`, then `"dev"`). It's exposed at `/api/system/status` as `controller_version`, shown in the dashboard header, and reported to HA as the ESPHome project version.
 
+### Releasing on this fork: versions carry `-fx.N`, and tags are made in the web UI
+
+Two things differ here from upstream, and both were learned the same day
+(2026-09-06).
+
+**Every fork release version carries an `-fx.N` suffix** —
+`controller-v2.23.0-fx.1`, `v2.15.0-fx.1`. Not decoration: upstream's tags are
+fetched into this repository by the weekly sync, so a fork tag with an upstream
+name is a collision on the next fetch, and an image published as `2.22.0`
+containing fork code is a lie to anyone reading the dashboard. The first pass
+at this picked `controller-v2.22.0` and `v2.14.0` — **both already existed
+upstream**, and both were caught only because `controller/CHANGELOG.md`
+mentioned a firmware version higher than any tag this repository had fetched.
+**Check `git ls-remote --tags https://github.com/wilbowes/EchoMuse` before
+choosing a number**; this repository's own tag list is as stale as the last
+sync. `version.parse` ignores the suffix, so `2.23.0-fx.1` compares equal to
+`2.23.0` and the dashboard's own comparisons are unaffected.
+
+**Tags cannot be pushed from a Claude Code session.** `git push` of any
+`refs/tags/*` — annotated or lightweight — is refused by GitHub with
+`error: RPC failed; HTTP 403` on `git-receive-pack`, while branch pushes from
+the same credential succeed. There is no tool that creates a tag ref either.
+So a release is cut by a human through **Releases → Draft a new release →
+Create new tag on publish**, which produces a **lightweight** tag.
+
+That breaks the rule above it — the annotation is the only copy of a controller
+release's notes, and a lightweight tag has none — so on this fork
+**`controller/CHANGELOG.md` is the copy that matters**, and it is where Home
+Assistant shows an add-on's release notes anyway. Write the notes there in the
+same change that bumps `config.yaml`'s `version:`, before the tag. The
+dashboard's controller-update notice will show the version with an empty
+changelog, and that is the accepted cost.
+
+For **firmware** the release object is created before `release.yml` runs, so
+the workflow updates it and overwrites the body with the tag's contents (for a
+lightweight tag: the commit message). Publish with an empty body, let the
+workflow attach the `server` asset, then edit the body. Leave **Set as a
+pre-release unchecked** — `em_api._fetch_latest_release` skips prereleases, so
+a ticked box is a release the OTA poller cannot see.
+
 `controller/docker-compose.yml` is the local dev/GPU build (`GPU=1` build arg swaps in onnxruntime-gpu); `controller/docker-compose.deploy.yml` is the user-facing compose that pulls the published image.
 
 `device/tools/` contains standalone diagnostics (`capture_mics`, `bf_capture` + analysis scripts) for mapping the 9-channel mic array; they build inside the same compiler image.

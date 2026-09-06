@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.23.0-fx.1
+
+**The LED ring is a Home Assistant light, mute can be closed from Home
+Assistant but never opened, and the controller stops shaping audio the device
+already shaped.** First release from the FelixTechgiti fork. Nothing to do
+before updating if you are already on this fork; if you are moving over from
+the upstream add-on, read `docs/fork-switchover.md` FIRST — a different add-on
+repository means a different `/data`, and a newly generated certificate
+authority that none of your devices will verify.
+
+The version carries `-fx.1` so it can never collide with an upstream
+`controller-v2.23.0`. It is ahead of upstream's 2.22.0 and contains everything
+upstream shipped up to and including 2.23.0-ea.1.
+
+### The ring is a light in Home Assistant
+
+Every Echo's LED ring turns up as an RGB light. Colour and brightness are
+yours, and three notification effects — Notify, Alert and Sweep — are
+selectable the way any light effect is, so blinking the ring at sunset is one
+line in an automation.
+
+The light owns the ring's RESTING colour only. Listening, thinking, speaking,
+mute and the little outcome flashes all still take priority, so a voice turn
+looks exactly as it did and the ring returns to your colour afterwards. **The
+LED under the microphone button is never handed over** — it means mute and
+nothing else.
+
+Switching the light off is a brightness of zero, not a colour, so the colour
+you picked is still there when you switch it back on.
+
+### Mute from Home Assistant, one way only
+
+A switch that mutes the microphone and cannot un-mute it. Turning it on shuts
+the microphone; turning it off snaps back and the microphone stays shut.
+
+That is the feature rather than a limitation. Un-muting is a physical act:
+somebody muted this Echo by pressing the button on it, and the red LED under
+that button is a promise. A mistaken automation, a shared Home Assistant login
+or a compromised controller should not be able to break that promise from
+another room while the LED still makes it.
+
+### One output chain instead of two
+
+Firmware from v2.13.0 onwards shapes its own audio — EQ, bass guard and
+limiter, applied after voice and music are mixed. The controller was still
+shaping it as well, which is two limiters in series and audibly wrong. It now
+stands down for firmware that says it can do the job, and shapes exactly as
+before for older devices.
+
+You should hear this: tighter bass on loud passages, and a tone change now
+takes effect in a twentieth of a second rather than four seconds, which is
+what makes tuning by ear possible at all.
+
+### The Echo can play music that never came through the controller
+
+A new **Streaming** section under Config. Three sources, all off by default:
+
+- **Sendspin** — the Echo joins a Music Assistant group directly.
+- **Spotify Connect** — the Echo appears in the Spotify app as a speaker.
+- **AirPlay** — classic AirPlay, not AirPlay 2. The dashboard says so.
+
+Home Assistant always wins the speaker. When it wants to play or speak, the
+local source is ended rather than left streaming into silence.
+
+**Spotify and AirPlay need a program that is not shipped yet.** The toggles are
+disabled with the reason rather than pretending to work, and Sendspin has not
+yet completed a handshake against a live Music Assistant. Treat all three as
+unfinished.
+
+### Updates come from this fork now
+
+The dashboard's firmware and controller update checks read this fork's
+releases. A database copied over from an upstream install is repointed once,
+on the first start, and says so in the log; if you would rather keep tracking
+upstream, set it back and it stays set.
+
 ## 2.23.0-ea.1 (Early Access)
 
 **The Bluetooth proxy stops crowding out the device it runs on, and the

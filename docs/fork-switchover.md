@@ -80,6 +80,16 @@ the switch having half-worked at random.
 
 ---
 
+## Version numbers
+
+Fork releases carry an `-fx.N` suffix — `controller-v2.23.0-fx.1`,
+`v2.15.0-fx.1`. Upstream's tags are fetched into this repository by the weekly
+sync, so a fork release using an upstream number would collide on the next
+fetch and would publish an image claiming to be a version it is not.
+
+It has no other meaning: the controller ignores the suffix when comparing
+versions, so `2.23.0-fx.1` is neither ahead of nor behind `2.23.0`.
+
 ## Update sources
 
 `github_repo` in the database decides where **both** update paths look: the
