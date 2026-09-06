@@ -53,6 +53,17 @@ jobs:
       contents: read
       packages: write
     steps:
+      # GHCR repository names must be lowercase, and `github.repository_owner`
+      # is the account's DISPLAY spelling — `FelixTechgiti`, not
+      # `felixtechgiti`. The workflow-level IMAGE above cannot fold it (no
+      # lower() in expressions, and workflow `env:` cannot read a step
+      # output), so each job rewrites IMAGE through $GITHUB_ENV, which beats
+      # the workflow-level value for every step after this one. Without it the
+      # build dies at the push with `invalid tag ...: repository name must be
+      # lowercase`, after every layer has been built.
+      - name: Registry owner, lowercased
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -132,6 +143,17 @@ jobs:
       contents: read
       packages: write
     steps:
+      # GHCR repository names must be lowercase, and `github.repository_owner`
+      # is the account's DISPLAY spelling — `FelixTechgiti`, not
+      # `felixtechgiti`. The workflow-level IMAGE above cannot fold it (no
+      # lower() in expressions, and workflow `env:` cannot read a step
+      # output), so each job rewrites IMAGE through $GITHUB_ENV, which beats
+      # the workflow-level value for every step after this one. Without it the
+      # build dies at the push with `invalid tag ...: repository name must be
+      # lowercase`, after every layer has been built.
+      - name: Registry owner, lowercased
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -205,6 +227,17 @@ jobs:
       contents: read
       packages: write
     steps:
+      # GHCR repository names must be lowercase, and `github.repository_owner`
+      # is the account's DISPLAY spelling — `FelixTechgiti`, not
+      # `felixtechgiti`. The workflow-level IMAGE above cannot fold it (no
+      # lower() in expressions, and workflow `env:` cannot read a step
+      # output), so each job rewrites IMAGE through $GITHUB_ENV, which beats
+      # the workflow-level value for every step after this one. Without it the
+      # build dies at the push with `invalid tag ...: repository name must be
+      # lowercase`, after every layer has been built.
+      - name: Registry owner, lowercased
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+
       - name: Download the digests
         uses: actions/download-artifact@v8
         with:

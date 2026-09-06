@@ -1,3 +1,13 @@
-name: "EchoMuse"
-url: "https://github.com/wilbowes/EchoMuse"
-maintainer: "wilbowes"
+# The Home Assistant add-on repository descriptor.
+#
+# The name is what Supervisor prints as the SECTION HEADING in the add-on
+# store, above the add-ons this repository contains. It says "fork" because
+# somebody who has upstream's repository added as well would otherwise see
+# two identical "EchoMuse" headings with an "EchoMuse" add-on under each,
+# with nothing to tell them apart — and installing the wrong one is not a
+# cosmetic mistake: add-ons from different repositories get different slugs
+# and therefore different /data, so it starts with an empty database and a
+# freshly generated CA that no fielded device will verify.
+name: "EchoMuse (FelixTechgiti fork)"
+url: "https://github.com/FelixTechgiti/EchoMuse"
+maintainer: "FelixTechgiti"

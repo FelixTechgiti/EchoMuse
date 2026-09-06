@@ -33,10 +33,10 @@ version: "2.23.0-ea.1"
 # add-on changes before they reach main (Supervisor clones the default
 # branch), and "it compiles onnxruntime" made that loop look far more
 # expensive than it is. tools/make_dev_addon.sh packages one.
-image: "ghcr.io/wilbowes/echomuse-controller"
+image: "ghcr.io/felixtechgiti/echomuse-controller"
 slug: "controller-ea"
 description: "Early Access build of the EchoMuse controller — the next release, before it is general. Install this INSTEAD of the stable add-on, not alongside it: both use host networking and the same ports. Add-ons do not share storage, so switching channels starts with an empty database and a new certificate authority, and existing devices will not connect until the stable add-on's /data is copied across."
-url: "https://github.com/wilbowes/EchoMuse"
+url: "https://github.com/FelixTechgiti/EchoMuse"
 init: false
 arch:
   - aarch64
