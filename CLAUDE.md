@@ -167,24 +167,37 @@ sync. `version.parse` ignores the suffix, so `2.23.0-fx.1` compares equal to
 **Tags cannot be pushed from a Claude Code session.** `git push` of any
 `refs/tags/*` — annotated or lightweight — is refused by GitHub with
 `error: RPC failed; HTTP 403` on `git-receive-pack`, while branch pushes from
-the same credential succeed. There is no tool that creates a tag ref either.
-So a release is cut by a human through **Releases → Draft a new release →
-Create new tag on publish**, which produces a **lightweight** tag.
+the same credential succeed, and the egress proxy records no denial. This
+repository has no tag ruleset and no tag protection rule (checked), and no
+tool here creates a tag ref, so it is a property of that credential.
 
-That breaks the rule above it — the annotation is the only copy of a controller
-release's notes, and a lightweight tag has none — so on this fork
-**`controller/CHANGELOG.md` is the copy that matters**, and it is where Home
-Assistant shows an add-on's release notes anyway. Write the notes there in the
-same change that bumps `config.yaml`'s `version:`, before the tag. The
-dashboard's controller-update notice will show the version with an empty
-changelog, and that is the accepted cost.
+**`.github/workflows/cut-release.yml` is the way round it**, and it creates
+only the TAG: `release.yml` and `controller-release.yml` still fire on the tag
+push exactly as they always have, so the path that publishes a release is the
+one that has been publishing them rather than a second copy that can drift.
+The tag it makes is **annotated**, built from the `## <version>` section of
+`controller/CHANGELOG.md` or `device/CHANGELOG.md` — so the notes exist before
+the release does, and a controller release keeps the annotation its update
+notice reads. Every check that can fail (version shape, tag already exists,
+add-on pin agrees, changelog section present) runs **before** anything is
+created, because a tag cannot be moved once a workflow has acted on it.
 
-For **firmware** the release object is created before `release.yml` runs, so
-the workflow updates it and overwrites the body with the tag's contents (for a
-lightweight tag: the commit message). Publish with an empty body, let the
-workflow attach the `server` asset, then edit the body. Leave **Set as a
-pre-release unchecked** — `em_api._fetch_latest_release` skips prereleases, so
-a ticked box is a release the OTA poller cannot see.
+**It needs `RELEASE_PAT`, and `GITHUB_TOKEN` cannot be substituted**: a ref
+created with `GITHUB_TOKEN` does not start another workflow run, so the tag
+would appear and the release workflow would never fire — a version tagged with
+nothing published for it. A fine-grained PAT scoped to this repository with
+Contents: read and write, and nothing else.
+
+**Without that secret, a release is cut by hand** through Releases → Draft a
+new release → Create new tag on publish, which produces a **lightweight** tag.
+That loses the annotation, so `controller/CHANGELOG.md` carries the notes and
+the dashboard's controller-update notice shows the version with an empty
+changelog. For **firmware** the release object then exists before `release.yml`
+runs, so the workflow overwrites the body with the tag's contents (for a
+lightweight tag: the commit message) — publish with an empty body, let the
+`server` asset attach, then edit. And leave **Set as a pre-release unchecked**:
+`em_api._fetch_latest_release` skips prereleases, so a ticked box is a release
+the OTA poller cannot see.
 
 `controller/docker-compose.yml` is the local dev/GPU build (`GPU=1` build arg swaps in onnxruntime-gpu); `controller/docker-compose.deploy.yml` is the user-facing compose that pulls the published image.
 
