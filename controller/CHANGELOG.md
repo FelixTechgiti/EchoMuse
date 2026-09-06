@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.23.0-ea.13 (Early Access)
+
+**The setup wizard now tells you when it has finished.** Setup flow only.
+
+A completed run left the last step waiting for ever, because it watched for the
+Echo to be *connected* — and a device waiting for your approval is deliberately
+disconnected until you approve it. So it waited for the very thing it was there
+to ask you to do.
+
+It now waits for the Echo to reach the controller, which happens whether or not
+it has been approved, and finishes with what to do next: nothing if the device
+was approved automatically, or a single instruction to approve it if not.
+
+The console transcript is also readable again — the Echo's own echo of each
+command was being written into the log alongside its answer — and while waiting
+it reports the Echo's network address rather than repeating that it is
+associated, which it had already said.
+
 ## 2.23.0-ea.12 (Early Access)
 
 **The end of the emOS setup flow, from the first run that got there.** Setup
