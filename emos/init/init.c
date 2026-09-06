@@ -981,11 +981,43 @@ static void usbwr(const char *leaf, const char *val)
     note("usb %s=%s rc=%d errno=%d\n", leaf, val, r, r ? errno : 0);
 }
 
-#define NETLOG "/data/local/tmp/net.log"
+/* The network log lives in RAM, not on the eMMC.
+ *
+ * It was on /data, appended with no bound — and it is not only netlog()'s own
+ * lines: spawn() points every child's stdout and stderr here, so wmt_loader,
+ * wpa_supplicant, dhcpcd, ntpd and the five-second wpa_cli nudge all write to
+ * it. A device that cannot join its network — wrong password, AP replaced,
+ * moved house — therefore wrote to flash every five seconds for ever, in
+ * exactly the failure state where nobody is watching. Measured 2026-09-06 on a
+ * device stuck at stage 11.
+ *
+ * /run is a 4MB tmpfs mounted for precisely this ("routine logging never
+ * touches the eMMC", below). The cost is that the log does not survive a
+ * reboot, which is the right trade: it answers "why is the network not up
+ * NOW", read over the console while the device is still running, and a crash
+ * that spans a reboot is what the last_kmsg copies are for.
+ *
+ * Capped and rotated, because filling a tmpfs is its own failure. */
+#define NETLOG     "/run/net.log"
+#define NETLOG_CAP (128 * 1024)
 
 /* The WiFi stage runs in a forked child, so it must NOT use note(): fork copies
  * the trail buffer, and both halves would then pwrite divergent contents to the
  * same offset on the cache partition. /data is mounted by the time this runs. */
+/* Open the network log for append, rotating first if it has outgrown the cap.
+ *
+ * One generation, so the worst case is two caps plus whatever a long-lived
+ * child keeps writing through an fd it opened before the rotation — ordinary
+ * log-rotation behaviour, and bounded in practice because the daemons here
+ * write on state changes rather than continuously. */
+static int netlog_open(void)
+{
+    struct stat st;
+    if (stat(NETLOG, &st) == 0 && st.st_size >= NETLOG_CAP)
+        rename(NETLOG, NETLOG ".1");
+    return open(NETLOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+}
+
 static void netlog(const char *fmt, ...)
 {
     char line[256];
@@ -999,7 +1031,7 @@ static void netlog(const char *fmt, ...)
     if (n <= 0)
         return;
     n += p;
-    int fd = open(NETLOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = netlog_open();
     if (fd < 0)
         return;
     write(fd, line, n > (int)sizeof line - 1 ? (int)sizeof line - 1 : n);
@@ -1013,7 +1045,7 @@ static pid_t spawn(char *const argv[])
     if (pid == 0) {
         char *envp[] = { "HOME=/", "ANDROID_ROOT=/system",
                          "PATH=/sbin:/system/bin:/system/xbin", NULL };
-        int n = open(NETLOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        int n = netlog_open();
         if (n < 0)
             n = open("/dev/null", O_RDWR);
         if (n >= 0) { dup2(n, 1); dup2(n, 2); if (n > 2) close(n); }
@@ -1362,6 +1394,24 @@ int main(void)
     int dtr = mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
     mount("proc", "/proc", "proc", 0, NULL);
     mount("sysfs", "/sys", "sysfs", 0, NULL);
+    /* debugfs, for the eMMC's own health.
+     *
+     * The flash reports wear through PRE_EOL_INFO and two life-time estimates
+     * in the Extended CSD, and on this kernel the only way to read them is
+     * /sys/kernel/debug/mmc0/mmc0:0001/ext_csd — the generic sysfs life_time
+     * and pre_eol_info attributes are a Linux 4.9 addition and 3.18 has
+     * neither. Samsung's vendor samsung_smart attribute exists here and
+     * answers "version 0, error mode: Invalid", so it is not a route either.
+     *
+     * Without this the directory is empty and the health of the part we are
+     * writing to is unreadable on the OS doing the writing. Confirmed on Test
+     * Echo 2, 2026-09-06: mounting it by hand returned rc=0 and the dump read
+     * straight out (PRE_EOL_INFO normal, 10-20% of rated life used).
+     *
+     * mkdir first: the kernel provides the mount point on a normal Android
+     * boot and our ramdisk does not. */
+    mkdir("/sys/kernel/debug", 0755);
+    mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
     mkdir("/dev/block", 0755);
 
     /* Every device node is created by hand.

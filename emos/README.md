@@ -258,6 +258,45 @@ writes a skeleton (`ctrl_interface` + `update_config=1`) while `/data` is
 writable and before the flash. Recovering by hand needs only those two lines
 and a reboot.
 
+**The eMMC reports its own wear, and debugfs is how you read it.** The flash
+carries `PRE_EOL_INFO` and two life-time estimates in its Extended CSD, and on
+this kernel the only route to them is
+`/sys/kernel/debug/mmc0/mmc0:0001/ext_csd` — the generic sysfs `life_time` and
+`pre_eol_info` attributes are a Linux 4.9 addition and 3.18 has neither, and
+Samsung's vendor `samsung_smart` answers `version 0, error mode: Invalid`. init
+mounts debugfs for this; without it the directory is empty and the health of
+the part we write to is unreadable on the OS doing the writing.
+
+Byte 192 is `EXT_CSD_REV` (7 or above means the health fields are defined at
+all), 267 is `PRE_EOL_INFO` (1 normal, 2 at 80% of reserved blocks consumed, 3
+urgent), 268 and 269 are the SLC and MLC life-time estimates in 10% steps from
+1 to 11. Both devices measured 2026-09-06 carry the same part — Samsung
+`FJ25AB`, 08/2017 — and read `PRE_EOL_INFO` normal with life-time 0x01 and
+0x02, so they differ by one bucket for reasons nobody recorded. That is the
+argument for reporting it: at 10% granularity a baseline taken before there is
+a problem is the only thing that makes a later difference answerable.
+
+**Nothing routine writes to the eMMC.** `/run/net.log` (128KB, one rotation)
+takes netlog's own lines AND every spawned child's stdout and stderr —
+wmt_loader, wpa_supplicant, dhcpcd, ntpd and the wpa_cli nudge — and syslogd
+writes `/run/messages` at 256KB x 2. Both are tmpfs.
+
+That log lived on `/data` and was appended with no bound until 2026-09-06, so a
+device that could not join its network wrote to flash every five seconds for
+ever, in exactly the failure state nobody is watching. The trade is that it
+does not survive a reboot, which is right: it answers "why is the network not
+up NOW", read over the console while the device is running, and a crash that
+spans a reboot is what the `last_kmsg` copies are for.
+
+The persistent writers are all bounded and all write on CHANGE rather than on a
+timer: `boot.state` once per boot, `last_kmsg.{prev,1,2}` rotated three deep,
+`console.pw` and `wpa_supplicant.conf` when they change, and `boot-good.img`
+only when the boot header's SHA1 image id differs from the stored one — a size
+check would never promote a new image, since every emOS build so far is the
+same length. The firmware's `supervisor.log` is trimmed to 32KB before each
+append; its `server.log` is on tmpfs and trimmed (it reached 45MB once, in
+2026-07).
+
 **`reboot` does nothing; use `busybox reboot`.** Plain `reboot` signals init,
 and emOS's init does not handle that signal, so it exits silently having done
 nothing. `busybox reboot` goes to the syscall. Worth knowing before concluding
