@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.25.0-fx.1
+
+**Spotify Connect and AirPlay can be switched on.** Both endpoints have been
+announced by the firmware and shown in the dashboard for a while, and neither
+could be enabled — the programs they run were built nowhere, and there was no
+way to put one on an Echo short of a USB cable. Both halves of that are fixed.
+
+### Install the two binaries from the dashboard
+
+A device's **Updates** tab has a new **Streaming endpoints** panel. Upload
+`librespot` or `shairport-sync` once, then install it on each Echo with a
+button. No cable, and the toggles on the Config tab go live immediately — the
+controller reads the file back off the device rather than assuming its own
+success, so nothing waits for a reconnect.
+
+The upload is checked before it is stored: an x86 or ARM64 build is refused
+with a message saying which it is, because the likeliest mistake here is a
+host build from a compile that succeeded. The transfer is md5-verified and
+lands as `.part` before it is renamed, so **a failed install leaves the binary
+that was already there** — which is what the endpoint keeps running.
+
+Build them with `device/librespot/build.sh` and `device/shairport/build.sh`.
+Neither program publishes Android builds, so this is the supported route.
+
+### Both build recipes had never been run, and now they have
+
+`librespot` built unmodified. `shairport-sync` needed seven corrections: two
+required libraries the recipe never built, two POSIX facilities Android does
+not have at all, a header that promises a function it will not link, and two
+mis-spelled configure flags — one of which had been silently doing nothing.
+
+The two platform gaps are worth knowing about if AirPlay ever misbehaves.
+bionic has **no pthread cancellation at any API level**, so stopping a thread
+is emulated with a signal; and `getifaddrs` is implemented over netlink,
+including the hardware-address entries the AirPlay device ID is derived from.
+If an endpoint ever refuses to stop, that emulation is the first suspect.
+
+### Known: neither has run on hardware yet
+
+Both binaries are the right architecture against the right libc, verified by
+reading the ELF, and nobody has yet had one playing on an Echo. Each device
+reports its own status, so the dashboard will tell you what actually happened
+rather than what was expected.
+
 ## 2.24.0-fx.1
 
 **The headphone jack works, your Echoes learn the time, and updates stop
