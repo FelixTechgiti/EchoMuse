@@ -1,17 +1,12 @@
 #!/bin/bash
 # Build shairport-sync (classic AirPlay) for the Echo Dot.
 #
-# ⛔ THIS DOES NOT CURRENTLY PRODUCE A BINARY, and the reason is in the
-# platform rather than in this script. configure completes — every library
-# below is found — and the compile then fails on pthread cancellation, which
-# bionic does not implement at any API level (pthread_cancel appears zero
-# times in its pthread.h). shairport-sync has 164 cancellation call sites in
-# 4.3.7 and 113 in 3.3.9, so no version pin escapes it; rewriting those
-# teardown paths is a port of the threading model. See README.md before
-# spending time here.
-#
-# The script is kept, and run, because it now reaches that obstacle instead
-# of stopping five corrections earlier at the first configure check.
+# Two things about this build are unusual, and both are bionic rather than us:
+# it cross-compiles popt, libconfig and mbedtls because a host library would
+# be a second opinion about what FireOS 5 provides, and it carries a compat
+# shim (compat/, see #20) because Android has no pthread cancellation at any
+# API level and no getifaddrs below API 24. The shim is injected with
+# -include, so no upstream source is patched and the 4.3.7 pin stays movable.
 #
 # Usage: ./build.sh [git-ref]
 set -euo pipefail
@@ -25,7 +20,7 @@ echo "Building shairport-sync $REF for armv7a/Android API 22..."
 docker build -t "$IMAGE" "$HERE"
 
 mkdir -p "$OUT"
-docker run --rm -v "$OUT:/out" "$IMAGE" bash -c '
+docker run --rm -v "$OUT:/out" -v "$HERE/compat:/compat:ro" "$IMAGE" bash -c '
     set -euo pipefail
     cd /build
 
@@ -140,6 +135,21 @@ docker run --rm -v "$OUT:/out" "$IMAGE" bash -c '
     # an ARM binary — a failure that arrives at the linker with no mention of
     # architecture. PKG_CONFIG_LIBDIR below confines it as well, so neither
     # alone is trusted.
+
+    # The Android compat shim, injected with -include so UPSTREAM SOURCES
+    # ARE NOT PATCHED. bionic has no pthread_cancel at any API level and no
+    # getifaddrs below API 24; compat/ supplies both, and the header renames
+    # the standard symbols onto its own so every call site compiles
+    # unchanged. See compat/android_compat.h and #20.
+    #
+    # Building it into libcompat.a rather than listing objects: configure
+    # decides the link line, and an archive named in LIBS is the one place
+    # we can add code to it without editing a Makefile it regenerates.
+    "$CC" -c -O2 -fPIC /compat/android_compat.c -o /build/android_compat.o
+    "$CC" -c -O2 -fPIC /compat/android_ifaddrs.c -o /build/android_ifaddrs.o
+    llvm-ar rcs /build/prefix/lib/libemcompat.a \
+        /build/android_compat.o /build/android_ifaddrs.o
+
     # The option names are read off the AC_ARG_WITH list in configure.ac,
     # not guessed, because autoconf ACCEPTS AN UNKNOWN --with SILENTLY. Two
     # were wrong here and only one of them announced itself:
@@ -148,28 +158,81 @@ docker run --rm -v "$OUT:/out" "$IMAGE" bash -c '
     #                         failed loudly — "specify one of --with-ssl=..."
     #                         — because nothing had selected a backend.
     #   --without-pipewire    the option is `pw`. This one did NOTHING, and
-    #                         would have gone on doing nothing forever: the
-    #                         backend is off by default, so the flag read as
-    #                         a deliberate exclusion while excluding nothing.
+    #                         would have gone on doing nothing: the backend
+    #                         is off by default, so the flag read as a
+    #                         deliberate exclusion while excluding nothing.
     #                         The day that default changes is the day it
     #                         matters, and by then nobody is looking here.
+    #
     # LIBS seeds the dependencies of a STATIC mbedtls, and without it the
     # mbedtls check fails on a library that is present and correct.
     # AC_CHECK_LIB([mbedtls],[mbedtls_ssl_init]) links `-lmbedtls $LIBS` and
-    # nothing else — which is enough for the shared library every distro
-    # ships, and not enough for an archive: libmbedtls.a calls into
-    # libmbedx509 and libmbedcrypto, so the probe ends in undefined symbols
-    # and configure reports the library as missing. Naming them in LIBS puts
-    # them AFTER -lmbedtls on every link line, which is the order a static
-    # link needs.
+    # nothing else — enough for the shared library every distro ships, not
+    # enough for an archive: libmbedtls.a calls into libmbedx509 and
+    # libmbedcrypto, so the probe ends in undefined symbols and configure
+    # reports the library as missing. Naming them in LIBS puts them AFTER
+    # -lmbedtls on every link line, which is the order a static link needs.
+    #
+    # -lemcompat goes LAST, for the same ordering reason: it resolves
+    # symbols the objects before it refer to, and nothing in it needs
+    # anything further along.
+    # THE SHIM IS ADDED AT MAKE TIME, NOT AT CONFIGURE TIME, and that is not
+    # tidiness — it is the difference between configuring and not.
+    #
+    # autoconf probes a libc function by declaring it itself, as
+    # `char clock_gettime();`, and linking. The shim includes <pthread.h> and
+    # <signal.h>, which pull in <time.h>, which declares the REAL prototype —
+    # so the probe stops compiling:
+    #
+    #   error: conflicting types for clock_gettime
+    #   error: too few arguments to function call, expected 2, have 0
+    #
+    # Every check then fails identically, and the first one to report it is
+    # `librt needed` — a message that points at the stub archive two steps
+    # above and has nothing to do with it. Cost an entire build to find,
+    # because the symptom names the wrong file.
+    #
+    # BASE_CFLAGS is one variable used twice so the two lines cannot drift:
+    # make has to be given the same flags configure got, plus the shim, and a
+    # hand-copied second spelling is how the optimisation level ends up
+    # silently different between what was probed and what was built.
+    BASE_CFLAGS="-I/build/prefix/include -O2"
+
     PKG_CONFIG_LIBDIR=/build/prefix/lib/pkgconfig \
     ./configure --host=armv7a-linux-androideabi \
         --with-stdout --with-tinysvcmdns --with-ssl=mbedtls --without-pkg-config \
         --without-alsa --without-pa --without-pw --without-soxr \
-        CFLAGS="-I/build/prefix/include -O2" \
+        CFLAGS="$BASE_CFLAGS" \
         LDFLAGS="-L/build/prefix/lib -static-libgcc" \
-        LIBS="-lmbedx509 -lmbedcrypto"
-    make -j"$(nproc)"
+        LIBS="-lmbedx509 -lmbedcrypto -lemcompat"
+
+    # automake compiles with $(AM_CFLAGS) $(CFLAGS), so overriding CFLAGS here
+    # ADDS the shim without discarding the flags shairport sets for itself.
+    #
+    # CXXLD is the other half, and without it this build produces a binary
+    # the Dot cannot exec. configure runs AC_PROG_CXX, so automake links with
+    # clang++ — as a driver only, since every object on that line comes from
+    # a .c file — and the NDK clang++ links libc++_shared.so by default. The
+    # result NEEDs a C++ runtime that is not on FireOS 5 and never will be:
+    #
+    #   NEEDED  libm.so  libc++_shared.so  libdl.so  libc.so
+    #
+    # It builds clean, it strips clean, and it dies at exec with a missing
+    # library — on the device, at the end of an install, which is the worst
+    # place to find out. Linking with the C compiler drops the dependency
+    # because there is genuinely no C++ here to support.
+    make -j"$(nproc)" \
+        CFLAGS="$BASE_CFLAGS -include /compat/android_compat.h" \
+        CXXLD="$CC"
+
+    # Proof rather than assumption, and it fails the build rather than
+    # warning: the whole hazard above is that everything looks fine until
+    # the device refuses the file.
+    if "$NDK/bin/llvm-readelf" -d shairport-sync | grep -q "libc++"; then
+        echo "ERROR: binary needs a C++ runtime the device does not have" >&2
+        "$NDK/bin/llvm-readelf" -d shairport-sync | grep NEEDED >&2
+        exit 1
+    fi
 
     "$NDK/bin/llvm-strip" shairport-sync
     cp shairport-sync /out/shairport-sync
