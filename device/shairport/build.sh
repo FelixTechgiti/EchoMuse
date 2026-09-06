@@ -20,7 +20,7 @@ echo "Building shairport-sync $REF for armv7a/Android API 22..."
 docker build -t "$IMAGE" "$HERE"
 
 mkdir -p "$OUT"
-docker run --rm -v "$OUT:/out" -v "$HERE/compat:/compat:ro" "$IMAGE" bash -c '
+docker run --rm -v "$OUT:/out" -v "$HERE/../compat:/compat:ro" "$IMAGE" bash -c '
     set -euo pipefail
     cd /build
 

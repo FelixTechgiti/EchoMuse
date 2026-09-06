@@ -344,6 +344,29 @@ fail:
   return -1;
 }
 
+/*
+ * The same two functions under their REAL names, for callers that cannot be
+ * macro-renamed.
+ *
+ * shairport-sync is C we compile, so android_compat.h maps its call sites
+ * onto the em_ names — necessary there, because bionic DECLARES getifaddrs
+ * with __INTRODUCED_IN(24) and clang refuses a call to it at API 22.
+ *
+ * librespot cannot be treated that way. Its Spotify Connect discovery pulls
+ * in the `if-addrs` crate, which emits a plain undefined reference and has no
+ * header of ours anywhere in its path:
+ *
+ *   libif_addrs...rlib: undefined reference to 'getifaddrs'
+ *
+ * So the archive exports both spellings and the Rust link resolves against
+ * these. Guarded on the API level: at 24 and above bionic supplies them and
+ * two definitions would collide.
+ */
+#if __ANDROID_API__ < 24
+int getifaddrs(struct ifaddrs **ifap) { return em_getifaddrs(ifap); }
+void freeifaddrs(struct ifaddrs *ifa) { em_freeifaddrs(ifa); }
+#endif
+
 void em_freeifaddrs(struct ifaddrs *ifa) {
   /*
    * NULL is an ordinary argument here, not a caller error.

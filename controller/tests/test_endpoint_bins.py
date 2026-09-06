@@ -277,6 +277,23 @@ def test_stat_command_names_the_destination():
     assert "stat " not in cmd
 
 
+def test_stat_command_asks_busybox_for_the_size_first():
+    # Measured on the fleet 2026-09-06: a bare `wc -c` produced nothing on a
+    # live device, so both installs reported ok with no size. busybox is what
+    # Magisk provides and what every other shell payload here reaches for
+    # first; the plain spelling stays as the fallback.
+    cmd = ebins.stat_command(ebins.KINDS["airplay"])
+    assert cmd.index("busybox wc -c") < cmd.index("|| wc -c")
+
+
+def test_stat_command_lets_the_size_fail_without_failing_the_stat():
+    # The executable bit is the gate and the size is presentation, so a
+    # device with no working `wc` must not read as a failed install.
+    cmd = ebins.stat_command(ebins.KINDS["airplay"])
+    assert "2>/dev/null" in cmd
+    assert ebins.parse_stat("EMBIN:ok:") == {"ok": True}
+
+
 @pytest.mark.parametrize("out,expect", [
     ("EMBIN:missing", {"ok": False, "reason": "not_installed"}),
     ("EMBIN:dir",     {"ok": False, "reason": "not_a_file"}),

@@ -23,6 +23,27 @@ every other system library. What survives is what this device needs:
 - **rustls**, not native-tls, so there is no OpenSSL to cross-compile and no
   system certificate store to find on a FireOS 5 image that does not have one
   where anything expects it.
+- **`with-libmdns`, named explicitly**, because `--no-default-features` takes
+  it away and it is what makes the Echo appear in the Spotify app at all.
+
+### The discovery backend has to be asked for, and this list is why it wasn't
+
+librespot 0.7.1 defaults to `["native-tls", "rodio-backend", "with-libmdns"]`.
+Turning defaults off is right for the first two and **silently wrong for the
+third**: `with-libmdns` is the mDNS responder a Spotify Connect device
+announces itself with. Without it librespot compiles, starts, logs nothing
+wrong, and is simply never listed.
+
+Measured on hardware 2026-09-06 — binary installed, `spotifyEnabled` true, no
+device in the app — and the list above is where it hid. It said "what survives
+is what this device needs" and did not mention discovery, so nothing prompted
+a check. **A list of what a flag keeps is only useful if it is also a list of
+what the flag removes**, which is the general lesson rather than a note about
+one feature.
+
+Pure Rust, so it adds no system dependency and nothing to cross-compile —
+which is also why it beats `with-avahi` (a D-Bus daemon Android does not have)
+and `with-dns-sd` (Bonjour, or Avahi compatibility: same problem).
 
 ## Why it builds on the firmware's own compiler image
 

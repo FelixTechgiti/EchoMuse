@@ -320,13 +320,29 @@ STAT_MARKER = "EMBIN:"
 
 
 def stat_command(k: Kind) -> str:
-    """The shell one-liner whose output `parse_stat` reads."""
+    """
+    The shell one-liner whose output `parse_stat` reads.
+
+    **busybox first, then plain `wc`**, the same order every other shell
+    payload in this controller uses — Magisk provides busybox, and the stock
+    toolbox is the thing that might not answer. Measured on the fleet
+    2026-09-06: a bare `wc -c` produced nothing on a live device, so both
+    installs reported `{"ok": true}` with no size. The fallback did the right
+    thing, since the executable bit is the gate and the size is presentation
+    — but the size is what tells an operator whether the file that landed is
+    the one they built.
+
+    The size is still allowed to fail: both spellings are tried, neither is
+    required, and `parse_stat` keeps `ok` when the field comes back empty. A
+    device with no working `wc` must not read as a failed install.
+    """
     p = k.dest
+    size = f'$(busybox wc -c < "{p}" 2>/dev/null || wc -c < "{p}" 2>/dev/null)'
     return (
         f'if [ ! -e "{p}" ]; then echo {STAT_MARKER}missing; '
         f'elif [ -d "{p}" ]; then echo {STAT_MARKER}dir; '
         f'elif [ ! -x "{p}" ]; then echo {STAT_MARKER}noexec; '
-        f'else echo {STAT_MARKER}ok:$(wc -c < "{p}"); fi'
+        f'else echo {STAT_MARKER}ok:{size}; fi'
     )
 
 
