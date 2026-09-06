@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.23.0-ea.7 (Early Access)
+
+**The emOS flash step could never succeed, and the fault was in the check
+rather than the write.** Setup flow only; nothing changes on running devices.
+
+### "Flash and Verify" failed on a write that was correct
+
+After writing the image, the wizard read the partition back and compared it
+against what it had sent. The read covered whole megabytes while the image is
+not a whole number of megabytes, so roughly 400KB of the *previous* boot image
+was being compared against empty space that had never been written. The write
+was complete every time; the comparison was not.
+
+It went unnoticed because the only version of this that had ever run on a real
+device was the restore, whose image is the entire boot partition and therefore
+an exact number of megabytes — so the mistake cancelled out and the check
+happened to be right.
+
+The wizard now reads back exactly as many bytes as it wrote.
+
+### Reconnecting when already in TWRP
+
+Starting the wizard with the device already in recovery kept the connection, as
+of ea.6 — but the next step then asked the browser for the same USB device a
+second time and failed until the third attempt. It now reuses the connection it
+already has.
+
 ## 2.23.0-ea.6 (Early Access)
 
 **Follow-up to ea.5, from the first emOS provisioning run that got past the
