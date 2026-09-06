@@ -1199,20 +1199,41 @@ The device side is version-agnostic: both put PCM on stdout, and the only
 difference that reaches the firmware is the sample rate. When an AirPlay 2
 build lands it is a config value and a binary, not a rewrite.
 
-**⛔ There is still no binary, and the blocker is not the one this section
-assumed.** `device/shairport/` was first executed on 2026-09-06. Five
-corrections got `configure` all the way through — two missing required
-libraries, bionic having neither librt nor libpthread, a popt header that
-lies about `glob()`, and two mis-spelled `--with` flags — and then the
-compile fails on **pthread cancellation, which bionic does not implement at
-any API level**. shairport-sync has 164 such call sites in 4.3.7 and 113 in
-3.3.9, so it is not a pin to move; it is a port of the threading model.
-Judged as one, it should be, before anyone starts.
+**The binary exists as of 2026-09-06, and getting there needed a compat
+shim.** `device/shairport/` had never been executed. Five corrections got
+`configure` through — two missing required libraries, bionic having neither
+librt nor libpthread, a popt header that lies about `glob()`, and two
+mis-spelled `--with` flags, one of which failed silently. Then two real
+platform gaps, both answered in `device/shairport/compat/`:
 
-Nothing downstream is degraded by that: `airplayStatus` reports
-`not_installed`, the toggle is disabled and says so, and the install path
-below handles AirPlay identically the day a binary exists. Spotify is
-unaffected — librespot built first time.
+- **bionic has no pthread cancellation at any API level.** It does have
+  `pthread_cleanup_push`/`pop`, which is what made this a shim rather than a
+  rewrite: `pthread_cancel` becomes a real-time signal whose handler calls
+  `pthread_exit`, unwinding the handler stack that already works. The signal
+  is also what returns a thread parked in `read()`/`poll()`, which is every
+  cancel target shairport has. **`pthread_setcancelstate` is implemented for
+  real** — a stub returning 0 would let the shim tear a thread down inside
+  the critical section the caller was protecting.
+- **`getifaddrs` is API 24 and we build at 22**, so it is implemented over
+  netlink. Not over `SIOCGIFCONF`, which is shorter and cannot report a MAC —
+  and `common.c` derives the **AirPlay device ID** from the MAC in the
+  `AF_PACKET` entries, so that version would have handed out an all-zero ID.
+
+The shim is injected with `-include` at MAKE time, never at configure time:
+it pulls in `<time.h>`, autoconf probes libc functions by declaring them
+itself as `char clock_gettime();`, and the conflict fails every check —
+reported as `librt needed`, which points at something entirely fine.
+
+**One fault would only have appeared on the device.** automake linked with
+`clang++` (configure runs `AC_PROG_CXX`) although every object comes from a
+`.c` file, and the NDK C++ driver pulls in `libc++_shared.so` — absent from
+FireOS 5. Builds clean, strips clean, dies at exec. `CXXLD` is overridden and
+the build now fails if that NEEDED entry returns.
+
+Result: 516KB, ELF32/ARM, needing only libm/libdl/libc. **Whether it RUNS is
+unproven** — that is the device's `airplayStatus` to answer, and the shim's
+signal-based cancellation is the first suspect if a thread ever dies holding
+a lock.
 
 Its own config section (`streaming`) rather than a line in `playback`:
 playback is about how audio sounds once it arrives and this is about where it
