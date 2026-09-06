@@ -1,0 +1,164 @@
+name: Cut a release
+
+# Creates the release TAG, and nothing else.
+#
+# It exists because a tag cannot be pushed from a Claude Code session at all:
+# `git push` of any refs/tags/* is refused by GitHub with `error: RPC failed;
+# HTTP 403` on git-receive-pack — annotated and lightweight alike — while
+# branch pushes from the same credential succeed, and no tool there creates a
+# tag ref. This repository has no tag ruleset and no tag protection rule; it
+# is a property of that credential.
+#
+# Everything downstream is UNTOUCHED. release.yml and controller-release.yml
+# still trigger on the tag push exactly as they always have, so the path that
+# actually publishes a release is the one that has been publishing them, not
+# a second copy of it that can drift.
+#
+# THE TAG IS ANNOTATED, and that is the point rather than a nicety. A
+# controller release creates no GitHub Release, so the annotation is the only
+# copy of its notes and is what the dashboard's update notice displays
+# (em_api._fetch_controller_release). A tag made by hand in the web UI is
+# LIGHTWEIGHT and carries none, which is the compromise this replaces.
+#
+# ⚠ IT NEEDS A PAT, and GITHUB_TOKEN cannot be substituted. A ref created with
+# GITHUB_TOKEN does not start another workflow run — GitHub says so plainly —
+# so the tag would appear and release.yml would never fire, leaving a version
+# tagged with nothing published for it. RELEASE_PAT should be a fine-grained
+# personal access token scoped to THIS repository with Contents: read and
+# write, and nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Which half to release
+        type: choice
+        options: [controller, firmware]
+        required: true
+      version:
+        description: 'Version with no prefix, e.g. 2.23.0-fx.1'
+        type: string
+        required: true
+      ref:
+        description: Commit or branch to tag
+        type: string
+        default: main
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Refuse without a token that can start a workflow
+        run: |
+          if [ -z "${{ secrets.RELEASE_PAT }}" ]; then
+            echo "::error::RELEASE_PAT is not set."
+            echo "A tag created with GITHUB_TOKEN does not start another workflow run, so"
+            echo "the release workflow would never fire and the version would be tagged"
+            echo "with nothing published for it. Add a fine-grained PAT scoped to this"
+            echo "repository with Contents: read and write, as the secret RELEASE_PAT."
+            exit 1
+          fi
+
+      # Fork releases carry -fx.N so a tag can never collide with an upstream
+      # one — see CLAUDE.md. The plain form is still accepted, because this
+      # workflow should not be the thing that decides the scheme.
+      - name: Work out the tag
+        id: tag
+        run: |
+          v='${{ inputs.version }}'
+          case "$v" in
+            v*|controller-v*)
+              echo "::error::give the version alone ('2.23.0-fx.1'), not the tag name"
+              exit 1 ;;
+          esac
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$v' is not a version"
+            exit 1
+          fi
+          case '${{ inputs.kind }}' in
+            controller) tag="controller-v$v"; notes_file="controller/CHANGELOG.md" ;;
+            firmware)   tag="v$v";            notes_file="device/CHANGELOG.md"     ;;
+          esac
+          echo "tag=$tag"               >> "$GITHUB_OUTPUT"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+          echo "tagging $tag from ${{ inputs.ref }}"
+
+      # Before anything is created, not after. A tag cannot be moved once
+      # workflows have acted on it, so every check that can fail belongs here.
+      - name: The tag must not exist yet
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.tag.outputs.tag }}" >/dev/null; then
+            echo "::error::${{ steps.tag.outputs.tag }} already exists."
+            echo "A published tag is never re-cut — pick the next version."
+            exit 1
+          fi
+
+      # The same guard controller-release.yml applies, moved EARLIER. There it
+      # fails after the tag exists, which needs a retag to recover; here it
+      # fails before anything has been created.
+      - name: The add-on pin matches the version
+        if: inputs.kind == 'controller'
+        run: |
+          want='${{ inputs.version }}'
+          got="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' controller/config.yaml)"
+          if [ "$want" != "$got" ]; then
+            echo "::error::controller/config.yaml pins '$got' but you asked for '$want'."
+            echo "Supervisor pulls image:version, so the add-on would install a tag that"
+            echo "does not exist. Bump the pin on ${{ inputs.ref }} first."
+            exit 1
+          fi
+          echo "config.yaml pins $got"
+
+      # The notes come from the CHANGELOG rather than from a dispatch input:
+      # a workflow_dispatch string is a single line, and release notes are the
+      # thing somebody reads before pushing firmware to a device they rely on.
+      # Requiring the entry to exist also means the changelog cannot silently
+      # fall behind the releases.
+      - name: Release notes from the changelog
+        id: notes
+        run: |
+          f='${{ steps.tag.outputs.notes_file }}'
+          v='${{ inputs.version }}'
+          if [ ! -f "$f" ]; then
+            echo "::error::$f does not exist on ${{ inputs.ref }}"
+            exit 1
+          fi
+          awk -v want="## $v" '
+            $0 == want            { in_section = 1; next }
+            in_section && /^## /  { exit }
+            in_section            { print }
+          ' "$f" > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::error::$f has no '## $v' section."
+            echo "Write the entry before cutting the release; it is the only copy of the"
+            echo "notes a controller release has."
+            exit 1
+          fi
+          echo "--- notes ---"; cat /tmp/notes.md
+
+      # An ANNOTATED tag: a tag OBJECT carrying the notes, then a ref pointing
+      # at it. Creating only the ref would produce a lightweight tag, which is
+      # the thing this workflow exists to stop.
+      - name: Create the annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          obj="$(gh api "repos/$GITHUB_REPOSITORY/git/tags" \
+                   -f tag="$TAG" -f object="$sha" -f type=commit \
+                   -F message=@/tmp/notes.md --jq .sha)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$obj" --jq .ref
+          echo "### Tagged \`$TAG\` at \`${sha:0:7}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The release workflow runs on the tag push; watch it in Actions." >> "$GITHUB_STEP_SUMMARY"
