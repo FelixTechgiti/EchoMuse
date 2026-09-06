@@ -19,8 +19,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/airplay"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
+	"github.com/wilbowes/EchoMuse/internal/clock"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/spotify"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
@@ -46,6 +48,13 @@ type controlMessage struct {
 	// never by version string. Absent on older controllers, which is
 	// exactly how absence should read — as "does not do this".
 	Features []string `json:"features,omitempty"`
+	// TimeMs is the controller's wall clock in unix milliseconds, sent on the
+	// ack. An Echo has no RTC that survives a power cut and boots reading
+	// 2010; under emOS nothing ever corrects that, because bionic resolves
+	// through Android's property service and so no bionic-linked binary there
+	// has DNS for an NTP pool. Absent from older controllers, which correctly
+	// reads as "no opinion" — see clock.ShouldStep.
+	TimeMs int64 `json:"time_ms,omitempty"`
 }
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
@@ -298,6 +307,21 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// without a shell session on the user's own hardware.
 		"spotify_status": spotify.Report(),
 		"airplay_status": airplay.Report(),
+		// Which userspace this firmware booted on — see internal/platform.
+		//
+		// On REGISTRATION and not the stats tick, which is where it was first
+		// put and where it was useless: its consumer is the payload reconcile,
+		// which runs the moment a device connects, ~30s before the first stats
+		// report. So the field resolved to "unknown" exactly when it was
+		// asked, the controller pushed Android payloads at an emOS device, and
+		// each one sat for the full 120s transfer timeout waiting for a
+		// TRANSFER_OK that a write into Magisk's absent overlay can never
+		// send. Measured on EFF, 2026-09-04: 240s across two attempts.
+		//
+		// It belongs here anyway. This is a static property of the boot, known
+		// before the network is up, exactly like ambient_light_status above —
+		// nothing about it needs re-reporting every 30 seconds.
+		"base_os": platform.Base(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -329,6 +353,24 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// is published, so a caller reading it can never see a stale set
 		// from the previous connection.
 		c.setFeatures(first.Features)
+		// ...and what time it is. Deliberately AFTER the connection exists,
+		// so nothing a connection depends on can depend on this: TLS keeps
+		// verifying against the build-time clamp, which is there precisely
+		// because the clock cannot be trusted at dial time.
+		//
+		// Every reconnect is the refresh. Once the clock is right the
+		// threshold makes this a no-op, so it costs a comparison.
+		if clock.ShouldStep(time.Now(), first.TimeMs) {
+			if err := clock.Step(first.TimeMs); err != nil {
+				// Not fatal, and not retried: a device that cannot set its
+				// own clock still does everything else, and the only cost is
+				// log lines that do not line up with the controller's.
+				log.Printf("[clock] could not set the clock from the controller: %v", err)
+			} else {
+				log.Printf("[clock] stepped to %s (from the controller)",
+					time.Now().Format(time.RFC3339))
+			}
+		}
 	default:
 		return fmt.Errorf("unexpected first message: %s", first.Type)
 	}
@@ -494,6 +536,22 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			if err := json.Unmarshal(raw, &msg); err == nil {
 				cfg := config.Get()
 				cfg.Apply(msg)
+				// Persisted here rather than through OnConfigApplied,
+				// because emOS's init reads the file and the firmware only
+				// ever writes it — there is no in-process consumer for a
+				// callback to serve, and a callback nobody registers is a
+				// feature that silently does nothing. Absent field means the
+				// controller said nothing about it, which must not be read as
+				// "remove"; hence the pointer.
+				if msg.ConsolePassword != nil {
+					changed, err := config.WriteConsolePassword(*msg.ConsolePassword)
+					if err != nil {
+						log.Printf("[control] Console password: %v", err)
+					} else if changed {
+						log.Printf("[control] Console password %s",
+							map[bool]string{true: "set", false: "cleared"}[*msg.ConsolePassword != ""])
+					}
+				}
 				snap := cfg.Snapshot() // read back under the config lock
 				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
 					snap.VadThreshold, snap.OwwThreshold)
@@ -1091,17 +1149,40 @@ func probeTCP(addr string, timeout time.Duration) bool {
 }
 
 // GetSerialNo reads ro.serialno — stable device identifier matching adb devices output.
+//
+// Falls back to androidboot.serialno on the kernel command line, which is where
+// the value comes from in the first place. The two sources are complementary
+// rather than redundant: Android's init consumes every androidboot.* argument
+// into a property and strips it from /proc/cmdline, so on stock FireOS only
+// getprop answers — while on a device booted without Android's userspace there
+// is no property service and only the cmdline answers. Both yield the identical
+// string, which matters because the whole fleet is keyed on the serial.
 func GetSerialNo() string {
 	out, err := exec.Command("getprop", "ro.serialno").Output()
+	if err == nil {
+		if serial := strings.TrimSpace(string(out)); serial != "" {
+			return serial
+		}
+	}
+	if serial := serialFromCmdline(); serial != "" {
+		return serial
+	}
+	log.Printf("[control] Warning: could not read ro.serialno: %v", err)
+	return "unknown-device"
+}
+
+func serialFromCmdline() string {
+	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
-		log.Printf("[control] Warning: could not read ro.serialno: %v", err)
-		return "unknown-device"
+		return ""
 	}
-	serial := strings.TrimSpace(string(out))
-	if serial == "" {
-		return "unknown-device"
+	const key = "androidboot.serialno="
+	for _, field := range strings.Fields(string(b)) {
+		if strings.HasPrefix(field, key) {
+			return strings.TrimPrefix(field, key)
+		}
 	}
-	return serial
+	return ""
 }
 
 func getLocalIP() string {
