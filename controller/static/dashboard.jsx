@@ -2778,12 +2778,26 @@ const _WIZARD_STEPS = [
 // The emOS flow. Nine steps against thirteen, and the four that go are the
 // four that only ever existed to obtain root inside Android:
 //
-//   Patch Boot Image   the permissive cmdline is inert (LK appends its own
-//                      duplicate androidboot.selinux=enforce after ours) and
-//                      emOS loads no policy; the init.rc entries are replaced
-//                      by emOS's own service table. THE MOST DANGEROUS STEP
-//                      IN THE WIZARD — in the wrong mode it writes over the
-//                      amonet unlock payload — and it is simply not needed.
+//   Patch Boot Image   emOS loads no SELinux policy at all, so the permissive
+//                      cmdline has nothing to act on, and the init.rc entries
+//                      are replaced by emOS's own service table. THE MOST
+//                      DANGEROUS STEP IN THE WIZARD — in the wrong mode it
+//                      writes over the amonet unlock payload — and it is
+//                      simply not needed.
+//
+//                      This used to say the cmdline was inert because LK
+//                      appends its own androidboot.selinux=enforce after ours.
+//                      That reason is WRONG and the measurement is the other
+//                      way round: on FireOS, ro.boot.selinux commits
+//                      `permissive` with both values on the cmdline, because
+//                      androidboot.* becomes a read-only property and those
+//                      are write-once — so the FIRST occurrence wins, and LK
+//                      splices the image cmdline in ahead of its own enforce.
+//                      Measured on 0C95 and 71VVV, 2026-09-06: getenforce
+//                      Permissive, ro.boot.selinux permissive. The patch works
+//                      and the FireOS flow depends on it; do not remove it on
+//                      the strength of the old sentence. It is dropped here
+//                      only because emOS has no policy to be permissive about.
 //   Install Magisk     we never boot Android; TWRP is already root.
 //   Pre-seed Root DB   only meaningful with Magisk.
 //   Verify Root        nothing downstream depends on Android root.
@@ -3283,19 +3297,103 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // ── Step runners ──
 
+  // The FireOS build, read off /system rather than from the running props.
+  //
+  // In recovery every getprop answers with the RECOVERY ramdisk's values, so
+  // the firmware identity the connect step prints is TWRP's own and the
+  // untested-build check compares against the wrong string entirely. The real
+  // answer is in /system/build.prop, which is where those properties come from
+  // on a normal boot — verified 2026-09-06 on 3611NF in TWRP, returning the
+  // same fingerprint 0C95 reports from a running Android.
+  //
+  // It matters most in the emOS flow, which is the one that runs entirely in
+  // recovery: emOS mounts this build's /system at runtime for bionic and
+  // tinyalsa, so the build that actually matters IS the one on that partition,
+  // and reading it there is more direct than inferring it from a boot we no
+  // longer perform.
+  //
+  // Resolved by NAME and by slot, never as p13 — the project rule, and the
+  // by-name glob matches TWO directories on this device, so it is iterated
+  // rather than passed to readlink, which takes a single argument and prints
+  // nothing when given two.
+  //
+  // Read-only, and it leaves the mount table as it found it. Nothing in either
+  // flow touches /system while provisioning, so this is safe — but a failure
+  // is a WARNING and never a refusal: a device whose /system will not mount is
+  // worth saying so about, not worth blocking a provision over.
+  async function readFireosBuild(c) {
+    const out = await c.shell(
+      'SLOT=$(getprop ro.boot.slot_suffix); S=""; '
+      + 'for d in /dev/block/platform/*/by-name; do '
+      + '  for n in "system$SLOT" system_a system; do '
+      + '    [ -z "$S" ] && [ -e "$d/$n" ] && S=$(readlink -f "$d/$n"); done; done; '
+      + 'echo "NODE=$S"; '
+      + '[ -z "$S" ] && exit 0; '
+      + 'WAS=$(mount | grep " /system " ); '
+      + '[ -z "$WAS" ] && mount -o ro "$S" /system 2>&1; '
+      + 'grep -E "^ro\\.(build\\.version\\.(name|incremental)|product\\.(model|name))=" '
+      + '  /system/build.prop 2>/dev/null; '
+      + '[ -z "$WAS" ] && umount /system 2>/dev/null; '
+      + 'echo _SYSREAD_OK');
+    if (!out.includes('_SYSREAD_OK')) return null;
+    const pick = k => ((out.match(new RegExp('^' + k + '=(.+)$', 'm')) || [])[1] || '').trim();
+    const build = pick('ro\\.build\\.version\\.incremental');
+    return build ? {
+      build,
+      name:  pick('ro\\.build\\.version\\.name'),
+      // The DEVICE's identity, not the recovery's. TWRP answers ro.product.*
+      // with its own strings ("Echo Dot 2nd Gen" / "omni_biscuit"), which pass
+      // the board check by containing "biscuit" — true, but it is TWRP being
+      // recognised rather than the board. /system carries the real pair
+      // (AEOBC / csm_biscuit), so in recovery the check tests the device.
+      model: pick('ro\\.product\\.model'),
+      pname: pick('ro\\.product\\.name'),
+    } : null;
+  }
+
   async function runConnectAndroid() {
     // requestDevice() handles USB open + ADB auth in one call.
     const c = await _ADB.Client.requestDevice(addLog);
     c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
-    const model   = await c.shell('getprop ro.product.model');
+    let model     = await c.shell('getprop ro.product.model');
     const release = await c.shell('getprop ro.build.version.release');
-    const name    = await c.shell('getprop ro.product.name');
+    let name      = await c.shell('getprop ro.product.name');
     const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
-    const fwBuild = await c.shell('getprop ro.build.version.incremental');
-    const fwName  = await c.shell('getprop ro.build.version.name');
+    let fwBuild = await c.shell('getprop ro.build.version.incremental');
+    let fwName  = await c.shell('getprop ro.build.version.name');
+    // TWRP answers every getprop above and reports Android 5.1.1 itself, so
+    // none of them can tell recovery from FireOS — this step ran to completion
+    // against a device sitting in TWRP, printed "FireOS 5 confirmed", warned
+    // about an untested firmware it had read off the RECOVERY ramdisk, and
+    // rebooted to recovery from recovery (Wil, 2026-09-06). Harmless, and a
+    // step that verified nothing while claiming otherwise. The banner is the
+    // only thing here that distinguishes the two.
+    //
+    // Tolerated rather than refused: arriving already in TWRP is the normal
+    // state on a retry, the device identification below works identically
+    // there, and the only thing this step does afterwards is a reboot that is
+    // already unnecessary.
+    const inRecovery = _bannerMode(c.banner) === 'twrp';
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
-    addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
+    if (inRecovery) {
+      addLog('Device is already in TWRP recovery — reading the FireOS build off '
+           + '/system, since every property above is the recovery ramdisk\'s.');
+      const sys = await readFireosBuild(c);
+      if (sys) {
+        fwBuild = sys.build; fwName = sys.name;
+        if (sys.model) model = sys.model;
+        if (sys.pname) name  = sys.pname;
+        addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild}  (from /system)`);
+        addLog(`Device identity from /system: ${model || '?'} / ${name || '?'}`);
+      } else {
+        fwBuild = ''; fwName = '';
+        addLog('Could not read /system/build.prop, so the FireOS build is '
+             + 'unknown — continuing.', 'warn');
+      }
+    } else {
+      addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
+    }
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
     }
@@ -3364,6 +3462,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
     }
 
+    // Already where the next step needs the device: say so and keep the
+    // connection, rather than rebooting recovery into recovery and making the
+    // operator re-pick the same device from the USB picker.
+    if (inRecovery) {
+      addLog('Already in TWRP — no reboot needed. Continue with "Connect to TWRP" '
+           + '(the device is still connected).', 'ok');
+      return c;
+    }
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
     expectDisconnect.current = true;
     try { await c.shell('reboot recovery'); } catch {}
@@ -4857,6 +4963,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
          + 'ten seconds and leaves /data untouched.', 'warn');
   }
 
+  // How much of a whole-partition read is actually the boot image. The rest is
+  // padding the builder never looks at, and sending it is what put the wizard's
+  // build POST over Home Assistant's ingress body limit — a 413 that never
+  // reached the add-on at all (measured 2026-09-06).
+  //
+  // Four little-endian u32s at fixed offsets, verified against real headers off
+  // G090LF1180440C95 and G090LF11803611NF. This is NOT a second copy of
+  // split_reference(): that goes on to parse the MTK wrapper and split the DTBs,
+  // and everything it reads lives inside the region computed here. It also
+  // validates what it is given, so a wrong answer here fails loudly on the next
+  // call rather than producing a bad image.
+  //
+  // Returns 0 when the header does not parse or the arithmetic lands outside the
+  // buffer, meaning "send the whole thing" — a size optimisation must never be
+  // the reason a build cannot happen.
+  function _bootImageLength(bytes) {
+    if (!bytes || bytes.length < 2048) return 0;
+    if (new TextDecoder().decode(bytes.slice(0, 8)) !== 'ANDROID!') return 0;
+    const hdr  = new DataView(bytes.buffer, bytes.byteOffset);
+    const page = hdr.getUint32(36, true);
+    if (!page || page > bytes.length) return 0;
+    const upTo = n => Math.ceil(n / page) * page;
+    const end = page + upTo(hdr.getUint32(8, true))
+                     + upTo(hdr.getUint32(16, true))
+                     + upTo(hdr.getUint32(24, true));
+    return (end > page && end <= bytes.length) ? end : 0;
+  }
+
   // Step 5 — build. The controller does the packing; see em_emos_build.py for
   // why it is there and not here.
   async function runBuildEmos(useLatest) {
@@ -4889,11 +5023,31 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'latest release. Build one from emos/ with build.sh if you need a '
         + 'specific version.');
     }
-    addLog(`Sending the escrowed image (${(emosRef.bytes.length/1024/1024).toFixed(1)} MB) `
+    // Send the BOOT IMAGE, not the whole partition. The escrow is a
+    // whole-partition read, so most of its 16MB is padding past the last
+    // region — and Home Assistant's ingress proxy caps a request body well
+    // below what the controller itself accepts (58MB), so the full reference
+    // plus the init was refused with a 413 that never reached the add-on at
+    // all: measured 2026-09-06, the emos_init GETs are in the controller log
+    // and the emos_image POST simply is not.
+    //
+    // The end of the image is four header fields, all little-endian u32 at
+    // fixed offsets — this is not a second copy of split_reference(), which
+    // goes on to parse the MTK wrapper and split the DTBs. Everything that
+    // function reads lives inside the region computed here, and it validates
+    // what it gets, so a wrong answer fails loudly on the next line rather
+    // than producing a bad image.
+    const imageEnd = _bootImageLength(emosRef.bytes);
+    const reference = imageEnd ? emosRef.bytes.subarray(0, imageEnd) : emosRef.bytes;
+    if (reference.length < emosRef.bytes.length) {
+      addLog(`  boot image is ${(reference.length/1024/1024).toFixed(1)} MB of the `
+           + `${(emosRef.bytes.length/1024/1024).toFixed(1)} MB partition — sending that`);
+    }
+    addLog(`Sending the escrowed image (${(reference.length/1024/1024).toFixed(1)} MB) `
          + `and the init to the controller…`);
 
     const fd = new FormData();
-    fd.append('reference', new Blob([emosRef.bytes]), 'reference.img');
+    fd.append('reference', new Blob([reference]), 'reference.img');
     fd.append('init', initBlob, 'init');
     fd.append('version', version);
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {
