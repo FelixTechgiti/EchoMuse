@@ -1,6 +1,8 @@
 package server
 
-import "testing"
+import (
+	"testing"
+)
 
 // The ring is no longer a mute indicator (2026-09-03). Mute lives on the
 // button's own GPIO LED, which was always in parallel and cannot be

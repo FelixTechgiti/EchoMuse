@@ -490,17 +490,29 @@ def test_the_wake_word_asset_wizard_step_is_mandatory():
     from pathlib import Path
     jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
 
-    steps = jsx[jsx.index("const _WIZARD_STEPS = ["):]
-    steps = steps[:steps.index("\n];")]
-    assert "'install_oww'" in steps, "the wake word asset step is missing from the wizard"
+    # Checked for BOTH flows. The wizard gained an emOS path whose steps are
+    # numbered differently, and an invariant that only held for the flow that
+    # happens to be second in the file is not an invariant.
+    auto_line = jsx[jsx.index("const autoSteps ="):]
+    auto_line = auto_line[:auto_line.index("\n")]
+    sets = re.findall(r"new Set\(\[([^\]]*)\]\)", auto_line)
+    assert len(sets) == 2, (
+        f"expected an autoSteps set per flow, found {len(sets)} in {auto_line!r}")
+    emos_auto, fireos_auto = [
+        {int(n) for n in re.findall(r"\d+", s)} for s in sets
+    ]
 
-    idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
-    auto = jsx[jsx.index("const autoSteps = new Set(["):]
-    auto = auto[:auto.index(")")]
-    assert str(idx) in auto, (
-        f"step {idx} (install_oww) must auto-run — a step that needs a click "
-        f"is one a user can skip"
-    )
+    for table, auto, flow in (("_WIZARD_STEPS", fireos_auto, "FireOS"),
+                              ("_EMOS_STEPS", emos_auto, "emOS")):
+        steps = jsx[jsx.index(f"const {table} = ["):]
+        steps = steps[:steps.index("\n];")]
+        assert "'install_oww'" in steps, \
+            f"the wake word asset step is missing from the {flow} wizard"
+        idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
+        assert idx in auto, (
+            f"{flow} step {idx} (install_oww) must auto-run — a step that "
+            f"needs a click is one a user can skip"
+        )
 
     runner = jsx[jsx.index("async function runInstallOwwAssets"):]
     runner = runner[:runner.index("\n  async function ", 1)]
@@ -2264,3 +2276,256 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
         (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
     assert "_extract_binary_version(binary)" in fn
     assert '"version": version' in fn
+
+
+# ─── The emOS provisioning flow ───────────────────────────────────────────────
+#
+# This flow writes a boot partition, so its guards are the kind that must not
+# quietly disappear in a refactor. Source-shape tests, like the rest of this
+# file: the dashboard compiles to one classic script with no module boundary,
+# so there is nothing to import.
+
+def _jsx():
+    return (CONTROLLER / "static" / "dashboard.jsx").read_text()
+
+
+def _step_ids(table):
+    steps = _jsx()
+    steps = steps[steps.index(f"const {table} = ["):]
+    steps = steps[:steps.index("\n];")]
+    return re.findall(r"\{ id: '([a-z_]+)'", steps)
+
+
+def test_the_emos_flow_drops_every_android_only_step():
+    """
+    The whole point of the emOS flow. Magisk, the boot-image patch, the root
+    pre-seed and the root check all exist to obtain root INSIDE Android, which
+    this flow never boots; Disable Alexa never worked and silences a userspace
+    about to be replaced; Debloat's package list targets that same userspace
+    and its service.d script lives in the image being overwritten.
+
+    Patch Boot Image is the one that matters most: it is the most dangerous
+    step in the wizard, because in the wrong mode it writes over the amonet
+    unlock payload.
+    """
+    ids = set(_step_ids("_EMOS_STEPS"))
+    for gone in ("patch_boot", "install_magisk", "preseed_db", "verify_root",
+                 "disable_alexa", "debloat"):
+        assert gone not in ids, (
+            f"'{gone}' is an Android-only step and must not be in the emOS flow")
+    assert len(ids) == 9, f"the emOS flow is nine steps, found {len(ids)}: {ids}"
+
+
+def test_the_emos_flow_escrows_before_it_flashes():
+    """
+    The escrowed image is both the build input and the ten-second undo, so
+    every destructive step has to come after it. Ordering is the guard here —
+    a flash before an escrow is a device with no way back.
+    """
+    ids = _step_ids("_EMOS_STEPS")
+    assert ids.index("escrow_boot") < ids.index("build_emos") < ids.index("flash_emos"), \
+        f"escrow must precede build must precede flash, got {ids}"
+    # And the install lands on /data before the partition write, which is what
+    # lets it survive the flash.
+    assert ids.index("install_em") < ids.index("flash_emos")
+    assert ids.index("install_oww") < ids.index("flash_emos")
+
+
+def test_the_flash_step_verifies_against_the_partition():
+    """
+    A write that reports implausible throughput went to cache, and a read-back
+    from that same cache passes. So the caches are dropped before reading, and
+    a mismatch refuses rather than warns — and says not to reboot, because a
+    device that has not rebooted is still recoverable from where it stands.
+    """
+    src = _jsx()
+    # The write itself lives in _writeBootPartition, shared by the flash and the
+    # restore. Shared rather than copied on purpose: this is the only code in
+    # the wizard that can leave a device unbootable, and a second copy is one
+    # that drifts from the checks this one carries — so pin that both callers
+    # go through it and that neither grew a dd of its own.
+    write = src[src.index("async function _writeBootPartition"):]
+    write = write[:write.index("\n  async function runFlashEmos")]
+    assert "conv=fsync" in write, "the write must be fsync'd"
+
+    # The read-back must cover exactly what was written. It used to read whole
+    # megabytes and compare against the image zero-padded to match, so 425,984
+    # bytes of the PREVIOUS boot image were checked against zeros nobody wrote
+    # — every emOS flash failed on a write that was provably complete. It hid
+    # because the only path that had ever run was the restore, whose image is
+    # the whole 16MB partition and therefore an exact number of blocks.
+    assert "bs=2048" in write, (
+        "the read-back must use page-sized blocks so it can cover exactly the "
+        "bytes written, not round up to the next megabyte")
+    assert "bytes.length / 2048" in write, (
+        "the read-back block count must come from the image length")
+    assert "% 2048 === 0" in write, (
+        "an image that is not page-aligned must be detected rather than "
+        "silently read short")
+    assert "drop_caches" in write, (
+        "the page cache must be dropped before the read-back, or the read-back "
+        "confirms the cache rather than the partition")
+    assert write.index("drop_caches") < write.index("Reading it back"), \
+        "the caches must be dropped BEFORE the read-back, not after"
+
+    fn = src[src.index("async function runFlashEmos"):]
+    fn = fn[:fn.index("\n  // ── Steps 7 and 8")]
+    assert "DO NOT REBOOT" in fn, (
+        "a verification failure must tell the operator not to reboot")
+    # Both callers write through the shared path, and neither writes a
+    # partition any other way.
+    for caller in ("runFlashEmos", "restoreEscrowedBoot"):
+        body = fn[fn.index(f"async function {caller}"):]
+        body = body[:body.index("\n  async function ", 1)] if "\n  async function " in body[1:] else body
+        assert "_writeBootPartition" in body, (
+            f"{caller} must write through _writeBootPartition, not its own dd")
+    # Matched against shell CALLS, not against the text "of=" — the restore's
+    # failure message quotes a dd command for the operator to run by hand, and
+    # a guard that greps for the thing it forbids finds the prose explaining it
+    # and fails on a file that is correct. Three times now.
+    for line in fn.splitlines():
+        assert not ("c.shell(" in line and "of=" in line), (
+            "no caller may issue its own partition write — the one dd that "
+            f"does lives in _writeBootPartition: {line.strip()}")
+
+
+def test_the_serial_console_disables_echo_before_anything_else():
+    """
+    A port opened with default termios echoes everything the device sends back
+    into its own input; the shell then executes its own prompt and every
+    command returns 127. It looks alive, echoes what you type, and runs
+    nothing. Web Serial has no stty to remind anyone, which is why this belongs
+    in the client and why it is pinned.
+
+    It cost an evening on 2026-09-04, a confident wrong diagnosis and a
+    reverted commit.
+    """
+    src = _jsx()
+    cls = src[src.index("class _EmosConsole"):]
+    cls = cls[:cls.index("\n}")]
+    assert "stty -echo" in cls, "the console client must disable echo"
+
+    watch = src[src.index("async function _watchFirstBoot"):]
+    watch = watch[:watch.index("\n  async function ", 1)]
+    assert "disableEcho" in watch, "the reboot step must disable echo"
+    assert watch.index("disableEcho") < watch.index("con.run("), \
+        "echo must be disabled BEFORE the first command, or its reply is garbled"
+
+    # Disabling echo is not enough on its own, and 2026-09-06 is how we know:
+    # stty is not guaranteed present and the shell is not guaranteed up, so
+    # echo survived and every run() returned the text of its OWN request. The
+    # marker must therefore be assembled ON THE DEVICE, so it cannot appear in
+    # the shell's echo of the command that asks for it.
+    assert "; echo ${mark}" not in cls and "; echo ${mark}`" not in cls, (
+        "the completion marker must not be sent whole — with echo on it "
+        "arrives before the command runs and run() answers with its own request")
+    assert "__a=__EM" in cls, (
+        "the marker must be assembled on the device from parts that do not "
+        "spell it in the echoed command")
+
+    # Two markers, so the echo is discarded by POSITION. Recognising it
+    # textually does not work — the terminal wraps at 80 columns, so the
+    # request arrives split across lines and no line holds the whole command.
+    assert "S__" in cls and "lastIndexOf(start)" in cls, (
+        "run() must bracket the answer between a start and an end marker, or "
+        "the console's echo of the request is returned as part of the answer")
+
+    # A failed attempt must release the serial port. The browser refuses to
+    # reopen one that is already open, and no amount of retrying clears it.
+    step = src[src.index("async function runRebootAndWatch"):]
+    step = step[:step.index("\n  async function ", 1)]
+    assert "con.close()" in step, (
+        "a failed first-boot watch must close the port, or every retry fails "
+        "with 'The port is already open'")
+
+
+def test_emos_wpa_cli_calls_carry_the_control_socket_path():
+    """
+    wpa_cli defaults to /var/run/wpa_supplicant. emOS starts its supplicant
+    with -p/data/misc/wifi/sockets (init.c), so a bare `wpa_cli -i wlan0`
+    fails every time with "Failed to connect to non-global ctrl_ifname".
+
+    Found by hand on the console on 2026-09-06, before the WiFi step had ever
+    run on hardware — it would have failed on its first call. The FireOS flow
+    has always passed -p; the emOS step was written without it.
+
+    Comments are stripped first: the explanation of this rule necessarily
+    quotes the broken form, and a guard that greps for the thing it forbids
+    otherwise fails a file that is correct.
+    """
+    src = _jsx()
+    body = re.sub(r"^\s*//.*$", "", src, flags=re.M)
+    bare = [ln.strip() for ln in body.splitlines()
+            if "wpa_cli -i " in ln]
+    assert not bare, (
+        "every wpa_cli invocation must pass -p /data/misc/wifi/sockets: "
+        + "; ".join(bare))
+
+
+def test_the_emos_build_endpoint_stores_nothing():
+    """
+    The reference is the user's own boot partition and the one file we take
+    care never to redistribute. Keeping a copy would mean holding a device
+    image for no reason.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_provision_emos_image"))
+    for writer in ("open(", "write_bytes", "Path(", "tempfile"):
+        assert writer not in fn, (
+            f"the emOS build endpoint must not persist anything (found {writer!r})")
+
+
+def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
+    """
+    Two release kinds live in one repo's release list, and each selector has
+    to be blind to the other's releases. `emos-v0.1` does not start with "v",
+    and a firmware release carries `server` rather than `init` — either
+    property alone is enough, and both are present, which is what makes this
+    safe rather than lucky.
+
+    Same mechanism that keeps controller-v* out of the firmware poll. The
+    failure if it broke would be the OTA offering an aarch64 init to a fleet
+    of armv7a devices as a firmware update.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+
+    fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
+    assert 'startswith("v")' in fw and '"server"' in fw, \
+        "the firmware poll must select on a v* tag AND a server asset"
+
+    emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
+    assert 'startswith("emos-v")' in emos and '"init"' in emos, \
+        "the emOS poll must select on an emos-v* tag AND an init asset"
+
+    workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
+    assert "'emos-v*'" in workflow, "the emOS release workflow must fire on emos-v* tags"
+    fw_workflow = (CONTROLLER.parent / ".github" / "workflows" / "release.yml").read_text()
+    assert "'v*'" in fw_workflow
+
+
+def test_the_emos_init_is_verified_before_it_is_served():
+    """
+    A release built wrong is wrong for everyone, so it is refused at the point
+    of download rather than at the point of boot. Both properties it checks
+    are silent when wrong and fatal on the device.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_get_provision_emos_init"))
+    assert "init_binary_problems" in fn, (
+        "the init must be checked for aarch64/static before it is served")
+    assert "bad_release_asset" in fn
+
+
+def test_the_emos_release_workflow_asserts_what_it_publishes():
+    """
+    The last point before the artifact is something people flash. CI checks
+    the tip of a branch; this checks the thing being published.
+    """
+    wf = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
+    assert "ARM aarch64" in wf, "the release must assert the init is aarch64"
+    assert "statically linked" in wf, "the release must assert the init is static"
+    assert "ringsim --check" in wf, "the release must run the ring invariants"
+    # The image is assembled on the user's side from their own boot partition,
+    # so the only thing published is the init.
+    assert "files: emos/build/init" in wf, \
+        "only the init is published — an image would carry Amazon's kernel"

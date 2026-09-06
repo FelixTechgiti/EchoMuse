@@ -171,8 +171,8 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
 | `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
 | `internal/wakeword/fixture/` | Shared golden-fixture parser, tolerance policy and `Verify`. Used by both the host test and `tools/oww_probe`, deliberately — the probe's answer is the trusted one because it runs on hardware, so it must be exactly as strict as the test by construction. Tolerances are relative to the **tensor's** scale, not per element: per-element relative error is meaningless for tensors straddling zero |
-| `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
-| `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. Exists for ONE job: accdet mutes `Ext_Speaker_Amp_Switch` on insert (correctly) and **nothing turns it back on**, so the speaker stayed dead until the next boot (#80). Output routing itself is done by the jack's own switch contacts — a response was heard in headphones while the mixer still read `Headphone_Speaker_Mux=Speaker`, so those controls do NOT describe where audio goes and nothing should drive them |
+| `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. **Polled every 5s, not every 1s, and the reason is the kernel log rather than the syscalls.** The driver prints a line on every read under its darkness threshold (`tsl2540_get_lux: darkness (0 <= 10)`), so a 1Hz poll is ~86,000 kernel lines a day — and it only fires in the dark, so it runs all night, which is exactly when a device sits idle and a crash most needs explaining. Measured on EFF 2026-09-04: the whole log ring was that one line and `messages.last` had reached 609KB. The cost is not disk — MediaTek's ram_console is the ONLY crash channel this kernel has and it is a fixed-size ring we do not control, so anything filling it evicts the evidence. `MinInterval` already refuses to report more often than every 2s, so 1Hz was finer than the reporting floor it feeds; if #296 ever wants faster, make the poll adaptive rather than paying a permanent flood. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
+| `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. `Watch` dispatches the state it STARTS in as well as every change: accdet is edge-triggered and a boot has no edge, so a device booted with a cable in got no correction at all. The callback (`PcmSpeaker.SetJackRouting`) owns both positions — the amp switch, and the `HP Driver Gain Volume` that accdet drops to the floor of its range on insert and nothing used to raise. Output *destination* is still physical, done by the jack's own switch contacts, so no mux layer should be driven — but level is ours |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
 | `internal/bluetooth/` | BLE proxy — raw HCI passive scan over `/dev/stpbt` (single-owner, so Android's Bluedroid is durably `pm disable`d first), parsed into adverts and forwarded to the controller. `emit.go` decides which of them are worth sending; see "The BLE proxy" below, and read it before changing the scan cadence or the filtering |
 | `internal/outchain/` | The output chain — EQ, bass guard, limiter — applied POST-MIX at the ALSA write (#243). A port of the controller's `em_eq`/`em_mbc`/`em_limiter`, and correctness means **agreement with them**: `internal/outchain/fixture` replays golden captures and all fifteen cases match bit for bit. No build tag, deliberately — it is arithmetic and belongs in the host suite. `Chain` adds the one thing the reference does not have: parameter changes that do not click, by crossfading between two complete chains rather than interpolating coefficients (which can pass through unstable states). Keep the STAGES faithful and put every divergence in `Chain`, or the fixture stops being evidence. The controller stands down for a device announcing `output_chain` (`controller/em_outchain.py`) — shaping at both ends is two limiters in series |
@@ -559,14 +559,45 @@ initialised` never appears.
 `Ext_Speaker_Amp_Switch` on insert, which is correct — the Dot should not also
 play to the room — and nothing ever turned it back on. `Init()` was the only
 thing that set it, which is exactly why a reboot appeared to fix it.
-`internal/bindings/jack` watches `h2w` and re-enables the amp on removal.
-Insert needs nothing from us.
+`internal/bindings/jack` watches `h2w`, and `PcmSpeaker.SetJackRouting` now
+applies BOTH positions rather than only re-enabling the amp on removal.
 
-**Routing is PHYSICAL and needs no code.** The jack's own switch contacts
-divert the signal. A voice response was heard in headphones while the mixer
-still read `Ext_Speaker_Amp_Switch=On`, `Ext_Headphone_Amp_Switch=Off` and
-`Headphone_Speaker_Mux=Speaker` — so those controls do **not** describe where
-audio goes, and driving them would be wrong. Do not build a routing layer.
+**Booting with a plug in was a third instance of the same gap, and it is
+edge-triggering all the way down.** accdet acts on the insert *transition*;
+`jack.Watch` used to seed its baseline from the first reading and dispatch
+nothing; and `Init()` sets the speaker amp **On unconditionally**, because its
+click-free startup order needs the amp brought up onto a DAC already clocking
+silence and it has no idea whether a plug is present. A boot has no transition,
+so nothing corrected it: measured 2026-09-03 with `h2w=1` and
+`Ext_Speaker_Amp_Switch=On`, i.e. the Dot playing to the room with a cable
+connected, and the jack simultaneously at minimum gain. That is why unplugging
+and replugging was the folk remedy — it manufactures the edge the boot never
+had. `Watch` now dispatches the state it starts in, which is why
+`SetJackRouting` must stay idempotent.
+
+**Routing is PHYSICAL and needs no code — but LEVEL is not, and that
+distinction cost three weeks.** The jack's own switch contacts divert the
+signal: a voice response was heard in headphones while the mixer still read
+`Ext_Speaker_Amp_Switch=On`, `Ext_Headphone_Amp_Switch=Off` and
+`Headphone_Speaker_Mux=Speaker`, so those controls do **not** describe where
+audio goes and no mux/destination layer should be built.
+
+That is still true. What it was read as — "the mixer has nothing to do with the
+jack" — is not, and it is why nobody looked at the gain. **`HP Driver Gain
+Volume` (ctl 62) is the jack's output stage**, and accdet drops it to **0, the
+FLOOR of a 0..35 range** on insert. On a stock Dot the audio HAL then raises it
+to 11; we had nothing that did, so the external output sat at minimum gain.
+Measured 2026-09-03 by diffing all 239 mixer controls across an insert on both
+a stock FireOS 5.5.5.4 Dot and ours: writing ctl 62 with music playing took the
+jack from inaudible to audible, while the `ref` loopback tap stayed flat —
+confirming it is a post-DAC analog stage and not something upstream.
+
+Stock changes five controls on insert, we now change two. `Right Channel Only`
+and `Ignore Ramp Up` are deliberately **not** copied: our wire is mono and
+`toStereo` duplicates L into R, so channel selection carries the same samples
+either way (it becomes real the day the wire carries stereo), and the ramp
+control's effect on this hardware has never been measured. Copying a stock
+value whose effect is unknown is not the same as matching stock.
 
 **Unresolved, and it is not only on removal (#117, #141).** A plug in the
 jack degrades the whole audio subsystem for as long as it is present — mic
@@ -587,12 +618,23 @@ live hypothesis is the audio HAL, which we displace by taking `pcm23p`.
 
 Two traps for whoever picks this up:
 
-- **`Ext_Speaker_Amp_Switch` does not gate the internal speaker.** It was
-  `Off` while the internal speaker was audibly playing. accdet also mutes
-  it on insert only *sometimes*. Making that deterministic ourselves looks
-  like an obvious fix and is currently the wrong one: accdet failing to
-  mute is the only reason a user hears anything at all with a plug in, so
-  it would turn "wrong speaker" into "no sound".
+- **`Ext_Speaker_Amp_Switch` was observed `Off` while the internal speaker
+  was audibly playing**, and that observation has NOT been retested since
+  the jack gain was fixed. It matters: if the control does not gate the
+  internal driver, `SetJackRouting` cannot deliver "external only", and the
+  remaining lever is unknown. The test is cheap and specific — cable in the
+  jack with the powered speaker switched OFF, so the mic array can only be
+  hearing the internal driver, then toggle ctl 5 with music playing and
+  watch the `[aec] mic=` level.
+  The older warning attached to this — that making the mute deterministic
+  would turn "wrong speaker" into "no sound" — **no longer applies**. It was
+  conditional on the external path being dead, and it was dead because
+  nothing set ctl 62. Now that it is set, muting the internal driver on
+  insert leaves a working output rather than silence. Note the residual
+  risk this shifts onto volume: a user at a low `PCM Playback Volume` who
+  plugs in now gets a quiet external output instead of a loud internal one,
+  which reads as a fault. Stock avoids this by sitting at unity (127) and
+  attenuating in software; we sit wherever the user left the control.
 - The mic stall log line says "ALSA overrun", which is an interpretation.
   It measures the arrival gap in `readLoop`, and the GoTinyAlsa stream
   channel is 16 batches (2.56s) deep, so a stall of that goroutine looks
@@ -877,6 +919,38 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   inert would hand back a live mic on reconnect, since mute is persisted in
   `state.json`.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
+
+## The emOS console password
+
+`consolePassword` arrives on the config push and the firmware does exactly one
+thing with it: writes `/data/local/etc/echomuse/console.pw`
+(`config.WriteConsolePassword`). It never checks it. **emOS's init reads that
+file and puts the prompt in front of the shell**, because the console has to
+work when the firmware is not running — which is precisely when someone needs
+it.
+
+Three things not to undo:
+
+- **The field is a POINTER.** An empty record is the legitimate "no password"
+  setting, so with a plain string plus `omitempty` a removal would be
+  indistinguishable from a field nobody sent, and clearing the password could
+  never reach a device. Same reason `DuckDb` is a pointer.
+- **Written only when the content changes.** The config push repeats every
+  setting on every reconnect, and this device runs for years on eMMC that
+  cannot be replaced, so an unconditional write spends a flash write per
+  reconnect to store bytes already there.
+- **Written from the config handler in `control.go`, not through
+  `OnConfigApplied`.** There is no in-process consumer for a callback to serve,
+  and a callback nobody registers is a feature that silently does nothing.
+
+Written to a temp file and renamed, so init can never read a half-written
+record: a truncated one parses as unusable, which is read as NO password, and
+would leave the console open exactly while it looked configured.
+
+The record is `<iterations>:<salt hex>:<hash hex>`, already hashed by the
+controller — no plaintext passes through the firmware. The rest of the design,
+including why hashing is worth it when deleting the file defeats it, is in
+`controller/CLAUDE.md`.
 
 ## cgo dependency
 
