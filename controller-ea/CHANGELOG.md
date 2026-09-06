@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.23.0-ea.10 (Early Access)
+
+**The emOS build no longer refuses a stock, freshly-rooted Echo.** Setup flow
+only.
+
+Before building, the controller takes your Echo's boot image apart and puts it
+back together, and refuses if the result is not identical — a check worth
+keeping, since it stops a misread image reaching a partition.
+
+One part of that image is a checksum of its own contents, and the tool that
+roots the device rewrites the contents without updating it. Reproducing a
+checksum that was already wrong is impossible, so a correctly-rooted device was
+refused. That checksum is no longer required to match: it describes the parts
+being replaced, and the image the wizard builds carries a correct one of its
+own. Everything else must still reproduce exactly.
+
+The check was also quietly confirming your escrowed image had not been
+corrupted on its way to the controller. That is now done directly, by comparing
+the image against the fingerprint the wizard took when it read it off the
+device — covering the whole file rather than part of it.
+
 ## 2.23.0-ea.9 (Early Access)
 
 **When the emOS build refuses an image, it now says which part it could not
