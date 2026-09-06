@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import platform
+import posixpath as _posixpath
 import re
+from shlex import quote as _sh_quote
 import shutil
 import sqlite3 as _sqlite3
 import sys
@@ -55,6 +57,8 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_console_pw
+import em_emos_build
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -334,6 +338,19 @@ _shell_pending:   dict = {}
 _shell_dashboard: dict = {}
 _shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
 _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
+# device_id → the asyncio Task that actually holds _shell_lock.
+#
+# `Lock.locked()` answers "is anyone holding this", never "am I", and the
+# cleanup paths used it as though it meant the second. So a caller that gave
+# up WAITING for the lock ran the same cleanup as one that had it, and
+# released the lock out from under the transfer still using it — two shell
+# sessions on one device, which is the exact thing the lock exists to stop.
+# Seen end to end on EFF 2026-09-04: a debloat push hung for 108s, the wake
+# word reconcile behind it timed out and released the debloat's lock, and the
+# slot detect that followed then failed with `Lock is not acquired` and
+# reported an empty result — surfacing to the operator as "could not
+# determine active slot", three steps from anything to do with locking.
+_shell_owner:     dict = {}   # device_id → task holding _shell_lock
 
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
@@ -462,6 +479,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
+    app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
+    app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
@@ -2185,6 +2204,10 @@ async def _get_device_shell_ws(live) -> object:
         await asyncio.wait_for(_shell_lock[device_id].acquire(), timeout=20.0)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
+    # Claimed immediately after a successful acquire and never before it:
+    # everything that cleans up asks whether it is the owner, so a caller
+    # that timed out above must not be able to answer yes.
+    _shell_owner[device_id] = asyncio.current_task()
 
     future = loop.create_future()
     _shell_pending[device_id] = future
@@ -2198,8 +2221,27 @@ async def _get_device_shell_ws(live) -> object:
     except asyncio.TimeoutError:
         _shell_pending.pop(device_id, None)
         _shell_ws.pop(device_id, None)
-        _shell_lock[device_id].release()
+        _release_shell_lock(device_id)
         raise
+
+
+def _release_shell_lock(device_id: str) -> None:
+    """
+    Release the shell lock, but only if THIS task is the one holding it.
+
+    `Lock.locked()` cannot answer that question — it says whether anyone
+    holds the lock — so guarding a release with it lets a caller that never
+    acquired release somebody else's. See the _shell_owner comment.
+    """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
+    _shell_owner.pop(device_id, None)
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
 async def _release_shell_ws(device_id: str, live=None) -> None:
@@ -2208,7 +2250,16 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
 
     Closing ws wakes handle_shell's ws.wait_closed(), which then returns
     and lets the device clean up its side too.
+
+    **A task that does not hold the lock cleans up nothing.** Callers run
+    this from a `finally`, which is reached whether or not the acquire
+    succeeded — so a caller that timed out waiting used to close the
+    websocket belonging to the transfer that was still using it, send that
+    device `shell_close`, and release its lock. Every one of those is an
+    action against another operation's session.
     """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
     ws = _shell_ws.pop(device_id, None)
     if ws:
         try:
@@ -2218,12 +2269,7 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
     _shell_pending.pop(device_id, None)
     if live is not None:
         await live.send_control({"type": "shell_close"})
-    lock = _shell_lock.get(device_id)
-    if lock and lock.locked():
-        try:
-            lock.release()
-        except RuntimeError:
-            pass
+    _release_shell_lock(device_id)
 
 
 async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
@@ -2384,7 +2430,21 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
             "else echo DECODER:none; fi; "
             "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
             "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
-            f"else echo MD5:none; fi; echo {DETECT_MARKER}\n"
+            f"else echo MD5:none; fi; "
+            # Does the destination DIRECTORY exist? Rides the round trip that
+            # was already happening, so it costs nothing.
+            #
+            # Without it a write into a directory that is not there fails, the
+            # `echo TRANSFER_OK` after it never runs, and the transfer waits
+            # out its full 120s timeout for a confirmation that can never
+            # come — holding the device's shell lock throughout. Measured on
+            # EFF 2026-09-04: the debloat payload targets Magisk's
+            # /sbin/.core overlay, which a device not running Magisk has no
+            # daemon to create, and every attempt cost two minutes and took
+            # the next shell operation down with it.
+            f"if [ -d {_sh_quote(_posixpath.dirname(dest) or '/')} ]; "
+            f"then echo DESTDIR:ok; else echo DESTDIR:missing; fi; "
+            f"echo {DETECT_MARKER}\n"
         )
 
         detect_buf = ""
@@ -2398,6 +2458,16 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
                     break
             except asyncio.TimeoutError:
                 continue
+
+        # Checked before the decoder, because it is the more specific answer:
+        # a device with a perfectly good base64 and nowhere to put the file is
+        # not a device that failed to decode.
+        if "DESTDIR:missing" in detect_buf:
+            log.warning(f"[api] {device_id}: {dest} — the destination "
+                        f"directory does not exist on this device; not sending")
+            return _transfer_failed(
+                "destination",
+                f"{_posixpath.dirname(dest)} does not exist on the device")
 
         if "DECODER:busybox" in detect_buf:
             decode_cmd = "busybox base64 -d"
@@ -3172,6 +3242,21 @@ async def _post_debloat(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
+    # Refused server-side, not merely greyed out in the dashboard. This is a
+    # plain POST with a session token, so a dashboard-only rule protects
+    # nothing from anyone who opens the network tab — the same reasoning that
+    # puts the recordings check on the server. And the cost of running it
+    # anyway is not a no-op: the payload targets Magisk's /sbin/.core overlay,
+    # which a device without Magisk has no daemon to create, so the write
+    # fails, TRANSFER_OK never comes, and the transfer holds that device's
+    # shell lock for its full timeout.
+    if not live.android_userspace:
+        return _error(
+            "not_android",
+            "This device is not running Android, so there is nothing to "
+            "debloat — the payload is a package list and a Magisk boot script.",
+            409)
+
     # No explicit shell release here: _shell_run and _stream_file_to_device each
     # acquire and release the session in their own finally, which is why
     # _sync_start_script does not either. Releasing it from out here could close
@@ -3252,6 +3337,12 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # Home Assistant already draws (its own panel header and title) and
         # can avoid offering a theme toggle that fights HA's theme.
         "ha_ingress": INGRESS_ONLY,
+        # Which userspaces the fleet has reported (schema v21). Sorted for a
+        # stable response; EMPTY means nothing has ever said, which is not the
+        # same as "all Android" and must not be read that way — a control
+        # disabled on the strength of not knowing is worse than one that is
+        # merely useless on this fleet.
+        "fleet_base_os": sorted(db.fleet_base_os()),
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
@@ -3363,7 +3454,31 @@ async def _get_global_config(request: web.Request) -> web.Response:
     """GET /api/global/config — fleet-wide default device config."""
     loop = asyncio.get_event_loop()
     config = await loop.run_in_executor(None, db.get_global_device_config)
-    return _ok(config)
+    return _ok(_redact_console_pw(config))
+
+
+# The console password record never leaves the controller. Hashing before
+# storage is pointless if the result is then handed to every client that asks
+# for the config, so reads see a sentinel and writes send it back untouched —
+# see em_console_pw.for_display / resolve_write.
+_CONSOLE_PW_KEY = "consolePassword"
+
+
+def _redact_console_pw(config: dict) -> dict:
+    if not config or _CONSOLE_PW_KEY not in config:
+        return config
+    out = dict(config)
+    out[_CONSOLE_PW_KEY] = em_console_pw.for_display(out[_CONSOLE_PW_KEY])
+    return out
+
+
+def _resolve_console_pw(incoming: dict, stored: dict) -> None:
+    """Turn whatever a client sent into the record to store, in place."""
+    if _CONSOLE_PW_KEY not in incoming:
+        return
+    incoming[_CONSOLE_PW_KEY] = em_console_pw.resolve_write(
+        incoming[_CONSOLE_PW_KEY], (stored or {}).get(_CONSOLE_PW_KEY)
+    )
 
 
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
@@ -3407,6 +3522,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
+    _resolve_console_pw(config, stored)
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(
@@ -4110,11 +4226,18 @@ async def reconcile_on_connect(device_id: str, live) -> None:
 
     # Held as callables, not coroutines: building all three up front and
     # abandoning two of them leaves un-awaited coroutines to warn about later.
-    steps = (
+    steps = [
         ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
         ("start script", lambda: _sync_start_script(live, device_id)),
-        ("debloat", lambda: _sync_debloat(live, device_id)),
-    )
+    ]
+    # The debloat payload is Android-only: a pm-hide list and a Magisk
+    # service.d script. emOS has neither a package manager nor Magisk, so
+    # pushing it there spends a shell round trip to run `pm hide` against
+    # nothing and leave a boot script no init will read. Gated on the device
+    # having POSITIVELY said it is on emOS — see Device.android_userspace for
+    # why absence keeps today's behaviour.
+    if live.android_userspace:
+        steps.append(("debloat", lambda: _sync_debloat(live, device_id)))
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these
         # take seconds, and a device that dropped and redialled part-way
@@ -4619,6 +4742,220 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
     )
 
 
+async def _fetch_latest_emos_release() -> Optional[dict]:
+    """
+    The newest published emOS release carrying an `init` asset.
+
+    Separate from `_fetch_latest_release` rather than a parameter on it,
+    because the two select on opposite things and share no cache: firmware is
+    `v*` + a `server` asset, emOS is `emos-v*` + an `init` asset. Folding them
+    together would mean one cache holding whichever kind was asked for last.
+
+    Note the tag namespaces make this safe in both directions — `emos-v0.1`
+    does not `startswith("v")`, so the firmware poll can never select an emOS
+    release, and this one cannot select a firmware release.
+    """
+    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    url = GITHUB_API_URL.format(repo=repo)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[api] GitHub API returned {resp.status} for emOS releases")
+                    return None
+                releases = await resp.json()
+    except Exception as e:
+        log.warning(f"[api] Could not poll GitHub for emOS releases: {e}")
+        return None
+
+    for data in releases:
+        if data.get("draft") or data.get("prerelease"):
+            continue
+        tag = data.get("tag_name", "")
+        if not tag.startswith("emos-v"):
+            continue
+        asset = next(
+            (a for a in data.get("assets", []) if a.get("name") == "init"), None)
+        if asset is None:
+            continue
+        return {"version": tag, "url": asset["browser_download_url"],
+                "size": asset.get("size", 0)}
+    return None
+
+
+@auth.require_admin
+async def _get_provision_emos_init(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/emos_init — the emOS init binary from the latest
+    emOS release, so the wizard does not need one chosen by hand.
+
+    Downloaded server-side for the reason `latest_binary` is: the device being
+    provisioned is not registered yet, and the browser cannot reach GitHub
+    under the dashboard's CSP.
+
+    **The init is the ONLY part of an emOS image we can distribute.** A
+    bootable image contains the device's own kernel and device trees, so
+    shipping one would mean redistributing Amazon's code; the image is
+    assembled from the boot partition the user read off their own device.
+
+    Verified before it is served, not after it is flashed. The same two checks
+    the build applies, run here as well, so a release built wrong is refused
+    at the point of download rather than at the point of boot.
+    """
+    release = await _fetch_latest_emos_release()
+    if release is None:
+        return _error(
+            "no_emos_release",
+            "No published emOS release with an 'init' asset was found. Build "
+            "one from emos/ with build.sh and select it by hand, or cut an "
+            "emos-v* tag.", 404)
+
+    binary = await _fetch_binary(release["url"], release["version"])
+    if binary is None:
+        return _error("fetch_failed",
+                      "Could not download the emOS init from GitHub", 502)
+
+    problems = em_emos_build.init_binary_problems(binary)
+    if problems:
+        # A release that is wrong is worth saying so about loudly: it is wrong
+        # for everyone, not just this download.
+        log.error(f"[api] emOS release {release['version']} carries an unusable "
+                  f"init: {'; '.join(problems)}")
+        return _error("bad_release_asset",
+                      f"The init in emOS release {release['version']} is not "
+                      f"usable: {'; '.join(problems)}", 502)
+
+    return web.Response(
+        body=binary,
+        content_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="init"',
+            "X-Emos-Version": release["version"],
+        },
+    )
+
+
+@auth.require_admin
+async def _post_provision_emos_image(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/emos_image (multipart: "reference", "init", "version")
+
+    Build an emOS boot image from the reference the wizard just escrowed off
+    the device, and stream it back. Step 5 of the emOS provisioning flow.
+
+    ON THE CONTROLLER RATHER THAN IN THE BROWSER, for the reason the
+    diagnostics route above gives: the packer and its refusals live in
+    em_emos_build, with tests, and a second copy in JavaScript would drift
+    from them without anyone noticing until a device took a bad flash. This
+    function only carries; em_emos_build decides.
+
+    NOTHING IS STORED. The reference is the user's own boot partition and the
+    only copy that matters is the one the wizard escrowed to them — keeping a
+    second here would mean holding a device image we have no reason to hold,
+    and it is also the file we take care never to redistribute. Same reason
+    the built image is streamed rather than cached.
+
+    The init binary rides in the request rather than being resolved here. That
+    is the first-cut shape and it is a known gap: the natural home is a
+    release asset beside `server`, so the wizard can offer "latest from
+    GitHub" the way it already does for the firmware.
+    """
+    try:
+        reader = await request.multipart()
+        parts = {}
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name in ("reference", "init"):
+                parts[field.name] = await field.read()
+            elif field.name == "reference_md5":
+                parts["reference_md5"] = (await field.read()).decode(
+                    errors="replace")[:64].strip().lower()
+            elif field.name == "version":
+                parts["version"] = (await field.read()).decode(errors="replace")[:64]
+
+        reference = parts.get("reference")
+        init_bin = parts.get("init")
+        if not reference:
+            return _error("invalid_upload",
+                          "Expected multipart field 'reference' — the boot "
+                          "image read off the device", 400)
+        if not init_bin:
+            return _error("invalid_upload",
+                          "Expected multipart field 'init' — the emOS init "
+                          "binary", 400)
+
+        # The escrow arrived intact, checked before anything reads it.
+        #
+        # This replaces a property the packer's round-trip used to provide as a
+        # side effect: the boot header carries a SHA1 over the kernel and
+        # ramdisk, so a byte corrupted in transfer made the repack disagree and
+        # was refused. That check had to be relaxed — some images legitimately
+        # carry a stale id that cannot be reproduced by definition, and no rule
+        # can tell a stale id from a corrupted byte — so the integrity half is
+        # now explicit, and covers the WHOLE transfer rather than two of its
+        # regions.
+        #
+        # Absent md5 is accepted: an older wizard does not send one, and
+        # refusing there would break provisioning for a dashboard that has not
+        # been reloaded. Present-and-wrong always refuses.
+        want_md5 = parts.get("reference_md5")
+        if want_md5:
+            got_md5 = hashlib.md5(reference).hexdigest()
+            if got_md5 != want_md5:
+                return _error(
+                    "corrupt_upload",
+                    f"The boot image arrived corrupted: the wizard read "
+                    f"{want_md5} off the device and {got_md5} arrived. "
+                    f"Nothing has been built. Re-run the escrow step.", 400)
+
+        version = parts.get("version") or "0.1"
+        loop = asyncio.get_event_loop()
+        # Off the event loop: gzipping a ramdisk and hashing two images blocks
+        # it for long enough to matter, and devices are streaming audio
+        # through this process while somebody provisions a new one.
+        info = await loop.run_in_executor(
+            None, em_emos_build.build_emos_image, reference, init_bin, version)
+
+        log.info(f"[api] emOS image built: {info['size']:,} bytes "
+                 f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "
+                 f"byte reference (md5 {info['reference_md5'][:8]}…)")
+
+        image = info.pop("image")
+        return web.Response(
+            body=image,
+            content_type="application/octet-stream",
+            headers={
+                "Content-Disposition": 'attachment; filename="emos-boot.img"',
+                # The wizard compares this against its own hash of what it
+                # received, and again against what it reads back off the
+                # device after the flash. Both comparisons are the point of
+                # the step.
+                "X-Image-MD5": info["md5"],
+                "X-Image-SHA256": info["sha256"],
+                "X-Reference-MD5": info["reference_md5"],
+                "X-Build-Info": json.dumps(info),
+            },
+        )
+    except em_emos_build.BuildError as e:
+        # Every one of these is a refusal with something a person can act on,
+        # and each is a state we would rather meet here than after a partition
+        # write. 422 rather than 400: the request was well formed, the image
+        # is what could not be accepted.
+        log.warning(f"[api] emOS build refused: {e}")
+        return _error("build_refused", str(e), 422)
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"[api] emOS build error: {e}")
+        return _error("build_failed", str(e), 500)
+
+
 @auth.require_admin
 async def _get_support_bundle(request: web.Request) -> web.Response:
     """
@@ -5080,6 +5417,17 @@ def _merge_device(row) -> dict:
         # capable and still be running on the software tap.
         "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # Which userspace the device booted: "emos", "fireos", or null from
+        # firmware that cannot say. Null is not FireOS — the wizard, the
+        # support bundle and the payload reconcile all need to tell "Android"
+        # apart from "not asked".
+        "baseOs":          getattr(live, "base_os", None) if live else None,
+        # The DERIVED answer, not a second copy of the rule. em_platform owns
+        # "which payloads mean anything here"; a dashboard that re-derived it
+        # from baseOs would be a mirror free to disagree with the server that
+        # actually refuses. Defaults True with no device, so a disconnected
+        # device shows the control as it always did.
+        "androidUserspace": getattr(live, "android_userspace", True) if live else True,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Gates the Sendspin toggle. A device that ignores sendspinEnabled

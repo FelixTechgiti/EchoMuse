@@ -75,6 +75,415 @@ The dashboard's firmware and controller update checks read this fork's
 releases. A database copied over from an upstream install is repointed once,
 on the first start, and says so in the log; if you would rather keep tracking
 upstream, set it back and it stays set.
+## 2.23.0-ea.13 (Early Access)
+
+**The setup wizard now tells you when it has finished.** Setup flow only.
+
+A completed run left the last step waiting for ever, because it watched for the
+Echo to be *connected* — and a device waiting for your approval is deliberately
+disconnected until you approve it. So it waited for the very thing it was there
+to ask you to do.
+
+It now waits for the Echo to reach the controller, which happens whether or not
+it has been approved, and finishes with what to do next: nothing if the device
+was approved automatically, or a single instruction to approve it if not.
+
+The console transcript is also readable again — the Echo's own echo of each
+command was being written into the log alongside its answer — and while waiting
+it reports the Echo's network address rather than repeating that it is
+associated, which it had already said.
+
+## 2.23.0-ea.12 (Early Access)
+
+**The end of the emOS setup flow, from the first run that got there.** Setup
+flow only.
+
+### The last step could not tell whether it had worked
+
+It watched for a new device to appear in your device list — but setting up a
+device adds it to that list partway through, before it has ever connected. So
+the wizard sat waiting while the Echo was on the network and working. It now
+asks the question it meant to: is *this* device connected?
+
+### A mistyped network is no longer permanent
+
+The network was saved before anything checked it worked, so a wrong name or
+password was written to the Echo and retried for ever — fixable only over a
+serial cable. It now waits for the connection to come up first, and removes the
+network again if it does not, telling you what to check. It also says outright
+that this Echo cannot join a WPA3-only network, whatever the password is.
+
+### Pick your network instead of typing it
+
+The WiFi step now scans and shows what the Echo's own radio can actually see,
+with signal, band and security. Typing a name from memory made a typo look
+exactly like a network the device cannot reach — and this hardware genuinely
+cannot see 5GHz or join WPA3, which are now visible before you choose rather
+than after it fails.
+
+### Smaller things
+
+The wizard says when it has finished, and whether the device still needs
+approving. Starting with the Echo already in recovery no longer asks you to
+click a button confirming what it just told you. And the network you set is
+flushed to disk immediately, so unplugging the Echo cannot undo it.
+
+## 2.23.0-ea.11 (Early Access)
+
+**Second fix to the emOS build refusing a stock, freshly-rooted Echo.** Setup
+flow only.
+
+Part of your Echo's boot image is a small header the bootloader checks, and it
+ends with padding. Amazon's own images use one filler byte and images that have
+been repacked by rooting tools use another — both are perfectly normal, and the
+builder assumed whichever one it was written against. So it accepted a device
+that had been through the older setup flow and refused one restored to stock.
+
+It no longer assumes. Your image's own header is carried straight through,
+whatever it contains, which is correct by construction — the build replaces
+only the part of the image it needs to and leaves the rest exactly as it found
+it.
+
+## 2.23.0-ea.10 (Early Access)
+
+**The emOS build no longer refuses a stock, freshly-rooted Echo.** Setup flow
+only.
+
+Before building, the controller takes your Echo's boot image apart and puts it
+back together, and refuses if the result is not identical — a check worth
+keeping, since it stops a misread image reaching a partition.
+
+One part of that image is a checksum of its own contents, and the tool that
+roots the device rewrites the contents without updating it. Reproducing a
+checksum that was already wrong is impossible, so a correctly-rooted device was
+refused. That checksum is no longer required to match: it describes the parts
+being replaced, and the image the wizard builds carries a correct one of its
+own. Everything else must still reproduce exactly.
+
+The check was also quietly confirming your escrowed image had not been
+corrupted on its way to the controller. That is now done directly, by comparing
+the image against the fingerprint the wizard took when it read it off the
+device — covering the whole file rather than part of it.
+
+## 2.23.0-ea.9 (Early Access)
+
+**When the emOS build refuses an image, it now says which part it could not
+read.** Setup flow only.
+
+Before flashing anything, the controller takes your Echo's boot image apart and
+puts it back together, and refuses to build if the result is not identical.
+That check is worth keeping — it has caught three real problems — but all it
+said was "could not reproduce this boot image byte for byte", which leaves
+nothing to act on.
+
+It now names the field that differs and shows both values, so a refusal points
+somewhere instead of stopping the conversation.
+
+Also picks up the emOS 0.2 init, which names the USB console after the device
+instead of leaving your computer to guess. That needs the boot image rebuilding
+to take effect.
+
+## 2.23.0-ea.8 (Early Access)
+
+**Everything found on the first provisioning run to reach the end of the emOS
+flow.** Setup flow only; nothing changes on running devices.
+
+### The first-boot console could not be read
+
+Watching the first emOS boot reported that the device was not running emOS. It
+was — the console was reading its own echo back as the device's answer, so
+every command "replied" with the text of the request. Commands now carry a
+completion marker the device assembles itself, which the echo cannot
+accidentally produce, so the console is readable whether echo is on or not.
+
+A failed attempt also left the serial port open, so every retry failed with
+"the port is already open" — an error that no amount of retrying can clear, and
+which also blocked terminal programs outside the browser. The port is now
+released on failure.
+
+### WiFi could never have worked
+
+Every `wpa_cli` command in the WiFi step was missing the path to emOS's control
+socket, so all of them would have failed. And emOS had no supplicant
+configuration to start from, so there was no socket to talk to in the first
+place — a device that went straight to emOS sat for ever with the ring
+throbbing, associating and never finishing.
+
+The wizard now writes a minimal supplicant config while installing, before the
+flash, so the first emOS boot can be configured. **An existing configuration is
+never touched** — a device that has been on WiFi under FireOS keeps its
+networks.
+
+### A red flash on a device that was not muted
+
+The red ring means the microphone is muted. It was being repainted on every
+reconnect regardless, and a device waiting for approval reconnects repeatedly —
+so a working device showed a red flash through its pending animation, over and
+over.
+
+### emOS devices now say what they are
+
+The USB console showed up under whatever name the computer had cached for that
+port, which on a Mac was a leftover from the device's Amazon firmware. It now
+identifies itself as EchoMuse, with the device's serial. The console prompt says
+`em-<serial>` rather than `root@android`.
+
+**These two need an emOS image built from this release to take effect.**
+
+## 2.23.0-ea.7 (Early Access)
+
+**The emOS flash step could never succeed, and the fault was in the check
+rather than the write.** Setup flow only; nothing changes on running devices.
+
+### "Flash and Verify" failed on a write that was correct
+
+After writing the image, the wizard read the partition back and compared it
+against what it had sent. The read covered whole megabytes while the image is
+not a whole number of megabytes, so roughly 400KB of the *previous* boot image
+was being compared against empty space that had never been written. The write
+was complete every time; the comparison was not.
+
+It went unnoticed because the only version of this that had ever run on a real
+device was the restore, whose image is the entire boot partition and therefore
+an exact number of megabytes — so the mistake cancelled out and the check
+happened to be right.
+
+The wizard now reads back exactly as many bytes as it wrote.
+
+### Reconnecting when already in TWRP
+
+Starting the wizard with the device already in recovery kept the connection, as
+of ea.6 — but the next step then asked the browser for the same USB device a
+second time and failed until the third attempt. It now reuses the connection it
+already has.
+
+## 2.23.0-ea.6 (Early Access)
+
+**Follow-up to ea.5, from the first emOS provisioning run that got past the
+install steps.** Two things that only showed up on hardware.
+
+### "Build emOS" failed with HTTP 413
+
+The wizard sends your escrowed boot partition to the controller to be repacked,
+and Home Assistant's ingress proxy refused the request before it ever reached
+the add-on. The escrow is a read of the whole 16MB partition, most of which is
+empty padding — the boot image itself is under 8MB on this hardware — so the
+wizard now sends the image rather than the partition. If the header cannot be
+read for any reason it falls back to sending everything, because a size
+optimisation should never be why a build cannot happen.
+
+### Connecting while already in TWRP
+
+Starting the wizard with the device already in recovery used to report "FireOS 5
+confirmed", warn about an untested firmware it had read off the recovery
+ramdisk, and reboot recovery into recovery. Nothing it checked could tell the
+two apart — TWRP reports Android 5.1.1 and answers every property with its own
+values.
+
+It now recognises recovery, reads the real FireOS build and device identity from
+`/system` instead of the ramdisk, and keeps the connection rather than
+rebooting — so you continue straight to "Connect to TWRP". Connecting in
+recovery is a normal thing to do on a retry, so it is handled rather than
+refused.
+
+## 2.23.0-ea.5 (Early Access)
+
+**Fixes a provisioning wizard that could not install emOS at all, and adds a
+one-click undo if the flash goes wrong.** Nothing changes on devices already
+running; this is entirely the setup flow.
+
+### The emOS install steps now work
+
+Provisioning stopped at "Install EchoMuse" with every command reporting
+`su: not found`, having said the recovery environment was ready a step
+earlier. TWRP is already root, so the wizard installs a small `su` stand-in to
+let the shared install steps run unchanged — and it was written pointing at a
+shell path that does not exist in recovery, so it could never run. Worse, a
+retry then *skipped* the check that had just caught it, which is why step 3
+turned green and step 4 failed anyway.
+
+The stand-in is now built against the shell the device actually has, it is
+tested by running it rather than by looking for the file, and each step that
+needs it sets it up itself — reconnecting between steps used to quietly remove
+it.
+
+### If a flash fails, the wizard puts your image back
+
+A failed boot-partition write used to end with a warning and a command to type
+yourself. There is now a **Restore escrowed boot image** button on the flash
+and first-boot steps: it writes back the image the wizard escrowed before it
+changed anything, verifies it against the partition, and leaves everything on
+`/data` untouched. If the page has been reloaded, it accepts the `.img` file
+you downloaded at the escrow step.
+
+The flash itself also retries once automatically before giving up, refuses an
+image too large for the partition instead of writing a truncated one, and can
+now tell a short write from a corrupt one and a bad partition from an
+unreliable read.
+
+### Steps that said they worked when they had not
+
+Four places reported success having achieved nothing: the install step logged
+"Cleared." after every command failed, wake word assets were checked where they
+were uploaded rather than where they were installed, the startup script was
+copied without verification while the binary beside it was checked byte for
+byte, and WiFi's "Skip (already connected)" marked itself done without asking
+the device anything. All four now check.
+
+### Safer partition handling
+
+The wizard's one partition write now goes to the partition it ran its safety
+check against, rather than re-resolving a symlink that could answer
+differently. And every step confirms the device is in the mode it needs —
+unplugging an Echo powers it off, so a replug comes back in Android, and a
+recovery step run there had nothing but one guard in front of it.
+
+## 2.23.0-ea.4 (Early Access)
+
+**Your Echo can now run without any of Amazon's software on it, and the
+provisioning wizard installs it that way by default.** This release migrates
+the database (schema 21) — a backup is taken automatically before it does.
+Nothing to change on your devices.
+
+### emOS: an Echo with no Android on it at all
+
+emOS replaces the Echo Dot's entire Amazon userspace — no Android init, no
+system_server, no mediaserver, no audio HAL — while keeping the device's own
+kernel. A complete voice turn runs on it: wake word, Home Assistant, spoken
+answer, along with WiFi, the microphone array, the Bluetooth proxy, the buttons
+and the light ring.
+
+**It is proven on one device over two days, and it is not a finished product.**
+Nothing about your existing Echoes changes, and nothing here reaches a device
+unless you deliberately install it.
+
+### The provisioning wizard now installs emOS
+
+Setting up a new Echo takes nine steps instead of thirteen, and all of them
+happen in TWRP recovery — Magisk, the boot image patch and the root checks are
+gone, because none of them are needed when Android is never started. The most
+dangerous step in the old wizard went with them.
+
+Before it changes anything, the wizard reads your Echo's existing boot
+partition and hands you the file. That one file puts the device back exactly as
+it was, in about ten seconds, and leaves everything installed on it untouched.
+
+**It has not been tested on hardware end to end.** The last two steps, which
+watch the first boot and set up WiFi over the USB console, have never talked to
+a real device. Treat this as something to try on a spare Echo rather than on
+one you rely on — and keep the boot image it gives you at step 2.
+
+**Once an Echo is on emOS the wizard cannot be run against it again.** Setup
+needs Android's debug bridge and emOS does not have one, so the first step will
+not find the device.
+
+Going back is the same four steps that prepare a Dot for EchoMuse in the first
+place, done by hand: reach TWRP recovery with the button combo, wipe cache,
+wipe data, sideload a FireOS 5 image, **then flash `f1r30s.zip`**. Do not skip
+that last one — a stock flash restores dm-verity against a partition table the
+unlock modified, and the device will not boot without it. The sequence erases
+the Echo, so it is a real undo rather than a convenient one. Re-provisioning an
+emOS Echo properly, over the network, is not built yet.
+
+The old FireOS install is unchanged and still available at `?flow=fireos` on
+the dashboard URL.
+
+### A password for the emOS console
+
+emOS puts a root shell on the USB port, which anyone with a cable could reach.
+You can now set a password for it under Config → Advanced → USB console, and it
+applies to every device at once. The password is hashed before it is stored or
+sent, so the plain text is never written down anywhere.
+
+This is a nod to security rather than a lock: anyone holding the device can
+delete the password from recovery. What it protects is the password itself,
+which people tend to reuse somewhere that matters. Forgetting it costs a
+reflash, not a device. FireOS devices are unaffected.
+
+### Smaller things
+
+- An Echo running emOS started EchoMuse **122 seconds late on every boot**,
+  waiting for an Amazon service that cannot exist there. It now starts in about
+  35 seconds.
+- Support bundles no longer include a console password record if one is quoted
+  in a log line.
+
+## 2.23.0-ea.3 (Early Access)
+
+**Your Echoes will know what time it is, and updates stop stalling on things
+they cannot do.** Nothing to do before updating: no database migration, nothing
+to change on your devices. The clock needs firmware newer than v2.14.0 at both
+ends.
+
+### Echoes now know the time
+
+An Echo has no clock that survives being unplugged, so it starts up believing
+it is 2010 and only corrects itself if it can reach a time server. The
+controller now simply tells it, over the connection it already has. Device log
+timestamps line up with the controller's from the first moment, which is the
+difference between a readable support bundle and a puzzle.
+
+**Needs firmware newer than v2.14.0.**
+
+### Updates no longer stall for two minutes at a time
+
+A file transfer to a folder that does not exist on the device used to wait out
+its full two-minute timeout instead of failing immediately — and it held that
+device's connection for the whole time, so whatever came next failed too. One
+firmware update could lose four minutes to this and report a confusing error
+about something unrelated. Transfers now check first and fail straight away.
+
+A related fault could make the controller close a connection belonging to a
+transfer that was still using it, which is what turned a stalled transfer into
+an error message pointing somewhere else entirely.
+
+### Maintenance actions that do not apply are now greyed out
+
+The Re-apply debloat button is disabled, with the reason shown, on an Echo that
+is not running Android — there are no Amazon packages to hide there, and
+pressing it achieved nothing while tying the device up.
+
+### Smaller things
+
+- The ambient light sensor is read less often. Its driver logs a line every
+  time it reads in a dark room, which was filling the small area the Echo keeps
+  crash reports in — so a crash overnight could no longer be explained. Nothing
+  visible changes.
+
+## 2.23.0-ea.2 (Early Access)
+
+**Sound through the headphone jack works properly, and the controller stops
+spending minutes sending maintenance files an Echo cannot use.** Nothing to do
+before updating: no database migration, nothing to change on your devices. The
+jack fixes need firmware newer than v2.14.0 and do nothing until you have it.
+
+### The headphone and line-out jack
+
+Plugging a speaker or headphones into the Echo produced almost no sound. The
+jack has its own output stage, and inserting a cable drops it to the bottom of
+its range — nothing on our side ever raised it again, so the audio was present
+and inaudible. It is now set whenever a cable is detected.
+
+Booting with a cable already plugged in was the same gap from the other
+direction. The Echo only corrected its audio routing when a cable was inserted
+or removed, and a device that started up with one connected never had such a
+moment — so it played to the room with a cable attached. Unplugging and
+replugging was the folk remedy for both, and is no longer needed.
+
+**Needs firmware newer than v2.14.0.**
+
+### The controller knows what each Echo is running
+
+Echoes now report which base system they booted, and the controller sends
+Android-specific maintenance files only to the ones actually running Android.
+Elsewhere each attempt sat for two minutes before giving up, which made an
+ordinary firmware update look as though it had stalled when the update itself
+had already finished.
+
+### Smaller things
+
+- The Local Build file picker clears itself once a deploy starts, rather than
+  leaving a filename sitting there as though something were still pending.
 
 ## 2.23.0-ea.1 (Early Access)
 
