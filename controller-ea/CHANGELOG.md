@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.23.0-ea.8 (Early Access)
+
+**Everything found on the first provisioning run to reach the end of the emOS
+flow.** Setup flow only; nothing changes on running devices.
+
+### The first-boot console could not be read
+
+Watching the first emOS boot reported that the device was not running emOS. It
+was — the console was reading its own echo back as the device's answer, so
+every command "replied" with the text of the request. Commands now carry a
+completion marker the device assembles itself, which the echo cannot
+accidentally produce, so the console is readable whether echo is on or not.
+
+A failed attempt also left the serial port open, so every retry failed with
+"the port is already open" — an error that no amount of retrying can clear, and
+which also blocked terminal programs outside the browser. The port is now
+released on failure.
+
+### WiFi could never have worked
+
+Every `wpa_cli` command in the WiFi step was missing the path to emOS's control
+socket, so all of them would have failed. And emOS had no supplicant
+configuration to start from, so there was no socket to talk to in the first
+place — a device that went straight to emOS sat for ever with the ring
+throbbing, associating and never finishing.
+
+The wizard now writes a minimal supplicant config while installing, before the
+flash, so the first emOS boot can be configured. **An existing configuration is
+never touched** — a device that has been on WiFi under FireOS keeps its
+networks.
+
+### A red flash on a device that was not muted
+
+The red ring means the microphone is muted. It was being repainted on every
+reconnect regardless, and a device waiting for approval reconnects repeatedly —
+so a working device showed a red flash through its pending animation, over and
+over.
+
+### emOS devices now say what they are
+
+The USB console showed up under whatever name the computer had cached for that
+port, which on a Mac was a leftover from the device's Amazon firmware. It now
+identifies itself as EchoMuse, with the device's serial. The console prompt says
+`em-<serial>` rather than `root@android`.
+
+**These two need an emOS image built from this release to take effect.**
+
 ## 2.23.0-ea.7 (Early Access)
 
 **The emOS flash step could never succeed, and the fault was in the check
