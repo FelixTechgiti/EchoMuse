@@ -1265,6 +1265,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [assetNow, setAssetNow]       = useState(null);
   const [assetLog, setAssetLog]       = useState([]);
   const [assetResult, setAssetResult] = useState(null);
+  // Spotify / AirPlay binaries: what this device has, what the fleet store
+  // holds, which kind is busy, and the last outcome per kind. Keyed by kind
+  // rather than one shared flag, because the two are independent installs and
+  // a shared "busy" would grey out the other one's button for no reason.
+  const [endpointBins, setEndpointBins] = useState(null);
+  const [endpointStore, setEndpointStore] = useState(null);
+  const [epBusy, setEpBusy] = useState(null);
+  const [epResult, setEpResult] = useState({});
+  const epFileRefs = useRef({});
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -1293,6 +1302,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       // someone acts on it here.
       API.get(`/api/devices/${device.device_id}/oww_assets`)
         .then(setAssets).catch(() => setAssets(null));
+      // Two fetches because they answer two different questions: what this
+      // device has, and what there is to give it. The per-device one is
+      // cheap — it reads the status the device reported on register rather
+      // than opening a shell — so unlike the asset state above it costs the
+      // device nothing.
+      API.get(`/api/devices/${device.device_id}/endpoint_binaries`)
+        .then(setEndpointBins).catch(() => setEndpointBins(null));
+      API.get('/api/endpoint_binaries')
+        .then(setEndpointStore).catch(() => setEndpointStore(null));
     }
   }, [tab, device.device_id]);
 
@@ -1393,6 +1411,66 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             + 'watch the device log for details.');
     } catch(e) { alert(e.error || 'Debloat failed'); }
     setTimeout(() => setDebloating(false), 8000);
+  }
+
+  // ─── Spotify / AirPlay binaries ────────────────────────────────────────────
+  //
+  // Two steps, and they are two on purpose: a binary is uploaded once for the
+  // whole fleet and installed per device. Uploading per device would send the
+  // same ~9MB up the dashboard once per Dot and would leave no way to answer
+  // "is this Echo running the binary I built?".
+
+  async function refreshEndpointBins() {
+    // Both, always. An install changes the device's half and a delete changes
+    // the store's, and either one alone leaves the panel describing a state
+    // that is no longer true.
+    const [state, store] = await Promise.all([
+      API.get(`/api/devices/${device.device_id}/endpoint_binaries`).catch(() => null),
+      API.get('/api/endpoint_binaries').catch(() => null),
+    ]);
+    if (state) setEndpointBins(state);
+    if (store) setEndpointStore(store);
+  }
+
+  async function doUploadEndpoint(kind, file) {
+    if (!file) return;
+    setEpBusy(kind);
+    setEpResult(r => ({ ...r, [kind]: null }));
+    try {
+      const res = await API.upload(`/api/endpoint_binaries/${kind}`, file, 'binary');
+      await refreshEndpointBins();
+      setEpResult(r => ({ ...r, [kind]: { ok: true, text:
+        `Uploaded ${(res.stored.size / 1024 / 1024).toFixed(1)} MB. `
+        + `Install it on this Echo below.` } }));
+    } catch(e) {
+      // The controller's message names WHICH mistake — a host build, the
+      // wrong ABI — so it is shown verbatim rather than replaced with
+      // "upload failed". The build it came from succeeded, so a generic
+      // rejection sends somebody back to a green build with no clue.
+      setEpResult(r => ({ ...r, [kind]: { ok: false, text: e.error || 'Upload failed' } }));
+    }
+    setEpBusy(null);
+  }
+
+  async function doInstallEndpoint(kind) {
+    setEpBusy(kind);
+    setEpResult(r => ({ ...r, [kind]: null }));
+    try {
+      const res = await API.post(`/api/devices/${device.device_id}/endpoint_binaries/${kind}`, {});
+      await refreshEndpointBins();
+      // res.status is what the DEVICE said when asked afterwards, and null
+      // means the stat could not be read. Saying so is the honest ending:
+      // the bytes are verified either way, but only the device can confirm
+      // the file is there and executable, and claiming it did when it never
+      // answered is the kind of false success this codebase keeps finding.
+      setEpResult(r => ({ ...r, [kind]: { ok: true, text: res.status
+        ? 'Installed. The switch on the Config tab is live now — no restart needed.'
+        : 'Sent and verified, but the device did not answer when asked to '
+          + 'confirm. Reopen this tab in a moment to check.' } }));
+    } catch(e) {
+      setEpResult(r => ({ ...r, [kind]: { ok: false, text: e.error || 'Install failed' } }));
+    }
+    setEpBusy(null);
   }
 
   async function doInstallAssets() {
@@ -2227,6 +2305,108 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 </Panel>
               )}
 
+
+              {/* Spotify / AirPlay binaries.
+
+                  Here rather than on Config beside the toggles they unlock,
+                  for the reason Maintenance moved off Status: Config
+                  describes what a device SHOULD DO, and putting a program on
+                  one is something you DO. It also keeps the two gates apart
+                  on screen — the toggle over there stays disabled and says
+                  why, and this is the why being fixed. */}
+              {isAdmin && (
+                <Panel label="Streaming endpoints">
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    librespot and shairport-sync run as subprocesses of the firmware
+                    and are not part of it — they are third-party programs with no
+                    Android build published anywhere, so they are cross-compiled once
+                    from <code>device/librespot/</code> and <code>device/shairport/</code>{' '}
+                    and installed from here. Upload once; install on each Echo. The
+                    transfer is md5-verified and a failed one leaves the previous
+                    binary untouched.
+                  </div>
+                  {(endpointBins?.endpoints || []).map(ep => {
+                    const store = endpointStore?.store?.[ep.kind] || ep.stored;
+                    const busy  = epBusy === ep.kind;
+                    const res   = epResult[ep.kind];
+                    const tone  = ep.status === 'installed' ? 'var(--ok)'
+                                : ep.status === 'missing'   ? 'var(--warn)'
+                                : 'var(--muted)';
+                    // Four states, four sentences. "We have not heard from
+                    // this device" is not "the binary is missing", and an
+                    // offline Echo must not be told its file is gone.
+                    const label = ep.status === 'installed' ? 'Installed'
+                                : ep.status === 'missing'
+                                  ? `Not installed${ep.reason_text && ep.reason_text !== 'not installed'
+                                      ? ` — ${ep.reason_text}` : ''}`
+                                : ep.status === 'unsupported' ? 'Firmware has no such endpoint'
+                                : 'Device offline — state unknown';
+                    return (
+                      <div key={ep.kind} style={{ borderTop:'1px solid var(--hairline)', paddingTop:12, marginTop:12 }}>
+                        <div style={{ display:'flex', alignItems:'baseline', gap:12, flexWrap:'wrap', marginBottom:8 }}>
+                          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)' }}>
+                            {ep.label}
+                          </span>
+                          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:tone }}>
+                            {label}
+                          </span>
+                          {/* Three-valued on purpose. The device stats the
+                              file, it does not hash it, so a size match is
+                              suggestive and never proof — and null means
+                              "cannot tell", which is why there is no third
+                              badge claiming a mismatch. */}
+                          {ep.matches_store === false && (
+                            <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--warn)' }}>
+                              differs from the uploaded build
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginBottom:10 }}>
+                          {store
+                            ? `Uploaded: ${store.filename} · ${(store.size/1024/1024).toFixed(1)} MB · md5 ${store.md5.slice(0,12)}…`
+                            : `Nothing uploaded yet — build one with ${ep.source}`}
+                        </div>
+                        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                          <input type="file" accept="*/*" style={{ display:'none' }}
+                            ref={el => { epFileRefs.current[ep.kind] = el; }}
+                            onChange={e => {
+                              const f = e.target.files[0];
+                              // Cleared so choosing the same file twice after
+                              // a failed upload fires onChange again.
+                              e.target.value = '';
+                              doUploadEndpoint(ep.kind, f);
+                            }}/>
+                          <Pill small disabled={busy}
+                                onClick={() => epFileRefs.current[ep.kind]?.click()}>
+                            {busy ? 'Working…' : store ? 'Replace binary' : 'Upload binary'}
+                          </Pill>
+                          <Pill small accent={ep.installable && !busy}
+                                disabled={!ep.installable || busy}
+                                onClick={() => doInstallEndpoint(ep.kind)}>
+                            {busy ? 'Installing…'
+                              : ep.status === 'installed' ? 'Reinstall on this Echo'
+                              : 'Install on this Echo'}
+                          </Pill>
+                          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>
+                            {ep.dest}
+                          </span>
+                        </div>
+                        {res && (
+                          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, lineHeight:1.6,
+                                        color: res.ok ? 'var(--ok)' : 'var(--error)', marginTop:10 }}>
+                            {res.text}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {endpointBins === null && (
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
+                      checking…
+                    </div>
+                  )}
+                </Panel>
+              )}
 
               {/* On-device wake word assets.
 

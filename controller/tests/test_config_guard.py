@@ -188,9 +188,28 @@ def test_dropped_keys_is_a_plain_helper_not_a_route_handler():
     "_post_global_config",
     "_post_device_config",
     "_post_upload_binary",
+    # The Spotify / AirPlay binaries. Strictly more dangerous than a config
+    # write: one stores an arbitrary executable and the other puts it on a
+    # device and marks it 755. The reads are here too because their responses
+    # name sizes and md5s of programs and sit beside the install they enable.
+    "_get_endpoint_binaries",
+    "_post_endpoint_binary_upload",
+    "_get_device_endpoint_bins",
+    "_post_device_endpoint_bin",
 ])
 def test_mutating_handlers_still_require_admin(handler):
     """Any config/binary write must keep its auth decorator."""
     assert "require_admin" in _decorators_of(handler), (
         f"{handler} lost its @auth.require_admin — anyone could call it"
+    )
+
+
+def test_read_endpoint_status_is_a_plain_helper_not_a_route_handler():
+    # Same hazard as _dropped_keys above, and the same shape: this helper
+    # sits directly above a decorated handler, so if it ever picks up a
+    # decorator it has stolen one — leaving a route that installs an
+    # executable on a device with no admin requirement.
+    assert _decorators_of("_read_endpoint_status") == [], (
+        "_read_endpoint_status has picked up a decorator — it is a pure "
+        "helper, and taking one means the handler below it lost it."
     )

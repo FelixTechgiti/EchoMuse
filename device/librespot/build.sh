@@ -43,6 +43,10 @@ echo "Built: $OUT/librespot"
 ls -lh "$OUT/librespot"
 cat "$OUT/librespot.md5"
 echo
-echo "Install it with the dashboard (Updates -> Spotify), or by hand:"
+echo "Install it from the dashboard: a device's Updates tab -> Streaming"
+echo "endpoints -> Upload binary, then Install on this Echo. It is md5-verified"
+echo "on the way, and the toggle on the Config tab goes live without a restart."
+echo
+echo "By hand, if the device is on USB and not yet talking to the controller:"
 echo "  adb push $OUT/librespot /data/local/bin/librespot"
 echo "  adb shell chmod 755 /data/local/bin/librespot"

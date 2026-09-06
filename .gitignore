@@ -43,3 +43,12 @@ tls/
 
 # speaker_profile generates its test signals; generate_signals.py is the source
 device/tools/speaker_profile/*.wav
+
+# The Spotify and AirPlay binaries, built by device/*/build.sh. Deliberately
+# NOT committed: they are ~9MB of third-party ARM executable, they are not
+# ours to redistribute, and the dashboard now installs them from a store
+# beside the database — so the repository holds the recipe and the fleet
+# holds the artifact. Same split as the firmware, which is a release asset
+# rather than a file in the tree.
+device/librespot/out/
+device/shairport/out/
