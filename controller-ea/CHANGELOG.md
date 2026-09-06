@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.24.0-fx.1
+
+**The headphone jack works, your Echoes learn the time, and updates stop
+stalling on things a device cannot do.**
+
+⚠ **This release migrates the database to schema 21.** A backup is taken
+automatically before it runs (`echomuse.db.pre-v20.bak`, beside the
+database), and a failure refuses to start rather than running on a
+half-migrated schema. Nothing to change on your devices.
+
+It carries everything upstream shipped in its 2.23.0 Early Access line, on
+top of the fork's own 2.23.0-fx.1.
+
+### The half that needs new firmware
+
+Two of these are pairs, and they do nothing until the Echo is on
+v2.16.0-fx.1 or newer. They are harmless without it.
+
+**Sound through the headphone jack.** The jack's output stage was left at the
+minimum of its range, so it read as dead rather than quiet. Fixed on the
+device; nothing to set here.
+
+**Your Echoes will know what time it is.** The controller now tells each
+device the time on connect. These Dots boot with a nonsense clock and no
+battery to keep one.
+
+### The half that works today
+
+**Updates stop spending minutes on files a device cannot use.** The
+controller now asks which userspace an Echo booted and skips the maintenance
+payloads that do not apply to it, instead of pushing each one and waiting out
+its full transfer timeout.
+
+**The setup wizard verifies each step against what it actually did**, says
+where a boot image could not be reproduced rather than only that it could
+not, checks a flash against the bytes written rather than the next megabyte,
+and rolls a bad network configuration back.
+
+### emOS is in the tree, and installing it is a separate decision
+
+Upstream built a distribution that runs EchoMuse on the Dot with **no Amazon
+software at all**, and the provisioning wizard can install it. It is present
+here because the sync brought it, and the release notes say so rather than
+letting you find it in a menu.
+
+**Do not put it on your only Echo.** Upstream calls it 0.1, bench-proven on
+one device over two days, and says the wizard that installs it has not been
+through a full run on hardware. A device on emOS cannot be re-provisioned by
+the wizard, and going back wipes it.
+
+### Still not usable
+
+Spotify Connect and AirPlay remain announced and disabled: the two programs
+they need have never been built for this hardware. Issue #16 tracks both
+halves.
+
 ## 2.23.0-fx.1
 
 **The LED ring is a Home Assistant light, mute can be closed from Home

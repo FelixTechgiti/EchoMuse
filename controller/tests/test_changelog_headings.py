@@ -35,6 +35,24 @@ CHANGELOGS = [
 # What the extractor treats as the start of a version section.
 VERSION_HEADING = re.compile(r"^## \d")
 
+# What a version heading has to look like in FULL. The loose form above is what
+# cut-release.yml matches, and matching loosely is what let a mangled file
+# through: inserting an entry by slicing on the first occurrence of the string
+# "## 2.15.0-fx.1" cut the file's own header in half, because the header quotes
+# that string as an example. The wreckage — `## 2.15.0-fx.1` for the tag ...` —
+# began with "## " and a digit, so it read as a version heading, the extractor
+# started the section there, and the release notes came out empty. Caught by
+# running the extraction, not by this file, which is why the rule is here now.
+#
+# The two channel labels are spelled out rather than allowed as "any trailing
+# text": entries before 2.20.2 use an em dash and later ones parentheses, and
+# both are real headings — but naming them is what keeps the rule able to
+# reject prose.
+EXACT_VERSION_HEADING = re.compile(
+    r"^## \d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?"
+    r"(?: \(Early Access\)| \u2014 Early Access)?$"
+)
+
 
 @pytest.mark.parametrize("path", CHANGELOGS, ids=lambda p: p.parent.name)
 def test_every_level_two_heading_is_a_version(path):
@@ -71,4 +89,22 @@ def test_the_newest_entry_extracts_whole(path):
         f"{path.relative_to(REPO)}'s newest entry is empty — cut-release.yml "
         f"refuses to tag on that, which is the intended failure, but it means "
         f"the release cannot be cut."
+    )
+
+
+@pytest.mark.parametrize("path", CHANGELOGS, ids=lambda p: p.parent.name)
+def test_a_version_heading_carries_nothing_but_its_version(path):
+    """
+    A `## ` line that merely STARTS like a version still starts a section for
+    cut-release.yml, so prose trailing one is a silently truncated release.
+    """
+    bad = [
+        (n, line.rstrip())
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if VERSION_HEADING.match(line) and not EXACT_VERSION_HEADING.match(line)
+    ]
+    assert not bad, (
+        f"{path.relative_to(REPO)} has version headings with trailing text: "
+        f"{bad}. cut-release.yml starts a section at such a line, so whatever "
+        f"follows it becomes the release notes."
     )
