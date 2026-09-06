@@ -132,10 +132,18 @@ jobs:
             echo "::error::$f does not exist on ${{ inputs.ref }}"
             exit 1
           fi
+          # The section ends at the next VERSION heading, not at the next
+          # level-2 heading of any kind. `/^## /` was the first version of
+          # this and it silently truncated v2.15.0-fx.1's notes at their own
+          # `## What's new`, publishing a release body two thirds shorter than
+          # the file it came from — and a tag annotation cannot be corrected
+          # afterwards. controller/CHANGELOG.md happened to use `###` inside
+          # its entries, so the controller release was unaffected and the bug
+          # looked like a firmware-only oddity.
           awk -v want="## $v" '
-            $0 == want            { in_section = 1; next }
-            in_section && /^## /  { exit }
-            in_section            { print }
+            $0 == want                 { in_section = 1; next }
+            in_section && /^## [0-9]/  { exit }
+            in_section                 { print }
           ' "$f" > /tmp/notes.md
           if [ ! -s /tmp/notes.md ]; then
             echo "::error::$f has no '## $v' section."
