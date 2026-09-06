@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.23.0-ea.11 (Early Access)
+
+**Second fix to the emOS build refusing a stock, freshly-rooted Echo.** Setup
+flow only.
+
+Part of your Echo's boot image is a small header the bootloader checks, and it
+ends with padding. Amazon's own images use one filler byte and images that have
+been repacked by rooting tools use another — both are perfectly normal, and the
+builder assumed whichever one it was written against. So it accepted a device
+that had been through the older setup flow and refused one restored to stock.
+
+It no longer assumes. Your image's own header is carried straight through,
+whatever it contains, which is correct by construction — the build replaces
+only the part of the image it needs to and leaves the rest exactly as it found
+it.
+
 ## 2.23.0-ea.10 (Early Access)
 
 **The emOS build no longer refuses a stock, freshly-rooted Echo.** Setup flow
