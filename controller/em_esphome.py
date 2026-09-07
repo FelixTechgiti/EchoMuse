@@ -85,6 +85,7 @@ import em_announce
 import em_recordings
 import em_runbarrier
 import em_oww_models
+import em_oww_metadata
 import em_player
 import em_timers
 import em_turnclock
@@ -328,6 +329,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         mac_address: str,
         oww_model_id: str,
         on_disconnected_cb,
+        oww_model_info,
         owning_server=None,   # DeviceESPhomeServer — back-reference so the
                               # standalone-announce path can read the live
                               # _standalone_play callback rather than a
@@ -344,6 +346,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self.label          = label
         self.mac_address    = mac_address
         self.oww_model_id   = oww_model_id
+        self.oww_model_info = oww_model_info
         self._owning_server  = owning_server
         # Strong references to in-flight timer-event tasks (see the
         # VoiceAssistantTimerEventResponse branch).
@@ -630,8 +633,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 available_wake_words=[
                     api_pb2.VoiceAssistantWakeWord(
                         id=self.oww_model_id,
-                        wake_word=em_oww_models.display_name(self.oww_model_id),
-                        trained_languages=["en"],
+                        wake_word=self.oww_model_info.name,
+                        trained_languages=list(self.oww_model_info.languages),
                     )
                 ],
                 active_wake_words=[self.oww_model_id],
@@ -2181,11 +2184,20 @@ class DeviceESPhomeServer:
     inbound connection is rejected with DisconnectResponse + close.
     """
 
-    def __init__(self, device_id: str, label: str, mac_address: str, oww_model_id: str, port: int) -> None:
+    def __init__(
+        self,
+        device_id: str,
+        label: str,
+        mac_address: str,
+        oww_model_id: str,
+        port: int,
+        oww_model_info,
+    ) -> None:
         self.device_id    = device_id
         self.label        = label
         self.mac_address  = mac_address
         self.oww_model_id = oww_model_id
+        self.oww_model_info = oww_model_info
         self.port         = port
         self._server: Optional[asyncio.AbstractServer] = None
         self._active_satellite: Optional[EchoMuseSatellite] = None
@@ -2311,6 +2323,7 @@ class DeviceESPhomeServer:
             label=self.label,
             mac_address=self.mac_address,
             oww_model_id=self.oww_model_id,
+            oww_model_info=self.oww_model_info,
             on_disconnected_cb=self._on_satellite_disconnected,
             owning_server=self,
         )
@@ -2452,8 +2465,9 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
     # Get OWW model from device config
     config       = await loop.run_in_executor(None, db.get_device_config, device_id)
     # Custom models are file paths in config; HA sees the friendly stem.
-    oww_model_id = em_oww_models.prediction_key(
-        config.get("owwModel", "hey_jarvis_v0.1"))
+    model_name = config.get("owwModel", "hey_jarvis_v0.1")
+    oww_model_id = em_oww_models.prediction_key(model_name)
+    oww_model_info = await loop.run_in_executor(None, em_oww_metadata.resolve, model_name)
 
     # Re-check after the awaits above — a concurrent caller may have
     # created the server while we were in the executor.
@@ -2466,6 +2480,7 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
         label=label,
         mac_address=mac,
         oww_model_id=oww_model_id,
+        oww_model_info=oww_model_info,
         port=port,
     )
     # Capabilities that arrived before this server existed decide which HA
@@ -2848,7 +2863,7 @@ async def trigger_voice_turn(
     # configured, because a model is always configured; what varies is whether
     # it fired. Covers "wakeword(0.522)" and the on-device "wakeword-dev(…)".
     wake_word_phrase = (
-        em_oww_models.display_name(server.oww_model_id)
+        satellite.oww_model_info.name
         if trigger_label.startswith("wakeword") else ""
     )
 
@@ -2921,7 +2936,7 @@ async def push_media_state(device_id: str, state: str) -> None:
         log.debug(f"[{device_id}] media state push failed: {e}")
 
 
-def update_oww_model(device_id: str, model_id: str) -> None:
+async def update_oww_model(device_id: str, model_id: str) -> None:
     """
     Keep HA's wake-word dropdown honest.
 
@@ -2932,11 +2947,21 @@ def update_oww_model(device_id: str, model_id: str) -> None:
     by the next satellite instance) and bounce the active HA connection so
     HA redials (within seconds) and re-requests the configuration.
     """
-    model_id = em_oww_models.prediction_key(model_id)
     server = get_server(device_id)
-    if server is None or server.oww_model_id == model_id:
+    if server is None:
+        return
+    # Runtime initialization must not pause the audio event loop. A newer
+    # request wins if concurrent model reads complete out of order.
+    revision = getattr(server, "_oww_metadata_revision", 0) + 1
+    server._oww_metadata_revision = revision
+    model_info = await asyncio.to_thread(em_oww_metadata.resolve, model_id)
+    if get_server(device_id) is not server or server._oww_metadata_revision != revision:
+        return
+    model_id = em_oww_models.prediction_key(model_id)
+    if server.oww_model_id == model_id and server.oww_model_info == model_info:
         return
     server.oww_model_id = model_id
+    server.oww_model_info = model_info
     satellite = server.get_satellite()
     if satellite is not None:
         log.info(f"[{device_id}] OWW model → {model_id} — bouncing HA "

@@ -3600,7 +3600,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller
         # restarts too.
-        esphome.update_oww_model(device_id, device.oww_model)
+        await esphome.update_oww_model(device_id, device.oww_model)
         # BT proxy: mark the device online (brings its proxy listener up if
         # enabled) and reconcile against current config — covers devices
         # approved or toggled while they were offline.

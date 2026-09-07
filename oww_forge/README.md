@@ -282,6 +282,37 @@ plain names). Note openwakeword keys its prediction dict by the filename
 *stem*, not the path — the controller maps path → stem everywhere it reads
 scores (`em_oww_models.prediction_key`), so keep filenames unique.
 
+## Model metadata
+
+New ONNX exports carry `wake_word` (the first `target_phrase`), the complete
+`target_phrases` list, `language`, `trained_by`, and a UTC `training_date`.
+Set `language` in the training config before building a non-English model.
+`recommended_threshold` is optional and advisory: it does not change a device's
+configured threshold. If the build environment supplies `FORGE_VERSION`, that
+value is recorded as `oww_forge_version`; an unknown version is omitted.
+
+The controller uses the metadata name and language when advertising the wake
+word to Home Assistant. A voice turn uses the same name that its HA connection
+advertised; button turns still carry no wake phrase. Model IDs and prediction
+keys remain filename-based. Replacing a model invalidates the metadata cache,
+and a config refresh reconnects HA if its name or language changed, even if
+the filename did not.
+
+Stock models and older or third-party files without metadata retain the existing
+filename-derived name and English language fallback. Unreadable optional metadata
+also falls back, with a warning. Publication preserves other ONNX metadata and
+uses an atomic replacement, so a failed stamp cannot replace a finished model.
+The exported file's hash changes, causing normal model asset synchronization.
+
+This exporter publishes ONNX only. Converting it separately to TFLite does not
+preserve these ONNX fields; metadata must be carried by that converter if a
+future consumer needs it.
+
+The real export/read/inference regression runs in the separate CI job:
+`python -m pytest oww_forge/tests/` (pytest, numpy, pyyaml, onnx and onnxruntime).
+The normal lightweight controller suite tests fallback and refresh behavior
+without importing runtime dependencies.
+
 ## Layout
 
 ```

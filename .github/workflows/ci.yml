@@ -29,6 +29,18 @@ jobs:
         working-directory: controller
         run: python -m pytest tests/ -v
 
+  forge-metadata-tests:
+    name: ONNX metadata round trip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # Keep runtime/model dependencies out of the lightweight controller suite.
+      - run: pip install pytest numpy pyyaml onnx==1.17.0 onnxruntime
+      - run: python -m pytest oww_forge/tests/ -v
+
   controller-lint:
     name: Controller lint (undefined names)
     runs-on: ubuntu-latest

@@ -1279,12 +1279,12 @@ def test_wake_word_phrase_is_sent_and_matches_what_we_advertise():
 
     advertised = re.search(r"api_pb2\.VoiceAssistantWakeWord\((.*?)\)", src, re.S)
     assert advertised, "VoiceAssistantWakeWord advertisement not found"
-    assert "em_oww_models.display_name" in advertised.group(1), (
-        "the advertised wake_word must come from em_oww_models.display_name, "
+    assert "self.oww_model_info.name" in advertised.group(1), (
+        "the advertised wake_word must come from the connection metadata, "
         "the same source as the phrase we send")
 
-    assert 'display_name(server.oww_model_id)' in src, (
-        "the phrase must be derived with display_name too — a second spelling "
+    assert 'satellite.oww_model_info.name' in src, (
+        "the phrase must use the same connection metadata — a second spelling "
         "is how it drifts from what we advertised")
 
 

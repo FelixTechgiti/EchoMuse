@@ -1102,7 +1102,7 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # Refresh HA's wake-word dropdown (lazy import — em_esphome imports
         # em_api at module level).
         import em_esphome
-        em_esphome.update_oww_model(device_id, effective["owwModel"])
+        await em_esphome.update_oww_model(device_id, effective["owwModel"])
     if pending_model:
         # The device is still on its previous wake word, still scoring
         # locally, still answering. Install, then switch.
@@ -4081,7 +4081,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     await live.send_control({"type": "config", **effective})
     live.oww_model = model
     import em_esphome
-    em_esphome.update_oww_model(device_id, model)
+    await em_esphome.update_oww_model(device_id, model)
     await _push_log_event(
         device_id, "info", "controller",
         f"Wake word model {model} installed — device switched"
