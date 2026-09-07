@@ -4,6 +4,11 @@
 
 model_name: "@NAME@"
 
+# Language advertised to Home Assistant for this trained model.
+language: "en"
+# Optional advisory detection threshold, 0..1; never overrides device settings.
+# recommended_threshold: 0.5
+
 # Phrase(s) the model activates on. Multiple entries still train ONE binary
 # model that fires on any of them — use alternate phonetic spellings to cover
 # how the phrase is actually pronounced in your house ("hey clara" is read
