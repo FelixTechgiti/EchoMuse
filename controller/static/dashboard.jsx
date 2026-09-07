@@ -5471,7 +5471,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const uname = await con.run('uname -a');
     addLog(uname || '(no answer)');
     const osrel = await con.run('cat /etc/os-release 2>/dev/null | head -3');
-    if (!/emos/i.test(osrel)) {
+    // ID=emos at the start of a line, not "emos" anywhere in the reply.
+    //
+    // A substring match was safe only while nothing else on this console ever
+    // said "emOS". The login banner now prints the name and the version, so a
+    // loose match could be satisfied by the banner rather than by
+    // /etc/os-release — a false positive on the one check that decides whether
+    // to keep going after a partition write. The line-anchored form can only
+    // be produced by the file.
+    if (!/^ID=emos\s*$/m.test(osrel)) {
       throw new Error('The console answered but this does not look like emOS '
         + `(/etc/os-release says "${osrel.trim() || 'nothing'}"). `
         + 'Restore the escrowed boot image before going further.');
@@ -5613,8 +5621,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
+      // /api/devices returns a bare ARRAY, not {devices: [...]}. Reading
+      // .devices off it yielded undefined and the `|| []` made that an empty
+      // list on every pass — so this loop never examined a single device, and
+      // three successive rewrites of the condition below were all debugging a
+      // predicate that was never evaluated against anything. Two other call
+      // sites in this file use the response directly as an array; checking one
+      // of them would have settled it in seconds.
       let list = [];
-      try { list = (await API.get('/api/devices')).devices || []; } catch {}
+      try { list = await API.get('/api/devices') || []; } catch {}
+      if (!Array.isArray(list)) list = list.devices || [];
       seen = list.find(d => (d.connected || d.firmware_ver)
         && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
