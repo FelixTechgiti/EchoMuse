@@ -290,6 +290,11 @@ def cmd_build(args) -> None:
     cfg_path = WAKEWORDS / name / "config.yml"
     if not cfg_path.exists():
         sys.exit(f"no such wake word: {cfg_path} missing (run forge.py new first)")
+    import yaml
+    from model_metadata import publish_model, training_metadata
+    config_text = cfg_path.read_text()
+    config = yaml.safe_load(config_text)
+    training_metadata(config)  # reject invalid identity before expensive training
     missing = missing_assets()
     if missing:
         sys.exit("missing training assets:\n  - " + "\n  - ".join(missing))
@@ -332,7 +337,9 @@ def cmd_build(args) -> None:
             sys.exit(f"training finished but {src} was not produced — check the logs above")
         MODELS.mkdir(parents=True, exist_ok=True)
         dest = MODELS / f"{name}.onnx"
-        shutil.copy2(src, dest)
+        if cfg_path.read_text() != config_text:
+            sys.exit("training config changed during the build; refusing to publish mismatched metadata")
+        publish_model(src, dest, config)
         log(f"model ready: {dest} ({dest.stat().st_size / 1e3:.0f} kB)")
         log("install into EchoMuse: see oww_forge/README.md §Installing")
 

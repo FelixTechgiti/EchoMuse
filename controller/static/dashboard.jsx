@@ -21,6 +21,39 @@ function isIngress() {
   return document.baseURI.includes('/hassio_ingress/');
 }
 
+// Why WebUSB is unavailable, or null when it is fine.
+//
+// WebUSB needs a secure context and no amount of code changes that, so this
+// exists only to say so BEFORE somebody unboxes a device — it used to surface
+// at the first click of Connect, with a cable already in their hand.
+//
+// One copy, read by both the wizard's pre-flight panel and requestDevice's
+// throw. A second copy would drift, and this is text somebody acts on.
+//
+// The origin is named because Chrome's allowlist matches scheme, host and port
+// exactly, and the add-on's page is served from HOME ASSISTANT's origin rather
+// than the controller's — so an entry added for the standalone dashboard does
+// nothing here and gives no clue why (#169).
+function webUsbBlocked() {
+  if (navigator.usb) return null;
+  const origin = window.location.origin;
+  return {
+    origin,
+    why: `WebUSB needs a secure context, and this page is on ${origin}.`,
+    // Under the add-on there is no localhost route to offer:
+    // _ingress_only_middleware rejects anything that is not the Supervisor
+    // gateway, so suggesting a direct port would send the user to a 403.
+    fix: isIngress()
+      ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to `
+        + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
+        + `the browser. An allowlist entry for the controller's own address does `
+        + `not cover this one.`
+      : `Open the dashboard at http://localhost:8768, or add exactly ${origin} to `
+        + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
+        + `the browser.`,
+  };
+}
+
 function ingressWebSocketUrl(path) {
   const url = new URL(ingressPath(path), document.baseURI);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2737,30 +2770,8 @@ const _ADB = (() => {
     // Open the browser USB picker, load the library, authenticate, return a
     // ready Client.  logFn is optional — wizard passes addLog.
     static async requestDevice(logFn = () => {}) {
-      if (!navigator.usb) {
-        // Name the origin. Chrome's insecure-origin allowlist is per-origin
-        // and matches on scheme, host and port exactly, so someone who has
-        // already allowlisted the standalone dashboard gets no benefit here
-        // and has no way to tell why — the add-on's page is served from
-        // Home Assistant's origin, not the controller's.
-        const origin = window.location.origin;
-        throw new Error(
-          `WebUSB not available — requires a secure context (HTTPS or localhost). ` +
-          `This page is on ${origin}. ` +
-          (isIngress()
-            // Under the add-on there is no localhost route to offer:
-            // _ingress_only_middleware rejects anything that is not the
-            // Supervisor gateway, so suggesting a direct port would send
-            // the user to a 403.
-            ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to ` +
-              `chrome://flags/#unsafely-treat-insecure-origin-as-secure and ` +
-              `relaunch the browser. An allowlist entry for the controller's ` +
-              `own address does not cover this one.`
-            : `Open the dashboard at http://localhost:8768, or add exactly ` +
-              `${origin} to chrome://flags/#unsafely-treat-insecure-origin-as-secure ` +
-              `and relaunch the browser.`)
-        );
-      }
+      const blocked = webUsbBlocked();
+      if (blocked) throw new Error(`${blocked.why} ${blocked.fix}`);
 
       const { manager, Transport, Adb, defaultAuths } = await _load(logFn);
 
@@ -2854,6 +2865,13 @@ const CONNECT_STEPS = new Set([0, 1, 6]);
 
 // The emOS flow reconnects only once, at TWRP, and never returns to Android.
 const _EMOS_CONNECT_STEPS = new Set([0, 1]);
+
+// Steps that carry operator-fixable input: a file picker or a field. Keep
+// stable IDs here rather than flow-local positions so emOS and FireOS cannot
+// drift when either flow gains a step.
+const INPUT_STEPS = new Set([
+  'install_magisk', 'wifi', 'install_em', 'build_emos', 'wifi_register',
+]);
 
 // Which mode each step has to run in.
 //
@@ -2980,6 +2998,19 @@ const _WIZARD_STEPS = [
   // also much better suited to 15MB than the shell plane.
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
+
+// Transcript styling only — copy uses e.msg verbatim.
+function _wizardLogClass(msg, type) {
+  if (type === 'head') return 'em-console__line--head';
+  if (type === 'error') return 'em-console__line--error';
+  if (type === 'ok') return 'em-console__line--ok';
+  if (type === 'warn') return 'em-console__line--warn';
+  if (/^Waiting for|still waiting on|^\s+\[\d+s\]/.test(msg)) return 'em-console__line--wait';
+  if (/^  adb:/.test(msg)) return 'em-console__line--adb';
+  if (/^Error:/.test(msg)) return 'em-console__line--error';
+  if (/^  →/.test(msg)) return 'em-console__line--detail';
+  return 'em-console__line--info';
+}
 
 // The emOS flow. Nine steps against thirteen, and the four that go are the
 // four that only ever existed to obtain root inside Android:
@@ -3294,15 +3325,22 @@ class _EmosConsole {
 
 // Which flow the wizard runs.
 //
-// emOS is what a new device gets; the FireOS path stays reachable at
-// `?flow=fireos` and is not advertised in the UI. It is kept rather than
-// deleted because emOS is proven on one device, and a path that has
-// provisioned every device in the field is not something to remove on that
-// evidence — but offering the choice would ask the user to make a decision
-// they have no basis for.
+// emOS is the default and FireOS is offered beside it, on the wizard's first
+// step only (Wil's call, 2026-09-07). The earlier version hid FireOS behind
+// `?flow=fireos` on the grounds that offering a choice would ask the user to
+// decide something they had no basis for. The answer to that is to GIVE them
+// the basis rather than to withhold the choice, so both options carry the
+// thing that actually separates them.
 //
-// Read from the query string ONCE, not from state: changing flow mid-run
-// would renumber the steps under a wizard that has already done some of them.
+// Why emOS is the default rather than the safer-sounding incumbent: on FireOS
+// we share the audio path with Amazon's stack permanently and cannot stop —
+// evicting the HAL crash-loops `system_server` and takes WiFi with it — which
+// is why the jack faults there are worked around on a 30s reconciler rather
+// than fixed. emOS has neither the HAL nor the faults. What it does have is
+// far less field evidence, and a way back that costs the user their `/data`.
+//
+// `?flow=fireos` still works and still wins, so a support answer can put
+// somebody on a known path without talking them through a control.
 function _wizardFlow() {
   try {
     const want = new URLSearchParams(window.location.search).get('flow');
@@ -3312,7 +3350,11 @@ function _wizardFlow() {
 }
 
 function ProvisionWizard({ token, onClose, knownDevices }) {
-  const flow = useRef(_wizardFlow()).current;
+  // State rather than a ref, but frozen the moment anything has run — see
+  // `flowLocked` below. The two flows have different step COUNTS, so switching
+  // one mid-run would renumber the steps under a wizard that has already done
+  // some of them, which is what the ref was protecting against.
+  const [flow, setFlow] = useState(_wizardFlow);
   const isEmos = flow === 'emos';
   const STEPS = isEmos ? _EMOS_STEPS : _WIZARD_STEPS;
   const STEP_MODE = isEmos ? _EMOS_STEP_MODE : _STEP_MODE;
@@ -3348,6 +3390,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [latestRelease, setLatestRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
+  const [waiting, setWaiting] = useState(false);
   const logRef = useRef(null);
   // Bumped whenever the step in flight is abandoned — by the cable being
   // pulled, or by the operator cancelling. A step that later settles compares
@@ -3380,6 +3423,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
 
+  // The flow can only be chosen while the wizard has done nothing: on step 0,
+  // not running, with no step yet in any state but pending, and no device
+  // attached. Anything else and the choice is locked — switching would
+  // renumber the steps under work already done.
+  const flowLocked = running || step !== 0 || !!adb
+                  || stepState.some(s => s !== 'pending');
+
+  function chooseFlow(next) {
+    if (next === flow || flowLocked) return;
+    // Step count differs between the flows, so the per-step state has to be
+    // rebuilt rather than carried across.
+    setFlow(next);
+    setStepState((next === 'emos' ? _EMOS_STEPS : _WIZARD_STEPS).map(() => 'pending'));
+    setStep(0);
+    setLog([]);
+  }
+
   // Abandon whatever step is in flight.
   //
   // The ADB calls a step awaits do NOT reliably reject when the device goes
@@ -3398,6 +3458,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   function abandonStep(reason, idx = step) {
     stepEpoch.current++;
     setRunning(false);
+    setWaiting(false);
     markStep(idx, 'error');
     addLog(reason, 'error');
   }
@@ -4166,43 +4227,48 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const TIMEOUT_MS = 600000;
     const started = Date.now();
     let boot = false, lastNote = -1, lastProbe = '', announced = false;
-    while (Date.now() - started < TIMEOUT_MS) {
-      if (!boot) boot = (await c.shell('getprop sys.boot_completed')).trim() === '1';
-      if (boot) {
-        // The package manager is the thing we actually need; ask it. It comes
-        // up meaningfully after boot_completed on this hardware, so the flag
-        // is a necessary condition, not the answer.
-        // Deliberately NOT via su: this is a read, it works as the shell
-        // user, and verify_root calls this before root is confirmed.
-        lastProbe = (await c.shell('pm path android 2>&1')).trim();
-        if (lastProbe.startsWith('package:')) {
-          // Only worth a line if there was actually a wait. Every step after
-          // the first re-gates (steps are individually retryable), and three
-          // "Framework ready after 0s" banners per run is noise that trains
-          // people to skim past the one time it matters.
-          if (announced) addLog(`Framework ready after ${Math.round((Date.now() - started) / 1000)}s.`, 'ok');
-          return;
+    setWaiting(true);
+    try {
+      while (Date.now() - started < TIMEOUT_MS) {
+        if (!boot) boot = (await c.shell('getprop sys.boot_completed')).trim() === '1';
+        if (boot) {
+          // The package manager is the thing we actually need; ask it. It comes
+          // up meaningfully after boot_completed on this hardware, so the flag
+          // is a necessary condition, not the answer.
+          // Deliberately NOT via su: this is a read, it works as the shell
+          // user, and verify_root calls this before root is confirmed.
+          lastProbe = (await c.shell('pm path android 2>&1')).trim();
+          if (lastProbe.startsWith('package:')) {
+            // Only worth a line if there was actually a wait. Every step after
+            // the first re-gates (steps are individually retryable), and three
+            // "Framework ready after 0s" banners per run is noise that trains
+            // people to skim past the one time it matters.
+            if (announced) addLog(`Framework ready after ${Math.round((Date.now() - started) / 1000)}s.`, 'ok');
+            return;
+          }
         }
+        if (!announced) {
+          announced = true;
+          addLog('Waiting for Android to finish booting — safe to have clicked Reconnect early, this waits as long as it takes…');
+        }
+        // Heartbeat every 15s so a multi-minute wait reads as progress rather
+        // than as a hang (lesson 3 above).
+        const elapsed = Math.floor((Date.now() - started) / 1000);
+        if (elapsed - lastNote >= 15) {
+          lastNote = elapsed;
+          addLog(`  [${elapsed}s] boot_completed=${boot ? '1' : '0'}`
+               + (boot ? `, package manager not answering yet${lastProbe ? ` (${lastProbe.split('\n')[0]})` : ''}` : ', still booting'));
+        }
+        await new Promise(r => setTimeout(r, 2000));
       }
-      if (!announced) {
-        announced = true;
-        addLog('Waiting for Android to finish booting — safe to have clicked Reconnect early, this waits as long as it takes…');
-      }
-      // Heartbeat every 15s so a multi-minute wait reads as progress rather
-      // than as a hang (lesson 3 above).
-      const elapsed = Math.floor((Date.now() - started) / 1000);
-      if (elapsed - lastNote >= 15) {
-        lastNote = elapsed;
-        addLog(`  [${elapsed}s] boot_completed=${boot ? '1' : '0'}`
-             + (boot ? `, package manager not answering yet${lastProbe ? ` (${lastProbe.split('\n')[0]})` : ''}` : ', still booting'));
-      }
-      await new Promise(r => setTimeout(r, 2000));
+      throw new Error(
+        `Android has not finished booting after 10 minutes, so ${what} cannot run. `
+        + `Every pm command would fail and the step would silently do nothing. `
+        + `This is long past a slow boot — suspect a bootloop rather than patience: `
+        + `check the device's light ring, and click Retry once it settles.`);
+    } finally {
+      setWaiting(false);
     }
-    throw new Error(
-      `Android has not finished booting after 10 minutes, so ${what} cannot run. `
-      + `Every pm command would fail and the step would silently do nothing. `
-      + `This is long past a slow boot — suspect a bootloop rather than patience: `
-      + `check the device's light ring, and click Retry once it settles.`);
   }
 
   async function runVerifyRoot(c) {
@@ -4262,33 +4328,38 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let out = '';
     let rooted = false;
     const attemptStart = Date.now();
-    for (let i = 0; i < 15; i++) {
-      const callStart = Date.now();
-      // The line below reports the call's duration, but only once it returns —
-      // and a single su call has been observed blocking for 72s against a
-      // magiskd that isn't listening yet. That was 72 seconds of a completely
-      // silent wizard, which is indistinguishable from a hang. Tick while the
-      // call is still in flight, so the wait is visibly a wait.
-      const ticker = setInterval(
-        () => addLog(`    still waiting on su (${Math.round((Date.now() - callStart) / 1000)}s) — magiskd has not answered yet`),
-        15000);
-      try {
-        out = await c.shell('su -c id 2>&1');
-      } finally {
-        clearInterval(ticker);
+    setWaiting(true);
+    try {
+      for (let i = 0; i < 15; i++) {
+        const callStart = Date.now();
+        // The line below reports the call's duration, but only once it returns —
+        // and a single su call has been observed blocking for 72s against a
+        // magiskd that isn't listening yet. That was 72 seconds of a completely
+        // silent wizard, which is indistinguishable from a hang. Tick while the
+        // call is still in flight, so the wait is visibly a wait.
+        const ticker = setInterval(
+          () => addLog(`    still waiting on su (${Math.round((Date.now() - callStart) / 1000)}s) — magiskd has not answered yet`),
+          15000);
+        try {
+          out = await c.shell('su -c id 2>&1');
+        } finally {
+          clearInterval(ticker);
+        }
+        const callMs = Date.now() - callStart;
+        // Log every attempt with timing — the previous version of this loop
+        // was silent inside the loop body, so a single su -c id call that's
+        // unexpectedly slow (e.g. blocking on a magiskd socket that isn't
+        // listening yet, rather than failing fast with permission-denied)
+        // was indistinguishable from a true hang. This makes that visible:
+        // if callMs is large, the call itself is slow, not the wizard stuck.
+        addLog(`  attempt ${i + 1}/15 (${(callMs / 1000).toFixed(1)}s): ${out || '(empty)'}`);
+        if (out.includes('uid=0')) { rooted = true; break; }
+        // If a single su call already took a while, don't add the full 2s
+        // sleep on top — just move to the next attempt.
+        if (callMs < 2000) await new Promise(r => setTimeout(r, 2000 - callMs));
       }
-      const callMs = Date.now() - callStart;
-      // Log every attempt with timing — the previous version of this loop
-      // was silent inside the loop body, so a single su -c id call that's
-      // unexpectedly slow (e.g. blocking on a magiskd socket that isn't
-      // listening yet, rather than failing fast with permission-denied)
-      // was indistinguishable from a true hang. This makes that visible:
-      // if callMs is large, the call itself is slow, not the wizard stuck.
-      addLog(`  attempt ${i + 1}/15 (${(callMs / 1000).toFixed(1)}s): ${out || '(empty)'}`);
-      if (out.includes('uid=0')) { rooted = true; break; }
-      // If a single su call already took a while, don't add the full 2s
-      // sleep on top — just move to the next attempt.
-      if (callMs < 2000) await new Promise(r => setTimeout(r, 2000 - callMs));
+    } finally {
+      setWaiting(false);
     }
     addLog(`Total wait: ${((Date.now() - attemptStart) / 1000).toFixed(0)}s.`);
     if (!rooted) throw new Error('Root not working after waiting for boot + magiskd — check Magisk install and magisk.db.');
@@ -4461,6 +4532,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     } else {
       addLog(`"${ssid}" was not in the last scan — configuring it as a hidden network.`, 'warn');
     }
+
+    // Android 5.1's WifiAutoJoinController blocks auto-join after enough
+    // "no internet" reports. Reset the persisted counter before disabling the
+    // source of new reports, so an already-provisioned device recovers too.
+    addLog('Resetting Android WiFi network history…');
+    await c.shell('su -c "rm -f /data/misc/wifi/networkHistory.txt"');
+
+    // On a local-only LAN every connection is flagged, so the counter grows
+    // every reboot until association is suppressed (#317).
+    addLog('Disabling captive portal detection (EchoMuse is local-only)…');
+    await c.shell('su -c "settings put global captive_portal_detection_enabled 0"');
+    const captivePortal = (await c.shell(
+      'su -c "settings get global captive_portal_detection_enabled"')).trim();
+    if (captivePortal !== '0') {
+      throw new Error(`Captive portal detection setting read back ${captivePortal || '(empty)'}, expected 0.`);
+    }
+    addLog('Captive portal detection disabled (read back 0).', 'ok');
 
     addLog('Enabling WiFi radio…');
     await c.shell("su -c 'svc wifi enable'");
@@ -5677,7 +5765,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const uname = await con.run('uname -a');
     addLog(uname || '(no answer)');
     const osrel = await con.run('cat /etc/os-release 2>/dev/null | head -3');
-    if (!/emos/i.test(osrel)) {
+    // ID=emos at the start of a line, not "emos" anywhere in the reply.
+    //
+    // A substring match was safe only while nothing else on this console ever
+    // said "emOS". The login banner now prints the name and the version, so a
+    // loose match could be satisfied by the banner rather than by
+    // /etc/os-release — a false positive on the one check that decides whether
+    // to keep going after a partition write. The line-anchored form can only
+    // be produced by the file.
+    if (!/^ID=emos\s*$/m.test(osrel)) {
       throw new Error('The console answered but this does not look like emOS '
         + `(/etc/os-release says "${osrel.trim() || 'nothing'}"). `
         + 'Restore the escrowed boot image before going further.');
@@ -5819,8 +5915,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
+      // /api/devices returns a bare ARRAY, not {devices: [...]}. Reading
+      // .devices off it yielded undefined and the `|| []` made that an empty
+      // list on every pass — so this loop never examined a single device, and
+      // three successive rewrites of the condition below were all debugging a
+      // predicate that was never evaluated against anything. Two other call
+      // sites in this file use the response directly as an array; checking one
+      // of them would have settled it in seconds.
       let list = [];
-      try { list = (await API.get('/api/devices')).devices || []; } catch {}
+      try { list = await API.get('/api/devices') || []; } catch {}
+      if (!Array.isArray(list)) list = list.devices || [];
       seen = list.find(d => (d.connected || d.firmware_ver)
         && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
@@ -6097,13 +6201,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   const cur    = STEPS[step];
   const isDone = step === STEPS.length - 1 && stepState[step] === 'done';
-
-  // Buttons are shown for manual steps; auto steps start themselves.
-
-  // Dashboard-palette step states — same tones the rest of the UI uses
-  // (accent slate for activity, deep green for done, rust for error).
+  const doneCount = stepState.filter(s => s === 'done').length;
+  // +0.35 for a running step is deliberate: it nudges the bar off the
+  // completed count so an in-flight step reads as progress rather than as a
+  // stall, but stays well under a full step so a step that hangs is still an
+  // obvious non-finish. It is a human-chosen fraction, not a derived figure.
+  const progressPct = Math.min(100, ((doneCount + (running ? 0.35 : 0)) / STEPS.length) * 100);
+  const upcoming = STEPS.slice(step + 1, step + 3);
+  const stepFailed = !running && stepState[step] === 'error';
+  // Evaluated per render rather than held in state: a browser relaunched with
+  // the flag set is a new page load, so there is nothing to invalidate.
+  const usbBlocked = webUsbBlocked();
   const statusColors = { pending: 'var(--muted)', running: 'var(--accent)', done: 'var(--ok)', error: 'var(--warn)' };
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
+
+  function recoveryHint() {
+    if (CONNECT.has(step)) {
+      return adb
+        ? 'The USB link is up but this step failed — click Retry to run it again.'
+        : 'Pick the device from the USB picker, then click Retry.';
+    }
+    if (INPUT_STEPS.has(cur.id)) {
+      return diagnostics
+        ? 'Fix the input above, then retry. If it keeps failing, download diagnostics and attach them to your issue.'
+        : 'Fix the input above and retry. Reconnect if the device was unplugged.';
+    }
+    if (diagnostics) {
+      return 'Click Retry first. If it fails again, download diagnostics — the transcript is included.';
+    }
+    return 'Click Retry to run this step again. Use Reconnect if the cable was unplugged.';
+  }
 
   return (
     /* Same overlay + frame treatment as the Detail and Settings modals —
@@ -6133,40 +6260,131 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
-          {/* Step list */}
-          <div style={{ width: 176, borderRight: '1px solid var(--border)', background: 'var(--hairline)', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
-            {STEPS.map((s, i) => {
+          {/* Step list + overall progress */}
+          <div style={{ width: 196, borderRight: '1px solid var(--border)', background: 'var(--hairline)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+            <div className="em-wizard-progress">
+              <div className="em-wizard-progress__track">
+                <div className="em-wizard-progress__fill" style={{ width: `${progressPct}%` }}/>
+              </div>
+              <div className="em-wizard-progress__label">
+                {doneCount} of {STEPS.length} complete · step {step + 1}
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
+             {STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
                 <div key={s.id}
-                  style={{
-                    padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7,
-                    background: active ? 'var(--hairline)' : 'transparent',
-                    cursor: 'default',
-                    opacity: running && !active ? 0.5 : 1,
-                  }}>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: active ? 'var(--text)' : 'var(--muted)', letterSpacing: '0.04em', lineHeight: 1.4 }}>{s.label}</span>
+                  className={[
+                    'em-wizard-step',
+                    active && 'em-wizard-step--active',
+                    st === 'done' && 'em-wizard-step--done',
+                    st === 'error' && 'em-wizard-step--error',
+                    st === 'pending' && 'em-wizard-step--pending',
+                  ].filter(Boolean).join(' ')}
+                  style={{ opacity: running && !active && st !== 'done' ? 0.55 : undefined }}>
+                  <span className="em-wizard-step__num">{i + 1}</span>
+                  <span className="em-wizard-step__icon" style={{ color: statusColors[st] }}>{statusIcons[st]}</span>
+                  <span className="em-wizard-step__label">{s.label}</span>
                 </div>
               );
             })}
+            </div>
           </div>
 
           {/* Content */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '18px 22px 14px' }}>
 
             {/* Step title + desc */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{cur.label}</div>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{cur.desc}</div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                {step + 1}. {cur.label}
+              </div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6 }}>{cur.desc}</div>
             </div>
+
+            {/* WebUSB pre-flight. Shown on step 0 rather than at the first
+                click, because the point is to be read before a device is
+                unboxed — the throw in requestDevice says the same thing to
+                somebody already holding a cable. Both fixes are named; there
+                is no third one, and nothing here can be worked around in
+                code. */}
+            {step === 0 && usbBlocked && (
+              <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>USB is unavailable in this browser</div>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: '0 0 6px' }}>
+                  {usbBlocked.why}
+                </p>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: 0 }}>
+                  {usbBlocked.fix}
+                </p>
+              </div>
+            )}
+
+            {/* Which OS to install. Step 0 only, and gone once anything has
+                run — see flowLocked. Both options state the thing that
+                actually decides it, because a choice offered without one is
+                the objection this control was held back for. Above "Up next",
+                which previews the flow being chosen. */}
+            {step === 0 && !flowLocked && (
+              <div style={{ marginBottom: 12 }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>What to install</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {[
+                    { id: 'emos', name: 'emOS',
+                      sub: 'No Amazon software. The 3.5mm jack works.',
+                      warn: 'Newer, and going back to FireOS wipes the device.' },
+                    { id: 'fireos', name: 'FireOS + root',
+                      sub: 'Keeps Android. Every device in the field runs this.',
+                      warn: 'The 3.5mm jack is unreliable on this path.' },
+                  ].map(o => (
+                    <div key={o.id} onClick={() => chooseFlow(o.id)}
+                      style={{
+                        flex: 1, cursor: 'pointer', padding: '9px 11px', borderRadius: 8,
+                        border: `1px solid ${flow === o.id ? 'var(--accent)' : 'var(--border-soft)'}`,
+                        background: flow === o.id ? 'var(--hairline)' : 'transparent',
+                      }}>
+                      <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600,
+                                    color: flow === o.id ? 'var(--text)' : 'var(--text2)' }}>
+                        {o.name}{o.id === 'emos' && <span style={{ fontWeight: 400, color: 'var(--muted)' }}> · default</span>}
+                      </div>
+                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', marginTop: 3, lineHeight: 1.5 }}>{o.sub}</div>
+                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--warn)', marginTop: 2, lineHeight: 1.5 }}>{o.warn}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {upcoming.length > 0 && !isDone && (
+              <div className="em-wizard-upcoming">
+                <div className="em-label" style={{ marginBottom: 6 }}>Up next</div>
+                {upcoming.map(s => (
+                  <div key={s.id} className="em-wizard-upcoming__item">
+                    <span className="em-wizard-upcoming__name">{s.label}</span>
+                    <span className="em-wizard-upcoming__desc">{s.desc}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {running && (
+              <div className={'em-wizard-status' + (waiting ? ' em-wizard-status--wait' : '')}>
+                <span className="em-wizard-status__dot"/>
+                <span>
+                  {waiting
+                    ? 'Waiting on the device — this can take several minutes and is normal.'
+                    : 'Working on this step…'}
+                </span>
+              </div>
+            )}
 
             {/* ── Step-specific controls ── */}
 
             {/* Steps 0, 1, 6: connect / reconnect buttons */}
             {CONNECT.has(step) && stepState[step] === 'pending' && !running && (
               <div style={{ marginBottom: 10 }}>
-                <Pill onClick={() => runStep(step)}>
+                <Pill disabled={!!usbBlocked} onClick={() => runStep(step)}>
                   {step === 0 ? 'Connect Device' : step === 1 ? 'Connect to TWRP' : 'Reconnect Device'}
                 </Pill>
               </div>
@@ -6314,9 +6532,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
             {/* emOS steps 7 and 8: reboot into emOS and configure WiFi over
                 the console. */}
+            {/* The first boot is the one moment the operator has to watch,
+                and the only one where the wrong reaction makes things worse.
+                Told BEFORE the reboot rather than after it goes wrong: this
+                asks somebody to act on their own hardware, so it keeps its
+                length. The ring states are the ones in emos/README.md — the
+                orbiting segment is the case that needs a human, because it
+                means PID 1 never ran and nothing on the device will recover
+                itself. */}
             {isEmos && step === 7 && stepState[7] !== 'done' && !running && (
-              <div style={{ marginBottom: 12 }}>
-                <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+              <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>Watch the light ring on this boot</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
+                  <div><strong style={{ color: 'var(--ok)' }}>Filling, then white, then fading</strong> — up and on the network. Done, about 30 seconds.</div>
+                  <div><strong>Two lit segments at the top, throbbing</strong> — waiting for the network. Normal, and most of the boot.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Solid amber</strong> — the device is restoring its own last good image. Leave it alone; it reboots itself.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Red and stopped</strong> — a boot stage failed. Recoverable, see below.</div>
+                  <div><strong style={{ color: 'var(--error)' }}>A single segment orbiting a full blue ring, for more than a minute</strong> — emOS never started. This is the one that needs you.</div>
+                </div>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, margin: '10px 0 0' }}>
+                  <strong>If it does not come up, do not keep power cycling it.</strong> To reach
+                  TWRP: unplug the power, hold the <strong>mute</strong> button down, and apply
+                  power with it still held — the ring shows an <strong>alternating cyan
+                  pattern</strong> once you are in recovery. Reconnect here and use
+                  <strong> Restore escrowed boot image</strong> below: about ten seconds, and it
+                  leaves everything on /data alone. Repeatedly power cycling a device that will
+                  not boot is what turns a recoverable one into a case-opening job.
+                </p>
+                <div style={{ marginTop: 12 }}>
+                  <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+                </div>
               </div>
             )}
             {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
@@ -6358,54 +6603,45 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Retry button — re-runs the step directly (runStep marks it running).
-                Excludes steps with their own dedicated retry UI above (file
-                pickers for 3/11, WifiPanel for 10) — those already give a
-                complete retry path with fresh input, so a second generic
-                "Retry" here would just compete with it and, for the file
-                steps, retry with no file selected (since failure clears it). */}
-            {!running && stepState[step] === 'error' && ![3, 10, 11].includes(step) && (
-              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
-                <Pill onClick={() => runStep(step)}>Retry</Pill>
-                {/* Reachable from every step, not just the connection ones.
-                    Unplugging the cable is a normal reaction to something
-                    going wrong, and it used to leave the wizard holding a dead
-                    handle with no way to get a live one (#91). */}
-                {!CONNECT.has(step) && (
-                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
-                )}
-                {/* Collection is automatic on failure; sharing is deliberate.
-                    The file is redacted controller-side (no SSIDs, BSSIDs or
-                    IPs) so it is safe to attach to a public issue, but it is
-                    still the operator's call whether to. */}
-                {diagnostics && (
-                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
-                )}
-                {step === 0 && duplicateDeviceId && (
-                  <Pill danger onClick={async () => {
-                    try {
-                      await API.del(`/api/devices/${duplicateDeviceId}`);
-                      addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
-                      setDuplicateDeviceId(null);
-                      markStep(0, 'pending');
-                    } catch (e) {
-                      addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
-                    }
-                  }}>Delete "{duplicateDeviceId}" from controller</Pill>
-                )}
+            {/* Retry / recovery — one panel so the primary action is obvious */}
+            {stepFailed && !INPUT_STEPS.has(cur.id) && (
+              <div className="em-panel em-wizard-recovery">
+                <div className="em-label">This step failed</div>
+                <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                <div className="em-wizard-recovery__actions">
+                  <Pill accent onClick={() => runStep(step)}>Retry</Pill>
+                   {!CONNECT.has(step) && (
+                    <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                  )}
+                  {diagnostics && (
+                    <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                  {step === 0 && duplicateDeviceId && (
+                    <Pill danger onClick={async () => {
+                      try {
+                        await API.del(`/api/devices/${duplicateDeviceId}`);
+                        addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
+                        setDuplicateDeviceId(null);
+                        markStep(0, 'pending');
+                      } catch (e) {
+                        addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
+                      }
+                    }}>Delete "{duplicateDeviceId}" from controller</Pill>
+                  )}
+                </div>
               </div>
             )}
 
-            {/* The file steps run their own buttons above and are excluded
-                from the Retry block, which left them with no way to reconnect
-                either. A dead handle is a dead handle whichever step is
-                showing, and step 11 pushes 10MB over that handle. */}
-            {!running && stepState[step] === 'error' && [3, 10, 11].includes(step) && (
-              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
-                <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
-                {diagnostics && (
-                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
-                )}
+            {stepFailed && INPUT_STEPS.has(cur.id) && (
+              <div className="em-panel em-wizard-recovery">
+                <div className="em-label">This step failed</div>
+                <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                <div className="em-wizard-recovery__actions">
+                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                  {diagnostics && (
+                    <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                </div>
               </div>
             )}
 
@@ -6450,25 +6686,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             </div>
             <div
               ref={logRef}
-              style={{
-                flex: 1, minHeight: 0, overflowY: 'auto',
-                background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))',
-                border: '1px solid var(--lcd-line)', borderRadius: 8,
-                boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)',
-                padding: '10px 14px',
-                fontFamily: "'DM Mono',monospace", fontSize: 10, lineHeight: 1.7,
-                marginTop: 10,
-              }}
+              className="em-console"
+              style={{ flex: 1, minHeight: 0, marginTop: 10 }}
             >
               {log.length === 0
                 ? <span style={{ color: 'var(--lcd-faint)' }}>— no output yet —</span>
                 : log.map((e, i) => (
-                  // 'head' is a step banner, not output — it is what turns 200
-                  // undifferentiated lines into something you can scan for the
-                  // step that went wrong.
-                  <div key={i} style={e.type === 'head'
-                    ? { color: 'var(--accent-lit)', letterSpacing: '0.12em', marginTop: i === 0 ? 0 : 10, paddingTop: 6, borderTop: i === 0 ? 'none' : '1px solid var(--lcd-faint)' }
-                    : { color: e.type === 'error' ? 'var(--error)' : e.type === 'ok' ? 'var(--ok)' : e.type === 'warn' ? 'var(--warn)' : 'var(--lcd-green)' }}>
+                  <div key={i} className={_wizardLogClass(e.msg, e.type)}>
                     {e.msg}
                   </div>
                 ))
