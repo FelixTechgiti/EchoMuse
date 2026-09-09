@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.23.0-ea.15 (Early Access)
+
+**Fixed: some commands took fifteen seconds to answer.** If you spoke
+immediately after the wake word, or said something short like "stop", the Echo
+would sit there for about fifteen seconds before replying — while the same
+words, said after a half-second pause, came back in three. Reported by
+**@maxwellh**, with a support bundle that made it findable.
+
+The wait was not ours. Home Assistant decides when you have stopped speaking,
+and before it can do that it has to decide you STARTED — which needs about a
+third of a second of speech it is confident about. A short command, or one that
+begins before its microphone analysis has warmed up, never clears that bar, so
+Home Assistant stops waiting only when its own fifteen-second limit runs out,
+and reports that as though you had simply finished talking. Nothing in the
+message it sends says otherwise, which is why this looked for months like the
+Echo being slow.
+
+The controller now notices when that has happened and ends the turn itself,
+about a second after you stop speaking. While Home Assistant's own detection is
+working — the ordinary case — nothing changes: its judgement is better than
+ours and it still decides. This was firing on roughly one wake in thirty here,
+and about half of those came back with no answer at all.
+
+Each turn now also records whether Home Assistant's detection ever engaged, so
+this is countable rather than something you notice and doubt. If a command
+still takes fifteen seconds, that is worth reporting with a support bundle.
+
+**Fixed: provisioning a device that already had a console password set could
+not finish.** The password lives in a part of the device that a reinstall
+deliberately leaves alone, so a device moved between EchoMuse setups — or
+simply set up again — arrived still holding it, and the setup wizard had no way
+past the prompt. It reported that the device's console "did not answer", which
+pointed at the boot, the flash and the image rather than at a login, and the
+device itself was fine throughout.
+
+Provisioning now clears the console password along with the old install, and
+the controller puts it back when the device next connects. If you are moving an
+Echo from somebody else's EchoMuse, this is also the right behaviour on its own
+account: their password should not follow the hardware to you.
+
 ## 2.23.0-ea.14 (Early Access)
 
 **You can now choose which operating system the wizard installs.** The first
