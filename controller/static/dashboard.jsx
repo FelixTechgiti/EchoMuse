@@ -2126,6 +2126,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
+                audioStateCapable={!device.connected || !!device.audioStateCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 spotifyCapable={!device.connected || !!device.spotifyCapable}
@@ -6911,7 +6912,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "audioHoldoffMs"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -7039,6 +7040,7 @@ function onDeviceMode(config) {
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
+                            audioStateCapable = true,
                             holdCapable = true, triggerCapable = true,
                             hwEchoRef = false, hwRefCapable = true,
                             sendspinCapable = true,
@@ -7271,6 +7273,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   : "needs firmware that mixes music and voice (v2.10.0+)"}
                 value={config.duckDb ?? -18} min={-40} max={0} step={1} unit="dB"
                 onChange={v => set('duckDb', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Slider label="Audio hold-off" disabled={!audioStateCapable}
+                sub={audioStateCapable
+                  ? "how long the HA \"Audio\" sensor stays on after the last sound — bridges the gap between an answer and the announcement after it, so an amplifier automated on it does not switch input back and forth"
+                  : "needs firmware that reports what its music plane is playing"}
+                value={config.audioHoldoffMs ?? 5000} min={0} max={30000} step={500} unit="ms"
+                onChange={v => set('audioHoldoffMs', v)}/>
             </div>
             {/* The startup-volume slider used to live here and was removed
                 (2026-07-25): volume is persisted device STATE, not a setting.

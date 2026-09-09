@@ -59,8 +59,8 @@ message (`device/internal/client/control.go`):
 }
 ```
 
-`capabilities` is the negotiation signal. The Dot announces ten unconditionally
-plus one conditional (`capabilities()` in `control.go`):
+`capabilities` is the negotiation signal. The Dot announces sixteen
+unconditionally plus one conditional (`capabilities()` in `control.go`):
 
 | Capability | Condition | Meaning |
 |------------|-----------|---------|
@@ -74,6 +74,12 @@ plus one conditional (`capabilities()` in `control.go`):
 | `button_hold` | always | Emits long-press (`heldMs`) |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
 | `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
+| `mute_set` | always | Accepts a `mute_set` command. Says nothing about unmuting — no firmware will ever do that, and the message carries no boolean for it |
+| `output_chain` | always | Applies EQ, bass guard and limiter itself, post-mix. The controller must then send unshaped audio: shaping at both ends is two limiters in series |
+| `sendspin` | always | Can join a Music Assistant group directly, with no controller hop |
+| `spotify` | always | Can run a Spotify Connect endpoint. Whether the librespot binary is installed is `spotify_status`, below |
+| `airplay` | always | Can run an AirPlay receiver. Whether shairport-sync is installed is `airplay_status`, below |
+| `audio_state` | always | Reports which source owns its music plane (`audio_source`, below) |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
@@ -129,6 +135,7 @@ absent optional fields take prior/default behaviour.
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |
 | `oww_wake` | score, effective threshold, age | On-device trigger fired (`owwOnDevice=on`); lands in `Device.pending_wake` |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
+| `audio_source` | `source` | The music plane changed hands: `"none"`, `"controller"`, `"sendspin"`, `"spotify"` or `"airplay"` (only if `audio_state`). The current value also rides `register`, so a reconnect mid-track does not read as silence. It is the ONLY way the controller can learn that a local endpoint is playing — no frame of that audio passes through it |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `pong` | — | Keepalive reply |
 

@@ -82,6 +82,7 @@ import em_api as api
 import em_hostip
 import em_ns
 import em_announce
+import em_audiostate
 import em_recordings
 import em_runbarrier
 import em_oww_models
@@ -234,6 +235,8 @@ EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 LIGHT_KEY        = 4   # the LED ring's RESTING colour, as an HA light
 MUTE_SWITCH_KEY  = 5   # microphone mute — closes only, never opens
+AUDIO_STATE_KEY  = 6   # is this Echo audible right now (em_audiostate)
+AUDIO_SOURCE_KEY = 7   # ...and what is making the sound
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -554,6 +557,39 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _mute_set_capable(self) -> bool:
         return self._device_has("mute_set")
 
+    @property
+    def _audio_state_capable(self) -> bool:
+        return self._device_has("audio_state")
+
+    def _audio_state_msgs(self):
+        """
+        Is this Echo audible, and what is making the sound.
+
+        Two entities from one answer, because they are two different jobs. The
+        binary sensor is what an automation triggers on — "switch the amp to
+        AUX when this goes on, back to tuner when it goes off" is one trigger
+        each way. The text sensor is what an automation branches on, for
+        someone who wants the amplifier on a different input for AirPlay than
+        for the assistant's voice.
+
+        Read off the owning server, like the mute and ring state above and for
+        the same reason: a device has one audio state and may have more than
+        one HA connection over its life.
+        """
+        srv = self._owning_server
+        active = bool(srv.audio_active) if srv else False
+        source = (srv.audio_source if srv else None) or em_audiostate.SOURCE_NONE
+        return (
+            api_pb2.BinarySensorStateResponse(
+                key=AUDIO_STATE_KEY,
+                state=active,
+            ),
+            api_pb2.TextSensorStateResponse(
+                key=AUDIO_SOURCE_KEY,
+                state=source,
+            ),
+        )
+
     def _mute_state_msg(self):
         """
         The microphone mute, as HA sees it.
@@ -739,6 +775,33 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     icon="mdi:microphone-off",
                     device_class="switch",
                 )
+            # Is the Echo audible, and what is making the sound.
+            #
+            # The case this exists for: an amplifier on the Dot's jack that
+            # has to switch its input when the Echo has something to play and
+            # switch back when it stops. Nothing else here can answer that —
+            # the media_player reports what the CONTROLLER sent, and Spotify
+            # Connect, AirPlay and Sendspin play from programs on the device.
+            #
+            # Gated on `audio_state` because that is exactly the firmware that
+            # can see those three. Older firmware runs all of them and cannot
+            # say so, and a sensor reading "off" through a whole album is the
+            # control-that-lies failure this file gates every entity to avoid
+            # — worse here than a missing entity, because the automation
+            # built on it would switch the amplifier AWAY from the music.
+            if self._audio_state_capable:
+                yield api_pb2.ListEntitiesBinarySensorResponse(
+                    object_id="audio",
+                    key=AUDIO_STATE_KEY,
+                    name="Audio",
+                    device_class="sound",
+                )
+                yield api_pb2.ListEntitiesTextSensorResponse(
+                    object_id="audio_source",
+                    key=AUDIO_SOURCE_KEY,
+                    name="Audio Source",
+                    icon="mdi:speaker-play",
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -750,6 +813,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 yield self._light_state_msg()
             if self._mute_set_capable:
                 yield self._mute_state_msg()
+            if self._audio_state_capable:
+                for m in self._audio_state_msgs():
+                    yield m
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -2451,6 +2517,13 @@ class DeviceESPhomeServer:
         # async callable() — asks the device to mute. No unmute counterpart
         # exists anywhere in this chain, deliberately.
         self._set_mute = None
+        # Whether this Echo is audible right now and what is making the
+        # sound, aggregated by em_audiostate and mirrored here for the same
+        # reason `muted` is: the state outlives any one HA connection, and
+        # a satellite that attaches mid-track must be able to report the
+        # truth at SubscribeStates rather than waiting for the next change.
+        self.audio_active: bool = False
+        self.audio_source: str = em_audiostate.SOURCE_NONE
         # Injected by device_connected() — async callable(level: int) that
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
@@ -3427,6 +3500,32 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def update_device_audio_state(device_id: str, active: bool, source: str) -> None:
+    """
+    Called by em_controller whenever the aggregated audio state changes.
+
+    Stored on the server whether or not HA is attached: the entity state has
+    to survive a reconnect, and the alternative is a satellite that comes back
+    reporting silence over audible music until the next transition.
+
+    Best-effort on the push itself, like every other proactive state here —
+    HA re-reads at SubscribeStates.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.audio_active = bool(active)
+    server.audio_source = source or em_audiostate.SOURCE_NONE
+    satellite = server.get_satellite()
+    if satellite is None or not satellite._audio_state_capable:
+        return
+    try:
+        for m in satellite._audio_state_msgs():
+            satellite._send_one(m)
+    except Exception as e:
+        log.debug(f"[{device_id}] audio state push failed: {e}")
 
 
 def update_device_mute(device_id: str, muted: bool) -> None:

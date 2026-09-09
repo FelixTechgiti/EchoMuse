@@ -12,6 +12,32 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.17.0-fx.1
+
+The Echo now tells the controller when it is playing something of its own.
+
+### What's new
+
+**Spotify Connect, AirPlay and Sendspin were invisible to Home Assistant.**
+All three play from programs running on the Echo — no audio passes through the
+controller — so Home Assistant's media player reported idle over music that
+was audibly playing.
+
+The firmware now reports which source owns its speaker, both on every handover
+and on the register message, so a reconnect mid-track does not read as
+silence. The controller turns that into two Home Assistant entities, **Audio**
+and **Audio Source**; see the controller's own notes for the automation this
+was built for.
+
+Nothing here changes what the speaker does or how it sounds. It is one small
+message on a transition, and the entities only appear once the controller is
+on 2.26.0-fx.1 or newer.
+
+### What is required of you
+
+Nothing beyond the update. The two entities appear on their own once both
+halves are new enough.
+
 ## 2.16.0-fx.1
 
 The headphone jack works, and the Echo finally knows what time it is.

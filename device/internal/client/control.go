@@ -126,6 +126,26 @@ type ControlClient struct {
 	// shellCancel cancels a running shell session when shell_close is received.
 	shellCancel context.CancelFunc
 	shellMu     sync.Mutex
+
+	// audioSource reports which source owns the music plane right now, for
+	// the register message. A hook rather than a package call like
+	// spotify.Report(), because the arbiter is an instance owned by cmd —
+	// there is one music plane per speaker, not one per process, and a
+	// package-level copy of it would be a second answer that can disagree
+	// with the one the audio path actually consults.
+	//
+	// audioNext holds the latest owner waiting to be sent, and audioWake
+	// (depth 1) tells the sender goroutine there is one. See
+	// SendAudioSource: writeJSON can park for wsWriteWait on a stalled
+	// socket, and its caller here is the goroutine feeding audio.
+	//
+	// All four under audioMu: registration runs on the reconnect loop while
+	// the plane changes hands on whichever goroutine is playing.
+	audioSource func() string
+	audioNext   string
+	audioHas    bool
+	audioWake   chan struct{}
+	audioMu     sync.Mutex
 }
 
 func NewControlClient(
@@ -134,12 +154,57 @@ func NewControlClient(
 	micStartCallback MicStartCallback,
 	micStopCallback MicStopCallback,
 ) *ControlClient {
-	return &ControlClient{
+	c := &ControlClient{
 		deviceID:         deviceID,
 		ledCallback:      ledCallback,
 		micStartCallback: micStartCallback,
 		micStopCallback:  micStopCallback,
+		audioWake:        make(chan struct{}, 1),
 	}
+	go c.audioSourceSender()
+	return c
+}
+
+// audioSourceSender is the one goroutine that writes plane handovers to the
+// control socket, so nothing on the audio path ever waits for one.
+//
+// It runs for the life of the process rather than being started on demand:
+// there is exactly one control client, the goroutine costs a few kilobytes of
+// stack, and a lazily started one is a second thing to get right on a path
+// whose whole purpose is not being in anybody's way.
+func (c *ControlClient) audioSourceSender() {
+	for range c.audioWake {
+		c.audioMu.Lock()
+		src, has := c.audioNext, c.audioHas
+		c.audioHas = false
+		c.audioMu.Unlock()
+		if !has {
+			continue
+		}
+		log.Printf("[music] plane owner: %s", src)
+		_ = c.writeJSON(map[string]interface{}{
+			"type":   "audio_source",
+			"source": src,
+		})
+	}
+}
+
+// SetAudioSourceFunc registers the reader for the music plane's current
+// owner. Set once at wiring time, before the control client connects.
+func (c *ControlClient) SetAudioSourceFunc(fn func() string) {
+	c.audioMu.Lock()
+	defer c.audioMu.Unlock()
+	c.audioSource = fn
+}
+
+func (c *ControlClient) currentAudioSource() string {
+	c.audioMu.Lock()
+	fn := c.audioSource
+	c.audioMu.Unlock()
+	if fn == nil {
+		return "none"
+	}
+	return fn()
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
@@ -322,6 +387,15 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// before the network is up, exactly like ambient_light_status above —
 		// nothing about it needs re-reporting every 30 seconds.
 		"base_os": platform.Base(),
+		// Which source owns the music plane at this instant. On the REGISTER
+		// message and not only on the change event, for base_os's reason
+		// turned round: the controller's aggregate is edge-driven, so a
+		// device that reconnects mid-track would otherwise be reported silent
+		// until the track ended — the amplifier switching away from a room
+		// that is still playing music, which is the exact failure this
+		// feature exists to prevent. Almost always "none"; the one time it is
+		// not is the one time it matters.
+		"audio_source": c.currentAudioSource(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -912,7 +986,21 @@ func capabilities() []string {
 		// "airplay": this firmware knows how to run an AirPlay receiver. Same
 		// firmware-versus-binary split as "spotify" — airplay_status on the
 		// register message says whether shairport-sync is actually here.
-		"airplay"}
+		"airplay",
+		// "audio_state": this firmware reports which source owns its music
+		// plane, so the controller can know that the Echo is audible when
+		// nothing of ours is playing. Spotify Connect, AirPlay and Sendspin
+		// all play from programs ON the device — the controller sends no
+		// frames and hears nothing — so without this the HA media_player
+		// reports idle over audible music, which is the warning that has sat
+		// in em_db.DEFAULT_DEVICE_CONFIG since Sendspin shipped.
+		//
+		// Separate from "sendspin"/"spotify"/"airplay" because those three
+		// shipped first: there is firmware in the field that runs all of them
+		// and cannot say so, and a controller reading "can play locally" as
+		// "will tell me it is playing" would advertise an entity that reads
+		// off through a whole album.
+		"audio_state"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -967,6 +1055,48 @@ func (c *ControlClient) SendAmbientLight(lux int) {
 		"type": "ambient_light",
 		"lux":  lux,
 	})
+}
+
+// SendAudioSource reports that the music plane changed hands.
+//
+// It is what lets Home Assistant know this Echo is audible when nothing of
+// ours is playing: Spotify Connect, AirPlay and Sendspin all run as programs
+// on the device, so the controller sends no frames for them and can see
+// nothing. The controller folds this together with its own voice and media
+// state (em_audiostate) into one answer an automation can switch an
+// amplifier's input on.
+//
+// IT MUST NOT BLOCK, and this is why it hands off rather than writing.
+// Its caller is the music plane arbiter's OnChange, which runs on the
+// CLAIMING goroutine — on the Sendspin path, the one feeding audio — and
+// writeJSON takes connMu and then parks for up to wsWriteWait (10s) on a
+// socket that has stopped draining. This fleet has measured 1.4s application
+// stalls from ordinary TCP retransmission, so that is not a hypothetical: it
+// would delay the start of the music by the length of the stall, at the exact
+// moment somebody pressed play.
+//
+// The handoff COALESCES rather than queueing. What travels is a level, not an
+// event — the plane's current owner — so a handover still waiting when a
+// newer one arrives is superseded rather than delayed behind it, and the
+// controller can never be left holding a source that stopped playing minutes
+// ago. Ordering is kept by there being exactly one sender goroutine.
+//
+// Silently dropped if not connected, and nothing is retried: the register
+// message carries the current source, so a reconnect resynchronises itself.
+func (c *ControlClient) SendAudioSource(source string) {
+	c.audioMu.Lock()
+	c.audioNext = source
+	c.audioHas = true
+	wake := c.audioWake
+	c.audioMu.Unlock()
+	if wake == nil {
+		return // zero-valued client (tests); nothing is listening anyway
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+		// Already awake and about to read audioNext, which is now ours.
+	}
 }
 
 // SendVolumeState notifies the controller of the current volume level

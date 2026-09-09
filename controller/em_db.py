@@ -211,6 +211,18 @@ DEFAULT_DEVICE_CONFIG = {
     # only (the device never sees the audio again); the key rides the
     # config channel and the device ignores it, same as wakeArbitrationMs.
     "saveUtterances":   False,
+    # audioHoldoffMs: how long the "Audio" HA entity stays ON after the last
+    # sound before reporting silence (em_audiostate). It exists so an
+    # amplifier automated on that entity does not switch its input back and
+    # forth across the gap between an answer and the announcement after it,
+    # or between two tracks — which is worse than not automating it at all,
+    # and is the failure the feature would be judged by, because it happens
+    # in front of whoever built the automation.
+    #
+    # A taste value like duckDb: it wants tuning against the amplifier in the
+    # room, not deriving. 0 reports every gap. Controller-side only; the key
+    # rides the config channel and the device ignores it.
+    "audioHoldoffMs":   5000,
     # bleProxyEnabled: BLE proxy (device-side passive scan over the raw HCI
     # transport, forwarded to HA as a separate ESPHome bluetooth_proxy
     # device — em_ble_proxy.py). Default off: enabling durably disables the
