@@ -1201,6 +1201,12 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
+    if "audioHoldoffMs" in effective:
+        # Applied to the running state machine, not stored beside it: a
+        # shortened hold-off must take effect on the wait already in
+        # progress, which is the one the person is watching when they move
+        # the slider.
+        live.audio_state.holdoff_ms = int(effective["audioHoldoffMs"])
     if "owwOnDevice" in effective:
         # Resolved against the CAPABILITY, not taken at face value: "on"
         # against firmware that cannot trigger would stop this controller
@@ -5641,6 +5647,9 @@ def _merge_device(row) -> dict:
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Gates the audio hold-off, and with it the two HA entities that
+        # report whether this Echo is audible.
+        "audioStateCapable": getattr(live, "audio_state_capable", False) if live else False,
         # Gates the AEC delay slider, which only means anything on the
         # software tap. Paired with aecRef because the capability says the
         # firmware KNOWS how to use a hardware reference and aecRef says

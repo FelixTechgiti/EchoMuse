@@ -664,6 +664,68 @@ directions.
 - **Ambient Light** (`ListEntitiesSensorResponse` / `SensorStateResponse`,
   `ambient_light`) — lux. A device with no sensor sends `missing_state`, not
   0, because 0 lux is a real reading.
+- **Audio** and **Audio Source** (`ListEntitiesBinarySensorResponse` +
+  `ListEntitiesTextSensorResponse`, `audio_state`) — is this Echo making a
+  sound, and what is making it. See below.
+
+### Is this Echo audible (`em_audiostate.py`)
+
+The case: an amplifier wired to the Dot's jack has to switch its input when
+the Echo has something to play and switch back when it stops. Nothing else
+here could answer that. The `media_player` entity reports what the
+**controller** sent, and Spotify Connect, AirPlay and Sendspin all play from
+programs ON the device — which is the gap `em_db.DEFAULT_DEVICE_CONFIG` has
+warned about since Sendspin shipped ("the HA media_player would report idle
+over audible audio").
+
+So the device reports its music plane's owner (`audio_source`, on the register
+message AND on every handover — `internal/musicplane`'s `OnChange`), and
+`em_audiostate` folds that together with `speaking`, `thinking` and
+`em_player.reported_state` into one answer. Pure, tested, and its own module
+for `em_barge`'s reason: the suite cannot import `em_controller`.
+
+- **`thinking` counts; `listening` does NOT.** An amp switched when the audio
+  starts has already lost the first word — HA has to run STT, an intent and
+  TTS before a sample exists, and an amplifier takes a moment to settle. But
+  listening begins at the wake word, before anyone knows whether the turn will
+  produce anything, so a false wake would switch somebody's amplifier for
+  nothing and switch it back seconds later. Thinking's margin is smaller and
+  it is real.
+- **Rising is immediate, falling waits** (`audioHoldoffMs`, default 5s, in
+  Playback). Never the other way round: delaying the rise is the case that
+  costs the beginning of a sentence, while reporting every lull — the gap
+  between an answer and the announcement after it, or between two tracks —
+  switches an amplifier back and forth, which is worse than not automating it
+  at all and is the failure the feature gets judged by, because it happens in
+  front of whoever built the automation. The **source is held** through the
+  hold-off too: the amp is still on that input, and reporting `none` while the
+  entity is still on is two halves of one state disagreeing.
+- **`media` is em_player's REPORTED state, not its internal one.** While a
+  turn owns the speaker the session is paused and the entity keeps saying
+  PLAYING — and for an amplifier that is right, because the assistant is
+  talking over music the user believes is still on. Same distinction as #62,
+  from the other side.
+- **A local source the controller does not recognise reads as SILENCE, not as
+  a new name.** Inventing a state string nobody can automate against is worse
+  than the entity being conservative, and `local_source is None` — old
+  firmware, or a device that has not registered — must mean not-playing, never
+  unknown-therefore-active.
+- **The refresh rides `_push_device_state`**, which is already the single
+  funnel for `speaking`/`thinking` (`Device._set_speaking`), and
+  `em_player`'s single way out to HA is wrapped rather than repointed. Two
+  hooks, no third list of call sites to keep in step;
+  `tests/test_audio_state_wiring.py` pins both.
+- **The hold-off timer is per device and is not re-armed on every signal.**
+  `deadline()` returns what is REMAINING, so an already-running timer is left
+  alone; re-arming on each intermediate signal would push the deadline out
+  every time and the state would never go quiet at all. It is cancelled when
+  the device's services are released — a bare sleep that fires after the
+  device is gone pushes a state nobody can act on and holds a dead `Device`.
+- **The state is seeded at registration with `force=True`.** The ESPHome
+  server object outlives the connection, so a device that went away mid-track
+  and came back silent has a fresh state machine reporting no change and a
+  server still holding the entity on — the one case where "nothing changed" is
+  not the same as "nothing to say".
 
 ## Background tasks are held, never fired and forgotten
 
@@ -1128,6 +1190,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn |
 | `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see the barge-in rules under the voice backend. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
+| `em_audiostate.py` | Whether this Echo is audible and what is making the sound — the aggregate behind the HA `Audio` / `Audio Source` entities, and the hold-off that keeps an amplifier automated on them from switching input across every gap. Pure; split out for `em_barge`'s reason |
 | `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn` |

@@ -165,6 +165,22 @@ func main() {
 		s.StartAnim(spec)
 	})
 
+	// The music plane's owner, reported to the controller so Home Assistant
+	// can know this Echo is audible. Wired here, before anything can claim:
+	// Sendspin, Spotify and AirPlay all play without a single frame passing
+	// through the controller, so this is the ONLY thing that can tell it.
+	//
+	// Two halves, and both are needed. OnChange carries every handover as it
+	// happens; SetAudioSourceFunc puts the current owner on each REGISTER
+	// message, so a control-plane reconnect mid-track does not leave the
+	// controller believing a playing device went quiet.
+	dataClient.MusicPlane().OnChange(func(src musicplane.Source) {
+		controlClient.SendAudioSource(src.String())
+	})
+	controlClient.SetAudioSourceFunc(func() string {
+		return dataClient.MusicPlane().Owner().String()
+	})
+
 	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded to
 	// the controller on the DATA plane where the controller can read them
 	// there, and on the control plane otherwise (#404). Armed from env

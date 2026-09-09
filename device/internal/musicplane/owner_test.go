@@ -346,3 +346,89 @@ func TestTheScopedViewNamesItsSource(t *testing.T) {
 		t.Fatalf("Source() = %v", got)
 	}
 }
+
+// ── OnChange: what the controller tells Home Assistant ───────────────────────
+//
+// The consumer is an amplifier on the jack, switching its input while the
+// device plays. Nothing else on the controller can see a local source, so a
+// missed transition here is an amp left on the wrong input.
+
+func TestOnChangeReportsEveryHandover(t *testing.T) {
+	var got []Source
+	o := &Owner{}
+	o.OnChange(func(s Source) { got = append(got, s) })
+
+	o.Claim(Spotify)
+	o.Claim(Controller) // HA takes it
+	o.Release(Controller)
+
+	want := []Source{Spotify, Controller, None}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestReclaimingIsNotAChangeEvent(t *testing.T) {
+	// Claiming a plane you already hold changes nothing, and reporting it
+	// would have Home Assistant re-notified on every chunk of a stream.
+	n := 0
+	o := &Owner{}
+	o.OnChange(func(Source) { n++ })
+	o.Claim(Sendspin)
+	o.Claim(Sendspin)
+	o.Claim(Sendspin)
+	if n != 1 {
+		t.Fatalf("reported %d times, want 1", n)
+	}
+}
+
+func TestARefusedClaimIsNotAnEvent(t *testing.T) {
+	// A local source cannot take the plane from the controller. Reporting
+	// that attempt would say the source changed when it did not.
+	o := &Owner{}
+	o.Claim(Controller)
+	n := 0
+	o.OnChange(func(Source) { n++ })
+	if o.Claim(AirPlay) {
+		t.Fatal("a local source took the plane from the controller")
+	}
+	if n != 0 {
+		t.Fatalf("reported %d times on a refused claim, want 0", n)
+	}
+}
+
+func TestReleasingAPlaneYouNoLongerHoldSaysNothing(t *testing.T) {
+	// The preempted source tears down AFTER the new owner is in place. If
+	// that teardown reported silence, Home Assistant would be told the
+	// speaker went quiet while the source that preempted it is still playing.
+	o := &Owner{}
+	o.Claim(Spotify)
+	o.Claim(Controller)
+	n := 0
+	o.OnChange(func(Source) { n++ })
+	o.Release(Spotify)
+	if n != 0 {
+		t.Fatalf("reported %d times, want 0", n)
+	}
+	if o.Owner() != Controller {
+		t.Fatalf("owner is %v, want Controller", o.Owner())
+	}
+}
+
+func TestOnChangeRunsOutsideTheLock(t *testing.T) {
+	// The callback is on the claiming goroutine, which on the Sendspin path
+	// is the one feeding audio. If it ran under the lock, a callback that
+	// touched the Owner at all would deadlock rather than misbehave.
+	o := &Owner{}
+	var seen Source
+	o.OnChange(func(Source) { seen = o.Owner() })
+	o.Claim(Spotify)
+	if seen != Spotify {
+		t.Fatalf("callback read owner %v, want Spotify", seen)
+	}
+}

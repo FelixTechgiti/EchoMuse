@@ -84,6 +84,7 @@ import em_ring_light
 import em_scenes
 import em_shadow
 import em_oww_warmup
+import em_audiostate
 import em_barge
 import em_arbiter
 import em_button
@@ -431,6 +432,19 @@ class Device:
         # old to say — which em_platform resolves to Android, leaving the
         # existing fleet exactly as it was.
         self._base_os: str | None = None
+        # Which source owns the DEVICE's own music plane, as it last said.
+        # None means it has not told us — firmware without `audio_state`, or
+        # a device that has not registered since this controller started. It
+        # must read as "not playing locally", never as unknown: see
+        # em_audiostate.Inputs.
+        self.local_audio_source: str | None = None
+        # The aggregate of voice, controller media and that local source,
+        # with the hold-off that keeps an amplifier from switching input on
+        # every gap. holdoff_ms is overwritten from config on the first push.
+        self.audio_state = em_audiostate.AudioState()
+        # The timer that ends a hold-off. Nothing else will: the last signal
+        # of a stream is what STARTS the wait, and no further signal arrives.
+        self._audio_holdoff_task: asyncio.Task | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -876,6 +890,18 @@ class Device:
         behaviour.
         """
         return "audio_mix" in (self.capabilities or [])
+
+    @property
+    def audio_state_capable(self) -> bool:
+        """
+        Whether this firmware reports which source owns its music plane.
+
+        Separate from `sendspin`/`spotify`/`airplay`, which shipped first:
+        there is firmware in the field that runs all three and cannot say so,
+        and reading "can play locally" as "will tell me it is playing" would
+        put a sensor in Home Assistant that reads off through a whole album.
+        """
+        return "audio_state" in (self.capabilities or [])
 
     @property
     def airplay_capable(self) -> bool:
@@ -1375,8 +1401,100 @@ def _guard_for(device):
     )
 
 
+def _audio_inputs(device: Device) -> em_audiostate.Inputs:
+    """
+    Everything that can make this device audible, gathered at one instant.
+
+    `media` is em_player's REPORTED state, not its internal one: while a turn
+    owns the speaker the session is paused and the entity keeps saying
+    PLAYING, and for an amplifier that is the right answer — the assistant is
+    talking over music the user believes is still on, and the input must not
+    change under it (#62 is the same distinction from the other side).
+    """
+    return em_audiostate.Inputs(
+        speaking=device.speaking,
+        thinking=device.thinking,
+        media=em_player.reported_state(device.device_id) == em_player.PLAYING,
+        local_source=device.local_audio_source,
+    )
+
+
+def refresh_audio_state(device: Device, force: bool = False) -> None:
+    """
+    Fold the current signals into the audio-state entities, and push on a
+    change.
+
+    Called from the transitions rather than on a tick, which is what keeps
+    this off the audio path: the cost of an ordinary turn is four dataclass
+    constructions. Synchronous on purpose — every caller is already inside
+    something, and the only thing that can block here is the timer, which is
+    spawned rather than awaited.
+
+    `force` pushes whether or not the answer changed, and exists for exactly
+    one caller: a device registering. The ESPHome server object OUTLIVES the
+    connection, so a device that went away mid-track and came back silent has
+    a fresh state machine that reports no change and a server still holding
+    the entity on — the one case where "nothing changed" is not the same as
+    "nothing to say".
+    """
+    st = device.audio_state
+    if st.update(_audio_inputs(device), time.monotonic()) or force:
+        esphome.update_device_audio_state(device.device_id, st.active, st.source)
+    _arm_audio_holdoff(device)
+
+
+def _arm_audio_holdoff(device: Device) -> None:
+    """
+    Keep exactly one timer per device pointed at the end of the hold-off.
+
+    An already-running timer is left alone rather than replaced. `deadline()`
+    counts DOWN within one quiet period, so the armed sleep is still the right
+    one; re-arming on every intermediate signal would push the deadline out on
+    each and the state would never go quiet at all. When audio returns the
+    deadline becomes None and the timer is cancelled outright.
+    """
+    left = device.audio_state.deadline(time.monotonic())
+    task = device._audio_holdoff_task
+    if left is None:
+        if task is not None and not task.done():
+            task.cancel()
+        device._audio_holdoff_task = None
+        return
+    if task is not None and not task.done():
+        return
+
+    async def _wait_out_holdoff():
+        try:
+            while True:
+                remaining = device.audio_state.deadline(time.monotonic())
+                if remaining is None:
+                    return
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                st = device.audio_state
+                if st.update(_audio_inputs(device), time.monotonic()):
+                    esphome.update_device_audio_state(
+                        device.device_id, st.active, st.source
+                    )
+                    return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if device._audio_holdoff_task is asyncio.current_task():
+                device._audio_holdoff_task = None
+
+    device._audio_holdoff_task = _spawn(
+        _wait_out_holdoff(), f"audio holdoff {device.device_id}"
+    )
+
+
 async def _push_device_state(device: Device) -> None:
     """Push current transient device state to dashboard clients."""
+    # The single funnel for speaking/thinking, which is why the audio-state
+    # refresh rides it: those two flags and this push are already one
+    # operation by rule (Device._set_speaking), so anything that changes them
+    # reaches here and nothing has to remember a second call.
+    refresh_audio_state(device)
     await api._push_event({
         "type":      "device_update",
         "device_id": device.device_id,
@@ -3654,6 +3772,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.ambient_light_status = msg.get("ambient_light_status")
         device.spotify_status = msg.get("spotify_status")
         device.airplay_status = msg.get("airplay_status")
+        # What the device's music plane is playing at this instant. On the
+        # register message because a device that reconnects mid-track would
+        # otherwise read as silent until the track ended — an amplifier
+        # switching away from a room that is still playing.
+        _src = msg.get("audio_source")
+        device.local_audio_source = _src if isinstance(_src, str) else None
         # Static property of the boot, so it arrives with registration
         # rather than on the stats tick — reconcile_on_connect asks for it
         # immediately and a stats-borne value is ~30s too late.
@@ -3725,6 +3849,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             config.get("buttonSingleTapEvent", False)
         )
         device.button_multi_tap_ms = int(config.get("buttonMultiTapMs", 0))
+        # The hold-off lives on the state machine rather than on the Device,
+        # so there is one copy of it and the machine that uses it owns it.
+        device.audio_state.holdoff_ms = int(
+            config.get("audioHoldoffMs", em_audiostate.DEFAULT_HOLDOFF_MS)
+        )
         # Resolved against the capability — see em_shadow.effective_mode for
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.
@@ -3958,6 +4087,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             set_mute=_set_mute,
             start_conversation=_start_conversation,
         )
+        # Seed the audio-state entities from this device's own truth. The
+        # register message carries what its music plane is playing, so a
+        # device that reconnects mid-track is reported audible rather than
+        # silent — which for an amplifier automated on that entity is the
+        # difference between staying on the right input and switching away
+        # from a room that is still playing.
+        refresh_audio_state(device, force=True)
         # Seed HA's light entity from the stored row, so it reads the colour
         # the ring is actually resting at rather than the default.
         esphome.update_device_ring(
@@ -4035,6 +4171,22 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             device.stats["ambientLux"] = _lux
                             esphome.update_ambient_lux(device_id, _lux)
                             log.info(f"[{device_id}] Ambient light → {_lux} lux")
+
+                    elif msg_type == "audio_source":
+                        # The device's music plane changed hands. This is the
+                        # ONLY way the controller can learn that Spotify
+                        # Connect, AirPlay or Sendspin is playing — those run
+                        # as programs on the device and no frame of their
+                        # audio passes through here.
+                        _src = msg.get("source")
+                        device.local_audio_source = (
+                            _src if isinstance(_src, str) else None
+                        )
+                        log.info(
+                            f"[{device_id}] Music plane: "
+                            f"{device.local_audio_source}"
+                        )
+                        refresh_audio_state(device)
 
                     elif msg_type == "mute_state":
                         device.muted = msg.get("muted", False)
@@ -4525,6 +4677,12 @@ async def _release_device_services(device) -> None:
         # lookup can hand out a device whose services are mid-teardown.
         if current is device:
             _devices.pop(device.device_id, None)
+        # The hold-off outlives the connection otherwise: it is a plain
+        # sleep, and firing after the device is gone would push a state
+        # nobody can act on and hold a reference to a dead Device.
+        if device._audio_holdoff_task is not None:
+            device._audio_holdoff_task.cancel()
+            device._audio_holdoff_task = None
         await api.notify_device_disconnected(device.device_id)
         await esphome.device_disconnected(device.device_id)
         await em_ble_proxy.device_disconnected(device.device_id)
@@ -4870,6 +5028,26 @@ async def event_loop_lag_monitor(interval: float = 1.0,
             )
 
 
+async def _notify_media_state(device_id: str, state: str) -> None:
+    """
+    em_player's state pushes, plus the audio-state refresh that rides them.
+
+    Hooked here rather than inside em_player because em_player already has
+    exactly one way out to Home Assistant and this is it — every play, pause,
+    stop, resume and deferred intent goes through _notify_state, so wrapping
+    it covers the controller's own music plane with no second list of call
+    sites to keep in step.
+
+    get_device_any, not get_device: a media state change during a link-down
+    grace is still a change, and the entity has to be right when the socket
+    comes back a second or two later.
+    """
+    await esphome.push_media_state(device_id, state)
+    device = get_device_any(device_id)
+    if device is not None:
+        refresh_audio_state(device)
+
+
 async def main():
     log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
@@ -4879,7 +5057,7 @@ async def main():
         # registry through its grace (#354), and the player asking for it
         # means "something to send audio to".
         get_device=get_device,
-        notify_state=esphome.push_media_state,
+        notify_state=_notify_media_state,
     )
 
     runner = await api.create_runner(_devices, _shell_pending, _shell_dashboard)

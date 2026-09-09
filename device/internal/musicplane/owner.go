@@ -119,9 +119,39 @@ const (
 //
 // The zero value is usable and means the plane is free.
 type Owner struct {
-	mu    sync.Mutex
-	owner Source
-	leave map[Source]func(Reason)
+	mu     sync.Mutex
+	owner  Source
+	leave  map[Source]func(Reason)
+	change func(Source)
+}
+
+// OnChange registers the one observer told whenever the plane changes hands.
+//
+// It exists so the controller can tell Home Assistant that this Echo is
+// making a sound — the case being served is an amplifier on the jack that
+// switches its input while the device plays and switches back when it stops.
+// Nothing else on the controller can see a local source: Spotify Connect,
+// AirPlay and Sendspin play from programs ON the device, and the 0x04 stream
+// the controller knows about is not involved.
+//
+// One observer, not a list: there is exactly one consumer and a slice would
+// invite a second that nobody sequenced against the first. Set it once, at
+// wiring time, before anything can claim.
+//
+// THE CALLBACK MUST NOT BLOCK. It is called on the claiming goroutine, which
+// on the Sendspin path is the one feeding audio. ControlClient.SendAudioSource
+// satisfies that by handing the value to its own sender goroutine and
+// returning: a websocket write parks for up to ten seconds on a socket that
+// has stopped draining, and paying that here would delay the start of the
+// music by the length of a link stall. It is called OUTSIDE the
+// lock and BEFORE the eviction callback, for two different reasons: outside
+// because holding the lock across anything that can stall blocks every other
+// claim, and before because eviction performs protocol I/O on a socket that
+// may itself be stalled, and the amplifier should not wait for a goodbye.
+func (o *Owner) OnChange(cb func(Source)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.change = cb
 }
 
 // Register records how to make a source leave its session cleanly. It must be
@@ -170,8 +200,12 @@ func (o *Owner) Claim(src Source) bool {
 	}
 	o.owner = src
 	evict := o.leave[prev]
+	notify := o.change
 	o.mu.Unlock()
 
+	if notify != nil {
+		notify(src)
+	}
 	if prev != None && evict != nil {
 		evict(ReasonPreempted)
 	}
@@ -188,9 +222,20 @@ func (o *Owner) Claim(src Source) bool {
 // Nothing is handed back. See the package comment: no rejoin.
 func (o *Owner) Release(src Source) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.owner == src {
-		o.owner = None
+	if o.owner != src {
+		o.mu.Unlock()
+		return
+	}
+	o.owner = None
+	notify := o.change
+	o.mu.Unlock()
+
+	// Outside the lock for Claim's reason, and only on a real release: a
+	// source releasing a plane it no longer holds changes nothing, and
+	// reporting silence there would tell Home Assistant the speaker went
+	// quiet while the source that preempted it is still playing.
+	if notify != nil {
+		notify(None)
 	}
 }
 
@@ -225,8 +270,17 @@ func (o *Owner) Shutdown() {
 			cbs = append(cbs, cb)
 		}
 	}
+	notify := o.change
 	o.mu.Unlock()
 
+	// Notified for the same reason Release is, rather than treated as a
+	// special case: the plane went to None and the observer's whole job is
+	// to know that. It has no production caller today, and a rule that
+	// holds only where it is currently reached is one the next caller
+	// breaks without noticing.
+	if notify != nil {
+		notify(None)
+	}
 	for _, cb := range cbs {
 		cb(ReasonStopped)
 	}

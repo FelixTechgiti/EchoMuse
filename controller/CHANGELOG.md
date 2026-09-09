@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.26.0-fx.1
+
+**Home Assistant can now see whether an Echo is making a sound** — including
+music playing over Spotify Connect, AirPlay or Sendspin, which the controller
+could not see at all until now.
+
+Two new entities per device:
+
+- **Audio** — a sound sensor, on whenever the Echo is speaking, about to
+  speak, or playing anything.
+- **Audio Source** — `voice`, `media`, `spotify`, `airplay`, `sendspin` or
+  `none`.
+
+### What it is for
+
+An amplifier wired to the Dot's jack that should switch to that input when the
+Echo has something to play, and go back to its usual input when it stops:
+
+```yaml
+automation:
+  - triggers:
+      - trigger: state
+        entity_id: binary_sensor.lounge_voice_assistant_audio
+        to: "on"
+        not_from: [unavailable, unknown]
+    actions:
+      - action: media_player.select_source
+        target: { entity_id: media_player.amplifier }
+        data: { source: "AUX" }
+```
+
+...and the mirror image on `to: "off"`. Use `not_from` on both, the same
+caveat the action-button event entity carries: HA restores an entity's state
+when a connection comes back, and a state trigger without it fires on
+`unavailable` → `on`.
+
+The `Audio Source` sensor is there for the case where the amplifier should be
+on a different input for AirPlay than for the assistant's voice.
+
+### The hold-off, which is the setting you may want to change
+
+**Config → Playback → Audio hold-off**, default **5 seconds**. It is how long
+the sensor stays on after the last sound, and it exists because audio is
+bursty in ways that have nothing to do with a listener — a turn ends and an
+announcement follows, a track gaps. Reporting every one of those lulls
+switches an amplifier's input back and forth, which is worse than not
+automating it at all.
+
+Turning it up is right for a slow amplifier or a long announcement sequence;
+0 reports every gap.
+
+### What counts, and one thing that deliberately does not
+
+Speaking counts, and so does **thinking** — an amplifier switched when the
+audio starts has already lost the first word, because Home Assistant runs
+speech-to-text, an intent and text-to-speech before a single sample exists.
+
+**Listening does not count.** It begins at the wake word, before anything
+knows whether the turn will produce an answer, so a false wake would switch
+your amplifier over for nothing and switch it back seconds later.
+
+### Requires firmware v2.17.0-fx.1
+
+Both entities are advertised only to firmware that reports what its music
+plane is playing. Older firmware runs Spotify, AirPlay and Sendspin perfectly
+and cannot say so, and a sound sensor that reads "off" through a whole album
+is worse than no sensor — the automation built on it would switch the
+amplifier away from the music. On older firmware the entities are simply
+absent and the hold-off setting is shown disabled with the reason.
+
 ## 2.25.0-fx.1
 
 **Spotify Connect and AirPlay can be switched on.** Both endpoints have been

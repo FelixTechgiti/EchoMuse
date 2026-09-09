@@ -156,6 +156,35 @@ anything the controller could still change. Older firmware shows the slider
 disabled and falls back to pausing the music for the turn and resuming
 after.
 
+### Audio hold-off
+How long the **Audio** sensor in Home Assistant stays on after the last sound.
+
+That sensor is on whenever the Echo is speaking, about to speak, or playing
+anything — including music over Spotify Connect, AirPlay or Sendspin, which
+nothing else here can see. It is built for an amplifier wired to the Echo's
+jack: switch the amplifier to that input when the sensor goes on, switch it
+back when it goes off.
+
+Default **5 seconds**, and the reason it is not zero is that audio comes in
+bursts that have nothing to do with you — an answer ends and an announcement
+follows it, one track gaps into the next. Reporting each of those lulls
+switches an amplifier's input back and forth, which is worse than not
+automating it at all. Turn it up for a slow amplifier or a long run of
+announcements; 0 reports every gap.
+
+Going **on** is never delayed — only going off — so an amplifier still has the
+whole of Home Assistant's thinking time to settle before the first word.
+
+Requires firmware **v2.17.0-fx.1 or newer**, which is what reports the music
+the Echo is playing on its own. Older firmware shows this disabled and gets no
+Audio sensor: one that read "off" through a whole album would be worse than
+none, because an automation built on it would switch the amplifier away from
+the music.
+
+When you write that automation, put `not_from: [unavailable, unknown]` on the
+state trigger. Home Assistant restores an entity's state when a connection
+comes back, and without it a reconnect fires the trigger.
+
 ### Volume
 Volume **tracks what you actually use** and survives reboots: every change —
 buttons, Home Assistant slider, wherever — is remembered by the controller
