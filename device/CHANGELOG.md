@@ -12,6 +12,38 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.26.0-fx.1
+
+The AirPlay slider can move the Echo's own volume.
+
+### What's new
+
+Turning the volume down in the AirPlay control on a phone did nothing to the
+Echo. The receiver was quietly turning the audio down inside itself, so the
+Echo's volume, its ring and Home Assistant all stayed exactly where they were
+while the phone believed it was in charge — and the quietening threw away
+resolution the speaker's own volume control would have kept.
+
+There is now a setting for it, under Streaming: **AirPlay volume moves this
+Echo**. With it on, the slider sets the Echo's volume, flashes the cyan volume
+ring the way a button press does, and is remembered like any other volume
+change. Muting on the phone reaches actual silence rather than "very quiet".
+
+**It is off by default, and the reason is worth reading before you turn it
+on.** An Echo has one volume, shared with the assistant. Turn AirPlay down to
+20% and the assistant's next spoken answer is at 20% too. That is arguably
+what "set the device volume" means, and it is what was asked for — but it
+should be your decision rather than a surprise, so it is a switch.
+
+Takes effect when AirPlay next starts, so toggle AirPlay off and on after
+changing it.
+
+### What is required of you
+
+Nothing, unless you want it. This also needs the rebuilt shairport-sync from
+the endpoints release — the previous build could not report volume at all.
+Install it from the device's Updates tab, or let the automatic fetch do it.
+
 ## 2.25.0-fx.1
 
 The Echo remembers where its controller is, and says whether Spotify and
