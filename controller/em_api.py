@@ -4859,6 +4859,12 @@ _endpoint_store_lock = asyncio.Lock()
 _endpoint_store_ts: float = 0.0
 ENDPOINT_POLL_TTL = 3600.0
 
+# Longest one endpoint install may hold the OTA queue. Shorter than
+# OTA_MAX_HOLD_S because there is no reboot and no reconnect watch here — just
+# one transfer, whose own recv timeout is 120s, plus a status read. A deadlock
+# cap rather than a performance budget, for that constant's reason.
+ENDPOINT_MAX_HOLD_S = 180.0
+
 
 async def _fetch_latest_endpoints_release(force: bool = False) -> Optional[dict]:
     """
@@ -5020,41 +5026,95 @@ async def _sync_endpoint_bins(live, device_id: str) -> None:
                     f"is already stored")
 
     for k in wanted:
-        if _devices.get(device_id) is not live:
+        live_now = _live(device_id)
+        if live_now is None:
             return
+        live = live_now
+        # The status read is cheap and stays OUTSIDE the lock: it is one shell
+        # round trip, and the common answer is "nothing to do", which must not
+        # queue behind another device's transfer.
         status = await _read_endpoint_status(live, k)
         why = em_endpoint_bins.install_needed(
             k, getattr(live, "capabilities", None), effective, status)
         if why is None:
             continue
-        entry = em_endpoint_bins.stored(k)
-        log.info(f"[api] [{device_id}] installing {k.filename}: {why}")
-        await _push_log_event(device_id, "info", "controller",
-                              f"Installing {k.filename} "
-                              f"({entry['size'] / 1024 / 1024:.1f} MB)")
-        data = await loop.run_in_executor(
-            None, em_endpoint_bins.store_path(k).read_bytes)
-        result = await _stream_file_to_device(live, data, k.dest,
-                                              mode="755", require_verify=True)
-        if not result:
-            log.warning(f"[api] [{device_id}] {k.filename} install failed at "
-                        f"stage {result.stage}: {result}")
+
+        # SERIALISED under the firmware OTA's own lock, one kind at a time.
+        # This is the same work in the same cost class — ~9MB of base64 over
+        # the shell plane, CPU-bound in this process — and three concurrent
+        # firmware OTAs were measured stalling the event loop for 11.1s, which
+        # is the loop that sends speaker periods and LED frames. The automatic
+        # path makes that MORE likely rather than less: a controller restart
+        # reconnects the whole fleet at once, so every device would reach this
+        # within the same second. Per kind rather than per device, so a
+        # hand-clicked firmware update can interleave between the two binaries
+        # instead of waiting for both.
+        _updates_queued.add(device_id)
+        try:
+            await _ota_lock.acquire()
+        finally:
+            _updates_queued.discard(device_id)
+        try:
+            await asyncio.wait_for(
+                _install_endpoint_locked(device_id, k, why),
+                timeout=ENDPOINT_MAX_HOLD_S)
+        except asyncio.TimeoutError:
+            log.warning(f"[api] [{device_id}] {k.filename} install abandoned "
+                        f"after {ENDPOINT_MAX_HOLD_S:.0f}s so the queue could "
+                        f"continue")
             await _push_log_event(device_id, "warn", "controller",
-                                  f"{k.filename} install failed — {result}")
-            continue
-        # Re-fetch and re-read, exactly as the hand-clicked install does: the
-        # transfer took a shell session over a lossy link and the device can
-        # have gone in the middle, and assigning a status onto a replaced
-        # Device writes it where nothing reads it.
-        live_now = _live(device_id)
-        if live_now is None:
-            return
-        live = live_now
-        fresh = await _read_endpoint_status(live, k)
-        if fresh is not None:
-            setattr(live, k.status_attr, fresh)
-        await _push_log_event(device_id, "info", "controller",
-                              f"{k.filename} installed at {k.dest}")
+                                  f"{k.filename} install timed out")
+        finally:
+            _ota_lock.release()
+
+
+async def _install_endpoint_locked(device_id: str, k, why: str) -> None:
+    """
+    One endpoint binary onto one device, with `_ota_lock` already held.
+
+    Split out for `_run_update_locked`'s reason: the hold has to be bounded,
+    and `await ws.send(line)` in the base64 loop is the one step in the
+    transfer that is not itself `wait_for`-bounded — a device that stops
+    reading applies backpressure and hangs there, which before the lock stalled
+    one device and now would hold the queue.
+
+    The live Device is re-fetched here rather than passed in, because the
+    transfer takes a shell session over a link measured at 5-7% packet loss and
+    the connection can go in the middle: assigning the status onto a Device
+    that has since been replaced writes it where nothing reads it, and the
+    dashboard then shows the toggle disabled after an install that worked.
+    """
+    live = _live(device_id)
+    if live is None:
+        return
+    entry = em_endpoint_bins.stored(k)
+    if entry is None:
+        return
+    log.info(f"[api] [{device_id}] installing {k.filename}: {why}")
+    await _push_log_event(device_id, "info", "controller",
+                          f"Installing {k.filename} "
+                          f"({entry['size'] / 1024 / 1024:.1f} MB)")
+    data = await asyncio.get_event_loop().run_in_executor(
+        None, em_endpoint_bins.store_path(k).read_bytes)
+    result = await _stream_file_to_device(live, data, k.dest,
+                                          mode="755", require_verify=True)
+    if not result:
+        # str(result) is the STAGE's own detail: "could not open a shell — no
+        # data was sent" and "arrived corrupt" want different next steps, and
+        # one message for both is what sent #121 looking at the wrong half.
+        log.warning(f"[api] [{device_id}] {k.filename} install failed at "
+                    f"stage {result.stage}: {result}")
+        await _push_log_event(device_id, "warn", "controller",
+                              f"{k.filename} install failed — {result}")
+        return
+    live = _live(device_id)
+    if live is None:
+        return
+    fresh = await _read_endpoint_status(live, k)
+    if fresh is not None:
+        setattr(live, k.status_attr, fresh)
+    await _push_log_event(device_id, "info", "controller",
+                          f"{k.filename} installed at {k.dest}")
 
 
 @auth.require_auth

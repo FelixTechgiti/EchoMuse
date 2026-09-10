@@ -1481,6 +1481,18 @@ Datei die ich händisch updaten muss"*. So the store fetches from the published
   pushing on it is a guess rather than a repair.
 - **A failed store refresh is never a failed install.** The store keeps what it
   had, which is very often already right; nothing here ever deletes.
+- **The transfer is SERIALISED under `_ota_lock`, one kind at a time.** It is
+  the same work in the same cost class as a firmware OTA — ~9MB of base64 over
+  the shell plane, CPU-bound in this process — and three concurrent OTAs were
+  measured stalling the event loop for 11.1s, which is the loop that sends
+  speaker periods and LED frames. The automatic path makes that MORE likely
+  rather than less: a controller restart reconnects the whole fleet at once, so
+  every device reaches this inside the same second. Per kind rather than per
+  device, so a hand-clicked firmware update can interleave between the two
+  binaries instead of waiting for both, and bounded by `ENDPOINT_MAX_HOLD_S`
+  for `OTA_MAX_HOLD_S`'s reason — `await ws.send(line)` in the base64 loop is
+  the one step not itself `wait_for`-bounded, so a device that stops reading
+  would hold the queue rather than only stalling itself.
 
 **The ELF header is checked at upload and the version is not.** The likely
 mistake is a host build — `cargo build --release` without the target, or the
