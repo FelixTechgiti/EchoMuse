@@ -87,14 +87,20 @@ func main() {
 	// The Server doesn't exist yet when the speaker starts its pump loop,
 	// so the tap goes through an atomic pointer armed just below.
 	var srvPtr atomic.Pointer[server.Server]
-	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
+	//
+	// This does NOT wait for the speaker. Android's media stack takes the
+	// playback device for itself when a plug is in the jack, and everything
+	// below — the control client, mDNS, the buttons, the LED ring — used to
+	// sit behind that open: a device that lost the race went completely dark
+	// and needed a power cycle, which is exactly what an OTA restart with a
+	// cable connected produced, twice, on 2026-09-10. The open now retries on
+	// its own goroutine and the speaker refuses pumps until it succeeds, so
+	// losing that race costs the audio rather than the device.
+	pcmSpeaker := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
 		if srv := srvPtr.Load(); srv != nil {
 			srv.SetAudioLevel(rms)
 		}
 	})
-	if err != nil {
-		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
-	}
 
 	// Install the output chain before anything can play. A device announcing
 	// `output_chain` has told the controller to stop shaping, so from that
