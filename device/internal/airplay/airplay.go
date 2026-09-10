@@ -159,7 +159,7 @@ type Options struct {
 // itself has to exist before shairport-sync opens it and /data is where every
 // other path this firmware owns already lives. It is a named pipe, so it
 // stores nothing and costs no flash writes.
-const MetadataPipePath = "/data/local/etc/echomuse/airplay-metadata"
+const MetadataPipePath = "/data/local/etc/revoice/airplay-metadata"
 
 // Client supervises one shairport-sync process.
 type Client struct {
