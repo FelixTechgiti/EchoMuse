@@ -95,7 +95,7 @@ docker build -t "$IMAGE" "$HERE"
 COMPAT="$(cd "$HERE/../shairport/compat" && pwd)"
 
 mkdir -p "$OUT"
-docker run --rm -v "$OUT:/out" -v "$COMPAT:/compat:ro" "$IMAGE" bash -c "
+docker run --rm -v "$OUT:/out" -v "$COMPAT:/compat:ro" -v "$HERE:/alias:ro" "$IMAGE" bash -c "
     set -euo pipefail
     git clone --depth 1 --branch '$REF' https://github.com/librespot-org/librespot /build/librespot
     cd /build/librespot
@@ -106,8 +106,10 @@ docker run --rm -v "$OUT:/out" -v "$COMPAT:/compat:ro" "$IMAGE" bash -c "
     # ordering is not ours to control from RUSTFLAGS.
     "\$NDK/bin/armv7a-linux-androideabi22-clang" -O2 -c \
         /compat/android_ifaddrs.c -o /build/android_ifaddrs.o
+    "\$NDK/bin/armv7a-linux-androideabi22-clang" -O2 -c \
+        /alias/ifaddrs_alias.c -o /build/ifaddrs_alias.o
 
-    RUSTFLAGS='-Clink-arg=/build/android_ifaddrs.o' \
+    RUSTFLAGS='-Clink-arg=/build/android_ifaddrs.o -Clink-arg=/build/ifaddrs_alias.o' \
     cargo build --release --target armv7-linux-androideabi \
         --no-default-features --features '$FEATURES'
     # Stripped: the eMMC is 8GB shared with Android and the symbols are of no
