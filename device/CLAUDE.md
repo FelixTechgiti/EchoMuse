@@ -898,6 +898,52 @@ thought to watch. Idle sits at 31–34°C, nowhere near throttling.
 this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
 
+## The device's log has to be readable from somewhere else
+
+**Until 2026-09-10 the only lines that ever left this box were the `[mem]`
+heap summaries.** Everything else went to stdout, which `start_server.sh` puts
+in `/tmp/server.log` — RAM-backed, on hardware with no remote access of its
+own. So `[airplay] shairport-sync exited: exit status 1`, repeating every
+minute for two hours, was visible to nobody but somebody willing to open a
+root shell on their own device. That single gap is what made the endpoint
+orphan below cost five shell sessions and two wrong diagnoses, and it is worth
+more than either fix.
+
+`internal/logrelay` wraps the process's log destination (`log.SetOutput`) so
+every line still reaches stdout and a SELECTION also reaches the controller,
+which writes warnings into its own logger — the add-on log, the container's
+stdout and the support bundle's `controller_log_tail`. Both halves are
+required: the device sending with the controller only storing puts the line in
+a database nobody watches, and the controller logging with the device not
+sending relays nothing.
+
+Four rules, and the first is the one that would hurt:
+
+- **The forward is ASYNCHRONOUS and must stay so.** `SendLog` takes `connMu`
+  on the control client, and `Write` can be reached from code already holding
+  it — `writeJSON` logs its own failures. A direct call deadlocks the control
+  plane the first time a send fails. `Write` only enqueues, never blocks, and
+  drops when the queue is full: the same rule `shadow.Scorer.Push` follows for
+  the mic goroutine, for the same reason.
+- **It is RATIONED, because the control plane is the liveness channel.** RTT
+  is measured on it and the keepalive pong rides it; bulk traffic there is
+  #404, where BLE advertisements produced 3615 idle RTT excursions in 24h
+  against a neighbour's 2. Six lines a minute, and the dropped count rides the
+  next line through rather than costing a message of its own.
+- **Match OUTCOMES, not components.** The classifier looks for `failed`,
+  `exited`, `could not`, `timeout` and so on, so a subsystem written next year
+  is relayed the day it breaks without anyone remembering to add it. The
+  lifecycle exceptions are deliberate and few — `PcmSpeaker initialised` is
+  relayed because its ABSENCE is the tell for a device whose PCM Android will
+  not release, and an absence is only legible when the presence is normally
+  there to compare against.
+- **The pass-through happens first and cannot fail.** This is the process's
+  log destination; a relay able to swallow a line would be worse than no relay.
+
+`[mem]`, `[aec]` and `[mic] clock` are excluded by name: the first has its own
+relay and is 89% of the `device_logs` table, and the others run ~1/s during
+playback.
+
 ## The endpoints are children, and a restart does not take them with it
 
 **This is what "AirPlay disappears after every update and comes back after a

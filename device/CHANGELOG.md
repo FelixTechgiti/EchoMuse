@@ -12,6 +12,34 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.23.0-fx.1
+
+The Echo can now say what went wrong.
+
+### What's new
+
+**Until now, when something failed on the device, the reason stayed on the
+device.** The Echo writes its log to memory, and the only thing it ever sent
+onward was a periodic memory summary. So a receiver failing to start every
+minute for two hours was visible only to somebody willing to open a root shell
+on their own hardware — which is exactly what diagnosing this week's AirPlay
+fault took.
+
+Failures and a few lifecycle lines are now forwarded to the controller and
+appear in its log, where they can be read without touching the device, and are
+included in a support bundle. Everything still goes to the device's own log
+unchanged; this adds a copy of the lines worth reading.
+
+It is deliberately rationed — six lines a minute — because the same connection
+carries the health checks that decide whether the Echo is considered online,
+and flooding it would break the thing it reports on. When lines are held back,
+the next one through says how many.
+
+### What is required of you
+
+Nothing. If you report a problem after this, the answer is far more likely to
+be in a support bundle already.
+
 ## 2.22.0-fx.1
 
 AirPlay and Spotify Connect survive an update.

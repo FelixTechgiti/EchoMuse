@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.28.0-fx.1
+
+Device faults appear in the controller's own log.
+
+### What's new
+
+**A device's log lines used to reach only the database and the dashboard.** So
+a fault on an Echo — a streaming endpoint failing to start, the speaker never
+opening — was absent from the add-on log, from the container's output and from
+the support bundle's controller log, which is where anyone actually looks
+first. Diagnosing one meant opening a root shell on the device.
+
+Warnings and errors from a device are now written to the controller's own log
+as well, tagged with the device they came from. Informational lines are not:
+that is where the volume is, and the controller's log ring holds a bounded
+history that would otherwise be spent on routine chatter.
+
+This needs firmware 2.23.0-fx.1 or newer to have anything to write — that is
+the release where the device starts sending these lines at all.
+
+### What is required of you
+
+Nothing.
+
 ## 2.27.0-fx.1
 
 **Spotify Connect and AirPlay install themselves.** The two programs the Echo
