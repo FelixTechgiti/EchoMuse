@@ -66,6 +66,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
 	"github.com/wilbowes/EchoMuse/internal/resample"
 )
@@ -442,30 +443,28 @@ func (c *Client) pump(r io.Reader) {
 	// on a period boundary (2048 stereo frames in is 2229 mono samples out),
 	// so the remainder has to be carried.
 	pw := pcm.NewPeriodWriter(pcm.MusicPeriodBytes, c.sink.PumpMusic)
-	claimed := false
+	// The plane is claimed on the FIRST audio rather than at process start:
+	// librespot runs continuously so it can appear in the app, and it is
+	// silent until somebody selects it. Claiming at start would take the plane
+	// from Home Assistant for a speaker nobody is playing to.
+	//
+	// A refused claim means Home Assistant holds it. The audio is dropped and
+	// the session carries on: the user's phone shows the Echo playing, which
+	// is wrong, and the alternative is killing a session they may want back in
+	// ten seconds. Bounded by HA releasing the plane, and the next chunk
+	// claims again.
+	//
+	// The claim EXPIRES when the audio stops — see musicplane.IdleClaim. The
+	// release after cmd.Wait below is still right and is no longer the only
+	// one: it covers the process exiting, and this covers the far commoner
+	// case of a daemon that simply goes quiet.
+	claim := musicplane.NewIdleClaim(c.plane, musicplane.DefaultIdle)
+	defer claim.Stop()
 
 	for {
 		n, err := io.ReadFull(br, buf)
 		if n > 0 {
-			// The plane is claimed on the FIRST audio rather than at
-			// process start: librespot runs continuously so it can appear
-			// in the app, and it is silent until somebody selects it.
-			// Claiming at start would take the plane from Home Assistant
-			// for a speaker nobody is playing to.
-			if !claimed {
-				if !c.plane.Claim() {
-					// Home Assistant holds it. The audio is dropped and
-					// the session carries on: the user's phone shows the
-					// Echo playing, which is wrong, and the alternative is
-					// killing a session they may want back in ten seconds.
-					// Bounded by HA releasing the plane, and the next
-					// chunk claims again.
-					continue
-				}
-				claimed = true
-			}
-			if !c.plane.MayWrite() {
-				claimed = false
+			if !claim.Feed() {
 				continue
 			}
 			out := conv.Convert(buf[:n-n%bytesPerFrame], pcm.DownmixStereo)

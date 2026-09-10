@@ -12,6 +12,38 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.18.0-fx.1
+
+Two fixes for the streaming endpoints, both found on a real device.
+
+### What's new
+
+**Home Assistant said the Echo was playing AirPlay long after it had
+stopped.** The Audio and Audio Source entities from 2.17.0-fx.1 read
+`airplay` for as long as the device stayed up, even with nothing playing and
+the connection dropped.
+
+The plane was only ever given back when shairport-sync *exited* — and it is a
+daemon that runs continuously so the Echo stays in the AirPlay list. When a
+phone disconnects it simply stops sending audio, so nothing was released. The
+claim now expires after two seconds of silence and is taken again with the
+next note. Spotify Connect had the identical fault and is fixed with it.
+
+**The Spotify build could never advertise itself.** librespot was compiled
+without `with-libmdns`, which is one of its own default features and the whole
+of how a speaker appears in the Spotify app. It ran perfectly, `spotifyEnabled`
+was on, the Echo was simply never in the list — and turning the setting off and
+on could not help, because there is no announcement to resend.
+
+### What is required of you
+
+**Rebuild and reinstall librespot** if you use Spotify Connect —
+`device/librespot/build.sh`, then Updates → Streaming endpoints. The firmware
+update alone does not fix it; the fault is inside the binary you installed.
+The build script now refuses to produce another one like it.
+
+Nothing is required for the AirPlay fix beyond this update.
+
 ## 2.17.0-fx.1
 
 The Echo now tells the controller when it is playing something of its own.

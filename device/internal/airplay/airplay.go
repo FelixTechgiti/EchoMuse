@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
 	"github.com/wilbowes/EchoMuse/internal/resample"
 )
@@ -383,24 +384,23 @@ func (c *Client) pump(r io.Reader) {
 	// becomes a short period — a glitch, counted in the instrumentation as
 	// a whole one. Nothing about a resampled read lands on a boundary.
 	pw := pcm.NewPeriodWriter(pcm.MusicPeriodBytes, c.sink.PumpMusic)
-	claimed := false
+	// Claimed on the FIRST AUDIO rather than at process start: shairport-sync
+	// runs continuously so it can appear in the AirPlay list, and it is silent
+	// until somebody selects it. Claiming at start would take the plane from
+	// Home Assistant for a receiver nobody is playing to.
+	//
+	// And GIVEN BACK when the audio stops, which is the half that was missing
+	// (2026-09-10). Release used to sit after cmd.Wait, so the plane was held
+	// until the PROCESS exited — and the process is a daemon that outlives
+	// every session by design. A phone that disconnected left this device
+	// reported as playing AirPlay until it rebooted.
+	claim := musicplane.NewIdleClaim(c.plane, musicplane.DefaultIdle)
+	defer claim.Stop()
 
 	for {
 		n, err := io.ReadFull(br, buf)
 		if n >= stereoBytesPerFrame {
-			// Claimed on the FIRST AUDIO rather than at process start:
-			// shairport-sync runs continuously so it can appear in the
-			// AirPlay list, and it is silent until somebody selects it.
-			// Claiming at start would take the plane from Home Assistant
-			// for a receiver nobody is playing to.
-			if !claimed {
-				if !c.plane.Claim() {
-					continue
-				}
-				claimed = true
-			}
-			if !c.plane.MayWrite() {
-				claimed = false
+			if !claim.Feed() {
 				continue
 			}
 			out := c.convert(conv, buf[:n-n%stereoBytesPerFrame])
