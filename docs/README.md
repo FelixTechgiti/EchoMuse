@@ -21,6 +21,10 @@ Tiefere technische Referenzen liegen anderswo:
   kann. Der Exploit selbst ist R0rt1z2s Arbeit im XDA-Forum, und jener Thread
   ist maßgeblich; hier steht, wo Revoice übernimmt und was der Assistent für
   dich erledigt.
+- [agent-access.md](agent-access.md) — wie eine Automation den Controller
+  durch Home Assistant hindurch ansteuert: Ingress-Authentifizierung, was
+  Lesezugriff schon kann, was Adminrechte braucht, und der eine Schritt, den
+  ein Mensch von Hand machen muss.
 - [device-controller-interface.md](device-controller-interface.md) — der
   Wire-Contract, den ein Geräte-Binary umsetzt: die drei WebSocket-Ebenen,
   Fähigkeitsaushandlung, `/control`-Nachrichten, `/data`-Frames, Config-Push,

@@ -1034,7 +1034,7 @@ restart-then-reboot pair appears **six times** in that one day's log — every
 one of them a person deciding to pull the plug.
 
 `discovery.SaveEndpoint`/`LoadEndpoint` persist the endpoint to
-`/data/local/etc/echomuse/controller.json`, beside the TLS credentials and
+`/data/local/etc/revoice/controller.json`, beside the TLS credentials and
 `state.json`, which OTA slot flips do not touch. `Run` seeds `lastServer` from
 it when the field is empty, so the fast path exists in a process that has
 never registered.

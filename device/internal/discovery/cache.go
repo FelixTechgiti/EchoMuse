@@ -44,7 +44,7 @@ import (
 // answer at this address could equally answer an mDNS browse, more easily and
 // without waiting for a restart, and the link is TLS-verified against a fixed
 // SAN wherever credentials are installed.
-const CachePath = "/data/local/etc/echomuse/controller.json"
+const CachePath = "/data/local/etc/revoice/controller.json"
 
 type cachedServer struct {
 	Host    string `json:"host"`
