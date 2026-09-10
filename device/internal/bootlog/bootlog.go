@@ -44,7 +44,7 @@ import (
 // em_api.SUPERVISOR_LOG, which is what the controller fetches — one file, so
 // the device's account and the supervisor's account read as one story in
 // order, rather than two files somebody has to interleave by hand.
-const Path = "/data/local/etc/echomuse/supervisor.log"
+const Path = "/data/local/etc/revoice/supervisor.log"
 
 // logPath is what Appendf actually writes, so the package's own tests can
 // redirect it. Everything outside this package uses Path.

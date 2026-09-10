@@ -959,7 +959,7 @@ cycle after 8 to 30 minutes each, and every one took its own explanation with
 it. Told to run a command on the device first, the answer was the obvious one:
 *"wie soll ich das machen. Ich gebe die Befehle über den Controller"*.
 
-**So the firmware also writes to `/data/local/etc/echomuse/supervisor.log`**
+**So the firmware also writes to `/data/local/etc/revoice/supervisor.log`**
 (`internal/bootlog`), the file `start_server.sh` has written its own decisions
 to since 2026-08-01 and which the controller fetches after a failed update
 (`em_api.SUPERVISOR_LOG`, `_collect_supervisor_log`). One file, not a second
