@@ -14,7 +14,8 @@ required of them.
 
 ## 2.25.0-fx.1
 
-The Echo remembers where its controller is.
+The Echo remembers where its controller is, and says whether Spotify and
+AirPlay are actually running.
 
 ### What's new
 
@@ -57,10 +58,30 @@ does not answer means the network, and no answer to a broadcast while the
 address does answer means the broadcast. Those want opposite fixes and
 previously read the same.
 
+### Spotify and AirPlay now say whether they are running
+
+The dashboard could tell you librespot and shairport-sync were **installed**.
+It could not tell you whether they were running, and those are not the same
+thing — an Echo can have the right file, of the right size, marked executable,
+and still appear in no AirPlay list at all. That happened for two hours on a
+real device: a leftover copy from before an update was still holding the
+network port, so every new attempt gave up immediately, and every screen said
+it was fine.
+
+The Echo now reports, every thirty seconds, whether each one is actually
+running, how long it has been up, and — if it is not — how many times it has
+tried to start and why the last attempt ended. The streaming settings show it
+directly: *"shairport-sync: running — up 2h"*, or *"shairport-sync: NOT
+running — 118 start attempts — last exit: exit status 1"*.
+
+An Echo on older firmware, and an Echo that has only just connected, both say
+nothing rather than claiming something is down. Being wrong in that direction
+is how a warning becomes one people learn to scroll past.
+
 ### What is required of you
 
-Nothing. The benefit starts one update after this one — this release is the
-one that begins remembering.
+Nothing. The remembering starts one update after this one — this release is
+the one that begins writing the address down.
 
 ## 2.24.0-fx.1
 

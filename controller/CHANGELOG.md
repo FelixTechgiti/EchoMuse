@@ -67,6 +67,17 @@ admin — it just puts that within reach of something other than a person at a
 keyboard. `docs/agent-access.md` describes the whole path, including how an
 automation authenticates through Home Assistant without a password.
 
+### Streaming endpoints show whether they are running
+
+Paired with firmware 2.25.0-fx.1: the Spotify and AirPlay settings now say
+whether librespot and shairport-sync are actually running, not just whether
+they are installed. An Echo that has the file and cannot start it — because
+something else is holding the network port, say — used to look identical to
+one that was working.
+
+Older firmware, and an Echo that has just connected, show the old wording
+rather than claiming anything is down.
+
 ### What is required of you
 
 Nothing.

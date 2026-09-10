@@ -6341,6 +6341,18 @@ def _merge_device(row) -> dict:
         # capable and still be running on the software tap.
         "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # Whether the streaming endpoints are actually RUNNING, against
+        # spotifyStatus/airplayStatus below which say whether their binary is
+        # installed. Both were true of a device that did not appear in a
+        # single AirPlay picker for two hours, because an orphan from before
+        # the last OTA still held TCP 5000.
+        #
+        # The capability rides alongside for the reason it exists: null here
+        # means "this firmware cannot say" on old firmware and "not yet
+        # reported" for the ~30s before the first stats tick, and neither may
+        # render as "it is down".
+        "endpointHealthCapable": getattr(live, "endpoint_health_capable", False) if live else False,
+        "endpointHealth":  getattr(live, "endpoint_health", None) if live else None,
         # Which userspace the device booted: "emos", "fireos", or null from
         # firmware that cannot say. Null is not FireOS — the wizard, the
         # support bundle and the payload reconcile all need to tell "Android"

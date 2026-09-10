@@ -66,6 +66,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/endpoint"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/orphan"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
@@ -169,6 +170,13 @@ type Client struct {
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
+
+	// What the endpoint has actually been doing, for endpoint.Health.
+	// Under mu with the rest: they are read together and a torn pair is a
+	// report that contradicts itself.
+	restarts  int
+	startedAt time.Time
+	lastExit  string
 	// proc is the live process, held so a preemption can end it.
 	proc *os.Process
 }
@@ -218,6 +226,12 @@ func (c *Client) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 	c.running = true
+	// Counted from the moment this was turned on, so "restarts" answers "since
+	// you enabled it" rather than "since the device booted". A toggle off and
+	// on is a fresh question, and carrying the old count into it would make a
+	// deliberate restart look like a fault.
+	c.restarts = 0
+	c.lastExit = ""
 	c.mu.Unlock()
 
 	// Take the ports over from a previous instance before starting our own.
@@ -297,6 +311,29 @@ func (c *Client) Running() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.running
+}
+
+// Health is what this endpoint can say about itself right now.
+//
+// Enabled and Alive are two questions and the gap between them is the whole
+// point: a supervisor that is up while nothing is running, restart after
+// restart, is a binary that cannot start — which every other report on this
+// device renders as healthy, because the file is present and executable.
+func (c *Client) Health() endpoint.Health {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := endpoint.Health{
+		Enabled:  c.running,
+		Alive:    c.proc != nil,
+		Restarts: c.restarts,
+		LastExit: c.lastExit,
+	}
+	// Only meaningful while something is running, and reporting the age of a
+	// process that has exited would read as uptime it does not have.
+	if c.proc != nil && !c.startedAt.IsZero() {
+		h.UptimeS = int(time.Since(c.startedAt).Seconds())
+	}
+	return h
 }
 
 // Leave ends the current session because something else took the music plane.
@@ -425,6 +462,8 @@ func (c *Client) session(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.proc = cmd.Process
+	c.startedAt = time.Now()
+	c.restarts++
 	c.mu.Unlock()
 
 	go relayLog(stderr)
@@ -433,6 +472,15 @@ func (c *Client) session(ctx context.Context) error {
 	err = cmd.Wait()
 	c.mu.Lock()
 	c.proc = nil
+	// Kept whatever it says, including nil: "exited cleanly" and "exit status
+	// 1 every minute for two hours" are both answers, and blanking the field
+	// on a clean exit would make the second one look like the first between
+	// restarts.
+	if err != nil {
+		c.lastExit = err.Error()
+	} else {
+		c.lastExit = "exited cleanly"
+	}
 	c.mu.Unlock()
 
 	// Whatever ended it, the plane goes back. Idempotent, and the thing the

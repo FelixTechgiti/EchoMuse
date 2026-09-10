@@ -1114,6 +1114,59 @@ Two details not to simplify:
 Sendspin is deliberately not covered: it runs in-process, so there is no child
 to orphan.
 
+## Installed is not running (`internal/endpoint`)
+
+`spotify_status`/`airplay_status` ride the register message and answer whether
+the BINARY is on the device — present, a file, executable, its size. That is a
+static property of the boot, correctly placed, and it answers "why is this
+off" when the answer is a missing file.
+
+**It cannot answer the question that actually gets asked.** On 2026-09-10 a
+device had shairport-sync installed, executable, the right size, reporting
+`ok: true` — and appeared in no AirPlay picker for two hours, because an
+orphaned copy from before the last OTA still held TCP 5000 and every new
+instance exited immediately. Every panel said the endpoint was fine.
+
+`Client.Health()` on both endpoints returns `endpoint.Health`, and the three
+fields each rule out a different thing:
+
+- **`Enabled`** — the supervisor is up, i.e. somebody turned this on.
+  `Running()` has always meant exactly this and is easily mistaken for the
+  next one.
+- **`Alive`** — a process exists right now. `Enabled && !Alive`, sampled
+  repeatedly, is the fault above.
+- **`Restarts`** — counted from the moment the endpoint was ENABLED, not from
+  boot, so a deliberate toggle does not read as a fault. Steady is healthy;
+  climbing is the signature, and it separates "briefly between sessions" from
+  "failing every minute for two hours" without needing a second sample.
+
+`LastExit` carries the reason, because `exit status 1` (a port it cannot bind)
+against `signal: killed` (a preemption we asked for) is the whole difference.
+
+Three rules:
+
+- **It rides the STATS tick, never the register message.** Whether a process
+  is alive is true at 14:44 and false at 14:45; reported once at registration
+  it would be wrong for however long the device stayed connected, which here
+  is days. Same rule that moved `base_os` in the other direction — ask where
+  the consumer needs the answer.
+- **`endpoint_health` is a capability, and a fourth one where three existed.**
+  All three endpoints shipped before this, so there is firmware in the field
+  that runs them and cannot say how they are doing. A capability to DO
+  something is never evidence of a capability to REPORT it.
+- **Only ENABLED endpoints appear.** A disabled one has no health to describe,
+  and an entry saying so renders as a thing that is down rather than a thing
+  nobody asked for. Both disabled sends nothing at all, which `omitempty`
+  turns into an absent key — the same absence as old firmware, and correctly
+  so: neither has anything to say.
+
+The dashboard's half is `endpointHealthLine` (`dashboard.jsx`, tested by
+`controller/tests/endpoint_health.test.mjs`), and its job is mostly to STAY
+SILENT: firmware that cannot report, and firmware that has not sent its first
+tick yet, must not render as "not running". Accusing a working Echo for the
+first thirty seconds of every reconnect is how this becomes the line everyone
+learns to ignore.
+
 ## AirPlay latency, and why the prime depth is not one number
 
 **The music plane's prime gate was ~1s of PERMANENT latency for every
