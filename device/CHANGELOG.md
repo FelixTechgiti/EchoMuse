@@ -34,6 +34,14 @@ device that has been updated — no power cycle needed. The programs are stopped
 on the way down as well, but that is the tidy half rather than the fix: it
 cannot run if the firmware is killed outright or crashes.
 
+**A device with a cable in the headphone socket no longer fights Android for
+the speaker.** Android keeps the speaker for itself while a plug is present,
+and since 2.20.0 the firmware asked for it back every few seconds — for ever,
+on a device where the answer was never going to change. That worked out at
+stopping an Android system service roughly every 2.6 seconds, all day. It now
+asks a few times and then settles into a slow retry, so a plugged-in Echo is
+quiet about it and picks the speaker up promptly if it does become free.
+
 **A device whose speaker Android will not release no longer floods its own
 log.** Since 2.20.0 such a device runs normally and stays silent, which is
 deliberate — but it was reporting the refusal for every fragment of audio,

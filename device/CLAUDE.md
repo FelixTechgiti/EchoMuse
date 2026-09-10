@@ -567,8 +567,26 @@ whatever Android is doing with the PCM. Two consequences to keep:
   nothing played.
 
 `retryOpen` lives in `pcmwait.go` with `waitFree`, untagged, for the same
-reason: what is worth pinning is that the loop retries and that a stop is
-honoured *between* attempts rather than after another full interval.
+reason: what is worth pinning is that the loop retries, that it BACKS OFF, and
+that a stop is honoured *between* attempts rather than after another full
+interval.
+
+**The retry must back off and the nudge must be budgeted, and the reason is a
+comment that stopped being true.** `nudgeInterval` was justified as costing
+"four fork/execs on a path that runs once per process start" — which the
+retrying open silently ended. The two holders look identical from here and are
+nothing alike: mediaserver restarting after an OTA lets go within seconds,
+while mediaserver holding the speaker **because a plug is in the jack** never
+lets go at all. Under the flat 3s retry the second case spent a `stop media`
+roughly every **2.6 seconds for the life of the process** — killing an Android
+system service in a loop, on a board sharing 512MB with Android — plus a
+`stop mixer` and a codec probe per attempt. `maxNudges` (4, exactly what the
+original ten-second window already spent) and a doubling delay to
+`speakerRetryMax` (60s) leave the recoverable case untouched, since it is over
+long before either bound is reached, and turn the unrecoverable one into a
+heartbeat. **Watch for this whenever something that ran once starts running
+in a loop: the cost comments written for the one-shot are the things that go
+stale, and they go stale silently.**
 
 `waitFree` is in `pcmwait.go` with **no build tag**, beside `pcmstatus.go` and
 for the same reason as `internal/outchain`: it is a timing loop over two

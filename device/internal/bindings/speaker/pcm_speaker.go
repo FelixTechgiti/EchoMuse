@@ -185,7 +185,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) *PcmSpeaker
 	// controller's own 0x04 stream over WiFi.
 	s.musicPrime.Store(primePeriods)
 	go func() {
-		if retryOpen(s.Init, s.stopCh, speakerRetryInterval) {
+		if retryOpen(s.Init, s.stopCh, speakerRetryInterval, speakerRetryMax) {
 			s.ready.Store(true)
 		}
 	}()
