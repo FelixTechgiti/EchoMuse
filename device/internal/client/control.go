@@ -13,12 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/airplay"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
+	"github.com/wilbowes/EchoMuse/internal/bootlog"
 	"github.com/wilbowes/EchoMuse/internal/clock"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
@@ -106,6 +108,14 @@ type ControlClient struct {
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
+
+	// registrations counts sessions that actually reached the controller.
+	// The reconnect loop reads it either side of connect() to tell "this
+	// attempt registered and the link later dropped" from "this attempt
+	// never got off the ground", which look identical from the outside — the
+	// ring pulses orange for both — and are the two halves of the fault the
+	// supervisor log exists to separate.
+	registrations atomic.Int64
 
 	// features is what the CONTROLLER announced on the ack. Guarded by its
 	// own mutex rather than connMu: HasFeature is read on the scanner's
@@ -233,9 +243,28 @@ func (c *ControlClient) IsConnected() bool {
 var errPending = fmt.Errorf("pending approval")
 
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
+	// How long this device has been without a controller, and the gate that
+	// decides when that is worth a line on /data.
+	//
+	// It has to live HERE rather than only in the mDNS search, and that is
+	// the half that was missing. A device which finds the controller every
+	// round and never registers — pending approval, a token the controller
+	// rejects, a TLS listener it cannot complete against — spends no time
+	// inside FindServer at all, so a search-scoped record says nothing about
+	// it. From the outside the two are the same device pulsing orange for
+	// twenty minutes, and telling them apart afterwards is the whole job.
+	offlineSince := time.Now()
+	var offline bootlog.Escalator
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		if offline.Due(time.Since(offlineSince)) {
+			bootlog.Appendf("no controller session for %s — %s",
+				time.Since(offlineSince).Round(time.Second),
+				discovery.DescribeLink())
 		}
 
 		// Show orange pulse while searching for server
@@ -279,9 +308,24 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}()
 
+		before := c.registrations.Load()
 		err := c.connect(ctx, server, data)
+		registered := c.registrations.Load() != before
 
 		cancelData()
+
+		if registered {
+			// The session reached the controller, so whatever this outage
+			// was, it is over. Report it only if anybody was told about it:
+			// an all-clear for something nobody heard is a flash write for
+			// nothing.
+			if offline.Reported() > 0 {
+				bootlog.Appendf("controller session established after %s offline",
+					time.Since(offlineSince).Round(time.Second))
+			}
+			offline.Reset()
+			offlineSince = time.Now()
+		}
 
 		switch err {
 		case errPending:
@@ -465,6 +509,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		c.connMu.Unlock()
 	}()
 
+	c.registrations.Add(1)
 	if c.connectedCallback != nil {
 		c.connectedCallback()
 	}

@@ -944,6 +944,71 @@ Four rules, and the first is the one that would hurt:
 relay and is 89% of the `device_logs` table, and the others run ~1/s during
 playback.
 
+### And the relay cannot cover the fault where it is needed most
+
+**The relay runs over the controller connection, so it says nothing about a
+device that has no controller connection** — which is the one condition where
+somebody is standing in front of a dead Echo with no way to ask it anything.
+The device's shell is proxied BY THE CONTROLLER too, so in that fault there is
+no channel at all: not the log, not a shell, not the dashboard. Every recovery
+is a power cycle, and `/tmp` is RAM-backed, so the act of recovering destroys
+the evidence.
+
+That is not hypothetical. Four such restarts on 2026-09-10 ended in a power
+cycle after 8 to 30 minutes each, and every one took its own explanation with
+it. Told to run a command on the device first, the answer was the obvious one:
+*"wie soll ich das machen. Ich gebe die Befehle über den Controller"*.
+
+**So the firmware also writes to `/data/local/etc/echomuse/supervisor.log`**
+(`internal/bootlog`), the file `start_server.sh` has written its own decisions
+to since 2026-08-01 and which the controller fetches after a failed update
+(`em_api.SUPERVISOR_LOG`, `_collect_supervisor_log`). One file, not a second
+one, so the supervisor's account and the firmware's read as one story in order
+rather than two somebody has to interleave by hand — and firmware lines are
+tagged `firmware:` so it is clear which wrote what.
+
+Four things are load-bearing:
+
+- **`up=` is SECONDS SINCE BOOT, read from `/proc/uptime`, because that is
+  what the supervisor writes.** Timing from process start would be cheaper and
+  would put two different zeros in the same column — an OTA restart is exactly
+  when they diverge, and exactly when the file is read. The wall clock rides
+  alongside as a hint and must not be trusted for ordering: an Echo boots
+  reading 2010 and is corrected by the controller it cannot find.
+- **Reports are ESCALATING, never periodic** (`bootlog.Escalator`: 1, 5, 15,
+  30 minutes, then half-hourly). This is eMMC that cannot be replaced, and
+  every fault recorded here is open-ended by nature — with a plug in the jack
+  Android never gives the speaker back. A per-attempt line would spend a flash
+  write every few seconds for as long as the fault lasts. The first milestone
+  sits past every ordinary restart (the successful reconnect measured that day
+  took 1m57s), so **a healthy device writes nothing at all** beyond its one
+  startup line. Milestones already behind are spent rather than queued, or a
+  caller returning from a long block pays out the backlog as a burst.
+- **The trim happens BEFORE the append, and the bounds are the supervisor's
+  own numbers** — pinned against `start_server.sh` by
+  `tests/test_deploy.py`, along with the path. Two programs trim one file, so
+  a firmware keeping more than the supervisor does merely has the extra
+  deleted at the next boot: a bound that reads as deliberate and is really the
+  smaller of the two.
+- **Every failure is swallowed.** This is diagnostics for a fault that has
+  already happened. A caller obliged to handle an error is a caller that might
+  decide not to log.
+
+What gets written, and why each is a fault nothing else can see:
+
+| Line | The fault it is the only record of |
+|------|-----------------------------------|
+| `<version> starting` | The supervisor logs `start pid=… slot=server_a` — which symlink was followed, never what is IN it. This is what dates an OTA that appeared to work. |
+| `no controller for …` (`internal/discovery`) | mDNS browsing and finding nothing. Carries `wlan0=<addr>` or `wlan0=no address`, which is the field separating "this device has no network" from "this device is on the network and the controller is not answering" — two faults with completely different next steps, and the ambiguity that could not be resolved after the fact. |
+| `no controller session for …` (`internal/client`) | **The half a search-scoped record misses.** A device that finds the controller every round and never registers — pending approval, a token refused, a TLS listener it cannot complete against — spends no time inside `FindServer` at all. From outside it is the same Echo pulsing orange for twenty minutes. Measured against a registration counter, not against the callbacks, so "connected and later dropped" is distinct from "never got off the ground". |
+| `no speaker for …` (`internal/bindings/speaker`) | The ALSA open never succeeding. `main()` is no longer gated on the speaker, so this costs only the audio now — which makes it QUIETER, not smaller: the device registers, answers its buttons and lights its ring while playing nothing. |
+
+Each fault also writes ONE all-clear when it clears, and **only if something
+was reported first** — an all-clear for a fault nobody heard about is a flash
+write for nothing. `Escalator.Reset` puts the cadence back afterwards, or a
+device flapping all night would be recorded once and then be as invisible as
+it was before any of this existed.
+
 ## The endpoints are children, and a restart does not take them with it
 
 **This is what "AirPlay disappears after every update and comes back after a
