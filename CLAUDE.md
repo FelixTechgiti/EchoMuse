@@ -201,6 +201,45 @@ would appear and the release workflow would never fire — a version tagged with
 nothing published for it. A fine-grained PAT scoped to this repository with
 Contents: read and write, and nothing else.
 
+**The pin bump belongs in its own release PR, and merging it early breaks
+every installed add-on until the tag is cut.** Supervisor reads
+`controller/config.yaml`'s `version:` off the DEFAULT BRANCH and pulls
+`image:version` directly, so the pin is live the instant it merges — while the
+image cannot exist yet, because `controller-release.yml` re-tags what
+`controller-build.yml` built FROM main. The commit necessarily comes first;
+the only question is how long the gap lasts. Folding the bump into a feature
+PR stretches it to however long passes before somebody remembers to cut, and
+what a user sees for the whole of that window is
+
+```
+Error updating EchoMuse: An unknown error occurred with app
+46aaf331_controller. Check Supervisor logs for details
+```
+
+which names nothing and points nowhere. Measured 2026-09-09, overnight, on
+2.26.0-fx.1: CI green, code correct, the only symptom inside somebody's Home
+Assistant. `controller-release.yml` already refuses a tag that disagrees with
+the pin, but that guard faces the other way — it protects the release from a
+stale pin, not users from a pin with no release. So: bump the pin in a
+`release/controller-X.Y.Z` PR of its own (the shape 2.25.0-fx.1 used), and cut
+the tag as soon as `Controller Build (main)` goes green on the merge.
+
+`.github/workflows/addon-pin.yml` is the backstop, hourly rather than on
+push: a few minutes of disagreement is structural and correct, so a
+push-triggered check would go red on every legitimate release and teach
+everyone to ignore it. An hour later is not a release in progress, it is a
+release somebody forgot. It HEADs the manifest — the exact question Supervisor
+asks — and its failure names the dispatch to run. EA is a warning rather than a
+failure there, because no `-ea` image has ever been published on this fork and
+a check red about an old thing cannot report a new one.
+
+**Cutting a release does not need a human at the keyboard.** `cut-release.yml`
+is `workflow_dispatch`, and a dispatch can be sent from a session through the
+GitHub API (`actions_run_trigger`, `workflow_id: cut-release.yml`, inputs
+`kind`/`version`/`ref`) — which is the whole of what could not be done
+directly, since the block is on pushing `refs/tags/*` and nothing else. Do not
+go on handing someone a list of buttons to click.
+
 **Without that secret, a release is cut by hand** through Releases → Draft a
 new release → Create new tag on publish, which produces a **lightweight** tag.
 That loses the annotation, so `controller/CHANGELOG.md` carries the notes and
