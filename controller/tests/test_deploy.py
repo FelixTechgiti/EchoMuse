@@ -2790,3 +2790,39 @@ def test_exec_is_admin_and_leaves_a_record():
         "a command was run on somebody's device and nothing recorded it"
     assert 'request["user"]' in fn, \
         "the record does not name who ran the command"
+
+
+def test_the_published_build_is_reachable_from_the_dashboard():
+    """
+    The automatic fetch never overwrites a binary the controller cannot prove
+    it wrote — right, because replacing a patched build somebody is testing is
+    help nobody asks for twice. The cost is that the same rule covers every
+    store filled before provenance existed, which is all of them: without a
+    way to take the published build deliberately, the automatic install can
+    never take over an existing installation and the one fleet that most needs
+    it is guaranteed not to get it.
+
+    The route existed with nothing calling it, which is the same thing as not
+    existing.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+
+    assert "use_published" in api, "no route to take the published build"
+    assert "use_published" in jsx, \
+        "nothing in the dashboard calls it — a route with no caller is a " \
+        "feature nobody has"
+    assert "publishedStoreState" in jsx, \
+        "the store's state against the release is not rendered anywhere"
+
+    # Provenance must be recorded, or this is a one-off copy and the store
+    # goes stale again at the next release.
+    fn = api[api.index("async def _post_endpoint_use_published"):]
+    fn = fn[:fn.index("\n@auth") if "\n@auth" in fn else len(fn)]
+    assert "write_provenance" in fn, \
+        "taking the published build does not record it as ours, so the " \
+        "automatic fetch will not keep it current"
+    assert "elf_problem" in fn, \
+        "a release asset is checked less than a person's upload"

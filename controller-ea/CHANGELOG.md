@@ -78,6 +78,22 @@ one that was working.
 Older firmware, and an Echo that has just connected, show the old wording
 rather than claiming anything is down.
 
+### The fleet store can take the published build
+
+Spotify and AirPlay binaries are downloaded from a release automatically —
+but only ever replacing a binary the controller knows it put there itself. It
+will not overwrite one you uploaded by hand, which is right if you are testing
+your own build and wrong for everybody who uploaded once before the automatic
+download existed. Those two look identical from the controller's side, so it
+stopped asking and simply left both alone, for ever, with nothing on screen
+explaining why the published build never arrived.
+
+The Streaming endpoints panel now says where the store stands — *the published
+build (endpoints-v1.2.0)*, *from an older release*, or *uploaded by hand —
+automatic updates leave this alone* — and offers a button to take the
+published build when that is what you want. Taking it also records it, so
+updates continue automatically from then on.
+
 ### What is required of you
 
 Nothing.
