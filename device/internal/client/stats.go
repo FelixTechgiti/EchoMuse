@@ -64,6 +64,22 @@ type DeviceStats struct {
 	// old to report it", and "off" collapsing into that would tell the
 	// dashboard a disarmed AEC is an unknown one.
 	AecRef string `json:"aecRef"`
+	// Endpoints is how the streaming programs are actually doing —
+	// endpoint.Health per kind, keyed "spotify"/"airplay". Nil when this
+	// firmware runs neither.
+	//
+	// **Here rather than on the register message, and that is the whole
+	// point.** `spotify_status`/`airplay_status` go out once at registration
+	// and answer whether the BINARY is installed, which is a static property
+	// of the boot and correctly belongs there. Whether the PROCESS is alive
+	// is true at 14:44 and false at 14:45 — reporting it once would report it
+	// wrong for however long the device stayed connected, which on this fleet
+	// is days. Ask when the consumer needs the answer.
+	//
+	// omitempty, so absence reads as "this firmware does not report it" and
+	// never as "nothing is running" — the NULL-not-zero rule, and the
+	// difference between "your AirPlay is broken" and "I cannot see".
+	Endpoints map[string]interface{} `json:"endpoints,omitempty"`
 	// The base OS deliberately does NOT ride this message — it is a static
 	// property of the boot and goes out once, on registration (control.go).
 	// It was here first and that was the bug: the payload reconcile asks for
@@ -99,5 +115,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"coresTotal":       s.CoresTotal,
 		"thermalCoreLimit": s.ThermalCoreLimit,
 		"aecRef":           s.AecRef,
+		"endpoints":        s.Endpoints,
 	})
 }

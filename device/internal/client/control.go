@@ -256,15 +256,34 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	offlineSince := time.Now()
 	var offline bootlog.Escalator
 
+	// Seed the fast path from the last registration, which may have been a
+	// previous PROCESS — an OTA restart has no memory and would otherwise
+	// have to rediscover, which is the failure this whole cache exists for.
+	// Only ever a hint: the probe below decides whether it is still true.
+	c.serverAddrMu.Lock()
+	if c.lastServer == nil {
+		if cached := discovery.LoadEndpoint(discovery.CachePath); cached != nil {
+			c.lastServer = cached
+			log.Printf("[control] remembered controller %s — trying it before mDNS",
+				cached.Addr)
+		}
+	}
+	c.serverAddrMu.Unlock()
+
+	// What the last attempt at the remembered controller did, for the record
+	// on /data. Its default says the search has not run yet rather than
+	// asserting anything about the network.
+	lastProbe := "not yet probed"
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
 		if offline.Due(time.Since(offlineSince)) {
-			bootlog.Appendf("no controller session for %s — %s",
+			bootlog.Appendf("no controller session for %s — %s, %s",
 				time.Since(offlineSince).Round(time.Second),
-				discovery.DescribeLink())
+				discovery.DescribeLink(), lastProbe)
 		}
 
 		// Show orange pulse while searching for server
@@ -292,8 +311,21 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}
 		if server != nil && probeTCP(server.Addr, 3*time.Second) {
+			lastProbe = fmt.Sprintf("remembered %s answered", server.Addr)
 			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
 		} else {
+			// Which of the two failed is the whole diagnosis, so the record
+			// says it. A remembered address that does not answer while the
+			// device holds an IP is a UNICAST failure — the network, not
+			// multicast; no remembered address at all, or one that answers
+			// while nothing else works, points the other way. Without this
+			// the log says "no controller" for both, which is where
+			// 2026-09-10 spent its afternoon.
+			if server == nil {
+				lastProbe = "no remembered controller — mDNS only"
+			} else {
+				lastProbe = fmt.Sprintf("remembered %s did not answer", server.Addr)
+			}
 			found, err := discovery.FindServer(ctx)
 			if err != nil {
 				return err
@@ -386,6 +418,12 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	c.serverBaseURL = baseURL
 	c.lastServer = server
 	c.serverAddrMu.Unlock()
+
+	// And on /data, so the NEXT PROCESS has it too. In memory this survives
+	// a reconnect and nothing else; the restart that needs it most — every
+	// OTA — starts with an empty field and only mDNS to fall back on. See
+	// discovery.CachePath. Written only when it has changed.
+	discovery.SaveEndpoint(discovery.CachePath, server)
 
 	reg := map[string]interface{}{
 		"type":      "register",
@@ -1060,7 +1098,18 @@ func capabilities() []string {
 		// and cannot say so, and a controller reading "can play locally" as
 		// "will tell me it is playing" would advertise an entity that reads
 		// off through a whole album.
-		"audio_state"}
+		"audio_state",
+		// "endpoint_health": this firmware reports, on every stats tick,
+		// whether the streaming programs are ALIVE — not merely installed.
+		//
+		// A fourth capability where three would do, for `audio_state`'s
+		// reason turned on a different axis: "spotify" says the firmware can
+		// run librespot and `spotify_status` says the binary is on the
+		// device, and BOTH were true of a device that did not appear in any
+		// AirPlay picker for two hours because an orphan held its port. The
+		// dashboard needs to tell "this firmware is too old to say" from "it
+		// is not running", and those are the same absence without this.
+		"endpoint_health"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

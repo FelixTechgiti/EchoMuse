@@ -454,6 +454,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/oww_models/upload",     _post_oww_model_upload)
     app.router.add_delete("/api/oww_models/{file}",   _delete_oww_model)
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
+    app.router.add_post("/api/devices/{id}/exec",         _post_device_exec)
     app.router.add_get("/api/devices/{id}/oww_assets",    _get_oww_assets)
     app.router.add_post("/api/devices/{id}/oww_assets",   _post_oww_assets)
 
@@ -1839,6 +1840,68 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
 
 # ─── OTA background tasks ─────────────────────────────────────────────────────
 
+# How long an OTA waits for the device to come back before it stops watching
+# in the foreground. NOT how long the update has to succeed — see
+# _monitor_reconnect and _settle_pending_ota. 90s is under the 1m57s a device
+# that has to boot was measured at on 2026-09-10, and raising it would only
+# move the line rather than remove it, which is why the verdict is settled on
+# reconnect instead.
+OTA_RECONNECT_TIMEOUT_S = 90
+
+# MAX_ATTEMPTS in device_payloads/start_server.sh. Named because the message
+# that quotes it is claiming something specific about the device's behaviour.
+ROLLBACK_ATTEMPTS = 3
+
+# device_id -> (attempted_version, version_before) for an update whose device
+# did not come back in time. The verdict is OPEN, not failed: it is settled by
+# _settle_pending_ota the moment the device reconnects, however much later.
+#
+# In memory only, deliberately. A controller restart drops these, and the
+# recorded update_error stays as the last thing anybody knew — which is
+# honest, whereas persisting a pending verdict would resurrect a question
+# about a device that has since been answered by other means.
+_pending_ota: dict[str, tuple[str, str]] = {}
+
+
+async def _settle_pending_ota(device_id: str, running: str | None) -> None:
+    """
+    Close out an update whose device went quiet, now that it is back.
+
+    The device is the only witness to what happened during those minutes, and
+    it reports its version on the register message — so the answer arrives by
+    itself and this only has to stop guessing before it does. Which is the
+    whole bug: the old code answered at the 90s mark from the database, where
+    the version of a device that never reconnected is by definition the OLD
+    one, and so read every slow update as a failed one.
+    """
+    pending = _pending_ota.pop(device_id, None)
+    if pending is None:
+        return
+    attempted, previous = pending
+
+    if running and running != previous:
+        _update_errors.pop(device_id, None)
+        await _push_log_event(device_id, "info", "controller",
+            f"✓ Update confirmed: {running} — the device came back late, "
+            f"not badly.")
+        await _push_event({
+            "type": "device_updated", "device_id": device_id,
+            "version": running,
+        })
+        return
+
+    # Back on the version it started on: a genuine rollback, learned late.
+    _update_errors[device_id] = (
+        f"auto-rolled back to {running or previous} — new binary failed to start"
+    )
+    await _push_log_event(device_id, "warn", "controller",
+        f"Device came back on {running or previous} after restarting into "
+        f"{attempted} — the new binary did not start.")
+    await _push_event({
+        "type": "device_auto_rolled_back", "device_id": device_id,
+        "version": running or previous,
+    })
+
 
 def _extract_binary_version(binary: bytes) -> str | None:
     """
@@ -1959,6 +2022,71 @@ async def _run_update(device_id: str, release: dict,
         _ota_lock.release()
 
 
+async def _leds_updating(device_id: str) -> None:
+    """
+    Turn the ring while an update transfers, so an update in progress and a
+    device that has died again stop being the same dark ring.
+
+    Best-effort throughout. This is feedback about an update, and an update
+    that failed because its LED push failed would be a strictly worse
+    outcome than one that ran without a light.
+    """
+    live = _live(device_id)
+    if live is None or not getattr(live, "led_anim_capable", False):
+        return
+    anim = (getattr(live, "led_scene", None) or {}).get("update_anim")
+    if not anim:
+        return
+    try:
+        await live.send_led_anim(anim)
+    except Exception as e:
+        log.debug(f"[api] update ring push failed for {device_id}: {e}")
+
+
+async def _leds_update_done(device_id: str) -> None:
+    """
+    Hand the ring back at the end of an update, on EVERY exit path.
+
+    In a `finally`, because the paths that skip it are the failure ones — a
+    fetch that 404s, a transfer that times out, an exception — and those are
+    precisely when a device would otherwise sit turning for ever with nothing
+    left to stop it. The 180s TTL is a backstop for a controller that dies,
+    not a substitute for this.
+
+    Best-effort, and deliberately quiet when the device is gone: after a
+    successful update the device has restarted and is not connected yet, which
+    is the ordinary case rather than a failure. The new firmware paints its
+    own ring when it comes up.
+
+    The resting colour is Home Assistant's, not ours — the ring light entity
+    owns what is shown when nothing is claiming the ring, and an update is a
+    transient that must hand it back rather than blank it. Painted here
+    directly rather than through em_controller.leds_idle because the import
+    runs the other way: em_controller imports this module.
+    """
+    live = _live(device_id)
+    if live is None:
+        return
+    rgb = em_ring_light.painted_rgb(
+        getattr(live, "idle_ring", em_ring_light.DEFAULT_COLOR),
+        getattr(live, "idle_ring_brightness", 0),
+    )
+    try:
+        if rgb is None:
+            # Rest is dark. A raw frame rather than {"pattern": "off"} for
+            # leds_idle's reason: a frame supersedes a running animation on
+            # the device's own generation counter, so this stops the rotation
+            # on firmware that animates locally AND on firmware that does not.
+            await live.set_leds([{"id": i, "r": 0, "g": 0, "b": 0}
+                                 for i in range(12)])
+        else:
+            r, g, b = rgb
+            await live.set_leds([{"id": i, "r": r, "g": g, "b": b}
+                                 for i in range(12)])
+    except Exception as e:
+        log.debug(f"[api] update ring clear failed for {device_id}: {e}")
+
+
 async def _run_update_locked(device_id: str, release: dict,
                              binary_override: bytes | None = None) -> None:
     """
@@ -1972,6 +2100,7 @@ async def _run_update_locked(device_id: str, release: dict,
     try:
         await _push_log_event(device_id, "info", "controller",
                               f"OTA update starting → {version}")
+        await _leds_updating(device_id)
 
         # Fetch binary
         if binary_override is not None:
@@ -2122,9 +2251,11 @@ async def _run_update_locked(device_id: str, release: dict,
         # _monitor_reconnect below detects whether the restart succeeded.
 
         # Wait for device to come back
-        confirmed = await _monitor_reconnect(device_id, version, previous_version=current_ver, timeout=90)
+        outcome = await _monitor_reconnect(device_id, version,
+                                           previous_version=current_ver,
+                                           timeout=OTA_RECONNECT_TIMEOUT_S)
 
-        if confirmed:
+        if outcome == "confirmed":
             _update_errors.pop(device_id, None)
             await _push_log_event(device_id, "info", "controller",
                                   f"✓ Update confirmed: {version}")
@@ -2133,44 +2264,64 @@ async def _run_update_locked(device_id: str, release: dict,
                 "device_id": device_id,
                 "version":   version,
             })
-        else:
+        elif outcome == "rolled_back":
+            # The device reconnected still running what it started on, which is
+            # the supervisor having given up on the new binary. Only THIS is a
+            # rollback; see _monitor_reconnect for what used to reach here.
             row     = await loop.run_in_executor(None, db.get_device, device_id)
-            running = row["firmware_ver"] if row else "unknown"
-
-            if running == current_ver:
-                # Device came back on old version — auto-rollback by start_server.sh
-                await loop.run_in_executor(
-                    None, db.set_firmware_previous, device_id, None
-                )
-                _update_errors[device_id] = (
-                    f"auto-rolled back to {running} — new binary failed to start"
-                )
-                _supervisor_log_wanted.add(device_id)
-                await _push_log_event(device_id, "warn", "controller",
-                    f"Device auto-rolled back to {running} "
-                    f"— new binary failed {3} start attempts")
-                await _push_event({
-                    "type":      "device_auto_rolled_back",
-                    "device_id": device_id,
-                    "version":   running,
-                })
-            else:
-                _update_errors[device_id] = (
-                    f"timed out — device running {running}"
-                )
-                _supervisor_log_wanted.add(device_id)
-                await _push_log_event(device_id, "warn", "controller",
-                    f"Update timed out — device running: {running}")
-                await _push_event({
-                    "type":      "device_update_failed",
-                    "device_id": device_id,
-                    "error":     _update_errors[device_id],
-                    "running":   running,
-                })
+            running = row["firmware_ver"] if row else current_ver
+            await loop.run_in_executor(
+                None, db.set_firmware_previous, device_id, None
+            )
+            _update_errors[device_id] = (
+                f"auto-rolled back to {running} — new binary failed to start"
+            )
+            _supervisor_log_wanted.add(device_id)
+            await _push_log_event(device_id, "warn", "controller",
+                f"Device auto-rolled back to {running} "
+                f"— new binary failed {ROLLBACK_ATTEMPTS} start attempts")
+            await _push_event({
+                "type":      "device_auto_rolled_back",
+                "device_id": device_id,
+                "version":   running,
+            })
+        else:
+            # Never came back inside the window. Say ONLY that: the update may
+            # still be fine and merely slow — a device that has to boot was
+            # measured at 1m57s against this 90s window — or it may be stranded
+            # with Android holding its PCM. Both look identical from here, and
+            # the one thing that can tell them apart is the device's own
+            # persistent log, which is why it is asked for.
+            #
+            # The verdict is left OPEN rather than guessed. _settle_pending_ota
+            # closes it when the device reconnects, however long that takes,
+            # because the answer arrives on its own and the only way to get it
+            # wrong is to answer before it does.
+            _pending_ota[device_id] = (version, current_ver)
+            _update_errors[device_id] = (
+                f"no contact {OTA_RECONNECT_TIMEOUT_S}s after the restart — "
+                f"still waiting; last seen on {current_ver}"
+            )
+            _supervisor_log_wanted.add(device_id)
+            await _push_log_event(device_id, "warn", "controller",
+                f"Device has not come back {OTA_RECONNECT_TIMEOUT_S}s after "
+                f"restarting into {version}. It may still return — the "
+                f"outcome will be recorded when it does.")
+            await _push_event({
+                "type":      "device_update_pending",
+                "device_id": device_id,
+                "error":     _update_errors[device_id],
+                "expected":  version,
+            })
 
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
+    finally:
+        # Every exit path, including the ones that returned early. A device
+        # left turning after a failed update is the exact "is it working or
+        # dead" ambiguity this ring exists to remove, inverted.
+        await _leds_update_done(device_id)
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
@@ -2257,32 +2408,62 @@ async def _monitor_reconnect(
     expected_version: str,
     previous_version: str | None = None,
     timeout: int = 90,
-) -> bool:
+) -> str:
     """
     Poll until the device reconnects on a new version, or timeout elapses.
+    Reports "confirmed", "rolled_back" or "absent".
 
     Accepts success if the device reports expected_version exactly (GitHub
     releases where the tag matches the binary's embedded version), OR any
     version that differs from previous_version (local uploads where the
     binary reports its own version string, not the controller's local-YYYYMMDD
     tracking string).
+
+    **"It did not come back" and "it came back on the old version" are two
+    different facts, and this returned the same False for both.** The caller
+    then read firmware_ver out of the database — which for a device that never
+    reconnected is still the OLD version, because only the device updates it —
+    and concluded an auto-rollback from the one piece of evidence that cannot
+    distinguish them. So a device that was merely SLOW was reported as one
+    whose new firmware failed to start, with a specific count of attempts it
+    had not made.
+
+    That is not a cosmetic wording problem. The message accuses the new binary,
+    which sends whoever reads it hunting a firmware bug that does not exist;
+    it cost most of an afternoon on 2026-09-10, twice. The device's own
+    supervisor log settles it — start_server.sh writes a `fast-exit` line per
+    failed start and a `rollback` line when it gives up, and across two weeks
+    of that fleet's log there is not one of either. Every rollback the
+    dashboard has ever reported on this fleet was this bug.
+
+    `reconnected` is therefore tracked explicitly rather than inferred at the
+    end, because by the time the caller looks, a device that connected and
+    dropped again looks exactly like one that never connected.
     """
     loop     = asyncio.get_event_loop()
     deadline = time.monotonic() + timeout
+    reconnected = False
     await asyncio.sleep(8)  # give device time to stop and restart
 
     while time.monotonic() < deadline:
         if _live(device_id) is not None:
+            reconnected = True
             row = await loop.run_in_executor(None, db.get_device, device_id)
             if row:
                 running = row["firmware_ver"]
                 if running == expected_version:
-                    return True
+                    return "confirmed"
                 if previous_version is not None and running != previous_version:
-                    return True
+                    return "confirmed"
         await asyncio.sleep(2)
 
-    return False
+    # The device came back and is running the version it started on: the
+    # supervisor gave up on the new binary and flipped the slot back.
+    if reconnected:
+        return "rolled_back"
+    # It never came back at all, which is a DIFFERENT fact and the one this
+    # fleet actually produces. See the caller.
+    return "absent"
 
 
 # ─── Shell helpers ────────────────────────────────────────────────────────────
@@ -2964,6 +3145,68 @@ async def _exec_shell(live, cmd: str) -> None:
 
 
 # ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
+
+@auth.require_admin
+async def _post_device_exec(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/exec  {"cmd": "..."} → {"output": "..."}
+
+    One shell command on the device, run to completion, output returned.
+
+    # This grants nothing new
+
+    `WS /api/devices/{id}/shell` already hands an admin a full interactive
+    root shell on the device, and has since the dashboard had a console tab.
+    This is the same capability in a shape a program can call: one request,
+    one answer, no terminal to drive. The bar is therefore the SAME bar —
+    admin — and it must stay there rather than becoming a lesser one on the
+    grounds that it looks smaller than a terminal.
+
+    # Why it exists
+
+    Everything about diagnosing a device currently needs a person at a
+    keyboard, driving a terminal, copying the output somewhere it can be
+    read. That person is a bottleneck on their own hardware: they are the
+    only path between what the device knows and anyone who could act on it,
+    and they have to be awake. The Echo's own log now survives a power cycle;
+    this is what makes the rest of the device answerable the same way.
+
+    # What keeps it accountable
+
+    **Every command is logged with the user who ran it**, at the same place
+    and in the same shape as `Shell session opened by <user>` — because the
+    owner of a device must be able to read back what was run on it, and an
+    interactive session at least announces itself. A scriptable one that did
+    not would be the quieter of the two, which is the wrong way round.
+
+    Sequential per device, like every other shell user here: `_shell_run`
+    takes the per-device lock, so this cannot interleave with an OTA transfer
+    or a dashboard terminal.
+    """
+    device_id = request.match_info["id"]
+    body = await _json_body(request)
+    cmd = _require_str(body, "cmd").strip()
+    if not cmd:
+        return _error("invalid_param", "cmd must not be empty", 400)
+
+    live = _live(device_id)
+    if live is None:
+        return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    try:
+        timeout = float(body.get("timeout", 30.0))
+    except (TypeError, ValueError):
+        return _error("invalid_param", "timeout must be a number", 400)
+    timeout = max(1.0, min(timeout, 120.0))
+
+    user = request["user"]["username"]
+    await _push_log_event(device_id, "info", "controller",
+                          f"exec by {user}: {cmd}")
+    log.info(f"[api] exec on {device_id} by {user}: {cmd}")
+
+    output = await _shell_run(live, cmd, timeout=timeout)
+    return _ok({"output": output, "cmd": cmd})
+
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     """
@@ -5924,12 +6167,14 @@ async def _collect_supervisor_log(device_id: str) -> None:
     text = (out or "").strip()
     if not text:
         await _push_log_event(device_id, "warn", "controller",
-            "Update failed, and the device has no supervisor log — firmware "
-            "predating it, or start_server.sh has not been synced yet "
-            "(it takes effect on the next device reboot).")
+            "The update did not confirm, and the device has no supervisor "
+            "log — firmware predating it, or start_server.sh has not been "
+            "synced yet (it takes effect on the next device reboot).")
         return
+    # Not "from the failed update": this is now fetched whenever an update did
+    # not CONFIRM, and a device that came back late did not fail.
     await _push_log_event(device_id, "warn", "controller",
-        "Supervisor log from the failed update:\n" + text)
+        "Supervisor log after the update:\n" + text)
 
 
 async def notify_device_connected(device_id: str, version: str | None = None) -> None:
@@ -5954,6 +6199,12 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
         if row:
             event["firmware_ver"] = row["firmware_ver"]
     await _push_event(event)
+
+    # An update whose device went quiet is answered HERE, by the device
+    # itself, rather than guessed at the 90s mark. Before the version lookup
+    # below can go stale, and before the log fetch, because the verdict is
+    # what makes the log worth reading.
+    await _settle_pending_ota(device_id, event.get("firmware_ver"))
 
     # Owed an explanation from a failed update? Collect it now the device is
     # reachable again. Removed from the set on the way in, so a flapping
@@ -6169,6 +6420,18 @@ def _merge_device(row) -> dict:
         # capable and still be running on the software tap.
         "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # Whether the streaming endpoints are actually RUNNING, against
+        # spotifyStatus/airplayStatus below which say whether their binary is
+        # installed. Both were true of a device that did not appear in a
+        # single AirPlay picker for two hours, because an orphan from before
+        # the last OTA still held TCP 5000.
+        #
+        # The capability rides alongside for the reason it exists: null here
+        # means "this firmware cannot say" on old firmware and "not yet
+        # reported" for the ~30s before the first stats tick, and neither may
+        # render as "it is down".
+        "endpointHealthCapable": getattr(live, "endpoint_health_capable", False) if live else False,
+        "endpointHealth":  getattr(live, "endpoint_health", None) if live else None,
         # Which userspace the device booted: "emos", "fireos", or null from
         # firmware that cannot say. Null is not FireOS — the wizard, the
         # support bundle and the payload reconcile all need to tell "Android"

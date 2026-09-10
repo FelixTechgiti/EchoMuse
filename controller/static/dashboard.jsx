@@ -1567,6 +1567,26 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     if (store) setEndpointStore(store);
   }
 
+  async function doUsePublished(kind) {
+    // Point the store at the published build and record provenance, so the
+    // automatic fetch keeps it current from here on. That second half is the
+    // point: without it this would be a one-off copy and the store would go
+    // stale again the moment the next release lands.
+    setEpBusy(kind);
+    setEpResult(r => ({ ...r, [kind]: null }));
+    try {
+      const res = await API.post(`/api/endpoint_binaries/${kind}/use_published`, {});
+      setEpResult(r => ({ ...r, [kind]: { ok: true,
+        text: `Took ${res.stored?.filename || 'the published build'} from ${res.tag || 'the release'}` } }));
+      const store = await API.get('/api/endpoint_binaries');
+      setEndpointStore(store);
+    } catch (e) {
+      setEpResult(r => ({ ...r, [kind]: { ok: false,
+        text: e.error || 'Could not take the published build' } }));
+    }
+    setEpBusy(null);
+  }
+
   async function doUploadEndpoint(kind, file) {
     if (!file) return;
     setEpBusy(kind);
@@ -2235,6 +2255,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 spotifyStatus={device.spotifyStatus}
                 airplayCapable={!device.connected || !!device.airplayCapable}
                 airplayStatus={device.airplayStatus}
+                endpointHealth={device.endpointHealth}
+                endpointHealthCapable={device.endpointHealthCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
@@ -2502,6 +2524,29 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                             ? `Uploaded: ${store.filename} · ${(store.size/1024/1024).toFixed(1)} MB · md5 ${store.md5.slice(0,12)}…`
                             : `Nothing uploaded yet — build one with ${ep.source}`}
                         </div>
+                        {/* Where the fleet store stands against the published
+                            release. Separate from the line above because
+                            "what is stored" and "is it the current published
+                            build" are different questions, and only the first
+                            had an answer anywhere. */}
+                        {(() => {
+                          const k = (endpointStore?.kinds || []).find(x => x.kind === ep.kind);
+                          const st = publishedStoreState(k, endpointStore?.release?.tag);
+                          if (!st.text) return null;
+                          return (
+                            <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
+                              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9,
+                                color: k?.state === 'published' ? 'var(--ok)' : 'var(--muted)' }}>
+                                Fleet store: {st.text}
+                              </span>
+                              {st.action && (
+                                <Pill small disabled={busy} onClick={() => doUsePublished(ep.kind)}>
+                                  {busy ? 'Working…' : st.action}
+                                </Pill>
+                              )}
+                            </div>
+                          );
+                        })()}
                         <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
                           <input type="file" accept="*/*" style={{ display:'none' }}
                             ref={el => { epFileRefs.current[ep.kind] = el; }}
@@ -3477,6 +3522,101 @@ function _wizardFlow() {
     if (want === 'fireos') return 'fireos';
   } catch { /* no location in a test harness; take the default */ }
   return 'emos';
+}
+
+// What one streaming endpoint is actually doing, as a sentence — or null when
+// there is nothing honest to say.
+//
+// **The two absences are different and neither may read as "it is down".**
+// Firmware too old to report liveness, and firmware that has simply not sent
+// its first stats tick yet (up to 30s after connecting), both arrive here as
+// no health object. Saying "not running" for either accuses a working Echo,
+// which is the failure this whole field exists to prevent — installed,
+// executable, correctly sized, and invisible in every AirPlay picker for two
+// hours because an orphan held its port.
+//
+// Pure and lifted by controller/tests/endpoint_health.test.mjs, for the
+// reason classifyBootTarget is: the dashboard has no module boundary, so the
+// alternative to extracting it is a second copy that drifts.
+// What the fleet store holds for one endpoint, against what the published
+// release offers — and whether there is anything the user can do about it.
+//
+// Returns { text, action } where action is the label for a button, or null
+// when there is nothing to press.
+//
+// **`unmanaged` is the state this exists for.** The automatic fetch replaces
+// only what the controller can prove it wrote, which is right — it must never
+// overwrite a patched build somebody is testing. But that same rule covers
+// every store filled before provenance existed, which is all of them, and
+// those two are indistinguishable from here: the record that would tell them
+// apart is the record that is missing. So a user who uploaded a binary by
+// hand once was stuck with it for ever, with nothing on screen saying so.
+// That is the one-way door #47 is about, and the button is the way back.
+//
+// Pure and lifted by controller/tests/endpoint_store.test.mjs, for
+// classifyBootTarget's reason.
+function publishedStoreState(kind, releaseTag) {
+  if (!kind) return { text: null, action: null };
+  const tag = releaseTag || null;
+
+  switch (kind.state) {
+    case 'published':
+      return { text: `the published build${tag ? ` (${tag})` : ''}`, action: null };
+
+    case 'outdated':
+      // The automatic fetch handles this one on its own, so the button is
+      // offered rather than urged: it only makes the next poll happen now.
+      return {
+        text: `from ${kind.stored_tag || 'an older release'}${tag ? ` — ${tag} is published` : ''}`,
+        action: tag ? 'Update from the release' : null,
+      };
+
+    case 'empty':
+      return {
+        text: tag ? `nothing stored — ${tag} will be fetched automatically`
+                  : 'nothing stored, and no published release found',
+        action: tag ? 'Fetch it now' : null,
+      };
+
+    case 'unmanaged':
+      // Never overwritten automatically, by design. Say so plainly: the cost
+      // of not saying it is somebody wondering for weeks why the published
+      // build never arrives.
+      return {
+        text: 'uploaded by hand — automatic updates leave this alone',
+        action: tag ? 'Use the published build' : null,
+      };
+
+    default:
+      return { text: null, action: null };
+  }
+}
+
+function endpointHealthLine(health, capable) {
+  if (!capable) return null;          // firmware cannot say — say nothing
+  if (!health) return null;           // capable, no tick yet — still nothing
+  if (!health.enabled) return null;   // nobody asked for it to run
+
+  if (health.alive) {
+    // Uptime is the reassurance: "running" alone is also true of something
+    // that started 200ms ago and is about to die again.
+    const up = health.uptimeS || 0;
+    const since = up >= 3600 ? `${Math.floor(up / 3600)}h`
+                : up >= 60   ? `${Math.floor(up / 60)}m`
+                :              `${up}s`;
+    return `running — up ${since}`;
+  }
+
+  // The case worth the whole feature. Restarts is what separates "briefly
+  // between sessions" from "failing every minute for two hours" without
+  // waiting for a second sample, and lastExit names the reason: `exit status
+  // 1` is a port it cannot bind, `signal: killed` is a preemption we asked
+  // for.
+  const why = health.lastExit ? ` — last exit: ${health.lastExit}` : '';
+  if (health.restarts > 1) {
+    return `NOT running — ${health.restarts} start attempts${why}`;
+  }
+  return `not running${why}`;
 }
 
 function ProvisionWizard({ token, onClose, knownDevices }) {
@@ -7234,6 +7374,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             sendspinCapable = true,
                             spotifyCapable = true, spotifyStatus = null,
                             airplayCapable = true, airplayStatus = null,
+                            endpointHealth = null, endpointHealthCapable = false,
                             emosFleet = true }) {
   // null means "we have not heard from this device", which is neither
   // "installed" nor "missing" — an offline device must not be told its
@@ -7244,6 +7385,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const airplayReady = airplayStatus === null || airplayStatus === undefined
     ? true : !!airplayStatus.ok;
   const airplayWhy = (airplayStatus && airplayStatus.reason) || 'not installed';
+  // Installed is not running, and only the first was ever shown. Null from
+  // either of these keeps the existing sentence unchanged — see
+  // endpointHealthLine for why both absences must stay silent.
+  const spotifyLive = endpointHealthLine(
+    endpointHealth && endpointHealth.spotify, endpointHealthCapable);
+  const airplayLive = endpointHealthLine(
+    endpointHealth && endpointHealth.airplay, endpointHealthCapable);
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -7850,7 +7998,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!spotifyCapable
               ? 'needs newer firmware on this Echo — it has no Spotify endpoint'
               : (spotifyReady
-                ? 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path'
+                ? (spotifyLive
+                  ? `librespot: ${spotifyLive}`
+                  : 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path')
                 : `librespot is not installed on this Echo (${spotifyWhy})`)}
             value={spotifyCapable && spotifyReady && (config.spotifyEnabled ?? false)}
             onChange={v => set('spotifyEnabled', v)}/>
@@ -7866,7 +8016,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!airplayCapable
               ? 'needs newer firmware on this Echo — it has no AirPlay receiver'
               : (airplayReady
-                ? 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet'
+                ? (airplayLive
+                  ? `shairport-sync: ${airplayLive}`
+                  : 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet')
                 : `shairport-sync is not installed on this Echo (${airplayWhy})`)}
             value={airplayCapable && airplayReady && (config.airplayEnabled ?? false)}
             onChange={v => set('airplayEnabled', v)}/>

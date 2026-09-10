@@ -1765,6 +1765,37 @@ it into the device's log events. Takes effect on the next device reboot after
 the script syncs.
 
 
+**An update that does not confirm in 90s is OPEN, not failed, and saying
+otherwise was a bug that cost most of a day.** `_monitor_reconnect` returned
+one `False` for two different facts — "it came back on the old version" and
+"it never came back" — and the caller then settled it by reading `firmware_ver`
+out of the database, which for a device that never reconnected is *by
+definition* still the old one, because only the device ever writes it. So
+every slow update was reported as `auto-rolled back — new binary failed 3
+start attempts`: a specific accusation against the new firmware, quoting a
+count of attempts it had not made, which sends whoever reads it hunting a
+firmware bug that does not exist.
+
+It is now three outcomes. `confirmed`, `rolled_back` (the device came back
+running what it started on — the only case that may claim a rollback), and
+`absent`, which records that there has been no contact and **leaves the
+verdict open**: `_pending_ota` holds it and `_settle_pending_ota` closes it
+from the register message when the device returns, however much later. The
+device is the sole witness and reports its version on connect, so the answer
+arrives on its own; the only way to get it wrong is to answer before it does.
+
+Two things confirm the diagnosis rather than merely arguing for it. The
+device's own supervisor log writes a `fast-exit` line per failed start and a
+`rollback` line when it gives up, and across two weeks of one fleet's log
+there is **not one of either** — every rollback the dashboard ever reported
+was this. And on 2026-09-10 a device took v2.24.0-fx.1 at 16:34, was declared
+rolled back at 16:36, and was observed at 16:45 connected and running
+v2.24.0-fx.1, with the dashboard still saying its binary had failed to start.
+
+Raising the 90s would only move the line: the measured reconnect for a device
+that has to boot is 1m57s, and the stranded case is unbounded. Settling on
+reconnect removes the line instead.
+
 The device runs an A/B slot binary system:
 - `/data/local/bin/server` is a symlink to either `server_a` or `server_b`
 - `start_server.sh` counts fast exits (< 15s runtime); after 3 consecutive failures it flips the symlink to the other slot and exits, letting Android init restart with the fallback binary
@@ -1940,6 +1971,41 @@ Note the mode gate is deliberately kept: with `owwOnDevice=off` the device score
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
 
 `com.amazon.whad` is `PERSISTENT`: `pm disable` is ignored, **`am force-stop` is a no-op**, and `pm hide` does not stop a running instance — it stays until the next reboot, which is why the log line says so. Note RSS overstates the win ~6x (shared zygote pages): the measured recovery is ~20-35MB per device by `memUsedMb`, not the 62MB RSS suggests.
+
+### The ring turns while an update runs (#38)
+
+From the room, an update in progress and a device that has died again are the
+same dark ring, and on 2026-09-10 somebody spent an afternoon unable to tell
+them apart. `update_anim` (`em_scenes`) turns the ring during the transfer,
+pushed by `_leds_updating` and handed back by `_leds_update_done`.
+
+Four things are load-bearing:
+
+- **`rotate` with ONE colour paints a static ring.** It walks a palette around
+  the twelve LEDs, so a single-colour scene — the default among them — renders
+  every LED identically on every frame. That is indistinguishable from an idle
+  device, which is the precise ambiguity this exists to remove, and it fails
+  silently. Single-colour scenes therefore use the head-and-trail `spin`, the
+  same branch `spin_anim` already takes. Pinned by test in both directions.
+- **Slower than the spinner, and the test says so.** The spinner covers think
+  time measured in seconds and must read as activity; a transfer takes a
+  minute or more, and that cadence over that long reads as agitation in the
+  one place a user is already anxious.
+- **The clear is in a `finally`.** The paths that skip the happy path are the
+  failure ones, and a device left turning after a failed update inverts the
+  question the ring answers. The 180s TTL is a dead-man for a controller that
+  dies mid-update, never a substitute — 180s of spinning after a failure is
+  still wrong. Sized above `_stream_binary_to_slot`'s own 120s ceiling, or it
+  would clear while the transfer was still running.
+- **It hands the ring BACK, not off.** The HA ring light owns the resting
+  colour, so `_leds_update_done` repaints it; blanking would turn a light HA
+  believes is on into a dark ring on every update.
+
+**It cannot survive the restart, and the notes must not promise it does.** The
+firmware rendering the ticker is the firmware being replaced, so at
+`kill $PPID` the ring freezes on its last frame until the new binary paints
+something. Frozen reads as mid-update rather than off, which is still the
+better of the two, but it is not an animation.
 
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 

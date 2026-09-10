@@ -487,6 +487,7 @@ func main() {
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			st.Endpoints = endpointHealth(spotifyClient, airplayClient)
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -718,6 +719,7 @@ func main() {
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			st.Endpoints = endpointHealth(spotifyClient, airplayClient)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -796,6 +798,30 @@ func shadowStats(dc *client.DataClient) interface{} {
 		"maxInferMs": st.MaxInferMs,
 		"maxGapMs":   st.MaxGapMs,
 	}
+}
+
+// endpointHealth is what the streaming endpoints say about themselves, for
+// the stats tick. Built here because this is where the two clients live —
+// collectStats reads sysfs and knows nothing about them.
+//
+// It reports what is ENABLED and nothing else. A disabled endpoint has no
+// health to describe, and an entry saying so would render in the dashboard as
+// a thing that is down rather than a thing nobody asked for. Both disabled
+// returns nil, which the omitempty on the field turns into an absent key —
+// the same absence as firmware too old to report it, and correctly so: in
+// neither case is there anything to say.
+func endpointHealth(sp *spotify.Client, ap *airplay.Client) map[string]interface{} {
+	out := map[string]interface{}{}
+	if h := sp.Health(); h.Enabled {
+		out["spotify"] = h
+	}
+	if h := ap.Health(); h.Enabled {
+		out["airplay"] = h
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func collectStats() client.DeviceStats {

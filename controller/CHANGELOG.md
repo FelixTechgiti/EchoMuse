@@ -33,6 +33,82 @@ it with the rest of the device's log lines. Until now it was collected
 automatically only after a failed update, so a device that simply never found
 the controller wrote the explanation and nobody read it.
 
+### An update that is slow is no longer called a failure
+
+**The dashboard has been reporting rollbacks that never happened.** After
+starting an update it waited 90 seconds for the Echo to come back, and if it
+had not, announced `auto-rolled back — new binary failed 3 start attempts`.
+
+It could not know that. A device that has not reconnected has not reported
+anything, so the version on record is still the old one — which is exactly
+what the check read as proof that the Echo had reverted. The Echo's own log
+settles it: it records every failed start and every rollback, and across two
+weeks there is not one of either.
+
+Seen on hardware: an Echo took an update at 16:34, was declared rolled back at
+16:36, and was running the new firmware at 16:45 while the dashboard still
+said its firmware had failed to start.
+
+Now there are three answers instead of two. Confirmed; genuinely rolled back,
+which is only ever said when the Echo has come back running the old version;
+and **no contact yet**, which says so and leaves the question open. When the
+Echo returns — a minute later or an hour later — it answers the question
+itself and the dashboard records what actually happened.
+
+### Running a command on an Echo from a script
+
+The Logs tab's **Fetch supervisor log** button has a companion:
+`POST /api/devices/{id}/exec` runs one command on a device and returns its
+output. Admin only, and every command is logged with the name of whoever ran
+it, in the same device log as the console's own sessions.
+
+This grants nothing new — the console tab is already a root shell for an
+admin — it just puts that within reach of something other than a person at a
+keyboard. `docs/agent-access.md` describes the whole path, including how an
+automation authenticates through Home Assistant without a password.
+
+### Streaming endpoints show whether they are running
+
+Paired with firmware 2.25.0-fx.1: the Spotify and AirPlay settings now say
+whether librespot and shairport-sync are actually running, not just whether
+they are installed. An Echo that has the file and cannot start it — because
+something else is holding the network port, say — used to look identical to
+one that was working.
+
+Older firmware, and an Echo that has just connected, show the old wording
+rather than claiming anything is down.
+
+### The fleet store can take the published build
+
+Spotify and AirPlay binaries are downloaded from a release automatically —
+but only ever replacing a binary the controller knows it put there itself. It
+will not overwrite one you uploaded by hand, which is right if you are testing
+your own build and wrong for everybody who uploaded once before the automatic
+download existed. Those two look identical from the controller's side, so it
+stopped asking and simply left both alone, for ever, with nothing on screen
+explaining why the published build never arrived.
+
+The Streaming endpoints panel now says where the store stands — *the published
+build (endpoints-v1.2.0)*, *from an older release*, or *uploaded by hand —
+automatic updates leave this alone* — and offers a button to take the
+published build when that is what you want. Taking it also records it, so
+updates continue automatically from then on.
+
+### The ring turns while an update is running
+
+From across the room, an Echo mid-update and an Echo that has gone dead again
+looked exactly the same: a dark ring. The ring now turns slowly while the new
+firmware is being transferred, and goes back to its resting colour when the
+update ends — including when it ends badly, so nothing is left spinning.
+
+It cannot keep turning through the restart itself: the firmware drawing the
+animation is the firmware being replaced, so the ring freezes on its last
+frame for those few seconds until the new one comes up. Frozen still reads as
+"mid-update" rather than "off", which was the whole problem.
+
+Needs firmware 2.9 or newer (anything that animates its own ring); older Echos
+are unaffected.
+
 ### What is required of you
 
 Nothing.
