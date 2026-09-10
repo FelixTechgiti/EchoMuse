@@ -1,0 +1,94 @@
+name: Build a streaming endpoint binary
+
+# librespot and shairport-sync are not in the firmware and not in any release:
+# they are upstream programs the controller pushes onto a device, and neither
+# project publishes an Android build. So somebody has to cross-compile them,
+# and until now that somebody needed Docker on their own machine.
+#
+# This runs the SAME build.sh, in the same pinned compiler image, and hands
+# back the binary as an artifact. Download it, then install it from the
+# device's Updates tab → Streaming endpoints, which verifies the md5 on
+# arrival and renames into place only on a match.
+#
+# It exists because the person who needs the binary is not always the person
+# with a Docker daemon — and because a build nobody can run is how the
+# librespot that could not advertise itself stayed on a device: rebuilding to
+# test a fix was expensive enough to put off.
+
+on:
+  workflow_dispatch:
+    inputs:
+      which:
+        description: Which endpoint to build
+        type: choice
+        options: [librespot, shairport-sync, both]
+        default: librespot
+        required: true
+      ref:
+        description: 'Upstream tag to build (librespot only; blank = the recipe default)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      # librespot's own build.sh checks its feature list against upstream's
+      # Cargo.toml before spending the cross-compile — see the comment there.
+      - name: Build librespot
+        if: inputs.which == 'librespot' || inputs.which == 'both'
+        working-directory: device/librespot
+        run: ./build.sh ${{ inputs.ref }}
+
+      - name: Build shairport-sync
+        if: inputs.which == 'shairport-sync' || inputs.which == 'both'
+        working-directory: device/shairport
+        run: ./build.sh
+
+      # What the ELF actually is, before anyone installs it. The controller's
+      # upload endpoint checks this too and refuses a host build — the likely
+      # mistake being a compile that succeeded against the wrong target — but
+      # a build that produced an x86 binary should say so here rather than at
+      # the dashboard, where it costs an upload first.
+      - name: It has to be an ARM binary
+        run: |
+          set -e
+          shopt -s nullglob
+          found=0
+          for f in device/librespot/out/librespot device/shairport/out/shairport-sync; do
+            [ -f "$f" ] || continue
+            found=1
+            echo "### \`$(basename "$f")\`" >> "$GITHUB_STEP_SUMMARY"
+            file "$f" | tee /tmp/desc
+            if ! grep -q 'ARM' /tmp/desc; then
+              echo "::error::$f is not an ARM binary — the Dot cannot exec it"
+              exit 1
+            fi
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            file -b "$f"       >> "$GITHUB_STEP_SUMMARY"
+            md5sum "$f"        >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$found" = 0 ]; then
+            echo "::error::the build produced no binary"
+            exit 1
+          fi
+          echo "Install from the device's Updates tab → Streaming endpoints." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-binaries
+          # The md5 rides along: it is the only identity either end can agree
+          # on for an upstream program with no version string of ours in it.
+          path: |
+            device/librespot/out/*
+            device/shairport/out/*
+          if-no-files-found: error
+          retention-days: 30
