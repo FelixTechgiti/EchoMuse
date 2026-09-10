@@ -543,9 +543,32 @@ never reached. The supervisor log showed the restart working perfectly both
 times (`start` two seconds after each `exit`), which is what made it look like
 a network fault rather than an audio one. A power cycle was the only recovery.
 `waitForFreePcm` now takes a `nudge` and re-issues the stop every
-`nudgeInterval`, which makes the race one we win. **Not gating `main()` on the
-speaker at all remains the real fix** — the comment in `waitForFreePcm` has
-said so since it was written, and it is filed rather than done.
+`nudgeInterval`, which makes the race one we win.
+
+**The nudge was not enough, and the real fix is that `main()` is no longer
+gated on the speaker at all.** Measured the same day: with the nudge shipped,
+a device still failed to come back after an OTA and needed a power cycle. So
+`NewPcmSpeaker` now **returns immediately** and the open runs on its own
+goroutine, retrying every `speakerRetryInterval` until it succeeds — the
+control client, mDNS, the buttons, the mute and the LED ring all come up
+whatever Android is doing with the PCM. Two consequences to keep:
+
+- **`waitForFreePcm` refuses instead of opening anyway.** Opening a device it
+  has just watched stay held for ten seconds is how a goroutine parks for
+  ever, since tinyalsa's open has no timeout. That refusal was rejected as
+  "a bigger behaviour change than the bug warrants" while main() was gated on
+  it — refusing then meant refusing to start. It is not any more, and the
+  comment that said so was true right up until its premise moved.
+- **Pumps are REFUSED while the speaker is not ready, never queued.** An
+  `audioStream` whose consumer does not exist yet accepts 128 periods and then
+  blocks the data plane's read goroutine, which is the head-of-line stall that
+  stops the device answering keepalives — trading a silent speaker for a
+  dropped connection. `errSpeakerNotReady` is named so the log says why
+  nothing played.
+
+`retryOpen` lives in `pcmwait.go` with `waitFree`, untagged, for the same
+reason: what is worth pinning is that the loop retries and that a stop is
+honoured *between* attempts rather than after another full interval.
 
 `waitFree` is in `pcmwait.go` with **no build tag**, beside `pcmstatus.go` and
 for the same reason as `internal/outchain`: it is a timing loop over two
