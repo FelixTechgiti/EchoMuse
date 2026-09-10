@@ -67,6 +67,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
+	"github.com/wilbowes/EchoMuse/internal/orphan"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
 	"github.com/wilbowes/EchoMuse/internal/resample"
 )
@@ -218,6 +219,20 @@ func (c *Client) Start() error {
 	c.cancel = cancel
 	c.running = true
 	c.mu.Unlock()
+
+	// Take the ports over from a previous instance before starting our own.
+	// A firmware restart does not take its children with it — they are
+	// reparented to init and keep holding the ports their protocol is defined
+	// on, so the new process cannot bind and exits immediately, for ever. Seen
+	// on a device 2026-09-10 and diagnosed there; see internal/orphan.
+	//
+	// At START rather than only at shutdown, because a cleanup on the way out
+	// cannot run after `kill -9`, after a panic, or on the supervisor's own
+	// restart path, and does nothing for a device already looping — which on a
+	// fielded fleet is every device that has ever been updated.
+	if n := orphan.Takeover(c.opts.Binary); n > 0 {
+		log.Printf("[spotify] stopped %d orphaned instance(s) left by a previous run", n)
+	}
 
 	log.Printf("[spotify] enabled as %q", c.name())
 	go c.supervise(ctx)
