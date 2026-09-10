@@ -12,6 +12,35 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.20.0-fx.1
+
+The Echo comes up even when the speaker does not.
+
+### What's new
+
+**2.19.0-fx.1 did not fix it.** That release made the device ask Android
+again, repeatedly, to hand back the speaker while it waited — which wins the
+race most of the time. It still lost it, and the device still had to be
+unplugged.
+
+So the device no longer waits for the speaker before doing anything else. The
+controller connection, the network announcement, the buttons, the mute and the
+LED ring all start straight away, and the speaker opens behind them, trying
+again every few seconds until it succeeds. Losing that race now costs the
+sound rather than the whole Echo — and the ring shows its orange
+no-controller pulse instead of staying dark, which is the difference between
+a device you can diagnose and one that looks broken.
+
+This also stops depending on the diagnosis being right. If something other
+than Android's media service is holding the speaker, the Echo still comes
+back; it simply stays silent and says so in its log.
+
+### What is required of you
+
+Nothing. If a device is reachable but silent after an update, that is this
+change working — give it a few seconds, and tell us if the sound does not
+return.
+
 ## 2.19.0-fx.1
 
 The Echo comes back on its own after an update.
