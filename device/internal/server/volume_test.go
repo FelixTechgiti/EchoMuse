@@ -1,9 +1,11 @@
 package server
 
 import (
-	"github.com/wilbowes/EchoMuse/pkg/led"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 // A deliberate button press must outrank the volume arc's 2s hold. Before
@@ -99,5 +101,63 @@ func TestSteppingSaturatesAtBothEnds(t *testing.T) {
 	if level != volumeButtonFloor {
 		t.Errorf("stepping down from the floor reached %d, want %d",
 			level, volumeButtonFloor)
+	}
+}
+
+// recordingLED captures every frame painted, so a test can assert on what
+// reached the hardware rather than on what the code meant to do.
+type recordingLED struct {
+	mu     sync.Mutex
+	frames [][]led.Led
+}
+
+func (r *recordingLED) Init() error              { return nil }
+func (r *recordingLED) GetNumLEDs() (int, error) { return numLEDs, nil }
+func (r *recordingLED) SetLEDs(l ...led.Led) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frames = append(r.frames, append([]led.Led(nil), l...))
+	return nil
+}
+func (r *recordingLED) painted() [][]led.Led {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]led.Led(nil), r.frames...)
+}
+
+// The arc's expiry hands the ring back. It must not paint it itself.
+//
+// It used to paint a RED RING whenever the device was muted, and that was a
+// leftover of a rule already removed: mute stopped owning the ring when the
+// ring became Home Assistant's, and the indicator moved to the microphone
+// button's own GPIO LED, which nothing can overpaint. This one site was
+// missed. Reported from a device on 2026-09-10 — the ring glowed red while
+// HA's light entity read `off` for the whole six hours, because the paint
+// went straight to the hardware and HA was never told.
+//
+// The timer is driven directly rather than waited out: volumeLEDSecs is 2s
+// and a test that sleeps is a test nobody runs.
+func TestTheArcExpiryHandsBackAndNeverPaintsTheRingItself(t *testing.T) {
+	rec := &recordingLED{}
+	vc := newVolumeController(func() led.Controller { return rec })
+
+	handed := false
+	vc.onDisplayExpire = func() { handed = true }
+
+	vc.showLEDs(100)
+	if vc.timer != nil {
+		vc.timer.Stop() // drive the expiry ourselves rather than waiting 2s
+	}
+	vc.expireDisplay(rec)
+
+	if !handed {
+		t.Fatal("the ring was not handed back to the controller's state")
+	}
+	for _, frame := range rec.painted() {
+		for _, l := range frame {
+			if l.R > 0 && l.G == 0 && l.B == 0 {
+				t.Fatalf("the expiry painted red on the ring: %+v", l)
+			}
+		}
 	}
 }

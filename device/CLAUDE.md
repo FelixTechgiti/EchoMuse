@@ -911,6 +911,17 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   tells you the microphone is off. The red button LED does, it is the
   indicator stock FireOS uses, and it is the only one nothing can overpaint.
 
+  **One paint site survived the removal and was found on a device, not by
+  reading** (2026-09-10). The volume arc's expiry still painted a RED RING
+  when muted — so a volume press on a muted device left the ring red, over
+  whatever resting colour Home Assistant had set, with no TTL and nothing to
+  clear it until the next paint. HA's own light entity read `off` for the six
+  hours it was lit, because the paint went straight to the hardware and the
+  entity was never told. That is the general hazard of removing a rule: the
+  places that ENFORCED it are easy to find, and the places that merely
+  ASSUMED it are not. `expireDisplay` is a named method now so a test can
+  drive it without waiting out the 2s window.
+
   **The action and volume buttons still go inert while `linkDown`**, gated at
   the consumers in `cmd` rather than in the evdev binding, which is the
   portable hardware layer and knows nothing about sessions. **The MUTE button
