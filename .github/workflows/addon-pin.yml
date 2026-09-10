@@ -1,0 +1,137 @@
+name: Add-on pin has an image
+
+# Supervisor installs an add-on by pulling `image:version` straight from the
+# config.yaml on the DEFAULT BRANCH. So the moment a version pin lands on main
+# for which no image has been published, every Home Assistant with this add-on
+# installed offers an update that cannot install — and the error it shows says
+# nothing useful:
+#
+#   Error updating EchoMuse: An unknown error occurred with app
+#   46aaf331_controller. Check Supervisor logs for details
+#
+# That happened on 2026-09-09: the 2.26.0-fx.1 pin was merged as part of the
+# feature PR and the release was cut the following day, so main advertised an
+# image that did not exist overnight. Nothing failed anywhere — CI was green,
+# the code was correct, and the only symptom was in somebody's Home Assistant.
+#
+# WHY THIS IS NOT ON `push`. The pin must reach main BEFORE the image exists:
+# controller-release.yml re-tags the image that controller-build.yml built
+# FROM main, so the commit necessarily comes first. A few minutes of
+# disagreement is therefore structural and correct, and a push-triggered check
+# would go red on every legitimate release — which teaches everyone to ignore
+# it, on the one signal that should mean something. Hourly measures the
+# DURABLE state instead: a pin still unpublished an hour later is not a
+# release in progress, it is a release somebody forgot.
+#
+# The remedy is always the same and the failure message says it: cut the
+# release for the version that is pinned.
+
+on:
+  schedule:
+    # Hourly. The window a real release opens is minutes, so this samples it
+    # essentially never; a pin left behind is caught within the hour.
+    - cron: "17 * * * *"
+  # Manual runs matter after cutting a release: the answer you want is
+  # "is it installable now", not a wait for the next hour.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pin:
+    name: The pinned version is pullable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # GHCR repository names must be lowercase and `github.repository_owner`
+      # is the account's DISPLAY spelling — `FelixTechgiti`, not
+      # `felixtechgiti`. Same fold every other workflow here needs.
+      - name: Lowercase the owner
+        id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Every published channel must be installable
+        env:
+          IMAGE: ${{ steps.owner.outputs.lc }}/echomuse-controller
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          # A registry token for this repository. Anonymous works while the
+          # package is public; going through GITHUB_TOKEN means the check does
+          # not quietly start failing the day somebody makes it private.
+          reg_token="$(curl -sS -u "$GH_USER:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:${IMAGE}:pull&service=ghcr.io" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')"
+          if [ -z "$reg_token" ]; then
+            echo "::error::could not get a pull token for ghcr.io/${IMAGE}"
+            exit 1
+          fi
+
+          # HEAD on the manifest, not the tag LIST: this asks the exact
+          # question Supervisor asks — can this tag be pulled — rather than a
+          # paginated listing whose second page is easy to forget.
+          #
+          # `-I`, never `-X HEAD`: the second sends the right method but still
+          # waits for a body, so curl exits 18 ("transfer closed with N bytes
+          # remaining") on every call and writes an error line for a request
+          # that succeeded. Verified against this registry before it shipped.
+          pullable() {
+            curl -sS -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer $reg_token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${IMAGE}/manifests/$1"
+          }
+
+          pin_of() {
+            sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$1"
+          }
+
+          failed=0
+
+          # ── GA (controller/) ────────────────────────────────────────────
+          # The channel people actually install, and the one the incident hit.
+          ga="$(pin_of controller/config.yaml)"
+          if [ -z "$ga" ]; then
+            echo "::error file=controller/config.yaml::no version: pin found"
+            exit 1
+          fi
+          code="$(pullable "$ga")"
+          if [ "$code" = "200" ]; then
+            echo "GA pins $ga — pullable"
+          else
+            failed=1
+            echo "::error file=controller/config.yaml::controller/config.yaml pins $ga, but ghcr.io/${IMAGE}:${ga} cannot be pulled (HTTP ${code})."
+            echo ""
+            echo "Every Home Assistant with this add-on installed is being offered an"
+            echo "update that will fail with \"An unknown error occurred with app"
+            echo "46aaf331_controller\". Supervisor pulls image:version off the default"
+            echo "branch, so the pin is live the moment it merges."
+            echo ""
+            echo "Fix: Actions -> Cut a release -> kind=controller, version=${ga}."
+            echo "If that version should never have been pinned, revert the pin on main"
+            echo "instead — do not re-cut a tag that already exists."
+          fi
+
+          # ── EA (controller-ea/) ─────────────────────────────────────────
+          # A WARNING, not a failure, and the distinction is deliberate. No
+          # -ea image has ever been published on this fork, so failing here
+          # would land red on arrival for something the incident has nothing
+          # to do with — and a check that is red about an old thing cannot
+          # report a new one. It is still worth saying: anyone who installs
+          # the EA add-on from this repository gets exactly the error above.
+          ea="$(pin_of controller-ea/config.yaml)"
+          if [ -n "$ea" ]; then
+            code="$(pullable "$ea")"
+            if [ "$code" = "200" ]; then
+              echo "EA pins $ea — pullable"
+            else
+              echo "::warning file=controller-ea/config.yaml::EA pins $ea, which has never been published on this fork (HTTP ${code}). The Early Access add-on is not installable from this repository until an EA release is cut."
+            fi
+          fi
+
+          exit "$failed"
