@@ -33,7 +33,7 @@ on:
       kind:
         description: Which half to release
         type: choice
-        options: [controller, firmware]
+        options: [controller, firmware, endpoints]
         required: true
       version:
         description: 'Version with no prefix, e.g. 2.23.0-fx.1'
@@ -87,6 +87,12 @@ jobs:
           case '${{ inputs.kind }}' in
             controller) tag="controller-v$v"; notes_file="controller/CHANGELOG.md" ;;
             firmware)   tag="v$v";            notes_file="device/CHANGELOG.md"     ;;
+            # The endpoint binaries are upstream programs, not ours: there is
+            # no changelog of ours to quote, and their release body is written
+            # by endpoint-release.yml from the builds themselves — the file
+            # descriptions, the md5s and the licence offer, all facts about
+            # the artifact rather than prose about a change.
+            endpoints)  tag="endpoints-v$v";  notes_file="" ;;
           esac
           echo "tag=$tag"               >> "$GITHUB_OUTPUT"
           echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
@@ -127,6 +133,15 @@ jobs:
         id: notes
         run: |
           f='${{ steps.tag.outputs.notes_file }}'
+          if [ -z "$f" ]; then
+            # endpoints: the body is built by the release workflow. The tag
+            # still needs an annotation, because a lightweight tag is the
+            # thing this workflow exists to stop.
+            printf 'Streaming endpoint binaries %s\n' '${{ inputs.version }}' \
+              > /tmp/notes.md
+            echo "--- notes ---"; cat /tmp/notes.md
+            exit 0
+          fi
           v='${{ inputs.version }}'
           if [ ! -f "$f" ]; then
             echo "::error::$f does not exist on ${{ inputs.ref }}"

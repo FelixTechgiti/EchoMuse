@@ -1,0 +1,118 @@
+name: Endpoint Release (librespot + shairport-sync)
+
+# Publishes the two streaming endpoint binaries as release assets, so the
+# CONTROLLER can fetch and install them the way it fetches firmware — no file
+# for anybody to upload by hand. That was the whole complaint: an OTA that
+# needs somebody at a keyboard is not an OTA.
+#
+# Its own tag namespace, `endpoints-v*`, and that is load-bearing for the same
+# reason emos-v* is. `em_api._fetch_latest_release` selects a tag starting `v`
+# that carries a `server` asset; `endpoints-v1.0` matches neither test, so
+# these releases cannot be mistaken for firmware by the OTA poller. Do not
+# rename them into the `v*` space.
+#
+# ⚠ LICENCES. These are other people's programs and publishing their binaries
+# carries obligations:
+#
+#   * librespot is MIT — the notice ships in the release body below.
+#   * shairport-sync is GPLv2-or-later, so distributing the binary means
+#     offering the corresponding source. The recipe is `device/shairport/`,
+#     it names the exact upstream tag it builds, and the compat shim is in
+#     this repository under the same terms. The release body says where, and
+#     that offer is what makes publishing it legitimate — it is not a
+#     formality to drop when the notes get edited.
+#
+# The build is `endpoint-binaries.yml`'s, deliberately duplicated as a call
+# rather than copied: the same build.sh in the same pinned compiler image, so
+# a published binary is the one the dispatch build produces.
+
+on:
+  push:
+    tags:
+      - 'endpoints-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build librespot
+        working-directory: device/librespot
+        run: ./build.sh
+
+      - name: Build shairport-sync
+        working-directory: device/shairport
+        run: ./build.sh
+
+      # Both, or neither. A release carrying one binary is one the controller
+      # would install happily and then report the other as "not installed",
+      # which is indistinguishable from a device that never received it.
+      - name: Both binaries must be ARM
+        run: |
+          set -e
+          for f in device/librespot/out/librespot \
+                   device/shairport/out/shairport-sync; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f was not produced — a release needs both"
+              exit 1
+            fi
+            desc="$(file -b "$f")"
+            echo "$(basename "$f"): $desc"
+            case "$desc" in
+              *ARM*) ;;
+              *) echo "::error::$f is not an ARM binary: $desc"; exit 1 ;;
+            esac
+          done
+
+      # The notes carry the licence offer, so it travels with the artifact
+      # rather than living only in a workflow comment.
+      - name: Release notes
+        run: |
+          {
+            echo "Streaming endpoint binaries for the Echo Dot"
+            echo "(armv7a, Android API 22, built in the pinned compiler image)."
+            echo
+            echo "The controller fetches these itself and installs them on any"
+            echo "device whose Spotify Connect or AirPlay toggle is on. Nothing"
+            echo "here needs downloading by hand."
+            echo
+            echo "## Licences and source"
+            echo
+            echo "These are upstream programs, built unmodified except where"
+            echo "the build recipe says otherwise."
+            echo
+            echo "- **librespot** — MIT. Source: <https://github.com/librespot-org/librespot>."
+            echo "  Build recipe and the exact tag: \`device/librespot/\`."
+            echo "- **shairport-sync** — GPL-2.0-or-later. Source:"
+            echo "  <https://github.com/mikebrady/shairport-sync>. Build recipe and"
+            echo "  the exact tag: \`device/shairport/\`; the Android compat shim"
+            echo "  (\`device/shairport/compat/\`) is part of this repository and is"
+            echo "  offered under the same terms."
+            echo
+            echo "The corresponding source for both binaries is therefore the"
+            echo "named upstream tag plus this repository at this release's commit."
+            for f in device/librespot/out/librespot device/shairport/out/shairport-sync; do
+              echo
+              echo "\`\`\`"
+              echo "$(basename "$f"): $(file -b "$f")"
+              md5sum "$f"
+              echo "\`\`\`"
+            done
+          } > /tmp/endpoint-notes.md
+          cat /tmp/endpoint-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Streaming endpoints ${{ github.ref_name }}
+          files: |
+            device/librespot/out/librespot
+            device/shairport/out/shairport-sync
+          body_path: /tmp/endpoint-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
