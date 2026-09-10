@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.29.0-fx.1
+
+### The AirPlay volume slider can drive the Echo
+
+Paired with firmware 2.26.0-fx.1. A new Streaming setting — **AirPlay volume
+moves this Echo** — makes the slider on a phone set the Echo's own volume and
+flash its ring, instead of the AirPlay receiver quietly turning itself down
+where nothing else can see it.
+
+Off by default. An Echo has one volume, shared with the assistant, so turning
+AirPlay down turns the next spoken answer down too; the setting exists so that
+is your choice rather than a discovery. The control says so.
+
+### What is required of you
+
+Nothing.
+
 ## 2.28.0-fx.1
 
 Device faults appear in the controller's own log.

@@ -409,7 +409,7 @@ func itoa(n int) string {
 func TestOurOwnBufferIsCompensatedForWithTheOppositeSign(t *testing.T) {
 	// shairport-sync's own sample: "if the output device delays by 100 ms,
 	// set this to -0.1". The music plane's prime is our delay.
-	got := renderConfig(0.1)
+	got := renderConfig(0.1, "")
 	if !strings.Contains(got, "audio_backend_latency_offset_in_seconds = -0.1000") {
 		t.Fatalf("a 100ms backend delay must compensate as -0.1; got:\n%s", got)
 	}
@@ -418,7 +418,7 @@ func TestOurOwnBufferIsCompensatedForWithTheOppositeSign(t *testing.T) {
 func TestNoKnownDelayWritesNoOffsetRatherThanZero(t *testing.T) {
 	// Absent means nobody measured; 0.0 asserts there is no delay. A caller
 	// that does not know its own pipeline must not make the second claim.
-	got := renderConfig(0)
+	got := renderConfig(0, "")
 	if strings.Contains(got, "audio_backend_latency_offset_in_seconds") {
 		t.Fatalf("an unknown delay must not assert an offset; got:\n%s", got)
 	}

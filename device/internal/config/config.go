@@ -169,6 +169,20 @@ type Device struct {
 	// AirplayName is what the receiver is called in the AirPlay list, pushed
 	// by the controller for SpotifyName's reason.
 	AirplayName string
+	// AirplayVolumeControl lets the AirPlay slider move the DEVICE volume
+	// rather than being attenuated in software inside shairport-sync.
+	//
+	// **Default OFF, and it is a setting rather than a behaviour because the
+	// consequence belongs to the person who owns the room.** This device has
+	// ONE volume, shared with the assistant: a phone that drops AirPlay to
+	// 20% drops the next spoken answer to 20% as well. That is a defensible
+	// reading of "set the device volume" and it is what was asked for — but
+	// it is not something to discover after the fact, so it is chosen.
+	//
+	// A pointer for DuckDb's reason: false is a meaningful value, and with a
+	// plain bool a controller turning it off would be indistinguishable from
+	// one that never mentioned it.
+	AirplayVolumeControl *bool
 
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
@@ -245,6 +259,8 @@ func (d *Device) loadDefaults() {
 	airplayEnabled := envBool("AIRPLAY_ENABLED", false)
 	d.AirplayEnabled = &airplayEnabled
 	d.AirplayName = envStr("AIRPLAY_NAME", "")
+	airplayVolumeControl := envBool("AIRPLAY_VOLUME_CONTROL", false)
+	d.AirplayVolumeControl = &airplayVolumeControl
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -363,6 +379,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.AirplayName != "" {
 		d.AirplayName = msg.AirplayName
+	}
+	if msg.AirplayVolumeControl != nil {
+		d.AirplayVolumeControl = msg.AirplayVolumeControl
 	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
@@ -543,6 +562,9 @@ type ConfigMessage struct {
 	SpotifyName        string    `json:"spotifyName,omitempty"`
 	AirplayEnabled     *bool     `json:"airplayEnabled,omitempty"`
 	AirplayName        string    `json:"airplayName,omitempty"`
+	// Pointer, no omitempty: false is a meaningful value here and a plain
+	// bool would make "turn it off" indistinguishable from "not mentioned".
+	AirplayVolumeControl *bool `json:"airplayVolumeControl"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

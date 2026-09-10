@@ -1226,6 +1226,80 @@ Two things not to undo:
   statement: absent means nobody measured, and a caller that does not know its
   own pipeline should not assert there is none.
 
+## The AirPlay slider can move the device volume (#30)
+
+**Off by default, and a setting rather than a behaviour, because the
+consequence belongs to whoever owns the room.** This device has ONE volume,
+shared with the assistant: a phone that drops AirPlay to 20% drops the next
+spoken answer to 20% as well. That is a defensible reading of "the slider sets
+the device volume" and it is what was asked for — but meeting it for the first
+time when the assistant whispers an answer is not, so it is chosen
+(`airplayVolumeControl`, default false at BOTH ends).
+
+Four parts, and each has one thing that is easy to get wrong:
+
+- **The build.** `--with-stdout` offers no volume callback, so shairport-sync
+  attenuates in SOFTWARE and never tells anyone the slider moved.
+  `--with-metadata` is what makes `ssnc`/`pvol` exist. Note `shairport/build.sh`
+  runs inside a single-quoted `bash -c`, so an apostrophe in a comment there
+  ends the quoting and breaks the build.
+- **The parse** (`metadata.go`). The stream has no root element and never
+  ends, so `encoding/xml` would block for ever waiting for a close tag that is
+  not coming — it is scanned for `</item>` instead. Only the FIRST field of
+  pvol is read: the other three are shairport's derived values about a range
+  it knows nothing about, since the stdout backend exposes no control. Every
+  unrecognised item is skipped SILENTLY, or cover art alone puts a line in the
+  log per track change.
+- **The pipe** (`metadatapipe.go`). Two traps. Opening a FIFO for reading
+  BLOCKS until a writer appears, so the open is `O_NONBLOCK` and the loop
+  reopens on EOF — and then clears the flag, because a non-blocking *read*
+  would burn a core for the length of every track. And a FIFO with no reader
+  fills at 64KB and then blocks the WRITER, which is the process decoding the
+  audio: so the config asks for metadata only when something is listening.
+  `Options.OnVolume` is the single gate for all of it — nil means no config
+  block, no pipe and no goroutine.
+- **The mapping** (`server.LevelForAirPlayDB`). Both scales are dB, so it is
+  an OFFSET: ctl 61 is 0.5dB a step with unity at 127, so `127 + dB*2` puts
+  AirPlay's 0dB on the codec's unity gain. Treating the slider as a percentage
+  of 0..127 is wrong twice — the control is dB-LINEAR, so a linear percentage
+  crushes the bottom third into inaudibility, and it would discard the fact
+  that AirPlay already sends decibels. `-144` is a MUTE SENTINEL and is
+  checked explicitly, so a future change to the range cannot quietly turn mute
+  into quiet. `volumeButtonFloor` is deliberately NOT applied: it exists so
+  physical presses do not spend themselves crossing a silent third of the
+  scale, and nothing about that applies to a slider somebody drags where they
+  mean.
+
+It paints the ring (`SetVolumeFromAirPlay` → `Set(level, true)`), unlike a
+controller command: a remote set is nobody standing at the device, but a
+slider is a person watching for the speaker to answer — the same thing a
+button press is. It also marks the volume SEEDED, so the stored
+`startupVolume` cannot land on top of a change the user just made.
+
+**The handler is installed LIVE, and assuming it could be fixed at `New()`
+was a bug in the first draft.** The setting arrives on a config push long
+after the client is wired, so a callback resolved at startup meant turning it
+on did nothing until the firmware restarted — while the label promised
+otherwise. `SetVolumeHandler` is called from `applyAirplayConfig` on every
+push, and a change that crosses nil↔non-nil restarts the receiver, because
+whether metadata is asked for is written into shairport's CONFIG FILE and that
+is produced when the process starts.
+
+**The reader's lifetime follows the handler, and the ordering is the part that
+bites.** Turning it on while the endpoint runs is the dangerous direction: the
+config would tell shairport-sync to write down a FIFO, and a FIFO with no
+reader fills at 64KB and then blocks the WRITER — the process decoding the
+audio, so the symptom is the music stopping. `syncMetadataReader` starts the
+reader *before* the restart that rewrites the config, and stops it when the
+handler goes away so it cannot outlive what it reads for. One owner
+(`metaStop != nil`), reconciled, rather than two places that can disagree.
+
+**Unverified end to end.** The format and the flags are documented, the parse
+and the mapping are covered by tests, and nothing here has met a real phone:
+`airplayStatus` will say whether the rebuilt binary runs, and the first
+listening test is what confirms the slider reaches the codec rather than
+shairport's own attenuator.
+
 ## Volume / mute persistence
 
 **The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
