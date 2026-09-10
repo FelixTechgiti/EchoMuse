@@ -1,61 +1,64 @@
-# LED Ring State Model
+# Zustandsmodell des LED-Rings
 
-The 12-LED ring (plus the discrete mute-button LED) is Revoice's entire user
-interface. There is no screen and no other indicator, so the ring carries the
-whole burden of telling someone what the device is doing.
+Der 12-LED-Ring (plus die eigene LED der Mute-Taste) ist die gesamte
+Benutzeroberfläche von Revoice. Es gibt keinen Bildschirm und keine andere
+Anzeige, der Ring trägt also die ganze Last, jemandem zu sagen, was das Gerät
+tut.
 
-**Core requirement:** the ring must be *unjarring*, *consistent*, and
-*understandable*. A ring that lights and then leads nowhere is worse than a
-ring that never lit.
+**Grundanforderung:** Der Ring muss *unaufdringlich*, *konsistent* und
+*verständlich* sein. Ein Ring, der aufleuchtet und dann ins Leere führt, ist
+schlimmer als ein Ring, der nie geleuchtet hat.
 
-This document is the authoritative behavioural spec: every ring owner, every
-event, and the outcome for each. Entries are tagged:
+Dieses Dokument ist die maßgebliche Verhaltensspezifikation: jeder
+Ring-Besitzer, jedes Ereignis und der jeweilige Ausgang. Einträge sind
+gekennzeichnet:
 
-- **[today]** — current shipped behaviour (v2.9.7)
-- **[proposed]** — design not yet built, pending sign-off
-
----
-
-## 1. Design principles
-
-1. **Never show a state the system cannot honour.** Optimistic feedback is
-   allowed only where it can be *bounded and resolved* — confirmed by the
-   controller, or visibly withdrawn.
-2. **Feedback local, decisions remote.** The device owns what it can know
-   first-hand (a button was pressed, its own speaker buffer emptied, it is
-   muted). The controller owns what requires knowledge the device lacks (was
-   a wake word spoken, did HA answer, which device should respond).
-3. **One meaning per signal.** Orange already means "controller unreachable".
-   New failure modes resolve into existing vocabulary rather than inventing
-   signals a user would have to learn.
-4. **Every provisional state resolves.** No state may be held indefinitely on
-   an assumption. Provisional paints carry a deadline; animations carry a TTL
-   dead-man.
-5. **Device-sovereign states are never overridden by the network.** Mute is
-   the canonical case: it must be correct with the controller absent, wedged,
-   or lying.
+- **[heute]** — aktuell ausgeliefertes Verhalten (v2.9.7)
+- **[vorgeschlagen]** — Entwurf, noch nicht gebaut, Freigabe ausstehend
 
 ---
 
-## 2. Ring owners — priority ladder
+## 1. Entwurfsprinzipien
 
-Highest layer that is active wins the physical paint. Lower layers still
-*record* their state (`baseLEDs`) so the ring can be handed back correctly on
-expiry.
+1. **Nie einen Zustand zeigen, den das System nicht einhalten kann.**
+   Optimistische Rückmeldung ist nur erlaubt, wo sie *begrenzt und aufgelöst*
+   werden kann — vom Controller bestätigt oder sichtbar zurückgenommen.
+2. **Rückmeldung lokal, Entscheidungen entfernt.** Dem Gerät gehört, was es
+   aus erster Hand wissen kann (eine Taste wurde gedrückt, sein eigener
+   Lautsprecherpuffer ist leergelaufen, es ist stumm). Dem Controller gehört,
+   was Wissen erfordert, das dem Gerät fehlt (wurde ein Wakeword gesprochen,
+   hat HA geantwortet, welches Gerät soll reagieren).
+3. **Eine Bedeutung pro Signal.** Orange bedeutet bereits „Controller nicht
+   erreichbar". Neue Fehlermodi lösen sich in vorhandenes Vokabular auf, statt
+   Signale zu erfinden, die jemand erst lernen müsste.
+4. **Jeder vorläufige Zustand löst sich auf.** Kein Zustand darf auf eine
+   Annahme hin unbegrenzt gehalten werden. Vorläufige Anzeigen tragen eine
+   Frist; Animationen tragen einen TTL-Totmannschalter.
+5. **Gerätehoheitliche Zustände werden nie vom Netzwerk überschrieben.** Mute
+   ist der Musterfall: Es muss stimmen, wenn der Controller fehlt, hängt oder
+   lügt.
 
-| # | Owner | Visual | Lifetime | Sovereignty | Code |
+---
+
+## 2. Ring-Besitzer — die Prioritätsleiter
+
+Die höchste aktive Ebene gewinnt die physische Anzeige. Tiefere Ebenen
+*zeichnen* ihren Zustand weiter auf (`baseLEDs`), damit der Ring beim Ablauf
+korrekt zurückgegeben werden kann.
+
+| # | Besitzer | Optik | Lebensdauer | Hoheit | Code |
 |---|---|---|---|---|---|
-| 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses only | `volume.go:145` |
-| 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/revoice/state.json` | `mute.go:132` |
-| 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
-| 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
-| 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
-| 6 | **Idle** | All off | — | — | — |
+| 1 | **Lautstärkebogen** | Cyan, N von 12 proportional | 2-s-Fenster (`volumeLEDSecs`) | Gerätelokal; nur physische Tastendrücke | `volume.go:145` |
+| 2 | **Mute-Ring** | Dauerhaft rot `(180,0,0)` + Tasten-LED (gpio444, active-high) | Bis zum Aufheben; übersteht Neustart und OTA | **Gerätehoheitlich**, gespeichert in `/data/local/etc/revoice/state.json` | `mute.go:132` |
+| 3 | **Verbindungszustand** | Oranges Sinus-Pulsieren (getrennt) / weißes langsames Pulsieren (Freigabe ausstehend) | Bis die Verbindung geklärt ist | Gerätelokal | `cmd/server.go:161,174` |
+| 4 | **Gesprächs- / Medienanimation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, in Szenenfarbe | Bis ersetzt oder `ttlSec` abläuft (30 s Zuhören / 135 s Spinner / je Antwort für den Pegel) | Vom Controller vorgegeben, vom Gerät gezeichnet | `animator.go:53` |
+| 5 | **Richtungsüberlagerung** | Grundfarbe des Rings, am Beam-Winkel Richtung Weiß aufgehellt | Solange der Zuhör-Ring steht | Gerätelokal, braucht `listeningLEDs` | `server.go:269` |
+| 6 | **Ruhe** | Alles aus | — | — | — |
 
-### Suppression rules [today]
+### Unterdrückungsregeln [heute]
 
-Both layer 1 and layer 2 suppress the hardware paint for layers 3–5, while
-still recording into `baseLEDs`:
+Sowohl Ebene 1 als auch Ebene 2 unterdrücken die Hardware-Anzeige für die
+Ebenen 3–5, zeichnen aber weiterhin in `baseLEDs` auf:
 
 ```go
 if s.volume.DisplayActive() || s.mute.IsMuted() {
@@ -63,9 +66,10 @@ if s.volume.DisplayActive() || s.mute.IsMuted() {
 }
 ```
 
-Between layers 1 and 2, the volume arc wins for its window — both paint the
-hardware directly, and the arc paints last. Its expiry timer is mute-aware and
-restores the red ring rather than handing back to the controller:
+Zwischen Ebene 1 und 2 gewinnt der Lautstärkebogen für sein Fenster — beide
+zeichnen direkt auf die Hardware, und der Bogen zeichnet zuletzt. Sein
+Ablauftimer kennt den Mute-Zustand und stellt den roten Ring wieder her,
+statt an den Controller zurückzugeben:
 
 ```go
 if vc.isMuted != nil && vc.isMuted() {
@@ -75,29 +79,31 @@ if vc.isMuted != nil && vc.isMuted() {
 }
 ```
 
-Layer 4 animations run on the device's own ticker and route every frame through
-`SetLEDs`, so they inherit the suppressions and keep `baseLEDs` current. This
-makes the volume-arc hand-back seamless mid-animation: the animator has been
-updating `baseLEDs` throughout the suppressed window, so `paintBaseLEDs()`
-paints the *latest* frame, and the next tick (≤80ms) resumes normally.
+Animationen der Ebene 4 laufen auf dem eigenen Taktgeber des Geräts und
+leiten jedes Bild durch `SetLEDs`, erben also die Unterdrückungen und halten
+`baseLEDs` aktuell. Das macht die Rückgabe nach dem Lautstärkebogen mitten in
+einer Animation nahtlos: Der Animator hat `baseLEDs` das ganze unterdrückte
+Fenster über aktualisiert, `paintBaseLEDs()` zeichnet also das *neueste* Bild,
+und der nächste Takt (≤80 ms) macht normal weiter.
 
-Replacement is atomic via a generation counter — a stale animation goroutine
-can never paint over its successor (`animator.go:45-48`).
+Das Ersetzen ist atomar über einen Generationszähler — eine veraltete
+Animations-Goroutine kann nie über ihre Nachfolgerin malen
+(`animator.go:45-48`).
 
 ---
 
-## 3. Link availability — three states, not two
+## 3. Verbindungsverfügbarkeit — drei Zustände, nicht zwei
 
-Local feedback must be link-aware, which requires a sharper notion of
-availability than the code currently has.
+Lokale Rückmeldung muss die Verbindung kennen, und das verlangt einen
+schärferen Begriff von Verfügbarkeit, als der Code ihn heute hat.
 
-| State | Meaning | Local feedback permitted? |
+| Zustand | Bedeutung | Lokale Rückmeldung erlaubt? |
 |---|---|---|
-| **LINKED** | Control WS registered *and* recent inbound evidence | Yes |
-| **SUSPECT** | Socket believed up, but no recent evidence — or an interaction went unconfirmed | No — resolve to DOWN |
-| **DOWN** | Socket closed, or awaiting approval | No — show link state (layer 3) |
+| **LINKED** | Control-WS registriert *und* jüngste eingehende Belege | Ja |
+| **SUSPECT** | Socket vermutlich offen, aber keine jüngsten Belege — oder eine Interaktion blieb unbestätigt | Nein — als DOWN behandeln |
+| **DOWN** | Socket geschlossen oder Freigabe ausstehend | Nein — Verbindungszustand zeigen (Ebene 3) |
 
-### The problem with what exists [today]
+### Das Problem mit dem, was existiert [heute]
 
 ```go
 func (c *ControlClient) IsConnected() bool {
@@ -105,135 +111,141 @@ func (c *ControlClient) IsConnected() bool {
 }
 ```
 
-`c.conn` goes nil only when the read loop errors, which is governed by
-`wsPongWait = 45 * time.Second` (`data.go:61`). So for a silently-dead link —
-controller stopped, WiFi blackhole, controller event loop wedged — the device
-reports **connected for up to 45 seconds** after the controller is gone, and
-the orange pulse does not start.
+`c.conn` wird nur nil, wenn die Leseschleife einen Fehler bekommt, und das
+regelt `wsPongWait = 45 * time.Second` (`data.go:61`). Bei einer still
+gestorbenen Verbindung — Controller gestoppt, WLAN-Blackhole,
+Controller-Ereignisschleife hängt — meldet das Gerät also bis zu **45 Sekunden
+lang „verbunden"**, nachdem der Controller weg ist, und das orange Pulsieren
+beginnt nicht.
 
-Gating optimistic paint on `IsConnected()` therefore produces a 45s window in
-which the ring confidently lights and nothing happens. That window is *exactly*
-when a user is most likely to be pressing the button — they press because
-nothing responded. It satisfies the requirement literally and violates it
-completely.
+Optimistische Anzeige an `IsConnected()` zu koppeln erzeugt daher ein
+45-Sekunden-Fenster, in dem der Ring zuversichtlich leuchtet und nichts
+passiert. Dieses Fenster ist *genau* der Moment, in dem eine Person am
+ehesten die Taste drückt — sie drückt ja, weil nichts reagiert hat. Es
+erfüllt die Anforderung buchstäblich und verletzt sie vollständig.
 
-A second gap: socket liveness cannot see a controller that is connected but
-**unable to serve** — HA down, pipeline erroring, event loop stalled.
+Eine zweite Lücke: Die Socket-Lebendigkeit sieht keinen Controller, der zwar
+verbunden, aber **nicht bedienfähig** ist — HA aus, Pipeline im Fehler,
+Ereignisschleife blockiert.
 
-### Passive detection has a floor [proposed]
+### Passive Erkennung hat einen Boden [vorgeschlagen]
 
-Inbound evidence during idle arrives from the controller's ping loop every
-**30s** (`em_controller.py:1674`). So a passive freshness threshold cannot be
-tighter than ~35s without false positives. **Passive liveness alone cannot
-give fast detection.** This is the structural reason the design below is
-built on per-interaction confirmation rather than a connection flag.
+Eingehende Belege im Leerlauf kommen aus der Ping-Schleife des Controllers,
+alle **30 s** (`em_controller.py:1674`). Eine passive Frischeschwelle kann
+also nicht enger als ~35 s sein, ohne Fehlalarme zu erzeugen. **Passive
+Lebendigkeit allein kann keine schnelle Erkennung liefern.** Das ist der
+strukturelle Grund, warum der Entwurf unten auf Bestätigung je Interaktion
+aufbaut statt auf einem Verbindungsflag.
 
-### Per-interaction confirmation [proposed]
+### Bestätigung je Interaktion [vorgeschlagen]
 
-Don't ask "is the controller there?" Ask "did the controller acknowledge
-*this* interaction?"
+Frag nicht „ist der Controller da?". Frag „hat der Controller *diese*
+Interaktion quittiert?".
 
-- On a local interaction, paint immediately and arm a **confirmation deadline**.
-- Any controller message that owns the ring (`led_anim` / `leds`) before the
-  deadline confirms it and replaces the provisional paint. **This mechanism
-  already exists** — the generation counter does exactly this. No protocol
-  change.
-- Deadline expires with nothing → the interaction was not honoured. Transition
-  to DOWN and show the orange pulse (layer 3).
+- Bei einer lokalen Interaktion sofort zeichnen und eine
+  **Bestätigungsfrist** scharfstellen.
+- Jede Controller-Nachricht, die den Ring beansprucht (`led_anim` / `leds`),
+  bestätigt sie vor Fristende und ersetzt die vorläufige Anzeige. **Dieser
+  Mechanismus existiert schon** — der Generationszähler tut genau das. Keine
+  Protokolländerung.
+- Läuft die Frist ohne etwas ab, wurde die Interaktion nicht eingelöst. Auf
+  DOWN wechseln und das orange Pulsieren zeigen (Ebene 3).
 
-Measured basis: the controller emits its response **sub-millisecond** after a
-button event arrives, so the deadline needs to cover only two network hops.
-Observed uplink latency, detection → first mic frame, over 79 wake turns:
+Gemessene Grundlage: Der Controller gibt seine Antwort **unter einer
+Millisekunde** nach Eintreffen eines Tastenereignisses aus, die Frist muss
+also nur zwei Netzwerkschritte abdecken. Beobachtete Uplink-Latenz, Erkennung
+→ erstes Mikrofonbild, über 79 Wake-Gespräche:
 
-| device | median | p90 | max | RSSI |
+| Gerät | Median | p90 | max | RSSI |
 |---|---|---|---|---|
-| Office | 264ms | 272ms | 278ms | −25 |
-| Lounge | 260ms | 294ms | 952ms | −52 |
-| Retreat | 258ms | 1046ms | 1225ms | −66 |
+| Office | 264 ms | 272 ms | 278 ms | −25 |
+| Lounge | 260 ms | 294 ms | 952 ms | −52 |
+| Retreat | 258 ms | 1046 ms | 1225 ms | −66 |
 
-The tail tracks RSSI, so any deadline must clear Retreat's worst case, not
-Office's typical. See §6 Q3 — because the deadline costs nothing in the happy
-path, the answer is to set it generously rather than tightly, which makes RTT
-instrumentation confirmatory rather than blocking.
+Der Ausläufer folgt dem RSSI, jede Frist muss also den schlechtesten Fall von
+Retreat abdecken, nicht den typischen von Office. Siehe §6 Q3 — weil die
+Frist im Gutfall nichts kostet, lautet die Antwort, sie großzügig statt eng zu
+setzen, was RTT-Messungen bestätigend statt blockierend macht.
 
-Side benefit: an unconfirmed interaction is a far faster link-failure detector
-than the 45s pong timeout. The button becomes an active probe, and local
-feedback and connection-awareness reinforce each other instead of conflicting.
+Nebennutzen: Eine unbestätigte Interaktion erkennt einen Verbindungsausfall
+weit schneller als der 45-s-Pong-Timeout. Die Taste wird zur aktiven Sonde,
+und lokale Rückmeldung und Verbindungsbewusstsein verstärken sich gegenseitig,
+statt sich zu widersprechen.
 
 ---
 
-## 4. Event → outcome tables
+## 4. Ereignis → Ausgang, in Tabellen
 
-State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
-`VOL-DISPLAY` (2s arc window), `DISCONNECTED`, `PENDING`.
+Verwendete Zustandsnamen: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
+`VOL-DISPLAY` (2-s-Bogenfenster), `DISCONNECTED`, `PENDING`.
 
-### 4.1 Action (dot) button — clickType 138
+### 4.1 Aktionstaste (Punkt) — clickType 138
 
-| # | State | Link | Device action | Ring outcome | Controller | Status |
+| # | Zustand | Verbindung | Aktion des Geräts | Ausgang am Ring | Controller | Status |
 |---|---|---|---|---|---|---|
-| A1 | IDLE | LINKED | Send button event | *Nothing until controller replies* — ring lights one RTT later | Starts turn, sends `led_anim` listening | [today] |
-| A2 | IDLE | LINKED | Send button event **+ paint listening ring locally**, arm confirmation deadline | Listening ring **immediately** | Confirms with `led_anim` listening, replacing provisional paint | [proposed] |
-| A3 | IDLE | LINKED, no confirmation before deadline | Withdraw provisional paint, mark link DOWN | **Hard cut** to orange pulse — no fade (§6 Q4) | — | [proposed] |
-| A4 | IDLE | DOWN / SUSPECT | Do not send, do not paint a turn state | Orange pulse continues (unchanged) | — | [proposed] |
-| A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
-| A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
-| A7 | **MUTED** | tap | Sent with `muted: true`; **controller refuses the turn** (`em_button.decide` → `BLOCKED`) | Red ring unchanged — **silent by design** (see §6 Q1) | Nothing. Mic never opens: `mic_start` is rejected device-side while muted | [today] |
-| A8 | **MUTED** | hold | Sent with `muted: true` | Red ring unchanged | **Fires `long` to HA.** A hold is not speech, so the mute has no opinion about it | [today] |
-| A9 | VOL-DISPLAY | LINKED | Send button event **and cancel the arc's hold** (`CancelVolumeDisplay`) | Arc stops being sovereign; the turn's listening frame paints as soon as it arrives | Starts turn normally | [today] |
+| A1 | IDLE | LINKED | Tastenereignis senden | *Nichts, bis der Controller antwortet* — der Ring leuchtet eine Umlaufzeit später | Startet Gespräch, sendet `led_anim` listening | [heute] |
+| A2 | IDLE | LINKED | Tastenereignis senden **und Zuhör-Ring lokal zeichnen**, Bestätigungsfrist scharfstellen | Zuhör-Ring **sofort** | Bestätigt mit `led_anim` listening und ersetzt die vorläufige Anzeige | [vorgeschlagen] |
+| A3 | IDLE | LINKED, keine Bestätigung vor Fristende | Vorläufige Anzeige zurücknehmen, Verbindung als DOWN markieren | **Harter Schnitt** auf orangenes Pulsieren — kein Überblenden (§6 Q4) | — | [vorgeschlagen] |
+| A4 | IDLE | DOWN / SUSPECT | Nicht senden, keinen Gesprächszustand zeichnen | Orangenes Pulsieren läuft weiter (unverändert) | — | [vorgeschlagen] |
+| A5 | LISTENING / THINKING / PLAYING | LINKED | Tastenereignis senden | Der Ring erlischt, wenn das Aufräumen des Controllers eintrifft | Bricht das Gespräch ab (`cancel_event` + `speaker_flush`); **nur lokal — HAs Pipeline läuft zu Ende, das Ergebnis wird verworfen** (`em_esphome.py:1158`) | [heute] |
+| A6 | LISTENING / THINKING / PLAYING | LINKED | Tastenereignis senden **und Ring lokal löschen** (ein Druck während eines Gesprächszustands heißt eindeutig *abbrechen*) | Ring erlischt **sofort** | Bricht wie oben ab | [vorgeschlagen] |
+| A7 | **MUTED** | Tippen | Wird mit `muted: true` gesendet; **der Controller verweigert das Gespräch** (`em_button.decide` → `BLOCKED`) | Roter Ring unverändert — **still, absichtlich** (siehe §6 Q1) | Nichts. Das Mikrofon öffnet nie: `mic_start` wird bei Mute geräteseitig abgewiesen | [heute] |
+| A8 | **MUTED** | Halten | Wird mit `muted: true` gesendet | Roter Ring unverändert | **Feuert `long` an HA.** Ein Halten ist keine Sprache, das Mute hat dazu keine Meinung | [heute] |
+| A9 | VOL-DISPLAY | LINKED | Tastenereignis senden **und den Halt des Bogens abbrechen** (`CancelVolumeDisplay`) | Der Bogen verliert die Hoheit; das Zuhör-Bild des Gesprächs zeichnet, sobald es eintrifft | Startet das Gespräch normal | [heute] |
 
-### 4.2 Mute button — clickType 113 (device-local, never leaves the device)
+### 4.2 Mute-Taste — clickType 113 (gerätelokal, verlässt das Gerät nie)
 
-| # | State | Device action | Ring outcome | Controller | Status |
+| # | Zustand | Aktion des Geräts | Ausgang am Ring | Controller | Status |
 |---|---|---|---|---|---|
-| M1 | IDLE | ADC mute all 4 codec pairs, persist to state.json, button LED on | Solid red; **suppresses all controller paints** | Notified via `mute_state` | [today] |
-| M2 | LISTENING / THINKING / PLAYING | As M1 | Solid red immediately; the cancelled turn's LED cleanup arrives *after* and is correctly ignored | Cancels turn + `speaker_flush` | [today] |
-| M3 | MUTED (unmute) | ADC unmute, clear ring, button LED off, persist | Ring black; next controller frame repaints | Notified via `mute_state` | [today] |
-| M4 | VOL-DISPLAY | As M1 — red painted directly | Red wins (painted last); arc expiry is mute-aware and restores red | Notified | [today] |
-| M5 | DISCONNECTED | As M1 — **works with no controller at all** | Solid red replaces orange pulse | None | [today] |
-| M6 | Boot after reboot/OTA while muted | `RestoreMuted()` — ADC + flag pre-connect; ring + button LED once LED init completes | Red, before any controller contact | None | [today] |
+| M1 | IDLE | ADC-Mute für alle 4 Codec-Paare, in state.json sichern, Tasten-LED an | Dauerhaft rot; **unterdrückt alle Anzeigen des Controllers** | Über `mute_state` benachrichtigt | [heute] |
+| M2 | LISTENING / THINKING / PLAYING | Wie M1 | Sofort dauerhaft rot; das LED-Aufräumen des abgebrochenen Gesprächs kommt *danach* und wird korrekt ignoriert | Bricht Gespräch ab + `speaker_flush` | [heute] |
+| M3 | MUTED (aufheben) | ADC entstummen, Ring löschen, Tasten-LED aus, sichern | Ring schwarz; das nächste Controller-Bild zeichnet neu | Über `mute_state` benachrichtigt | [heute] |
+| M4 | VOL-DISPLAY | Wie M1 — Rot wird direkt gezeichnet | Rot gewinnt (zuletzt gezeichnet); der Ablauf des Bogens kennt Mute und stellt Rot wieder her | Benachrichtigt | [heute] |
+| M5 | DISCONNECTED | Wie M1 — **funktioniert ganz ohne Controller** | Dauerhaft rot ersetzt das orange Pulsieren | Keiner | [heute] |
+| M6 | Start nach Neustart/OTA im Mute-Zustand | `RestoreMuted()` — ADC und Flag vor der Verbindung; Ring und Tasten-LED, sobald die LED-Initialisierung durch ist | Rot, vor jedem Controller-Kontakt | Keiner | [heute] |
 
-Mute is the reference implementation of principle 5, and its behaviour is
-**not changing**.
+Mute ist die Referenzumsetzung von Prinzip 5, und sein Verhalten **ändert
+sich nicht**.
 
-### 4.3 Volume buttons — clickType 115 / 114 (device-local)
+### 4.3 Lautstärketasten — clickType 115 / 114 (gerätelokal)
 
-| # | State | Device action | Ring outcome | Status |
+| # | Zustand | Aktion des Geräts | Ausgang am Ring | Status |
 |---|---|---|---|---|
-| V1 | IDLE | `Set(level, showRing=true)` | Cyan arc 2s → black | [today] |
-| V2 | LISTENING / THINKING / PLAYING | As V1 | Cyan arc 2s → hands back to the live animation mid-frame | [today] |
-| V3 | MUTED | As V1 | Cyan arc 2s → **red ring restored** (expiry is mute-aware) | [today] |
-| V4 | DISCONNECTED | As V1 | Cyan arc 2s → orange pulse resumes | [today] |
-| V5 | Remote set (controller / HA) or boot-time `SeedVolume` | `Set(level, showRing=false)` | **No arc** — nobody is at the device | [today] |
+| V1 | IDLE | `Set(level, showRing=true)` | Cyanfarbener Bogen 2 s → schwarz | [heute] |
+| V2 | LISTENING / THINKING / PLAYING | Wie V1 | Bogen 2 s → gibt mitten im Bild an die laufende Animation zurück | [heute] |
+| V3 | MUTED | Wie V1 | Bogen 2 s → **roter Ring wiederhergestellt** (der Ablauf kennt Mute) | [heute] |
+| V4 | DISCONNECTED | Wie V1 | Bogen 2 s → orangenes Pulsieren geht weiter | [heute] |
+| V5 | Ferngesetzt (Controller / HA) oder `SeedVolume` beim Start | `Set(level, showRing=false)` | **Kein Bogen** — es steht niemand am Gerät | [heute] |
 
-### 4.4 Controller-originated ring messages
+### 4.4 Ring-Nachrichten vom Controller
 
-| # | Message | State | Ring outcome | Status |
+| # | Nachricht | Zustand | Ausgang am Ring | Status |
 |---|---|---|---|---|
-| C1 | `led_anim` listening (`solid`, `listening:true`) | any unsuppressed | Scene listening colour; enables direction overlay | [today] |
-| C2 | `led_anim` `spin`/`rotate` (thinking) | any unsuppressed | Spinner on device ticker, 80ms | [today] |
-| C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live speaker RMS at the ALSA write — the **voice plane only**, measured before the music mix (v2.10.0). The AEC far-end tap deliberately sees the mixed output, since that is what must be cancelled from the mic; the meter must not, or it throbs to a song nobody asked it to visualise | [today] |
-| C4 | `led_anim` `off` | any unsuppressed | Ring black | [today] |
-| C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
-| C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |
-| C7 | No replacement within `ttlSec` | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
+| C1 | `led_anim` listening (`solid`, `listening:true`) | jeder nicht unterdrückte | Zuhörfarbe der Szene; aktiviert die Richtungsüberlagerung | [heute] |
+| C2 | `led_anim` `spin`/`rotate` (Nachdenken) | jeder nicht unterdrückte | Spinner auf dem Gerätetakt, 80 ms | [heute] |
+| C3 | `led_anim` `meter` (Wiedergabe) | jeder nicht unterdrückte | Pulsiert mit dem Live-RMS des Lautsprechers am ALSA-Schreibvorgang — nur die **Sprachebene**, gemessen vor dem Musikmix (v2.10.0). Der AEC-Fernabgriff sieht bewusst die gemischte Ausgabe, denn genau die muss aus dem Mikrofon gelöscht werden; der Pegel darf das nicht, sonst pulsiert er zu einem Lied, das niemand visualisiert haben wollte | [heute] |
+| C4 | `led_anim` `off` | jeder nicht unterdrückte | Ring schwarz | [heute] |
+| C5 | Jedes `led_anim` / `leds` | MUTED oder VOL-DISPLAY | **In `baseLEDs` aufgezeichnet, nicht gezeichnet** | [heute] |
+| C6 | Altes `leds`-Frame | jeder nicht unterdrückte | Ersetzt jede laufende Animation atomar (Generationszähler) | [heute] |
+| C7 | Kein Ersatz innerhalb von `ttlSec` | Animation läuft | Der Totmannschalter löscht den Ring — Schutz gegen einen Controller, der mitten im Gespräch gestorben ist | [heute] |
 
-### 4.5 Audio / link lifecycle
+### 4.5 Audio- und Verbindungslebenszyklus
 
-| # | Event | State | Ring outcome | Status |
+| # | Ereignis | Zustand | Ausgang am Ring | Status |
 |---|---|---|---|---|
-| L1 | Control WS registered | PENDING / DISCONNECTED | Pulse stops; mute ring restored if muted, else hand back | [today] |
-| L2 | Control WS closed (read-loop error) | any | `StopAnim()` then orange pulse | [today] |
-| L3 | Awaiting admin approval | boot | White slow pulse | [today] |
-| L4 | Link silently dead | any | **Nothing for up to 45s** — ring keeps showing the last state | [today] |
-| L5 | Link silently dead | any | Detected on the next interaction (§3) or by inbound-freshness timeout | [proposed] |
-| L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | **Controller estimates this from wall-clock and clears the ring early on slow links** — measured up to 6.1s premature | [today] |
-| L7 | Speaker stream ends | PLAYING | Device clears / hands back the ring itself, from the signal it already logs (`pcm_speaker.go:309`) | [proposed] |
+| L1 | Control-WS registriert | PENDING / DISCONNECTED | Pulsieren hört auf; Mute-Ring wiederhergestellt, falls stumm, sonst Rückgabe | [heute] |
+| L2 | Control-WS geschlossen (Fehler in der Leseschleife) | beliebig | `StopAnim()`, dann orangenes Pulsieren | [heute] |
+| L3 | Wartet auf Freigabe durch Administrator | Start | Weißes langsames Pulsieren | [heute] |
+| L4 | Verbindung still tot | beliebig | **Nichts für bis zu 45 s** — der Ring zeigt weiter den letzten Zustand | [heute] |
+| L5 | Verbindung still tot | beliebig | Erkannt bei der nächsten Interaktion (§3) oder über eine Frischeschwelle für Eingehendes | [vorgeschlagen] |
+| L6 | **Lautsprecherstrom endet** (EOS empfangen *und* Audiokanal leer) | PLAYING | **Der Controller schätzt das aus der Wanduhr und löscht den Ring auf langsamen Strecken zu früh** — gemessen bis zu 6,1 s zu früh | [heute] |
+| L7 | Lautsprecherstrom endet | PLAYING | Das Gerät löscht den Ring bzw. gibt ihn selbst zurück, aus dem Signal, das es ohnehin protokolliert (`pcm_speaker.go:309`) | [vorgeschlagen] |
 
 ---
 
-## 5. Why L6 is wrong today
+## 5. Warum L6 heute falsch ist
 
-`_run_post_turn_playback` never learns when playback actually ended
+`_run_post_turn_playback` erfährt nie, wann die Wiedergabe tatsächlich endete
 (`em_controller.py:746`):
 
 ```python
@@ -241,231 +253,260 @@ audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
 remaining      = max(0.0, audio_duration - elapsed)
 ```
 
-`elapsed` is *socket-write* time and is **subtracted**, so the estimate shrinks
-on precisely the streams that need it longest. Measured against `delivery_ms`
-(the device's `playback_stats` arrival — a true end-of-audio signal) across the
-last 40 instrumented turns, 4 cleared the ring more than 0.5s early:
+`elapsed` ist die Zeit des *Socket-Schreibens* und wird **abgezogen**, die
+Schätzung schrumpft also genau bei den Strömen, die sie am längsten brauchen.
+Gemessen gegen `delivery_ms` (das Eintreffen der `playback_stats` des Geräts —
+ein echtes Ende-des-Tons-Signal) über die letzten 40 instrumentierten
+Gespräche löschten 4 den Ring mehr als 0,5 s zu früh:
 
-| turn | tts | send_ms | delivery_ms | recv_span | ring cleared |
+| Gespräch | tts | send_ms | delivery_ms | recv_span | Ring gelöscht |
 |---|---|---|---|---|---|
-| 07-24 23:53 Retreat | 2.6s | 1154 | 9764 | 8193 | **6.1s early** |
-| 07-24 22:31 Lounge | 5.0s | 4296 | 9353 | 2039 | **3.2s early** |
-| 07-24 05:26 Lounge | 9.6s | 5364 | 13833 | 8275 | **3.1s early** |
-| 07-22 22:14 Lounge | 4.6s | 1 | 7417 | 4112 | **1.7s early** |
+| 07-24 23:53 Retreat | 2,6 s | 1154 | 9764 | 8193 | **6,1 s zu früh** |
+| 07-24 22:31 Lounge | 5,0 s | 4296 | 9353 | 2039 | **3,2 s zu früh** |
+| 07-24 05:26 Lounge | 9,6 s | 5364 | 13833 | 8275 | **3,1 s zu früh** |
+| 07-22 22:14 Lounge | 4,6 s | 1 | 7417 | 4112 | **1,7 s zu früh** |
 
-Every one correlates with inflated `recv_span_ms` / `max_gap_ms`. On healthy
-turns the estimate is ~1s *conservative*, which is why this only surfaces
-occasionally.
+Jeder Fall geht mit aufgeblähtem `recv_span_ms` / `max_gap_ms` einher. Bei
+gesunden Gesprächen ist die Schätzung rund 1 s *konservativ*, weshalb das nur
+gelegentlich auffällt.
 
-The device is the only party that knows when its own buffer empties. It already
-detects and logs exactly that. Under principle 2 this belongs to the device,
-and needs **no confirmation** — nothing is being predicted.
+Das Gerät ist die einzige Partei, die weiß, wann sein eigener Puffer leer
+läuft. Es erkennt und protokolliert genau das bereits. Nach Prinzip 2 gehört
+das dem Gerät, und es braucht **keine Bestätigung** — es wird nichts
+vorhergesagt.
 
 ---
 
-## 5b. Termination at the deadline [proposed]
+## 5b. Abschluss bei Fristablauf [vorgeschlagen]
 
-When the confirmation deadline expires, the interaction is over. Four things
-must happen, and the third is the one with teeth.
+Läuft die Bestätigungsfrist ab, ist die Interaktion vorbei. Vier Dinge müssen
+passieren, und das dritte hat Zähne.
 
-**1. Ring — hard cut to orange** (§6 Q4). The device is now in link state DOWN.
+**1. Ring — harter Schnitt auf Orange** (§6 Q4). Das Gerät ist jetzt im
+Verbindungszustand DOWN.
 
-**2. Revert the mic locally.** By deadline time the device may already have
-received `mic_start_turn` (it precedes `led_anim` in the controller's send
-order), so a bounded turn stream may be running. The device must stop it and
-return to the continuous wake stream — `StopMic()` then `StartMic(false)`.
+**2. Das Mikrofon lokal zurücksetzen.** Zum Fristende kann das Gerät bereits
+`mic_start_turn` bekommen haben (es geht `led_anim` in der Sendereihenfolge
+des Controllers voraus), es kann also ein begrenzter Gesprächsstrom laufen.
+Das Gerät muss ihn stoppen und zum durchgehenden Wake-Strom zurückkehren —
+`StopMic()`, dann `StartMic(false)`.
 
-**3. Tell the controller to abandon the turn.** Best-effort `turn_abort` control
-message. **This is mandatory, not optional, and the reason is privacy rather
-than tidiness:** without it the controller runs a full voice turn — streaming
-mic audio to HA — while the device shows orange. A device that is listening with
-no ring is exactly the state that must never exist. The controller releases
-`voice_lock`, cancels the turn, and stops the mic stream.
+**3. Dem Controller sagen, dass er das Gespräch aufgeben soll.** Eine
+Best-Effort-Kontrollnachricht `turn_abort`. **Das ist verpflichtend, nicht
+optional, und der Grund ist Privatsphäre, nicht Ordnung:** Ohne sie führt der
+Controller ein vollständiges Sprachgespräch durch — streamt Mikrofonton an HA
+—, während das Gerät Orange zeigt. Ein Gerät, das ohne Ring zuhört, ist genau
+der Zustand, der niemals existieren darf. Der Controller gibt `voice_lock`
+frei, bricht das Gespräch ab und stoppt den Mikrofonstrom.
 
-The abort reaches the controller in the common case, because the common cause of
-a late reply is a controller that is *slow but alive*. If the link genuinely
-dropped, reconnection already resets the ring (`leds_off` on config push,
-`em_controller.py:1638`) and the controller's own turn fails with the socket.
+Der Abbruch erreicht den Controller im Normalfall, denn die übliche Ursache
+einer späten Antwort ist ein Controller, der *langsam, aber am Leben* ist. Ist
+die Verbindung wirklich abgerissen, setzt die Wiederverbindung den Ring
+ohnehin zurück (`leds_off` beim Config-Push, `em_controller.py:1638`), und das
+Gespräch des Controllers scheitert mit dem Socket.
 
-**4. Refuse late arrivals for the abandoned interaction.** Belt-and-braces for
-the race where the abort and a late `led_anim` cross in flight. The device
-stamps each local interaction with a monotonically increasing **interaction
-epoch**, sends it with the button event, and the controller echoes it on the
-turn's ring messages. An `led_anim` carrying an epoch older than the device's
-current one is discarded.
+**4. Späte Eintreffende für die aufgegebene Interaktion abweisen.** Gürtel und
+Hosenträger für das Rennen, bei dem der Abbruch und ein spätes `led_anim` sich
+kreuzen. Das Gerät stempelt jede lokale Interaktion mit einer monoton
+steigenden **Interaktions-Epoche**, sendet sie mit dem Tastenereignis, und der
+Controller spiegelt sie auf den Ring-Nachrichten des Gesprächs. Ein
+`led_anim` mit einer älteren Epoche als der aktuellen des Geräts wird
+verworfen.
 
-This is the same generation-counter pattern the animator already uses
-(`animator.go:45`), extended across the wire — a stale response can never paint
-over its successor. Blanket-ignoring `led_anim` for a period would be wrong: it
-would also suppress a legitimate *new* turn from a second press or a wake word.
+Das ist dasselbe Generationszähler-Muster, das der Animator schon nutzt
+(`animator.go:45`), erweitert über die Leitung — eine veraltete Antwort kann
+nie über ihre Nachfolgerin malen. `led_anim` pauschal für eine Weile zu
+ignorieren wäre falsch: Es würde auch ein legitimes *neues* Gespräch aus einem
+zweiten Tastendruck oder einem Wakeword unterdrücken.
 
-### Interaction with the pre-existing button race
+### Zusammenspiel mit dem bereits vorhandenen Tasten-Rennen
 
-There is a latent race in `handle_button_event` that termination semantics would
-turn from harmless into user-visible. The start/cancel decision reads
-`device.voice_lock.locked()`, but the spawned task does not acquire the lock
-until several awaits later:
+In `handle_button_event` steckt ein latentes Rennen, das eine
+Abschlusssemantik von harmlos zu sichtbar machen würde. Die
+Start/Abbruch-Entscheidung liest `device.voice_lock.locked()`, aber die
+gestartete Aufgabe holt sich die Sperre erst mehrere Awaits später:
 
 ```python
 if device.voice_lock.locked():   # em_controller.py:1433
     ...cancel...
 else:
-    _btn_task = asyncio.create_task(_button_voice_turn())   # acquires the lock later
+    _btn_task = asyncio.create_task(_button_voice_turn())   # holt die Sperre später
 ```
 
-Two presses inside that window both see the lock free and both queue a turn. The
-second turn's `led_anim` is then delayed by however long the first turn takes —
-easily beyond any sane deadline. Under termination semantics the device would go
-orange, abort, and the controller would still run the queued turn.
+Zwei Tastendrücke in diesem Fenster sehen beide die Sperre frei und stellen
+beide ein Gespräch ein. Das `led_anim` des zweiten Gesprächs verzögert sich
+dann um die Dauer des ersten — leicht über jede vernünftige Frist hinaus.
+Unter der Abschlusssemantik ginge das Gerät auf Orange, bräche ab, und der
+Controller würde das eingestellte Gespräch trotzdem fahren.
 
-**So this fix belongs in the same change:** make the start path claim the turn
-synchronously in the handler (a `turn_pending` flag set before spawning, or
-acquire the lock in the handler), so the cancel/start decision is atomic. It was
-not observable in the 2026-07-25 field test — presses ~700ms apart never
-collided — but a fast double-tap would.
-
----
-
-## 6. Decisions
-
-### Q1 — refused press while muted: **stay silent** (decided)
-
-The red ring plus the red mute-button LED are sufficient signal that the device
-is deaf. This is how Alexa behaves, and there is no reason to reinvent
-behaviour that extensive focus-group work has already settled. No re-assert
-flash, no refusal signal. Row A7 stands as-is.
-
-**Amended 2026-08-08.** The *silence* decision above is unchanged, but what
-gets refused narrowed. The device used to drop every dot press while muted,
-which was right while the button meant only "start a voice turn" and became
-wrong once a hold also fired an HA event: a hold bound to something unrelated
-to speech stopped working whenever the mic was off, with nothing on the ring
-to connect the two. Presses now carry the mute state and the controller
-refuses only the **turn** (row A7); a hold forwards (row A8). Mute is still
-sovereign on the device, because sovereignty was never the button filter —
-it is the ADC mute plus the device rejecting every `mic_start` while muted.
-
-### Q2 — how the device knows it is mid-turn: **semantic field on `led_anim`** (recommended)
-
-This matters only for row A6 (clearing the ring immediately on a cancel press).
-Without it, the device would have to paint listening on *every* dot press,
-which flashes the wrong state for one RTT whenever the press was a cancel.
-
-**Option A — infer from the current animation.** The animator stores only
-`{mu, gen}` (`animator.go:45`) — no pattern — so this needs the current pattern
-recorded alongside the generation. Roughly three lines.
-
-*Correctness today is exact:* neither `em_player` nor the announcement path
-paints the ring (announcements call `_run_post_turn_playback` directly, which
-has no LED calls), so "ring shows a turn state" ⟺ "a voice turn is active".
-
-*The risk is a future foot-gun, not a present bug.* The equivalence is an
-implicit contract. The day music playback gains a meter ring — a very natural
-feature request — the dot button silently changes meaning during music, and
-nothing fails loudly. The ring would simply start clearing on presses that
-actually start turns.
-
-**Option B — derive from device audio/mic state.** Not viable. Wake-triggered
-turns deliberately keep the continuous ungated stream and never send
-`mic_start_turn` (P0-1), so `micActive && lockMic` is **false during the
-listening phase of the most common turn type**. And `streamActive` is also true
-for music and announcements — the inverse of A's problem. Neither signal, alone
-or combined, covers the state space.
-
-**Option C — explicit semantic from the controller.** The authority for "will
-my press be read as cancel?" is literally `device.voice_lock.locked()`; any
-device-side inference is a replica. The controller already sends an `led_anim`
-on **every** turn-state change, so adding a semantic field to that message
-(`state: listening | thinking | playing | idle`) costs **zero extra traffic**
-and two transitions per turn.
-
-**Recommendation: Option C.** It keeps A's zero-cost property while removing
-A's implicit contract — the device reads a declared state instead of inferring
-intent from pixel colour, and a future music-meter feature cannot silently
-change button semantics. It also makes the provisional paint self-describing:
-the device sets its own semantic state when it paints optimistically, and the
-controller's next `led_anim` either confirms or overrides it.
-
-Staleness (one RTT) is identical for A and C and is irreducible, so it does not
-differentiate them. Both drift directions self-correct within one RTT.
-
-### Q3 — confirmation deadline: **fixed, 3–3.5s** (recommended)
-
-Because the deadline **terminates the turn** (Q4), a false withdrawal now costs
-the user a real turn, not just a flicker. The deadline is therefore *not* free,
-and its floor is the worst legitimate time-to-first-inbound-message.
-
-That worst case is one full round trip: the controller emits its first response
-sub-millisecond after the button event arrives (measured — "Dot button → voice
-turn" and "Voice turn starting" land in the same millisecond), so the only
-variable is the wire. Retreat's uplink leg measures 1046ms p90 / 1225ms max, so
-a round trip worst case is ~2.5s.
-
-**3–3.5s** clears that with margin while remaining ~13× better than today's 45s
-blindness. Erring long is still correct: over-waiting costs a slower error
-indication, under-waiting kills turns the user wanted.
-
-**Fixed, not adaptive.** Per-device adaptive deadlines add state and a tuning
-surface to guard against a rare failure. Revisit only if field data shows
-Retreat-class devices false-aborting.
-
-**Confirmation is *any* inbound control message, not specifically `led_anim`.**
-This matters and it is not obvious: for a button turn the controller sends
-`mic_stop` → `mic_start_turn` → `led_anim`, so `mic_start_turn` is an *earlier*
-proof of life than the ring message. Arming the deadline against any inbound
-traffic is a strictly weaker condition, satisfied sooner, and therefore
-false-aborts less. `led_anim` remains the sole authority for ring *state*;
-liveness and ring-state authority are separate concerns.
-
-*RTT instrumentation* stays confirmatory rather than blocking — validate in the
-field that no legitimate first response exceeds the deadline.
-
-### Q4 — provisional-paint withdrawal: **hard cut to orange, and terminate the turn** (decided)
-
-A hard cut draws attention to an error state; a fade softens something that
-should be noticed.
-
-**The deadline terminates the interaction — it is not merely a repaint.** Once
-the device has gone orange and told the user "the controller is not answering",
-a late arrival that resurrects the turn only confuses them. The turn ends at the
-deadline, and anything that arrives afterwards for that interaction is refused.
-
-See §5b for what termination requires. Note the knock-on to Q3: because the
-deadline now ends a real turn rather than just changing a colour, it is no
-longer free, and its floor is set by the worst legitimate round trip.
+**Diese Behebung gehört also in dieselbe Änderung:** Der Startpfad muss das
+Gespräch synchron im Handler beanspruchen (ein `turn_pending`-Flag, gesetzt
+vor dem Starten, oder die Sperre im Handler holen), damit die
+Abbruch/Start-Entscheidung atomar ist. Im Feldtest vom 2026-07-25 war es nicht
+beobachtbar — Drücke im Abstand von ~700 ms kollidierten nie —, aber ein
+schnelles Doppeltippen würde es.
 
 ---
 
-## 7. Invariants — do not break
+## 6. Entscheidungen
 
-- **Mute is device-sovereign.** Correct with no controller, wedged controller,
-  or lying controller. Persisted locally; survives OTA slot flips.
-- **The volume arc owns the ring against *animations* for its 2s window.**
-  Turn animations repaint every ~80ms and would otherwise stomp it within one
-  frame. It does **not** outrank a deliberate action-button press, which
-  cancels the hold — the arc is protection from repaint churn, not from the
-  user (2026-07-25: pressing the button after a volume change gave no sign
-  the device was listening until the window expired).
-- **Arc expiry is mute-aware.** It must restore red when muted, never hand back
-  to controller state.
-- **`ttlSec` dead-man stays.** It is the only protection against a controller
-  that dies mid-animation.
-- **Animation replacement stays atomic** (generation counter). A stale
-  goroutine must never paint over its successor.
-- **`baseLEDs` keeps recording while suppressed.** This is what makes hand-back
-  seamless.
-- **The direction overlay requires `listeningLEDs`** and brightens the base
-  colour — it must never paint a hardcoded green, which reads as a glitch on
-  any non-standard scene.
+### Q1 — verweigerter Druck bei Mute: **still bleiben** (entschieden)
+
+Der rote Ring plus die rote LED der Mute-Taste sind ausreichendes Signal
+dafür, dass das Gerät taub ist. So verhält sich Alexa, und es gibt keinen
+Grund, ein Verhalten neu zu erfinden, das ausgedehnte Fokusgruppenarbeit
+bereits geklärt hat. Kein bestätigendes Blinken, kein Verweigerungssignal.
+Zeile A7 bleibt, wie sie ist.
+
+**Ergänzt am 2026-08-08.** Die *Stille*-Entscheidung oben bleibt unverändert,
+aber das, was verweigert wird, wurde enger. Das Gerät verwarf früher jeden
+Druck auf die Punkt-Taste bei Mute, was richtig war, solange die Taste nur
+„starte ein Sprachgespräch" bedeutete — und falsch wurde, sobald ein Halten
+zusätzlich ein HA-Ereignis feuerte: Ein Halten, das mit etwas Sprachfremdem
+belegt war, funktionierte nicht mehr, sobald das Mikrofon aus war, und nichts
+am Ring verband die beiden. Drücke tragen jetzt den Mute-Zustand, und der
+Controller verweigert nur das **Gespräch** (Zeile A7); ein Halten wird
+weitergereicht (Zeile A8). Mute ist auf dem Gerät weiterhin hoheitlich, denn
+die Hoheit war nie der Tastenfilter — sie ist das ADC-Mute plus die
+Zurückweisung jedes `mic_start` bei Mute.
+
+### Q2 — wie das Gerät weiß, dass es mitten im Gespräch ist: **semantisches Feld auf `led_anim`** (empfohlen)
+
+Das zählt nur für Zeile A6 (den Ring bei einem Abbruchdruck sofort löschen).
+Ohne das müsste das Gerät bei *jedem* Punkt-Druck Zuhören zeichnen, was
+jedes Mal, wenn der Druck ein Abbruch war, für eine Umlaufzeit den falschen
+Zustand aufblitzen lässt.
+
+**Möglichkeit A — aus der laufenden Animation ableiten.** Der Animator
+speichert nur `{mu, gen}` (`animator.go:45`) — kein Muster —, dafür müsste das
+aktuelle Muster neben der Generation mitgeführt werden. Etwa drei Zeilen.
+
+*Die Korrektheit ist heute exakt:* Weder `em_player` noch der Durchsagepfad
+zeichnen den Ring (Durchsagen rufen direkt `_run_post_turn_playback` auf, das
+keine LED-Aufrufe hat), also gilt „der Ring zeigt einen Gesprächszustand" ⟺
+„ein Sprachgespräch läuft".
+
+*Das Risiko ist eine künftige Fußangel, kein heutiger Fehler.* Die Äquivalenz
+ist ein stillschweigender Vertrag. An dem Tag, an dem die Musikwiedergabe
+einen Pegel-Ring bekommt — ein sehr naheliegender Wunsch —, ändert die
+Punkt-Taste während Musik still ihre Bedeutung, und nichts scheitert
+hörbar. Der Ring würde einfach bei Drücken erlöschen, die in Wahrheit
+Gespräche starten.
+
+**Möglichkeit B — aus Audio-/Mikrofonzustand des Geräts ableiten.** Nicht
+gangbar. Wakeword-Gespräche behalten bewusst den durchgehenden, ungegatterten
+Strom und senden nie `mic_start_turn` (P0-1), also ist `micActive && lockMic`
+**während der Zuhörphase der häufigsten Gesprächsart falsch**. Und
+`streamActive` ist auch bei Musik und Durchsagen wahr — das umgekehrte Problem
+von A. Kein Signal, allein oder kombiniert, deckt den Zustandsraum ab.
+
+**Möglichkeit C — explizite Semantik vom Controller.** Die Autorität für „wird
+mein Druck als Abbruch gelesen?" ist buchstäblich
+`device.voice_lock.locked()`; jede geräteseitige Ableitung ist eine Kopie. Der
+Controller sendet ohnehin bei **jedem** Gesprächszustandswechsel ein
+`led_anim`, ein semantisches Feld an dieser Nachricht
+(`state: listening | thinking | playing | idle`) kostet also **keinen
+zusätzlichen Verkehr** und zwei Übergänge pro Gespräch.
+
+**Empfehlung: Möglichkeit C.** Sie behält As Eigenschaft, nichts zu kosten,
+und beseitigt zugleich As stillschweigenden Vertrag — das Gerät liest einen
+erklärten Zustand, statt aus Pixelfarbe auf Absicht zu schließen, und eine
+künftige Musik-Pegel-Funktion kann die Tastensemantik nicht still ändern. Sie
+macht die vorläufige Anzeige außerdem selbstbeschreibend: Das Gerät setzt
+seinen eigenen semantischen Zustand, wenn es optimistisch zeichnet, und das
+nächste `led_anim` des Controllers bestätigt oder überschreibt ihn.
+
+Die Veralterung (eine Umlaufzeit) ist für A und C gleich und nicht
+reduzierbar, sie unterscheidet die beiden also nicht. Beide Driftrichtungen
+korrigieren sich innerhalb einer Umlaufzeit selbst.
+
+### Q3 — Bestätigungsfrist: **fest, 3–3,5 s** (empfohlen)
+
+Weil die Frist das **Gespräch beendet** (Q4), kostet eine falsche Rücknahme
+jetzt ein echtes Gespräch und nicht nur ein Flackern. Die Frist ist also
+*nicht* kostenlos, und ihr Boden ist die schlechteste legitime Zeit bis zur
+ersten eingehenden Nachricht.
+
+Dieser schlechteste Fall ist ein voller Umlauf: Der Controller gibt seine
+erste Antwort unter einer Millisekunde nach Eintreffen des Tastenereignisses
+aus (gemessen — „Dot button → voice turn" und „Voice turn starting" landen in
+derselben Millisekunde), die einzige Variable ist also die Leitung. Retreats
+Uplink-Abschnitt misst 1046 ms p90 / 1225 ms max, ein Umlauf im schlechtesten
+Fall liegt also bei ~2,5 s.
+
+**3–3,5 s** decken das mit Reserve ab und sind immer noch rund 13× besser als
+die heutige 45-s-Blindheit. Zu lang zu liegen ist weiterhin richtig: zu langes
+Warten kostet eine langsamere Fehleranzeige, zu kurzes Warten tötet
+Gespräche, die die Nutzerin wollte.
+
+**Fest, nicht adaptiv.** Adaptive Fristen je Gerät fügen Zustand und eine
+Stellschraube hinzu, um sich gegen einen seltenen Fehler zu wappnen. Nur
+wieder aufgreifen, wenn Felddaten zeigen, dass Geräte der Retreat-Klasse
+fälschlich abbrechen.
+
+**Als Bestätigung zählt *jede* eingehende Kontrollnachricht, nicht speziell
+`led_anim`.** Das ist wichtig und nicht offensichtlich: Bei einem
+Tastengespräch sendet der Controller `mic_stop` → `mic_start_turn` →
+`led_anim`, `mic_start_turn` ist also ein *früherer* Lebensnachweis als die
+Ring-Nachricht. Die Frist gegen jeden eingehenden Verkehr scharfzustellen ist
+eine strikt schwächere Bedingung, wird früher erfüllt und bricht daher
+seltener fälschlich ab. `led_anim` bleibt die alleinige Autorität für den
+Ring-*Zustand*; Lebendigkeit und Ring-Zustandshoheit sind getrennte Belange.
+
+*RTT-Messungen* bleiben bestätigend statt blockierend — im Feld prüfen, dass
+keine legitime erste Antwort die Frist überschreitet.
+
+### Q4 — Rücknahme der vorläufigen Anzeige: **harter Schnitt auf Orange, und das Gespräch beenden** (entschieden)
+
+Ein harter Schnitt lenkt Aufmerksamkeit auf einen Fehlerzustand; ein
+Überblenden weichzeichnet etwas, das bemerkt werden soll.
+
+**Die Frist beendet die Interaktion — sie ist nicht bloß ein Neuzeichnen.**
+Sobald das Gerät auf Orange gegangen ist und der Nutzerin gesagt hat „der
+Controller antwortet nicht", verwirrt eine späte Ankunft, die das Gespräch
+wiederbelebt, sie nur. Das Gespräch endet bei Fristablauf, und alles, was
+danach für diese Interaktion eintrifft, wird abgewiesen.
+
+Siehe §5b für das, was der Abschluss verlangt. Beachte die Rückwirkung auf Q3:
+Weil die Frist jetzt ein echtes Gespräch beendet statt nur eine Farbe zu
+ändern, ist sie nicht mehr kostenlos, und ihr Boden wird vom schlechtesten
+legitimen Umlauf gesetzt.
 
 ---
 
-## 8. Risk note
+## 7. Invarianten — nicht brechen
 
-The LED priority system is the most-repaired subsystem in this codebase — the
-two paint suppressions in §2 were each won the hard way, and their comments
-record why. Adding a provisional-paint layer means adding a **fourth**
-arbitration rule. The proposals here are deliberately staged so the
-lowest-risk, fully-evidenced change (L7) can ship independently of the
-provisional-paint layer (A2/A3/A6), which carries the new arbitration rule and
-the `led_anim` semantic field.
+- **Mute ist gerätehoheitlich.** Korrekt ohne Controller, mit hängendem
+  Controller oder mit lügendem Controller. Lokal gespeichert; übersteht das
+  Umschalten des OTA-Slots.
+- **Der Lautstärkebogen besitzt den Ring gegenüber *Animationen* für seine
+  2 Sekunden.** Gesprächsanimationen zeichnen alle ~80 ms neu und würden ihn
+  sonst binnen eines Bildes zertrampeln. Er steht **nicht** über einem
+  bewussten Druck auf die Aktionstaste, der den Halt abbricht — der Bogen
+  schützt vor Neuzeichnungs-Getrampel, nicht vor der Nutzerin (2026-07-25:
+  Die Taste nach einer Lautstärkeänderung zu drücken gab bis zum Ablauf des
+  Fensters kein Zeichen, dass das Gerät zuhört).
+- **Der Ablauf des Bogens kennt Mute.** Er muss bei Mute Rot wiederherstellen,
+  nie an den Controller-Zustand zurückgeben.
+- **Der `ttlSec`-Totmannschalter bleibt.** Er ist der einzige Schutz gegen
+  einen Controller, der mitten in einer Animation stirbt.
+- **Das Ersetzen von Animationen bleibt atomar** (Generationszähler). Eine
+  veraltete Goroutine darf nie über ihre Nachfolgerin malen.
+- **`baseLEDs` zeichnet während der Unterdrückung weiter auf.** Das macht die
+  Rückgabe nahtlos.
+- **Die Richtungsüberlagerung braucht `listeningLEDs`** und hellt die
+  Grundfarbe auf — sie darf nie ein festes Grün zeichnen, das auf jeder
+  nicht standardmäßigen Szene wie ein Fehler wirkt.
+
+---
+
+## 8. Risikohinweis
+
+Das LED-Prioritätssystem ist das am häufigsten reparierte Teilsystem dieses
+Codes — die beiden Anzeigeunterdrückungen in §2 wurden jeweils auf die harte
+Tour gewonnen, und ihre Kommentare halten fest, warum. Eine Ebene für
+vorläufige Anzeigen hinzuzufügen heißt, eine **vierte** Schlichtungsregel
+hinzuzufügen. Die Vorschläge hier sind bewusst gestaffelt, damit die
+risikoärmste, vollständig belegte Änderung (L7) unabhängig von der Ebene für
+vorläufige Anzeigen (A2/A3/A6) ausgeliefert werden kann, die die neue
+Schlichtungsregel und das semantische `led_anim`-Feld mitbringt.
