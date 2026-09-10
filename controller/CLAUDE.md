@@ -1264,6 +1264,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_outchain.py` | Who shapes the audio — the controller or the device. One pure predicate on the `output_chain` capability, plus a `Bypass` that returns the caller's own bytes. Split out because neither `em_controller` nor `em_player` is importable by the suite, and because both failure directions are audible and silent |
+| `em_endpoint_release.py` | Which published `endpoints-v*` release the store should hold, and what may be overwritten. Newest by PARSED version with the tag prefix stripped first — `version.parse` strips only `controller-`, so an unstripped `endpoints-v1.2.0` parses as None, every candidate sorts equal and "newest" quietly becomes "first in the list". A release carrying only one binary is skipped rather than half-used. And provenance: the controller replaces only what the controller wrote, so a hand-uploaded patched build is never overwritten on a timer |
 | `em_ring_light.py` | The LED ring as an HA light — the ring's RESTING colour, which every voice state outranks. Owns the partial-update semantics of `LightCommandRequest` (each field rides its own `has_*` flag) and the encoding decision that on/off lives in the brightness, so the colour survives being switched off and HA's card can offer it back |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
@@ -1445,6 +1446,41 @@ learned elsewhere in this file:
 - **The live Device is re-fetched after the transfer**, because the
   connection can drop mid-push and assigning onto a replaced object writes
   where nothing reads.
+
+### And it fills itself (`em_endpoint_release.py`)
+
+Uploading by hand is still one person at a keyboard per rebuild, which is the
+complaint that started this, twice: *"das will ich als OTA und nicht mit einer
+Datei die ich händisch updaten muss"*. So the store fetches from the published
+`endpoints-v*` release and a device installs on connect, as the fourth
+`reconcile_on_connect` payload (`_sync_endpoint_bins`).
+
+- **Gated on the DEVICE'S OWN TOGGLE, never on a release existing.** Pushing
+  ~9MB to every Dot because somebody cut a release spends a link measured at
+  5-7% packet loss on a program nobody asked to run; turning `spotifyEnabled`
+  on IS the ask, and it is the only signal carrying intent for THIS device
+  rather than for the store.
+- **The controller replaces only what the controller wrote.** Provenance
+  (`.provenance.json` beside the binaries) records the tag and the md5 of each
+  fetch; a stored md5 that is not the one recorded belongs to whoever uploaded
+  it — a patched librespot being tested is the case — and overwriting that on
+  a timer is help nobody asks for twice. Absent provenance reads the same way.
+- **A release asset is checked exactly as an upload is.** `elf_problem` runs on
+  the downloaded bytes too. A workflow can be edited, and a host build that
+  reached a release would otherwise install itself on the whole fleet, which is
+  strictly worse than one somebody had to click.
+- **Size is the only agreement the two ends can reach** — the firmware stats
+  the file rather than hashing it — so `install_needed` treats a size match as
+  "leave it", suggestive and never proof. The alternative is re-pushing every
+  binary on every connect for ever. It is pure and in `em_endpoint_bins` for
+  `refuse_install`'s reason: the suite cannot import `em_api`, and this decides
+  whether 9MB crosses that link on every connect.
+- **A shell that said nothing is not a missing binary.** `parse_stat` returns
+  None when the marker never came back, which moments after a connect usually
+  means the shell plane is not up yet — `reconcile_oww_assets`'s rule, and
+  pushing on it is a guess rather than a repair.
+- **A failed store refresh is never a failed install.** The store keeps what it
+  had, which is very often already right; nothing here ever deletes.
 
 **The ELF header is checked at upload and the version is not.** The likely
 mistake is a host build — `cargo build --release` without the target, or the
@@ -1880,10 +1916,10 @@ doing nothing, and nothing saying so.
 
 Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
-**All three payloads reconcile when the device CONNECTS** (`em_api.reconcile_on_connect`, called from the register handler). A device arriving is the one moment we know what it has, and until 2026-09-02 nothing used it: the wake word assets reconciled here but returned early unless the device scored locally and then checked only the selected classifier, while `_sync_start_script` and `_sync_debloat` ran **only** inside an OTA or from the Maintenance button. So a device already on the latest firmware never received a payload change at all — Office sat without three of the four stock classifiers for a fortnight with every panel calling it healthy. Four rules:
+**All four payloads reconcile when the device CONNECTS** (`em_api.reconcile_on_connect`, called from the register handler). A device arriving is the one moment we know what it has, and until 2026-09-02 nothing used it: the wake word assets reconciled here but returned early unless the device scored locally and then checked only the selected classifier, while `_sync_start_script` and `_sync_debloat` ran **only** inside an OTA or from the Maintenance button. So a device already on the latest firmware never received a payload change at all — Office sat without three of the four stock classifiers for a fortnight with every panel calling it healthy. Four rules:
 
-- **Sequential, never gathered.** All three talk to one device over one shell plane; concurrency contends for a single session and none of them is on the critical path of anything.
-- **One failure must not skip the other two.** Unrelated payloads — a device with a stale debloat list should still get its wake word models — so each step is caught individually, not the loop.
+- **Sequential, never gathered.** All four talk to one device over one shell plane; concurrency contends for a single session and none of them is on the critical path of anything.
+- **One failure must not skip the rest.** Unrelated payloads — a device with a stale debloat list should still get its wake word models — so each step is caught individually, not the loop.
 - **Debounced per device** (`RECONCILE_DEBOUNCE_S`, 15 min), because reconnects are routine on this fleet and the payloads are not; they change when someone deploys or edits a config, which is minutes to days apart. The stamp is claimed **before** the work, so a device reconnecting mid-run cannot start a second one against the same shell plane. `_delete_device` calls `forget_reconcile` — a re-added device is the one whose payloads are least likely to be right.
 - **A silent device is not a missing file.** `_shell_run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `_SHELL_OK` to the probe and return untouched without it. Same shape as `reconcile_oww_assets`'s "failure to LOOK is not evidence of absence".
 

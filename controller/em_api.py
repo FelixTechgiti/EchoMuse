@@ -60,6 +60,7 @@ import em_config_sections as sections_mod
 import em_console_pw
 import em_emos_build
 import em_endpoint_bins
+import em_endpoint_release
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -4274,7 +4275,7 @@ def _reconcile_due(device_id: str, now: float,
 
 async def reconcile_on_connect(device_id: str, live) -> None:
     """
-    Bring a freshly-connected device's three installed payloads back in line.
+    Bring a freshly-connected device's four installed payloads back in line.
 
     A device arriving is the one moment we know what it has, and until
     2026-09-02 nothing used it: `reconcile_oww_assets` ran here but returned
@@ -4287,10 +4288,10 @@ async def reconcile_on_connect(device_id: str, live) -> None:
 
     Three rules:
 
-    - **Sequential, never gathered.** All three talk to the same device over
+    - **Sequential, never gathered.** All four talk to the same device over
       the same shell plane; running them concurrently contends for one session
       for no gain, since none of them is on the critical path of anything.
-    - **One failure must not skip the other two.** They are unrelated payloads
+    - **One failure must not skip the rest.** They are unrelated payloads
       and a device with a stale debloat list should still get its wake word
       models. Each is best-effort in its own right, and this only stops them
       taking each other down.
@@ -4318,6 +4319,11 @@ async def reconcile_on_connect(device_id: str, live) -> None:
     # why absence keeps today's behaviour.
     if live.android_userspace:
         steps.append(("debloat", lambda: _sync_debloat(live, device_id)))
+    # Fourth payload, added 2026-09-10: the Spotify and AirPlay binaries. It
+    # goes LAST because it is the only one that can pull ~9MB down from GitHub
+    # and then push it over the shell plane, and the other three are md5
+    # compares that should not queue behind it.
+    steps.append(("endpoint binaries", lambda: _sync_endpoint_bins(live, device_id)))
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these
         # take seconds, and a device that dropped and redialled part-way
@@ -4825,6 +4831,230 @@ async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
         "status":   status,
         "state":    em_endpoint_bins.device_state(k, live),
     })
+
+
+# ─── The endpoint binaries, without anybody at a keyboard ────────────────────
+#
+# Everything above needs somebody to build a binary, upload it and then click
+# install on each device. That is not an OTA — it is the friction OTA exists to
+# remove, and it was the complaint that started this: "das will ich als OTA und
+# nicht mit einer Datei die ich händisch updaten muss". The store fills itself
+# from the published `endpoints-v*` release, and a device whose toggle is on
+# gets the binary on its next connect.
+#
+# Gated on the DEVICE'S OWN TOGGLE, never on the release existing. Pushing ~9MB
+# to every Dot in the fleet because a release was published spends a link
+# measured at 5-7% packet loss on a program nobody asked to run; turning
+# `spotifyEnabled` on IS the ask, and it is the only signal that carries intent
+# for this device rather than for the store.
+
+_endpoint_release_cache: Optional[dict] = None
+_endpoint_release_ts: float = 0.0
+
+# The store refresh is a ~10MB download and is serialised, so two devices
+# connecting at once cannot both start it. TTL is generous: these binaries
+# change when somebody cuts a release, which is days apart, and the cost of
+# being an hour late is nil against the cost of polling GitHub per connect.
+_endpoint_store_lock = asyncio.Lock()
+_endpoint_store_ts: float = 0.0
+ENDPOINT_POLL_TTL = 3600.0
+
+
+async def _fetch_latest_endpoints_release(force: bool = False) -> Optional[dict]:
+    """
+    The newest `endpoints-v*` release carrying BOTH binaries.
+
+    A separate function with a separate cache, for the reason
+    `_fetch_latest_emos_release` is: the three selectors pick on opposite
+    things, and one cache holding whichever kind was asked for last answers
+    the wrong question half the time. The tag namespaces make it safe in
+    every direction — `endpoints-v1.0.0` does not `startswith("v")`, so the
+    firmware poller cannot see it either.
+    """
+    global _endpoint_release_cache, _endpoint_release_ts
+    if (not force and _endpoint_release_cache is not None
+            and (time.monotonic() - _endpoint_release_ts) < ENDPOINT_POLL_TTL):
+        return _endpoint_release_cache
+
+    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    url = GITHUB_API_URL.format(repo=repo)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[api] GitHub returned {resp.status} for "
+                                f"endpoint releases")
+                    return _endpoint_release_cache
+                releases = await resp.json()
+    except Exception as e:
+        log.warning(f"[api] Could not poll GitHub for endpoint releases: {e}")
+        # The PREVIOUS answer, not None. A failed poll is not evidence that the
+        # release went away, and returning None here would make every network
+        # blip look like "no binaries are published" to everything downstream.
+        return _endpoint_release_cache
+
+    picked = em_endpoint_release.select(releases)
+    if picked is not None:
+        _endpoint_release_cache = picked
+        _endpoint_release_ts = time.monotonic()
+    return picked or _endpoint_release_cache
+
+
+async def _refresh_endpoint_store(force: bool = False) -> None:
+    """
+    Fill `endpoint_bins/` from the published release, if it is not already
+    what that release published.
+
+    Best-effort throughout: every failure leaves the store exactly as it was
+    and logs. The store having an older binary is a working device on an
+    older endpoint; the store being emptied by a failed refresh is a device
+    with no endpoint at all, so nothing here ever removes anything.
+
+    **Never overwrites a binary the controller did not write.** The decision
+    is `em_endpoint_release.needs_fetch` against the provenance record — a
+    stored md5 that is not the one we recorded belongs to whoever uploaded
+    it, and replacing a patched build on a timer with nothing said is the
+    kind of help nobody asks for twice.
+    """
+    global _endpoint_store_ts
+    async with _endpoint_store_lock:
+        now = time.monotonic()
+        if not force and _endpoint_store_ts and (now - _endpoint_store_ts) < ENDPOINT_POLL_TTL:
+            return
+        _endpoint_store_ts = now
+
+        release = await _fetch_latest_endpoints_release(force=force)
+        if release is None:
+            return
+
+        loop = asyncio.get_event_loop()
+        prov = await loop.run_in_executor(None, em_endpoint_release.read_provenance)
+        store = await loop.run_in_executor(None, em_endpoint_bins.scan)
+        wanted = em_endpoint_release.needs_fetch(release["tag"], prov, store)
+        if not wanted:
+            return
+
+        kinds = dict((prov.get("kinds") or {}))
+        changed = False
+        for key in wanted:
+            k = em_endpoint_bins.KINDS[key]
+            asset = release["assets"][key]
+            log.info(f"[api] fetching {k.filename} from {release['tag']}")
+            data = await _fetch_binary(asset["url"])
+            if not data:
+                continue
+            # The same header check the upload endpoint applies. A release
+            # asset is not more trustworthy than a person's upload — the
+            # workflow that built it can be edited, and a host build that
+            # reached a release would otherwise be installed on every device
+            # in the fleet automatically, which is strictly worse than one
+            # somebody had to click.
+            problem = em_endpoint_bins.elf_problem(data)
+            if problem:
+                log.error(f"[api] {release['tag']} published a {k.filename} "
+                          f"that is {problem} — not storing it")
+                continue
+            digest = em_endpoint_bins.md5_hex(data)
+            try:
+                await loop.run_in_executor(None, _write_endpoint_store, k, data)
+            except OSError as e:
+                log.warning(f"[api] could not store {k.filename}: {e}")
+                continue
+            kinds[key] = {"md5": digest, "size": len(data)}
+            changed = True
+            log.info(f"[api] stored {k.filename} {len(data):,} bytes "
+                     f"md5={digest[:8]}… from {release['tag']}")
+
+        if changed:
+            await loop.run_in_executor(
+                None, em_endpoint_release.write_provenance,
+                {"tag": release["tag"], "kinds": kinds})
+
+
+def _write_endpoint_store(k, data: bytes) -> None:
+    """
+    Put one binary into the store atomically. `.part` then rename, so a
+    refresh interrupted half way cannot leave a truncated program where the
+    install path will find one and push it to a device.
+    """
+    directory = em_endpoint_bins.store_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = em_endpoint_bins.store_path(k)
+    tmp = dest.parent / (dest.name + ".part")
+    tmp.write_bytes(data)
+    os.replace(tmp, dest)
+
+
+async def _sync_endpoint_bins(live, device_id: str) -> None:
+    """
+    On connect: give a device the endpoint binaries its own toggles ask for.
+
+    The fourth reconcile payload, and the one that removes the last manual
+    step from Spotify Connect and AirPlay. It refreshes the fleet store from
+    the published release first — cheap after the first time, and it is the
+    only place that ever needs to — then installs per kind.
+
+    Quiet when there is nothing to do, which is the ordinary case on a fleet
+    that reconnects often: one shell round trip per enabled endpoint and no
+    log line.
+    """
+    loop = asyncio.get_event_loop()
+    effective = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id)
+    wanted = [k for k in em_endpoint_bins.KINDS.values()
+              if effective.get(k.config_key)
+              and k.capability in (getattr(live, "capabilities", None) or [])]
+    if not wanted:
+        return
+
+    try:
+        await _refresh_endpoint_store()
+    except Exception as e:
+        # A store that could not be refreshed is a store with whatever it had
+        # before, which is very often the right binary already. Carry on.
+        log.warning(f"[api] endpoint store refresh failed ({e}) — using what "
+                    f"is already stored")
+
+    for k in wanted:
+        if _devices.get(device_id) is not live:
+            return
+        status = await _read_endpoint_status(live, k)
+        why = em_endpoint_bins.install_needed(
+            k, getattr(live, "capabilities", None), effective, status)
+        if why is None:
+            continue
+        entry = em_endpoint_bins.stored(k)
+        log.info(f"[api] [{device_id}] installing {k.filename}: {why}")
+        await _push_log_event(device_id, "info", "controller",
+                              f"Installing {k.filename} "
+                              f"({entry['size'] / 1024 / 1024:.1f} MB)")
+        data = await loop.run_in_executor(
+            None, em_endpoint_bins.store_path(k).read_bytes)
+        result = await _stream_file_to_device(live, data, k.dest,
+                                              mode="755", require_verify=True)
+        if not result:
+            log.warning(f"[api] [{device_id}] {k.filename} install failed at "
+                        f"stage {result.stage}: {result}")
+            await _push_log_event(device_id, "warn", "controller",
+                                  f"{k.filename} install failed — {result}")
+            continue
+        # Re-fetch and re-read, exactly as the hand-clicked install does: the
+        # transfer took a shell session over a lossy link and the device can
+        # have gone in the middle, and assigning a status onto a replaced
+        # Device writes it where nothing reads it.
+        live_now = _live(device_id)
+        if live_now is None:
+            return
+        live = live_now
+        fresh = await _read_endpoint_status(live, k)
+        if fresh is not None:
+            setattr(live, k.status_attr, fresh)
+        await _push_log_event(device_id, "info", "controller",
+                              f"{k.filename} installed at {k.dest}")
 
 
 @auth.require_auth
