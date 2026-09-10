@@ -363,6 +363,26 @@ DEFAULT_DEVICE_CONFIG = {
     # emOS only. FireOS has adbd, which honours ro.adb.secure and is already
     # better than this.
     "consolePassword":  "",
+    # consoleTimeoutMin: log the emOS USB serial console out when idle.
+    #
+    # 0 means no timeout, otherwise 1-90 minutes. Zero is a CHOICE rather than
+    # an absence — a device whose owner deliberately turned this off must not
+    # be moved by a later change of default — so it is pushed as a pointer and
+    # never elided.
+    #
+    # Minutes because that is the unit it is chosen in. The device stores
+    # minutes and emOS's init multiplies to seconds for the shell's TMOUT at
+    # the one point of use, so the stored value, the pushed value and the
+    # number on screen never disagree by a factor of sixty.
+    #
+    # It exists because console_gate() runs ONCE, when init spawns the shell.
+    # A session authenticated before a config change keeps its old behaviour
+    # for as long as it stays open, which on EFF was days: setting a password
+    # appeared to do nothing until something ended the session. The timeout is
+    # what ends it.
+    #
+    # emOS only, like the password beside it.
+    "consoleTimeoutMin": 0,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.
@@ -968,6 +988,33 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN base_os TEXT;
 
     UPDATE system_config SET value = '21' WHERE key = 'schema_version';
+    """,
+
+    # ── v22 — record when HA's VAD started, so the turns it never started are
+    #          countable ─────────────────────────────────────────────────────
+    #
+    # We have always stored vad_end_ms and never vad_start_ms, which made two
+    # very different turns identical in the record: one Home Assistant
+    # endpointed when the user stopped talking, and one where its VAD never
+    # engaged at all and the turn ran to HA's hardcoded 15s cap. HA reports
+    # both as the same STT_VAD_END — its segmenter sets `timed_out` and
+    # nothing in home-assistant/core reads it — so the satellite cannot tell
+    # them apart on the wire either.
+    #
+    # It was visible in the data all along and nobody had looked at the shape:
+    # 3.2% of wake turns on this fleet (27 of 845, 2026-07-14..08-13) sit in a
+    # single 250ms bin at 15.25s with 0-3 turns in every neighbouring bin, all
+    # with exactly 15,120ms of audio, half of them returning no_tts. That is a
+    # fixed cap firing, not people talking for a long time.
+    #
+    # -1 means HA's VAD never engaged on that turn, and is the counter for
+    # exactly this fault. NULL means the row predates this column — the two
+    # must not be conflated, which is why the sentinel is not NULL: an old row
+    # and a stalled VAD want opposite conclusions.
+    """
+    ALTER TABLE turns ADD COLUMN vad_start_ms INTEGER;
+
+    UPDATE system_config SET value = '22' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2114,6 +2161,8 @@ _TURN_COLUMNS = {
     "outcome":          "outcome",
     "stt_text":         "stt_text",
     "total_ms":         "total_ms",
+    # -1 = HA's VAD never engaged (schema v22); NULL = row predates the column
+    "vad_start_ms":     "vad_start_ms",
     "vad_end_ms":       "vad_end_ms",
     "stt_ms":           "stt_ms",
     "tts_url_ms":       "tts_url_ms",

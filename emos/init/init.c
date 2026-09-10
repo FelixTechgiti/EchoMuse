@@ -35,7 +35,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <linux/reboot.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -806,6 +808,37 @@ static void write_state(int n)
     close(fd);
 }
 
+/* Reboot into a named boot mode — "recovery" gets you TWRP.
+ *
+ * This is the whole of what `adb reboot recovery` does: one syscall carrying a
+ * mode string, which MediaTek's restart handler turns into the value LK reads
+ * on the next boot. No property service, no ueventd, no by-name symlinks, no
+ * BCB write into the misc partition.
+ *
+ * It has to be done here because **Amazon's /system/bin/reboot cannot reboot an
+ * emOS device at all** — not merely for recovery, but with no argument either.
+ * It reaches Android's property service over /dev/socket/property_service,
+ * which nothing here runs, so every mode fails with ENOENT. That is a confusing
+ * error to meet at a console, because it names a missing file and the file it
+ * means is a socket that was never going to exist. Measured on hardware
+ * 2026-09-10, along with the confirmation that the kernel accepts the string
+ * and LK acts on it.
+ *
+ * bionic's reboot(2) wrapper takes no argument, so it cannot express a mode.
+ * The raw syscall can, which is why this is syscall() rather than reboot().
+ *
+ * Returns only when the kernel refused; there is nothing useful to do then but
+ * say so, since the caller is a person at a serial console.
+ */
+static int reboot_into(const char *mode)
+{
+    sync();
+    sync();
+    syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+            LINUX_REBOOT_CMD_RESTART2, mode);
+    return -1;
+}
+
 /* Write the known-good image back over the boot partition and reboot into it. */
 static void restore_good(void)
 {
@@ -1374,9 +1407,42 @@ static void svc_add(const char *name, char *const *argv, const char *req,
                     const char *after);
 static void supervise(void);
 
-int main(void)
+/* Run as anything other than PID 1, this binary is a small tool instead of an
+ * init. It is the obvious place for the reboot: it is already static, already
+ * in the ramdisk at a known path, and already owns the syscall — so a person
+ * at the console types `/init recovery` and needs nothing pushed to the device.
+ * That matters more than it sounds, because a device on emOS has no adb, so
+ * "get a binary onto it" is the problem this avoids rather than solves.
+ *
+ * THE DISCRIMINATOR IS getpid(), NOT argc. The kernel can pass arguments to
+ * init from the boot cmdline, so a device whose bootloader appended one would
+ * take the tool path and never boot — a brick produced by an argument nobody
+ * typed. PID 1 is what "am I the init" actually means.
+ */
+static int tool_main(int argc, char **argv)
+{
+    const char *mode = (argc > 1) ? argv[1] : "recovery";
+
+    if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        dprintf(1, "usage: %s [mode]    (default: recovery)\n"
+                   "reboots into the named boot mode; \"recovery\" is TWRP\n",
+                argv[0]);
+        return 0;
+    }
+
+    dprintf(1, "rebooting into \"%s\"...\n", mode);
+    reboot_into(mode);
+    dprintf(2, "the kernel refused the boot mode \"%s\": %s\n",
+            mode, strerror(errno));
+    return 1;
+}
+
+int main(int argc, char **argv)
 {
     char buf[512];
+
+    if (getpid() != 1)
+        return tool_main(argc, argv);
 
     /* mknod's mode is masked by the umask, so without this every node below
      * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
@@ -2014,6 +2080,60 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
  * its own output back into its input is the trap that cost an evening here
  * once already (see README).
  */
+/* Where the firmware writes the console idle timeout, in MINUTES. Beside the
+ * password record and for the same reason: the firmware writes it and init
+ * reads it, because the console has to work when EchoMuse is not running. */
+/* Overridable like LEDDIR, so the off-target check can point it at a path it
+ * is allowed to write. The CI runner is not root and /data does not exist
+ * there, which the first version of tmoutcheck.c discovered the hard way. */
+#ifndef CONSOLE_TMOUT
+#define CONSOLE_TMOUT "/data/local/etc/echomuse/console.timeout"
+#endif
+
+/* Console idle timeout in SECONDS for the shell's TMOUT, or 0 for none.
+ *
+ * Stored in minutes because that is the unit it is chosen in (0, then 1-90);
+ * multiplied here, at the one point of use, so the stored value and the
+ * number on screen never disagree by a factor of sixty.
+ *
+ * Anything unparseable, negative or over the ceiling reads as NO timeout. Same
+ * rule as the password record: refusing to behave on a corrupt string would
+ * strand the owner, and the failure has to fall toward the console still
+ * working. A too-SHORT timeout from a truncated read is the dangerous
+ * direction — it presents as the device dropping the link — so a partial
+ * number is rejected rather than used.
+ */
+static long console_timeout_secs(void)
+{
+    int fd = open(CONSOLE_TMOUT, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    char b[32];
+    int n = (int)read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    b[n] = 0;
+
+    long v = 0;
+    int digits = 0;
+    for (int i = 0; i < n; i++) {
+        if (b[i] >= '0' && b[i] <= '9') {
+            v = v * 10 + (b[i] - '0');
+            digits++;
+            if (v > 90)          /* over the ceiling; stop before overflowing */
+                return 0;
+        } else if (b[i] == '\n' || b[i] == '\r' || b[i] == ' ' || b[i] == '\t') {
+            break;               /* trailing whitespace ends the number */
+        } else {
+            return 0;            /* anything else means the record is not a number */
+        }
+    }
+    if (!digits || v <= 0)
+        return 0;
+    return v * 60;
+}
+
 static void console_gate(void)
 {
     long iters;
@@ -2185,6 +2305,7 @@ static void console_banner(void)
         "   up          %ldm %02lds\r\n"
         "\r\n"
         "   logs: /run/net.log  /run/messages  /tmp/server.log\r\n"
+        "   /init recovery   reboot into TWRP  (Amazon's reboot cannot)\r\n"
         "\r\n",
         *ver ? ver : "emOS",
         host,
@@ -2208,8 +2329,32 @@ static pid_t start_console(void)
         console_gate();
         console_banner();
         char *argv[] = { "/system/bin/sh", NULL };
+        /* TMOUT is mksh's own idle timeout and costs no code here: an
+         * interactive shell idle at its PROMPT for that long exits, init
+         * respawns the console, and console_gate() above runs again. Timeout
+         * and password gate are the same mechanism seen twice.
+         *
+         * Idle at the prompt, not wall clock — a long foreground command is
+         * not killed under someone watching it, which matters because
+         * `logread -f` on a device being debugged is exactly the session that
+         * must not be dropped.
+         *
+         * The slot is left out of the array entirely when there is no
+         * timeout, rather than set to 0: mksh treats TMOUT=0 as no timeout
+         * too, but an absent variable cannot be misread by anything else
+         * inheriting this environment. */
+        /* Sized for the widest long, not for the 90-minute ceiling: the
+         * bound is enforced by console_timeout_secs and a buffer that
+         * depends on a check in another function is one refactor from
+         * truncating. */
+        char tmout[32];
         char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
-                         "PATH=/sbin:/system/bin:/system/xbin", NULL };
+                         "PATH=/sbin:/system/bin:/system/xbin", NULL, NULL };
+        long tsec = console_timeout_secs();
+        if (tsec > 0) {
+            snprintf(tmout, sizeof tmout, "TMOUT=%ld", tsec);
+            envp[4] = tmout;
+        }
         execve("/system/bin/sh", argv, envp);
         _exit(127);
     }

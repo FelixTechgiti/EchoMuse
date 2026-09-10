@@ -1350,6 +1350,11 @@ async def _post_device_config(request: web.Request) -> web.Response:
             409,
         )
 
+    # Validated BEFORE anything is written: a refusal must leave the stored
+    # config untouched, not half-applied with the bad key rejected later.
+    if (err := _validate_console_timeout(body)):
+        return _error("bad_console_timeout", err, 400)
+
     # Apply scoping first: set_device_config_sections prunes the values of
     # any section no longer overridden, so what follows writes into an
     # already-clean picture.
@@ -1978,10 +1983,33 @@ async def _run_update_locked(device_id: str, release: dict,
 
         # Sync the startup script while we're here — OTA is the only update
         # path existing devices have for it (see _sync_start_script).
+        #
+        # NOT gated on the platform, deliberately: emOS runs this same script.
+        # Its init supervises `/system/bin/sh /data/local/bin/start_server.sh`
+        # (emos/init/init.c), because the script owns the A/B slot symlink and
+        # the fast-exit backoff, which both bases need. Gating it here by
+        # symmetry with the debloat below would strand emOS devices on whatever
+        # script they were provisioned with.
         await _sync_start_script(live, device_id)
         # Payload drift is not limited to the start script — the debloat
         # halves had no update path at all until 2026-07-30.
-        await _sync_debloat(live, device_id)
+        #
+        # Gated, because the debloat is Android-only: a pm-hide list and a
+        # Magisk service.d script, and emOS has neither a package manager nor
+        # Magisk. This was the THIRD call site of _sync_debloat and the only
+        # one that did not ask — reconcile_on_connect and _post_debloat both
+        # check. Found on EFF 2026-09-07 at its first OTA onto emOS: the
+        # transfer targeted /sbin/.core/img/.core/service.d/ on a device with
+        # no Magisk daemon to have created it.
+        #
+        # It cost only a wasted shell round trip because the destination
+        # directory probe caught it. Without that probe it is the 240s stall
+        # measured on this same device on 2026-09-04 — TRANSFER_OK never
+        # arrives and the transfer holds the shell lock for its full timeout,
+        # twice. The gate belongs here anyway: the probe bounds the damage of
+        # a payload that should never have been sent.
+        if live.android_userspace:
+            await _sync_debloat(live, device_id)
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
 
@@ -3501,6 +3529,36 @@ def _resolve_console_pw(incoming: dict, stored: dict) -> None:
     )
 
 
+# The console idle timeout, in minutes: 0 for none, otherwise 1-90.
+_CONSOLE_TMOUT_KEY = "consoleTimeoutMin"
+_CONSOLE_TMOUT_MAX = 90
+
+
+def _validate_console_timeout(config: dict) -> str | None:
+    """
+    Return an error message when the timeout is out of range, else None.
+
+    REFUSED rather than clamped, deliberately. A value of 600 is somebody who
+    meant seconds, and silently giving them ten minutes is a console that logs
+    them out all day from a setting that looked accepted. The device refuses
+    it too — the controller validating first means a bad value reaching the
+    firmware is a bug rather than a user, but neither end assumes the other is
+    the careful one.
+
+    Absence is fine: it means the body did not mention the key.
+    """
+    if _CONSOLE_TMOUT_KEY not in config:
+        return None
+    v = config[_CONSOLE_TMOUT_KEY]
+    if isinstance(v, bool) or not isinstance(v, int):
+        return (f"{_CONSOLE_TMOUT_KEY} must be a whole number of minutes, "
+                f"got {v!r}")
+    if v < 0 or v > _CONSOLE_TMOUT_MAX:
+        return (f"{_CONSOLE_TMOUT_KEY} must be 0 (no timeout) or 1-"
+                f"{_CONSOLE_TMOUT_MAX} minutes, got {v}")
+    return None
+
+
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
     """
     Keys present in the stored config that the incoming body would delete.
@@ -3543,6 +3601,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
     _resolve_console_pw(config, stored)
+    if (err := _validate_console_timeout(config)):
+        return _error("bad_console_timeout", err, 400)
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(
