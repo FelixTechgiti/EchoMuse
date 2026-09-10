@@ -31,6 +31,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/logrelay"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
@@ -139,6 +140,20 @@ func main() {
 	dataClient.OnDirectionChanged(func(angle float64) {
 		s.SetDirectionLEDs(angle)
 	})
+	// Relay a SELECTION of our own log to the controller, so a fault here can
+	// be read from somewhere other than here. /tmp is RAM-backed and this box
+	// has no remote access of its own, so until now the only lines that ever
+	// left were the [mem] summaries — and
+	// `[airplay] shairport-sync exited: exit status 1`, repeating every minute
+	// for two hours, was visible to nobody but somebody willing to open a root
+	// shell on their own hardware (2026-09-10: five shell sessions, two wrong
+	// diagnoses). Installed here rather than at the top of main because it
+	// needs the control client to send through; the ~30 lines logged before
+	// this point are startup narration that the register message supersedes.
+	//
+	// Everything still goes to stdout unchanged — this ADDS a copy of a few
+	// lines. The bound is in internal/logrelay and is load-bearing: the
+	// control plane is the liveness channel, and bulk traffic on it is #404.
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led, listening *bool) {
@@ -159,6 +174,12 @@ func main() {
 		},
 		func() { dataClient.StopMic() },
 	)
+
+	// See the comment above the constructor. SendLog silently drops when there
+	// is no connection, so an early fault is logged locally and simply not
+	// relayed — which is the honest outcome rather than a queue that replays
+	// startup noise the moment a link appears.
+	log.SetOutput(logrelay.New(os.Stdout, controlClient.SendLog))
 
 	// Device-rendered ring animations (led_anim) — the animation engine
 	// runs on the device's own ticker, immune to controller/WiFi jitter.
@@ -721,6 +742,17 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	// The endpoints are CHILDREN, and exiting does not take them with us: they
+	// are reparented to init and keep holding the ports their protocols are
+	// defined on, so the next run cannot bind and loops for ever. Stopping
+	// them here is the tidy path and is deliberately NOT the fix — it cannot
+	// run on `kill -9`, on a panic, or on the supervisor's own restart, so
+	// each Start takes the ports over as well (internal/orphan). Both, because
+	// either alone leaves the failure reachable.
+	spotifyClient.Stop()
+	airplayClient.Stop()
+	// Sendspin is deliberately NOT here: it runs in-process, so there is no
+	// child to orphan, and its socket drops with us.
 	pcmSpeaker.Close()
 	os.Exit(0)
 }

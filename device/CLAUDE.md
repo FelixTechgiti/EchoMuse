@@ -567,8 +567,26 @@ whatever Android is doing with the PCM. Two consequences to keep:
   nothing played.
 
 `retryOpen` lives in `pcmwait.go` with `waitFree`, untagged, for the same
-reason: what is worth pinning is that the loop retries and that a stop is
-honoured *between* attempts rather than after another full interval.
+reason: what is worth pinning is that the loop retries, that it BACKS OFF, and
+that a stop is honoured *between* attempts rather than after another full
+interval.
+
+**The retry must back off and the nudge must be budgeted, and the reason is a
+comment that stopped being true.** `nudgeInterval` was justified as costing
+"four fork/execs on a path that runs once per process start" — which the
+retrying open silently ended. The two holders look identical from here and are
+nothing alike: mediaserver restarting after an OTA lets go within seconds,
+while mediaserver holding the speaker **because a plug is in the jack** never
+lets go at all. Under the flat 3s retry the second case spent a `stop media`
+roughly every **2.6 seconds for the life of the process** — killing an Android
+system service in a loop, on a board sharing 512MB with Android — plus a
+`stop mixer` and a codec probe per attempt. `maxNudges` (4, exactly what the
+original ten-second window already spent) and a doubling delay to
+`speakerRetryMax` (60s) leave the recoverable case untouched, since it is over
+long before either bound is reached, and turn the unrecoverable one into a
+heartbeat. **Watch for this whenever something that ran once starts running
+in a loop: the cost comments written for the one-shot are the things that go
+stale, and they go stale silently.**
 
 `waitFree` is in `pcmwait.go` with **no build tag**, beside `pcmstatus.go` and
 for the same reason as `internal/outchain`: it is a timing loop over two
@@ -879,6 +897,104 @@ thought to watch. Idle sits at 31–34°C, nowhere near throttling.
 **`thermalCoreLimit` (`num_limit_thermal`) is the sharpest throttling signal
 this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
+
+## The device's log has to be readable from somewhere else
+
+**Until 2026-09-10 the only lines that ever left this box were the `[mem]`
+heap summaries.** Everything else went to stdout, which `start_server.sh` puts
+in `/tmp/server.log` — RAM-backed, on hardware with no remote access of its
+own. So `[airplay] shairport-sync exited: exit status 1`, repeating every
+minute for two hours, was visible to nobody but somebody willing to open a
+root shell on their own device. That single gap is what made the endpoint
+orphan below cost five shell sessions and two wrong diagnoses, and it is worth
+more than either fix.
+
+`internal/logrelay` wraps the process's log destination (`log.SetOutput`) so
+every line still reaches stdout and a SELECTION also reaches the controller,
+which writes warnings into its own logger — the add-on log, the container's
+stdout and the support bundle's `controller_log_tail`. Both halves are
+required: the device sending with the controller only storing puts the line in
+a database nobody watches, and the controller logging with the device not
+sending relays nothing.
+
+Four rules, and the first is the one that would hurt:
+
+- **The forward is ASYNCHRONOUS and must stay so.** `SendLog` takes `connMu`
+  on the control client, and `Write` can be reached from code already holding
+  it — `writeJSON` logs its own failures. A direct call deadlocks the control
+  plane the first time a send fails. `Write` only enqueues, never blocks, and
+  drops when the queue is full: the same rule `shadow.Scorer.Push` follows for
+  the mic goroutine, for the same reason.
+- **It is RATIONED, because the control plane is the liveness channel.** RTT
+  is measured on it and the keepalive pong rides it; bulk traffic there is
+  #404, where BLE advertisements produced 3615 idle RTT excursions in 24h
+  against a neighbour's 2. Six lines a minute, and the dropped count rides the
+  next line through rather than costing a message of its own.
+- **Match OUTCOMES, not components.** The classifier looks for `failed`,
+  `exited`, `could not`, `timeout` and so on, so a subsystem written next year
+  is relayed the day it breaks without anyone remembering to add it. The
+  lifecycle exceptions are deliberate and few — `PcmSpeaker initialised` is
+  relayed because its ABSENCE is the tell for a device whose PCM Android will
+  not release, and an absence is only legible when the presence is normally
+  there to compare against.
+- **The pass-through happens first and cannot fail.** This is the process's
+  log destination; a relay able to swallow a line would be worse than no relay.
+
+`[mem]`, `[aec]` and `[mic] clock` are excluded by name: the first has its own
+relay and is 89% of the `device_logs` table, and the others run ~1/s during
+playback.
+
+## The endpoints are children, and a restart does not take them with it
+
+**This is what "AirPlay disappears after every update and comes back after a
+power cycle" actually was**, reported for days, with two mDNS theories in
+between that were both wrong. The announcement was never the problem: the
+process was never up to make one.
+
+`main()` exits and its children are reparented to init. librespot and
+shairport-sync keep running, still holding the ports their protocols are
+defined on — shairport listens on TCP 5000 for RTSP — so the new instance
+cannot bind and exits immediately. The supervisor then retries for ever.
+Measured on a device 2026-09-10, after an OTA from v2.19.0 to v2.21.0-fx.1:
+
+```
+1154 /data/local/bin/shairport-sync -a EchoDot  -o stdout    (alive, port 5000)
+14:44:29 [airplay] shairport-sync exited: exit status 1       (and every minute after)
+```
+
+Three facts made it certain rather than likely, and each is worth knowing as a
+technique:
+
+- **`/tmp` is RAM-backed, so the log's own age dates the boot.** It still held
+  lines from the previous hour, which proves the device had not rebooted —
+  only the process had restarted. That single observation separates "OTA
+  restart" from "power cycle" with no other instrumentation.
+- **The surviving command line carried no `-c`**, a flag the firmware only
+  began passing in the version that was supposedly running. A process older
+  than its own parent is an orphan.
+- **Port 5000 was listening while our supervisor was looping.** Both at once is
+  only possible if the listener is not ours.
+
+`internal/orphan` takes the ports over at **Start**, and that is the
+load-bearing half. Stopping the children on the way down is also done (the
+SIGTERM handler in `cmd/server.go`) and is NOT sufficient: it cannot run after
+`kill -9`, after a panic, or on the supervisor's own restart path, and it does
+nothing for a device already looping — which on a fielded fleet is every device
+that has ever been updated. Same posture the firmware already takes with
+Android's `mediaserver` and `mixer`: ask whoever holds the resource to let go,
+every start, so one bad exit cannot strand the feature permanently.
+
+Two details not to simplify:
+
+- **Match argv[0] EXACTLY, never a substring.** `/proc/<pid>/cmdline` is
+  NUL-separated and the first field is the executable as invoked. A `busybox
+  grep` for the path, a shell about to run it, our own log line — all contain
+  the path and none holds the port. A substring match kills the user's shell.
+- **`/proc`, not `pkill`.** `pkill` is not on FireOS and busybox's applet set
+  varies by SKU, so shelling out would be a check that silently cannot run.
+
+Sendspin is deliberately not covered: it runs in-process, so there is no child
+to orphan.
 
 ## AirPlay latency, and why the prime depth is not one number
 

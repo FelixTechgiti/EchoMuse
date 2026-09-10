@@ -3752,9 +3752,27 @@ async def _push_log_event(
     message: str,
 ) -> None:
     """
-    Persist a controller-generated log entry and push it to event clients.
+    Persist a log entry and push it to event clients.
+
+    **A warning also goes to the CONTROLLER'S OWN logger, and that is what
+    makes a device fault readable from outside the device.** Device log lines
+    used to land only in `device_logs` — the database and the dashboard — so
+    `[airplay] shairport-sync exited: exit status 1`, repeating every minute
+    for two hours, reached the add-on log, the container's stdout and the
+    support bundle's `controller_log_tail` exactly never. Diagnosing it needed
+    a root shell on the user's own hardware; on 2026-09-10 that cost five shell
+    sessions and two wrong theories. The device's half of this is
+    `device/internal/logrelay`, which is what makes such a line arrive at all.
+
+    Only warn and above. Info is where the volume is (the `[mem]` heap
+    summaries alone are 89% of that table), and the controller's own log ring
+    is bounded at 2000 lines — it already drops `aiohttp.access` to keep two
+    hours of history, and relaying every device info line would spend that
+    budget on exactly the noise `thin_noise` exists to remove.
     """
     loop = asyncio.get_event_loop()
+    if level in ("warn", "warning", "error", "critical"):
+        log.warning(f"[{device_id}] [{source}] {message}")
     await loop.run_in_executor(None, db.log_device, device_id, level, source, message)
     await _push_event({
         "type":      "device_log",
