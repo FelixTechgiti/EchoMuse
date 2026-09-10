@@ -31,6 +31,19 @@ import (
 // asked for: `metadataPipe()` returns "" when nothing is listening, and no
 // metadata block is written at all.
 
+// startMetadataReader is the reader syncMetadataReader launches, injectable
+// so the RECONCILER can be tested without doing filesystem work.
+//
+// It exists because the first version of those tests started the real reader,
+// which creates a FIFO — and then raced `t.TempDir()`'s cleanup, which listed
+// the directory as empty, tried to remove it, and found the pipe had appeared
+// in between. It failed as `directory not empty`, on main, in a test whose
+// subject is a boolean.
+//
+// The lesson is the general one: a test about bookkeeping should not be doing
+// I/O to find out what the bookkeeping says.
+var startMetadataReader = readMetadataPipe
+
 // pipeReopenDelay is how long to wait before reopening a FIFO that returned
 // EOF, i.e. that currently has no writer.
 //

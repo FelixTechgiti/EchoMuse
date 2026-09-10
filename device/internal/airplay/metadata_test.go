@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A real pvol item, in the shape shairport-sync writes.
@@ -166,17 +168,35 @@ func TestLatencyAndMetadataCoexist(t *testing.T) {
 	}
 }
 
+// stubReader replaces the real reader for tests about the RECONCILER, which
+// is bookkeeping and should not be doing filesystem work to be observed. It
+// also records every start, so "exactly one reader" can be asserted directly
+// rather than inferred from a pointer.
+func stubReader(t *testing.T) *int32 {
+	t.Helper()
+	var starts int32
+	old := startMetadataReader
+	startMetadataReader = func(path string, stop <-chan struct{}, fn func(float64)) {
+		atomic.AddInt32(&starts, 1)
+		<-stop
+	}
+	t.Cleanup(func() { startMetadataReader = old })
+	return &starts
+}
+
 // Turning volume control ON while the receiver runs is the dangerous
 // direction, and the reader has to exist before the config that asks for
 // metadata. A FIFO with no reader fills at 64KB and then BLOCKS the writer —
 // which is the process decoding the audio, so the symptom is music stopping.
 func TestTheReaderExistsBeforeTheConfigAsksForMetadata(t *testing.T) {
+	stubReader(t)
 	dir := t.TempDir()
 	c := New(Options{
 		Binary:       filepath.Join(dir, "no-such-binary"),
 		ConfigPath:   filepath.Join(dir, "shairport.conf"),
 		MetadataPipe: filepath.Join(dir, "meta"),
 	}, nil, nil)
+	t.Cleanup(func() { c.SetVolumeHandler(nil); c.syncMetadataReader() })
 
 	// Off: no pipe asked for, no reader.
 	if got := c.metadataPipe(); got != "" {
@@ -218,24 +238,47 @@ func TestTheReaderExistsBeforeTheConfigAsksForMetadata(t *testing.T) {
 // readers on one FIFO split the stream between them and each sees half an
 // item.
 func TestSyncingTwiceStartsOneReader(t *testing.T) {
+	starts := stubReader(t)
 	dir := t.TempDir()
 	c := New(Options{
 		Binary:       filepath.Join(dir, "nope"),
 		MetadataPipe: filepath.Join(dir, "meta"),
 		OnVolume:     func(float64) {},
 	}, nil, nil)
+	// Stopped before the temp directory goes, or the reader outlives the test.
+	t.Cleanup(func() { c.SetVolumeHandler(nil); c.syncMetadataReader() })
 
 	c.syncMetadataReader()
 	c.mu.Lock()
 	first := c.metaStop
 	c.mu.Unlock()
+	if first == nil {
+		t.Fatal("no reader was started for an installed handler")
+	}
 
-	c.syncMetadataReader()
-	c.mu.Lock()
-	second := c.metaStop
-	c.mu.Unlock()
+	// The deterministic half: the reconciler's own state must not move, which
+	// is what proves nothing was launched. Asserted on the CHANNEL rather
+	// than on a counter, because the counter is incremented inside the
+	// goroutine and reading it here would race the very thing under test —
+	// which is how the first version of this failed.
+	for i := 0; i < 5; i++ {
+		c.syncMetadataReader()
+		c.mu.Lock()
+		again := c.metaStop
+		c.mu.Unlock()
+		if again != first {
+			t.Fatalf("sync %d replaced the reader — two readers on one FIFO "+
+				"split the stream and each sees half an item", i+2)
+		}
+	}
 
-	if first != second {
-		t.Fatal("a second reader was started on the same pipe")
+	// And exactly one ever ran. Waited for rather than sampled: the start is
+	// asynchronous by construction.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(starts) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(starts); got != 1 {
+		t.Fatalf("%d readers started, want exactly 1", got)
 	}
 }
