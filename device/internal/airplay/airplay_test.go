@@ -317,7 +317,7 @@ func TestTheCommandLineKeepsShairportOffAlsa(t *testing.T) {
 	// #80 failure: a blocking open with no timeout, eighteen minutes of a
 	// stranded device.
 	c := New(Options{Binary: "/bin/true", Name: "Lounge"}, &fakeSink{}, &fakePlane{})
-	got := strings.Join(c.args(), " ")
+	got := strings.Join(c.args(""), " ")
 	if !strings.Contains(got, "-o stdout") {
 		t.Fatalf("not on stdout: %s", got)
 	}
@@ -394,4 +394,65 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// ─── The latency offset ──────────────────────────────────────────────────────
+//
+// The config file was declared and never written for the whole life of this
+// package, which is why the one setting that can take latency out of an
+// AirPlay stream was unreachable — and AirPlay latency is what the fault
+// report was about. So the sign, the absent case and the failure case are all
+// pinned: getting the sign wrong makes the complaint worse rather than
+// failing, and shairport-sync REFUSES TO START on a config file it was told
+// about and cannot read.
+
+func TestOurOwnBufferIsCompensatedForWithTheOppositeSign(t *testing.T) {
+	// shairport-sync's own sample: "if the output device delays by 100 ms,
+	// set this to -0.1". The music plane's prime is our delay.
+	got := renderConfig(0.1)
+	if !strings.Contains(got, "audio_backend_latency_offset_in_seconds = -0.1000") {
+		t.Fatalf("a 100ms backend delay must compensate as -0.1; got:\n%s", got)
+	}
+}
+
+func TestNoKnownDelayWritesNoOffsetRatherThanZero(t *testing.T) {
+	// Absent means nobody measured; 0.0 asserts there is no delay. A caller
+	// that does not know its own pipeline must not make the second claim.
+	got := renderConfig(0)
+	if strings.Contains(got, "audio_backend_latency_offset_in_seconds") {
+		t.Fatalf("an unknown delay must not assert an offset; got:\n%s", got)
+	}
+}
+
+func TestTheReceiverStartsWithoutAConfigItCouldNotWrite(t *testing.T) {
+	// -c naming a file that is not there stops shairport-sync starting at
+	// all, so a failed write has to cost the compensation and not AirPlay.
+	c := New(Options{Name: "Lounge", ConfigPath: "/proc/definitely/not/writable"},
+		nil, nil)
+	if path := c.writeConfig(); path != "" {
+		t.Fatalf("an unwritable config reported success as %q", path)
+	}
+	if args := strings.Join(c.args(""), " "); strings.Contains(args, "-c") {
+		t.Fatalf("started with -c and no file: %s", args)
+	}
+}
+
+func TestAWrittenConfigIsPassedWithMinusC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shairport-sync.conf")
+	c := New(Options{Name: "Lounge", ConfigPath: path, BackendDelaySec: 0.171},
+		nil, nil)
+	if got := c.writeConfig(); got != path {
+		t.Fatalf("writeConfig returned %q, want %q", got, path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "-0.1710") {
+		t.Fatalf("the offset is not in the file:\n%s", body)
+	}
+	args := strings.Join(c.args(path), " ")
+	if !strings.Contains(args, "-c "+path) {
+		t.Fatalf("the config is not on the command line: %s", args)
+	}
 }

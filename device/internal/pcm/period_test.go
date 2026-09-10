@@ -205,9 +205,16 @@ func TestThePeriodMatchesTheSpeakersOwn(t *testing.T) {
 			"pcm_speaker.go — this guard cannot see it, and it must be " +
 			"rewritten rather than deleted")
 	}
-	ps := regexp.MustCompile(`(?m)^const periodSize = (\d+)`).FindSubmatch(src)
+	// periodSize moved to format.go when musicprime.go needed to do
+	// arithmetic with it on the host — pcm_speaker.go is `//go:build server`
+	// and the untagged half cannot see anything declared inside it.
+	fmtSrc, err := os.ReadFile("../bindings/speaker/format.go")
+	if err != nil {
+		t.Fatalf("cannot read the speaker's format constants: %v", err)
+	}
+	ps := regexp.MustCompile(`(?m)^const periodSize = (\d+)`).FindSubmatch(fmtSrc)
 	if ps == nil {
-		t.Fatal("periodSize is no longer a plain const in pcm_speaker.go")
+		t.Fatal("periodSize is no longer a plain const in format.go")
 	}
 	n, err := strconv.Atoi(string(ps[1]))
 	if err != nil {

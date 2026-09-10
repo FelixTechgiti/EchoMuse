@@ -17,14 +17,17 @@ import (
 // never reach its prime gate, and the device would sit with a full buffer
 // playing nothing.
 func TestThePeriodMatchesTheSpeakersOwn(t *testing.T) {
-	src, err := os.ReadFile("../bindings/speaker/pcm_speaker.go")
+	// format.go rather than pcm_speaker.go: periodSize moved there when
+	// musicprime.go needed it on the host, since pcm_speaker.go is
+	// `//go:build server` and nothing untagged can see inside it.
+	src, err := os.ReadFile("../bindings/speaker/format.go")
 	if err != nil {
-		t.Fatalf("cannot read the speaker binding: %v", err)
+		t.Fatalf("cannot read the speaker's format constants: %v", err)
 	}
 	m := regexp.MustCompile(`(?m)^const periodSize = (\d+)`).FindSubmatch(src)
 	if m == nil {
 		t.Fatal("periodSize is no longer declared as a plain const in " +
-			"pcm_speaker.go — this guard cannot see it, and it must be " +
+			"format.go — this guard cannot see it, and it must be " +
 			"rewritten rather than deleted")
 	}
 	got, err := strconv.Atoi(string(m[1]))

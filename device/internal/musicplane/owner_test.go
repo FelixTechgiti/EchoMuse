@@ -278,7 +278,7 @@ func TestConcurrentClaimsLeaveExactlyOneOwner(t *testing.T) {
 	}
 	wg.Wait()
 
-	if !o.Owner().local() {
+	if !o.Owner().Local() {
 		t.Fatalf("owner = %v, want one of the local sources", o.Owner())
 	}
 }

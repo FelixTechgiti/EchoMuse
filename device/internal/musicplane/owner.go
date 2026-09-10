@@ -90,11 +90,16 @@ func (s Source) String() string {
 	return "unknown"
 }
 
-// local reports whether a source is a protocol spoken by the device itself,
+// Local reports whether a source is a protocol spoken by the device itself,
 // as opposed to the controller's stream. Written as an explicit switch rather
 // than `s != Controller`: None is neither, and a future source added to the
 // const block should have to be classified deliberately.
-func (s Source) local() bool {
+//
+// Exported because the answer decides more than precedence now: a device-local
+// producer reaches the music plane over a PIPE, with no WiFi hop at all, so
+// the buffer depth that protects a controller stream from link stalls is pure
+// added latency for this one — see speaker.MusicPrimeFor.
+func (s Source) Local() bool {
 	switch s {
 	case Sendspin, Spotify, AirPlay:
 		return true
@@ -194,7 +199,7 @@ func (o *Owner) Claim(src Source) bool {
 	// from another local source (last direct request wins) and from nobody
 	// else — while HA is streaming, the request that arrived through HA is
 	// the one being honoured.
-	if src.local() && prev == Controller {
+	if src.Local() && prev == Controller {
 		o.mu.Unlock()
 		return false
 	}
