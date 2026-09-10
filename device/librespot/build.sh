@@ -75,11 +75,39 @@ echo "features: $FEATURES   (dropping: $DROPPED)"
 echo "Building librespot $REF for armv7a/Android API 22..."
 docker build -t "$IMAGE" "$HERE"
 
+# getifaddrs() comes from OUR shim, and the reason is the platform rather than
+# librespot. bionic declares getifaddrs __INTRODUCED_IN(24) and FireOS 5 is
+# API 22, so `with-libmdns` pulls in if_addrs and the link ends in
+#
+#   undefined reference to 'getifaddrs'
+#   undefined reference to 'freeifaddrs'
+#
+# device/shairport/compat/android_ifaddrs.c already answers exactly that, over
+# netlink, written for shairport-sync's mDNS — and it is self-contained, so it
+# links here unchanged. Kept in the shairport directory rather than moved to a
+# shared one: it is exercised by that build every time, and relocating a file
+# two cross-compiles depend on buys tidiness at the price of the build that
+# currently works.
+#
+# The consequence worth knowing: ANYTHING doing mDNS on this platform hits
+# this, because enumerating interfaces is how a responder finds an address to
+# advertise. It is not a librespot problem and the next one will not be either.
+COMPAT="$(cd "$HERE/../shairport/compat" && pwd)"
+
 mkdir -p "$OUT"
-docker run --rm -v "$OUT:/out" "$IMAGE" bash -c "
+docker run --rm -v "$OUT:/out" -v "$COMPAT:/compat:ro" "$IMAGE" bash -c "
     set -euo pipefail
     git clone --depth 1 --branch '$REF' https://github.com/librespot-org/librespot /build/librespot
     cd /build/librespot
+    # An OBJECT rather than an archive, passed with -Clink-arg: an .o is
+    # always pulled into the link, while an archive member is taken only if
+    # something already unresolved needs it — which depends on where the
+    # linker sees it relative to the rlib that wants the symbol, and that
+    # ordering is not ours to control from RUSTFLAGS.
+    "\$NDK/bin/armv7a-linux-androideabi22-clang" -O2 -c \
+        /compat/android_ifaddrs.c -o /build/android_ifaddrs.o
+
+    RUSTFLAGS='-Clink-arg=/build/android_ifaddrs.o' \
     cargo build --release --target armv7-linux-androideabi \
         --no-default-features --features '$FEATURES'
     # Stripped: the eMMC is 8GB shared with Android and the symbols are of no

@@ -81,3 +81,14 @@ The device side is complete and tested without it: with no binary installed
 the firmware reports `spotify_status: {ok: false, reason: "not_installed"}`
 on its register message, and the dashboard disables the toggle and says so
 rather than offering a switch that saves and plays nothing.
+
+## getifaddrs comes from the shairport shim
+
+`with-libmdns` pulls in `if_addrs`, and bionic declares `getifaddrs`
+`__INTRODUCED_IN(24)` while FireOS 5 is API 22 — so the link fails with
+`undefined reference to 'getifaddrs'`. `build.sh` compiles
+`../shairport/compat/android_ifaddrs.c` (netlink, written for shairport-sync)
+and passes the object to the linker.
+
+Anything doing mDNS on this platform hits this: enumerating interfaces is how
+a responder finds an address to advertise. It is not a librespot problem.
