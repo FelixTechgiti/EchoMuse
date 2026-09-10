@@ -120,6 +120,21 @@ docker run --rm -v "$OUT:/out" -v "$HERE/compat:/compat:ro" "$IMAGE" bash -c '
     cd shairport-sync
     autoreconf -fi
 
+    # --with-metadata is what makes the AirPlay VOLUME reachable (#30). The
+    # stdout backend offers no volume callback, so shairport-sync attenuates
+    # in software and never tells anyone the slider moved: the volume on the
+    # Echo and its ring stay where they were while a phone believes it is in
+    # charge. With metadata built in, the ssnc/pvol item carries the AirPlay
+    # volume in dB and internal/airplay reads it off a pipe.
+    #
+    # It costs nothing when unused: the config file decides whether metadata
+    # is emitted at all, and the firmware writes that block only when the
+    # feature is turned on.
+    #
+    # NOTE for anyone editing this block: it lives inside a single-quoted
+    # bash -c, so an apostrophe here ends the quoting and breaks the build.
+    # That is why the comments in here are written without them.
+    #
     # --with-stdout is the whole point: PCM on stdout, no ALSA in
     # shairport-sync at all. The device already owns the speaker, and two
     # things opening it is the #80 failure — a blocking open with no timeout
@@ -200,7 +215,8 @@ docker run --rm -v "$OUT:/out" -v "$HERE/compat:/compat:ro" "$IMAGE" bash -c '
 
     PKG_CONFIG_LIBDIR=/build/prefix/lib/pkgconfig \
     ./configure --host=armv7a-linux-androideabi \
-        --with-stdout --with-tinysvcmdns --with-ssl=mbedtls --without-pkg-config \
+        --with-stdout --with-tinysvcmdns --with-ssl=mbedtls --with-metadata \
+        --without-pkg-config \
         --without-alsa --without-pa --without-pw --without-soxr \
         CFLAGS="$BASE_CFLAGS" \
         LDFLAGS="-L/build/prefix/lib -static-libgcc" \

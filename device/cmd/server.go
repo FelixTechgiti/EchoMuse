@@ -320,11 +320,12 @@ func main() {
 	airplayClient := airplay.New(airplay.Options{
 		Name:            deviceID,
 		BackendDelaySec: envFloat("EM_AIRPLAY_LATENCY_OFFSET", speaker.LocalPrimeSeconds()),
+		OnVolume:        airplayVolume(s),
 	}, pcmSpeaker, dataClient.MusicPlane().For(musicplane.AirPlay))
 	dataClient.MusicPlane().Register(musicplane.AirPlay, func(why musicplane.Reason) {
 		airplayClient.Leave(string(why))
 	})
-	applyAirplayConfig(airplayClient)
+	applyAirplayConfig(airplayClient, s)
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
@@ -517,7 +518,7 @@ func main() {
 		applyOutputChainConfig(pcmSpeaker)
 		applySendspinConfig(sendspinClient)
 		applySpotifyConfig(spotifyClient)
-		applyAirplayConfig(airplayClient)
+		applyAirplayConfig(airplayClient, s)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1390,9 +1391,36 @@ func envFloat(key string, def float64) float64 {
 	return v
 }
 
-func applyAirplayConfig(c *airplay.Client) {
+// airplayVolume is what an AirPlay slider does to this device, or nil when
+// the setting is off.
+//
+// Nil rather than a callback that checks the setting itself: the callback IS
+// the gate — see airplay.Options.OnVolume — so a non-nil one that decided to
+// do nothing would still ask shairport-sync for metadata, create the pipe and
+// run the reader, for a feature nobody switched on.
+//
+// Re-evaluated on every config push (applyAirplayConfig), NOT once at wiring.
+// The setting arrives from the controller long after this client is built, so
+// a handler resolved at startup would mean turning it on did nothing until
+// the firmware restarted.
+func airplayVolume(s *server.Server) func(float64) {
+	snap := config.Get().Snapshot()
+	if snap.AirplayVolumeControl == nil || !*snap.AirplayVolumeControl {
+		return nil
+	}
+	return func(db float64) {
+		level := server.LevelForAirPlayDB(db)
+		log.Printf("[airplay] volume %.1f dB -> level %d", db, level)
+		s.SetVolumeFromAirPlay(level)
+	}
+}
+
+func applyAirplayConfig(c *airplay.Client, s *server.Server) {
 	snap := config.Get().Snapshot()
 	c.SetName(snap.AirplayName)
+	// Before Start below, so a device coming up with the setting already on
+	// writes the metadata block into the config it launches with.
+	c.SetVolumeHandler(airplayVolume(s))
 	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
 		if err := c.Start(); err != nil {
 			log.Printf("[cmd] AirPlay is on but cannot run: %v", err)

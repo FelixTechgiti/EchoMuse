@@ -137,7 +137,29 @@ type Options struct {
 	ConfigPath string
 	// ExtraArgs are appended verbatim.
 	ExtraArgs []string
+	// OnVolume, when set, receives the AirPlay volume in dB whenever a phone
+	// moves its slider — and setting it is what turns metadata on at all.
+	// Change it live with SetVolumeHandler; this field is only the initial
+	// value, and a caller whose setting arrives from a controller should use
+	// that instead of relying on this.
+	//
+	// The gate is the callback rather than a flag: metadata costs a pipe, a
+	// goroutine and a config block, and a nil callback means nothing would
+	// read them. One thing to be true rather than two that can disagree.
+	OnVolume func(db float64)
+	// MetadataPipe is where shairport-sync writes metadata. Overridable for
+	// tests; MetadataPipePath otherwise.
+	MetadataPipe string
 }
+
+// MetadataPipePath is the FIFO shairport-sync writes metadata to.
+//
+// Under /data rather than /tmp, unlike most scratch on this device: /tmp is
+// RAM-backed and cleared at boot, which is fine for a FIFO, but the directory
+// itself has to exist before shairport-sync opens it and /data is where every
+// other path this firmware owns already lives. It is a named pipe, so it
+// stores nothing and costs no flash writes.
+const MetadataPipePath = "/data/local/etc/echomuse/airplay-metadata"
 
 // Client supervises one shairport-sync process.
 type Client struct {
@@ -156,6 +178,10 @@ type Client struct {
 	startedAt time.Time
 	lastExit  string
 	proc      *os.Process
+
+	// metaStop closes the metadata reader. Non-nil exactly while one runs,
+	// which is what syncMetadataReader reconciles against.
+	metaStop chan struct{}
 }
 
 // New wires a client. It starts nothing.
@@ -245,6 +271,9 @@ func (c *Client) Start() error {
 		log.Printf("[airplay] stopped %d orphaned instance(s) left by a previous run", n)
 	}
 
+	// Before supervise, deliberately: see syncMetadataReader.
+	c.syncMetadataReader()
+
 	log.Printf("[airplay] enabled as %q (source %dHz)", c.name(), c.opts.SourceRate)
 	go c.supervise(ctx)
 	return nil
@@ -266,6 +295,13 @@ func (c *Client) Stop() {
 	c.running = false
 	cancel := c.cancel
 	c.cancel = nil
+	// The reader is stopped HERE rather than off ctx, so the one thing that
+	// owns its lifetime is syncMetadataReader's `metaStop != nil` — two
+	// owners is how a goroutine ends up outliving the thing it reads for.
+	if c.metaStop != nil {
+		close(c.metaStop)
+		c.metaStop = nil
+	}
 	c.mu.Unlock()
 
 	if cancel != nil {
@@ -286,6 +322,78 @@ func (c *Client) Running() bool {
 // receiver — the name is a command-line argument shairport-sync reads once,
 // and without the restart a rename in Home Assistant would save, report
 // success and change nothing until the next reboot.
+// syncMetadataReader makes the reader goroutine match the handler: running
+// when there is somebody to call, stopped when there is not.
+//
+// **The dangerous direction is turning it ON while the endpoint runs.** The
+// config file tells shairport-sync to write metadata down a FIFO; a FIFO with
+// no reader fills at 64KB and then BLOCKS the writer — which is the process
+// decoding the audio. So the reader must exist before the config that asks
+// for it, and it must not be left behind either: the reader outliving the
+// handler is only a leaked goroutine, but it is one that lives until Stop.
+//
+// The reader is deliberately NOT tied to one shairport-sync process. The pipe
+// survives a restart of the writer, so tying this to `session` would tear the
+// reader down and rebuild it on every crash-restart.
+//
+// Called with c.mu NOT held.
+func (c *Client) syncMetadataReader() {
+	pipe := c.metadataPipe()
+
+	c.mu.Lock()
+	want := pipe != ""
+	have := c.metaStop != nil
+	if want == have {
+		c.mu.Unlock()
+		return
+	}
+	if !want {
+		close(c.metaStop)
+		c.metaStop = nil
+		c.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	c.metaStop = stop
+	fn := c.opts.OnVolume
+	c.mu.Unlock()
+
+	go startMetadataReader(pipe, stop, fn)
+}
+
+// SetVolumeHandler installs (or removes) the AirPlay volume callback, live.
+//
+// **The handler cannot be fixed at New(), and assuming it could was a bug in
+// this feature's first draft.** The setting arrives on a config push, long
+// after the client is wired, so a callback resolved once at startup meant
+// turning the setting on did nothing until the firmware restarted — while the
+// dashboard said it took effect at the next AirPlay start.
+//
+// Whether the handler is nil decides whether shairport-sync is asked for
+// metadata at all, and that decision is written into its CONFIG FILE, which
+// is produced when the process starts. So a change from nil to non-nil (or
+// back) has to restart the receiver, exactly as a rename does — otherwise the
+// running process keeps the config it was launched with and the pipe stays
+// empty. A change that does not cross that boundary restarts nothing.
+func (c *Client) SetVolumeHandler(fn func(db float64)) {
+	c.mu.Lock()
+	was := c.opts.OnVolume != nil
+	now := fn != nil
+	c.opts.OnVolume = fn
+	running := c.running
+	c.mu.Unlock()
+
+	if was == now || !running {
+		return
+	}
+	// Reader first, THEN the restart that rewrites the config: the new
+	// process must never be the one waiting for a reader to appear.
+	c.syncMetadataReader()
+	log.Printf("[airplay] volume control %s — restarting the receiver",
+		map[bool]string{true: "on", false: "off"}[now])
+	c.kill()
+}
+
 func (c *Client) SetName(name string) {
 	c.mu.Lock()
 	if name == "" || name == c.opts.Name {
@@ -394,14 +502,47 @@ func (c *Client) args(cfg string) []string {
 // Zero delay writes NO offset rather than `0.0`. The two are the same number
 // and not the same statement: absent means nobody measured, and a caller that
 // does not know its own delay should not assert there is none.
-func renderConfig(delaySec float64) string {
-	if delaySec == 0 {
-		return "general = {\n};\n"
+func renderConfig(delaySec float64, metadataPipe string) string {
+	general := "general = {\n"
+	if delaySec != 0 {
+		general += fmt.Sprintf(
+			"  audio_backend_latency_offset_in_seconds = %.4f;\n", -delaySec)
 	}
-	return fmt.Sprintf(
-		"general = {\n"+
-			"  audio_backend_latency_offset_in_seconds = %.4f;\n"+
-			"};\n", -delaySec)
+	general += "};\n"
+	if metadataPipe == "" {
+		return general
+	}
+	// Cover art is refused explicitly rather than left to the default. It is
+	// megabytes per track down a pipe whose only reader wants twenty bytes of
+	// volume, on a device sharing 512MB with Android — and the scanner would
+	// have to walk past every byte of it. `include_cover_art` defaults to
+	// "no", so this asserts what we are relying on rather than changing it:
+	// a future default flip would otherwise arrive as a memory problem with
+	// no obvious cause.
+	return general + fmt.Sprintf(
+		"metadata = {\n"+
+			"  enabled = \"yes\";\n"+
+			"  include_cover_art = \"no\";\n"+
+			"  pipe_name = \"%s\";\n"+
+			"};\n", metadataPipe)
+}
+
+// metadataPipe is the pipe to ask shairport-sync for metadata on, or "" when
+// nothing is listening.
+//
+// Driven by OnVolume rather than by a separate flag: a config block telling
+// shairport to write down a pipe nobody opens would fill its buffer and
+// eventually block the process that is playing the music.
+func (c *Client) metadataPipe() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.opts.OnVolume == nil {
+		return ""
+	}
+	if c.opts.MetadataPipe != "" {
+		return c.opts.MetadataPipe
+	}
+	return MetadataPipePath
 }
 
 // writeConfig puts the configuration where shairport-sync will read it, and
@@ -426,7 +567,7 @@ func (c *Client) writeConfig() string {
 		return ""
 	}
 	tmp := path + ".part"
-	if err := os.WriteFile(tmp, []byte(renderConfig(c.opts.BackendDelaySec)), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(renderConfig(c.opts.BackendDelaySec, c.metadataPipe())), 0o644); err != nil {
 		log.Printf("[airplay] cannot write %s: %v — starting without the "+
 			"latency offset", tmp, err)
 		return ""

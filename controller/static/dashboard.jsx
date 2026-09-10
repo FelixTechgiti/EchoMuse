@@ -7246,7 +7246,7 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
   "bluetooth": ["bleProxyEnabled"],
-  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName"]
+  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName", "airplayVolumeControl"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -8025,6 +8025,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <TextField label="AirPlay name" sub="what this Echo is called in the AirPlay list. Blank uses its serial"
             value={config.airplayName ?? ''} disabled={!airplayCapable || !airplayReady}
             onChange={v => set('airplayName', v)}/>
+          {/* The consequence is IN THE LABEL, which is the whole reason this
+              is a setting at all. An Echo has one volume and shares it with
+              the assistant, so a phone that drops AirPlay to 20% drops the
+              next spoken answer to 20% as well. That is a defensible reading
+              of "set the device volume" — but discovering it the first time
+              the assistant whispers an answer is not, so it is chosen here
+              instead of being the behaviour. */}
+          <Toggle label="AirPlay volume moves this Echo"
+            disabled={!airplayCapable || !airplayReady}
+            sub="the slider on a phone sets the Echo's own volume and flashes the ring, instead of being turned down inside the AirPlay receiver where nothing else can see it. Note this Echo has ONE volume: turn AirPlay down and the assistant's next answer is quieter too. Takes effect when AirPlay next starts"
+            value={config.airplayVolumeControl ?? false}
+            onChange={v => set('airplayVolumeControl', v)}/>
         </div>
       </Stage>
     </div>

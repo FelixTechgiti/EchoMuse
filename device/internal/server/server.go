@@ -173,6 +173,24 @@ func (s *Server) SetVolume(level int) {
 	s.volume.Set(level, false)
 }
 
+// SetVolumeFromAirPlay applies a volume a phone chose on its AirPlay slider,
+// and SHOWS the ring — unlike SetVolume above.
+//
+// The ring is the difference and it is deliberate. A controller command is
+// nobody standing at the device, so lighting the ring reads as a glitch; an
+// AirPlay slider is a person moving a control and watching for the speaker to
+// answer, which is the same thing a button press is. `Set(level, true)` is
+// the path the physical buttons already take.
+//
+// It also marks the volume SEEDED, so the controller's stored startupVolume
+// cannot land on top of it later in the run and undo a change the user just
+// made. That is the same reason SetVolume marks it: whoever moved it last
+// meant it.
+func (s *Server) SetVolumeFromAirPlay(level int) {
+	s.volumeSeeded.Store(true)
+	s.volume.Set(level, true)
+}
+
 // SeedVolume restores the controller's stored startupVolume — the source of
 // truth for volume, kept current by the volume_state echo — on the first
 // config push of each run. Applying it on *every* push would race a live

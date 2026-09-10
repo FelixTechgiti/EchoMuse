@@ -372,3 +372,58 @@ def test_endpoint_liveness_rides_the_stats_tick_not_registration():
     reg = reg[:reg.index("regBytes")]
     assert "endpoint" not in reg.lower() or "endpoint_health" not in reg, \
         "endpoint liveness moved onto the register message, where it goes stale"
+
+
+def test_airplay_volume_control_is_off_by_default_at_both_ends():
+    """
+    An Echo has ONE volume and shares it with the assistant, so a phone that
+    drops AirPlay to 20% drops the next spoken answer to 20% too. That is a
+    defensible reading of "the AirPlay slider sets the device volume", and it
+    is what #30 asked for — but nobody should meet it for the first time when
+    the assistant whispers an answer.
+
+    So it is a setting, and the default is the old behaviour at BOTH ends. A
+    device defaulting on while the controller defaulted off would give the
+    consequence to anyone whose controller had not yet pushed a config.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    db = (root / "em_db.py").read_text()
+    assert '"airplayVolumeControl": False' in db, \
+        "the controller default is missing or not False"
+
+    cfg = (root.parent / "device" / "internal" / "config" / "config.go").read_text()
+    assert 'envBool("AIRPLAY_VOLUME_CONTROL", false)' in cfg, \
+        "the device default is missing or not false"
+
+    # Pointer on the wire: false is meaningful, so "turned off" must be
+    # distinguishable from "not mentioned" — the DuckDb rule.
+    assert "AirplayVolumeControl *bool" in cfg, \
+        "a plain bool makes turning this OFF unreachable through a config push"
+
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+    assert "airplayVolumeControl" in jsx, "no control for it in the dashboard"
+    # The consequence has to be stated where the choice is made, or the
+    # setting is just the same surprise behind one more click.
+    i = jsx.index("AirPlay volume moves this Echo")
+    assert "ONE volume" in jsx[i:i + 900], \
+        "the shared-volume consequence is not stated on the control"
+
+
+def test_airplay_metadata_is_built_and_read():
+    """
+    The reader is inert without the build flag: the stdout backend offers no
+    volume callback, so shairport-sync attenuates in software and never says
+    the slider moved. `--with-metadata` is what makes ssnc/pvol exist at all.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent.parent
+
+    build = (root / "device" / "shairport" / "build.sh").read_text()
+    assert "--with-metadata" in build, \
+        "shairport-sync is built without metadata, so no volume is ever emitted"
+
+    meta = (root / "device" / "internal" / "airplay" / "metadata.go").read_text()
+    assert "pvol" in meta and "ssnc" in meta, \
+        "the volume item is not the one being read"

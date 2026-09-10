@@ -282,6 +282,20 @@ DEFAULT_DEVICE_CONFIG = {
     # the only difference that reaches the firmware is the sample rate.
     "airplayEnabled":   False,
     "airplayName":      "",
+    # airplayVolumeControl: whether the AirPlay slider on a phone moves THIS
+    # DEVICE'S volume, instead of being attenuated in software inside
+    # shairport-sync where nothing else can see it.
+    #
+    # **False, and it is a setting rather than a behaviour because the
+    # consequence belongs to whoever owns the room.** An Echo has ONE volume,
+    # shared with the assistant: a phone that drops AirPlay to 20% drops the
+    # next spoken answer to 20% too. That is a defensible reading of "set the
+    # device volume" and it is what was asked for in #30 — but it is not
+    # something anybody should discover after the fact, so it is chosen.
+    #
+    # Turning it on also moves the attenuation from software to the codec's
+    # own gain stage, which is where a 16-bit stream keeps its bits.
+    "airplayVolumeControl": False,
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake
