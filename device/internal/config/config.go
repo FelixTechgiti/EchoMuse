@@ -501,10 +501,23 @@ type ConfigMessage struct {
 	// Consumed by the firmware only to write it to disk for init — the
 	// firmware never checks it, because the console must work when the
 	// firmware is not running. Ignored on FireOS, which uses adbd.
-	ConsolePassword  *string  `json:"consolePassword,omitempty"`
-	BargeInEnabled   *bool    `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold float64  `json:"bargeInThreshold,omitempty"`
-	DuckDb           *float64 `json:"duckDb,omitempty"`
+	ConsolePassword *string `json:"consolePassword,omitempty"`
+	// ConsoleTimeoutMin is the emOS console idle timeout in MINUTES: 0 for no
+	// timeout, otherwise 1-90. A POINTER for ConsolePassword's reason — zero
+	// is the legitimate "no timeout" setting, so with omitempty it would be
+	// indistinguishable from a field nobody sent and could never be turned
+	// off once on.
+	//
+	// Minutes because that is the unit it is chosen in. `TMOUT` is seconds;
+	// init multiplies when it builds the shell's environment, so the stored
+	// value, the pushed value and the number on screen all agree.
+	//
+	// Written to disk for init like the password above, and ignored on
+	// FireOS, which uses adbd.
+	ConsoleTimeoutMin *int     `json:"consoleTimeoutMin,omitempty"`
+	BargeInEnabled    *bool    `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold  float64  `json:"bargeInThreshold,omitempty"`
+	DuckDb            *float64 `json:"duckDb,omitempty"`
 	// Output chain. Every one is a POINTER: 0.0 is a legitimate value for
 	// every band and for the limiter threshold, and false is legitimate
 	// for both toggles, so the usual "non-zero means set" rule cannot

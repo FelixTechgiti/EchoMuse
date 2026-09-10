@@ -543,9 +543,32 @@ never reached. The supervisor log showed the restart working perfectly both
 times (`start` two seconds after each `exit`), which is what made it look like
 a network fault rather than an audio one. A power cycle was the only recovery.
 `waitForFreePcm` now takes a `nudge` and re-issues the stop every
-`nudgeInterval`, which makes the race one we win. **Not gating `main()` on the
-speaker at all remains the real fix** — the comment in `waitForFreePcm` has
-said so since it was written, and it is filed rather than done.
+`nudgeInterval`, which makes the race one we win.
+
+**The nudge was not enough, and the real fix is that `main()` is no longer
+gated on the speaker at all.** Measured the same day: with the nudge shipped,
+a device still failed to come back after an OTA and needed a power cycle. So
+`NewPcmSpeaker` now **returns immediately** and the open runs on its own
+goroutine, retrying every `speakerRetryInterval` until it succeeds — the
+control client, mDNS, the buttons, the mute and the LED ring all come up
+whatever Android is doing with the PCM. Two consequences to keep:
+
+- **`waitForFreePcm` refuses instead of opening anyway.** Opening a device it
+  has just watched stay held for ten seconds is how a goroutine parks for
+  ever, since tinyalsa's open has no timeout. That refusal was rejected as
+  "a bigger behaviour change than the bug warrants" while main() was gated on
+  it — refusing then meant refusing to start. It is not any more, and the
+  comment that said so was true right up until its premise moved.
+- **Pumps are REFUSED while the speaker is not ready, never queued.** An
+  `audioStream` whose consumer does not exist yet accepts 128 periods and then
+  blocks the data plane's read goroutine, which is the head-of-line stall that
+  stops the device answering keepalives — trading a silent speaker for a
+  dropped connection. `errSpeakerNotReady` is named so the log says why
+  nothing played.
+
+`retryOpen` lives in `pcmwait.go` with `waitFree`, untagged, for the same
+reason: what is worth pinning is that the loop retries and that a stop is
+honoured *between* attempts rather than after another full interval.
 
 `waitFree` is in `pcmwait.go` with **no build tag**, beside `pcmstatus.go` and
 for the same reason as `internal/outchain`: it is a timing loop over two
@@ -856,6 +879,65 @@ thought to watch. Idle sits at 31–34°C, nowhere near throttling.
 **`thermalCoreLimit` (`num_limit_thermal`) is the sharpest throttling signal
 this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
+
+## AirPlay latency, and why the prime depth is not one number
+
+**The music plane's prime gate was ~1s of PERMANENT latency for every
+device-local source, and that is ours rather than AirPlay's.** `primePeriods`
+= 24 (~1s) exists to protect the opening seconds of a CONTROLLER stream, where
+measured 1.8–2.6s link stalls used to drain the buffer into audible gaps. That
+is a justification about a WiFi hop — and librespot and shairport-sync are
+processes on this device writing to a pipe, so the audio they produce never
+takes that path.
+
+It is also not a start-up cost that goes away. Both local producers pace
+themselves at realtime — shairport-sync has its own clock and librespot is
+paced by pipe backpressure — so the buffer settles at whatever depth the prime
+gate demanded and stays there, and every sample waits for the periods ahead of
+it. AirPlay already carries ~2s of protocol latency; a second on top is what
+"der AirPlay-Ton ist mega verzögert" was measuring.
+
+- **`speaker.MusicPrimeFor(local bool)`** returns 4 periods (~171ms) for a
+  device-local owner and 24 for the controller. Set from the ONE observer that
+  sees every handover (`musicplane.OnChange` in `cmd/server.go`), because that
+  is the only place that knows who is filling the plane. It takes effect on the
+  next stream, not the current one — `ready` consults it only while `playing`
+  is false — so a mid-track handover cannot re-gate audio already flowing.
+- **Not zero and not one.** A pipe read still arrives in bursts, the ALSA loop
+  still takes exactly one period per iteration, and a mid-stream drain is
+  counted against the stream as an underrun. A few periods of slack keeps a
+  scheduling hiccup from reading as a fault.
+- **`sampleRate` and `periodSize` moved to `format.go`, untagged**, so
+  `musicprime.go` can turn periods into seconds on the host. `pcm_speaker.go`
+  is `//go:build server` and nothing untagged can see inside it — the same
+  reason `pcmwait.go` and `pcmstatus.go` exist. Both `periodSize` source guards
+  (`internal/pcm`, `internal/sendspin`) read that file now.
+
+**shairport-sync has to be TOLD what we add behind it, and `ConfigPath` was
+declared and never written.** It plays each packet at the instant the sender
+stamped it, so a backend that holds audio makes every packet late by that much;
+`audio_backend_latency_offset_in_seconds` is how it is told, and with no config
+file at all the setting was unreachable for the life of the package. The value
+is derived from `speaker.LocalPrimeSeconds()` rather than written as a literal,
+so changing the prime changes the compensation.
+
+Two things not to undo:
+
+- **The sign comes from shairport-sync's own sample** ("if the output device
+  delays by 100 ms, set this to -0.1") and is **not measured here**.
+  `EM_AIRPLAY_LATENCY_OFFSET` overrides it in seconds — an env var rather than
+  a config key, for `EM_AEC_HW_REF`'s reason, and it exists so the number can
+  be corrected against a real speaker without a rebuild.
+- **A config that could not be written must not reach the command line.**
+  shairport-sync REFUSES TO START on a `-c` file it cannot read, so
+  `writeConfig` returns `""` on any failure and `args` omits the flag: the
+  compensation is worth ~171ms, the receiver is worth AirPlay existing. Written
+  to a temp file and renamed for the same reason — a half-written config is one
+  it will not parse, and the observable is a receiver that never appears with
+  the reason on a stderr nobody is reading yet.
+- **A zero delay writes NO offset rather than `0.0`.** Same number, different
+  statement: absent means nobody measured, and a caller that does not know its
+  own pipeline should not assert there is none.
 
 ## Volume / mute persistence
 

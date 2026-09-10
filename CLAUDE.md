@@ -40,15 +40,25 @@ EchoMuse; this fork is not.
   existing `.env`, break discovery against fielded firmware, and change
   nothing anyone reads as branding.
 
-**Two compatibility shims exist solely because of the rename**, and both are
-about files that the old name left on a device: `_sync_debloat` deletes
-`echomuse-debloat.sh` as it installs `revoice-debloat.sh`, and the wizard's
-init.rc patch treats `service echomuse` as already-patched. Magisk's
-`service.d` runs *every* script it finds, so a leftover means the debloat
-runs twice off two files that will drift; the init.rc check means a second
-service entry starting the same `start_server.sh`. Neither is dead code —
-delete them only once no device provisioned as EchoMuse can reach this
-controller, which is not a date anybody can name.
+**Three compatibility shims exist solely because of the rename**, and all
+three are about files that the old name left on a device:
+
+- `_sync_debloat` deletes `echomuse-debloat.sh` as it installs
+  `revoice-debloat.sh`, and the wizard's install does the same. Magisk's
+  `service.d` runs *every* script it finds, so a leftover means the debloat
+  runs twice off two files that will drift.
+- The wizard's init.rc patch treats `service echomuse` as already-patched.
+  Without it, re-provisioning appends a SECOND service entry starting the
+  same `start_server.sh`.
+- The wizard's console-password clear removes BOTH
+  `/data/local/etc/{revoice,echomuse}/console.pw`, and probes both. That
+  block exists because the password record belongs to a PREVIOUS OWNER and
+  emOS's init puts it in front of the console — so clearing only the new path
+  on a device handed on from an EchoMuse install leaves the new owner locked
+  out by exactly the password the step is there to remove.
+
+None of it is dead code — delete it only once no device provisioned as
+EchoMuse can reach this controller, which is not a date anybody can name.
 
 The upgrade is **not** transparent for an existing install: the database file,
 the certificate SAN and the image name all changed. The procedure is in the
@@ -339,7 +349,7 @@ Credential delivery: the provisioning wizard installs credentials over adb pre-f
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `consolePassword`, `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `aecRefSource`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `limiterEnabled`, `limiterThreshold`, `limiterRelease`, `bassGuardEnabled`, `bassGuardDb`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `sendspinEnabled`, `spotifyEnabled`, `spotifyName`, `airplayEnabled`, `airplayName`, `owwOnDevice`, `saveUtterances` and `audioHoldoffMs` (`consolePassword` is written to disk for emOS's init rather than acted on — the console must work when the firmware is not running — and its EMPTY value is meaningful, so it rides as a POINTER and the "non-zero means set" rule above does not apply to it; the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `audioHoldoffMs`, `wakeArbitrationMs` and the two `button*` keys are ignored by it).
+Configurable parameters: `consolePassword`, `consoleTimeoutMin`, `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `aecRefSource`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `limiterEnabled`, `limiterThreshold`, `limiterRelease`, `bassGuardEnabled`, `bassGuardDb`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `sendspinEnabled`, `spotifyEnabled`, `spotifyName`, `airplayEnabled`, `airplayName`, `owwOnDevice`, `saveUtterances` and `audioHoldoffMs` (`consolePassword` and `consoleTimeoutMin` are written to disk for emOS's init rather than acted on — the console must work when the firmware is not running — and their EMPTY/zero value is meaningful, so both ride as POINTERS and the "non-zero means set" rule above does not apply to them; the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `audioHoldoffMs`, `wakeArbitrationMs` and the two `button*` keys are ignored by it).
 
 **Upstream's copy of this list says the output-chain keys are ignored by the device, and on upstream that is true — here it is not.** Upstream has no `device/internal/outchain` and announces no `output_chain`, so its controller shapes every stream. This fork moved the chain onto the device, which is why the paragraph below exists and why the merge kept it: taking upstream's sentence wholesale would have documented a controller-only chain into a tree that has both halves, and the failure that follows from believing it is two limiters in series.
 

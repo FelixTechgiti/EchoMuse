@@ -4,6 +4,7 @@ package speaker
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"os"
@@ -20,12 +21,9 @@ import (
 )
 
 // cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
-// the status path — this file is ARM-only (build tag `server`).
-// sampleRate is the speaker path's rate everywhere — the wire, the ALSA
-// config and the output chain's filter design all assume it.
-const sampleRate = 48000
+// the status path, and sampleRate/periodSize in format.go so musicprime.go can
+// do arithmetic with them — this file is ARM-only (build tag `server`).
 
-const periodSize = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
 // The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
@@ -53,14 +51,9 @@ const audioChanDepth = 128
 // have the server starve us.
 const MusicBufferSeconds = float64(audioChanDepth) * float64(periodSize) / 48000.0
 
-// primePeriods — playback holds on silence until this many periods are
-// queued (or the stream's EOS has arrived, for clips shorter than the
-// prime). Protects the opening seconds of playback, when the sender's
-// lead is still ~zero and a single WiFi stall used to stutter. 24 periods
-// ≈ 1s of audio ≈ ~0.5s added start latency at 2× realtime delivery
-// (accepted trade, 2026-07-14). The controller's post-playback drain
-// sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
-const primePeriods = 24
+// primePeriods and localPrimePeriods live in musicprime.go, untagged, with
+// the reasoning for why the music plane no longer uses one number for both
+// kinds of producer.
 
 var silencePeriod = make([]byte, periodBytes)
 
@@ -77,6 +70,22 @@ type PcmSpeaker struct {
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
+
+	// musicPrime is how many periods the MUSIC plane fills before playback
+	// starts, set from the plane's current owner (SetMusicPrime). Atomic
+	// because it is written from the control plane and read by the ALSA
+	// goroutine every period. The voice plane keeps primePeriods
+	// unconditionally — TTS always comes from the controller.
+	musicPrime atomic.Int32
+
+	// ready reports that Init has opened the PCM and silenceLoop is running.
+	// Until then the pumps refuse rather than queue: a period handed to an
+	// audioStream whose consumer does not exist yet fills the 128-period
+	// channel and then BLOCKS the data plane's read goroutine, which is the
+	// same head-of-line stall that stops the device answering keepalives.
+	// Refusing costs the first few periods of whatever was playing; blocking
+	// costs the connection.
+	ready atomic.Bool
 
 	// Two independent playback planes, mixed at the ALSA write.
 	//
@@ -141,7 +150,25 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 	p.statsMu.Unlock()
 }
 
-func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
+// NewPcmSpeaker builds the speaker and RETURNS IMMEDIATELY. The ALSA open
+// happens on its own goroutine and retries until it succeeds.
+//
+// It returns no error, and that is the change rather than an oversight.
+// main() initialises the speaker before mDNS, the control client, the buttons
+// and the LEDs, so for as long as this call could block or fail the whole
+// device was gated on Android handing back one PCM device: with a plug in the
+// jack after an OTA restart, mediaserver keeps it, and the Dot went completely
+// dark — no registration, no wake word, not even the orange no-controller
+// pulse, because the code that paints it is never reached. Measured twice on
+// 2026-09-10; a power cycle was the only recovery. The nudge inside waitFree
+// makes that race one we usually win, and this makes losing it cost the audio
+// instead of the device.
+//
+// Until the open succeeds the speaker is NOT READY: pumps are refused with an
+// error rather than queued, so nothing blocks on a consumer that does not
+// exist yet, and everything that does not touch the PCM — the jack routing,
+// the mute, the LED ring, the buttons — works throughout.
+func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) *PcmSpeaker {
 	s := &PcmSpeaker{
 		stopCh:   make(chan struct{}),
 		deadCh:   make(chan struct{}),
@@ -152,10 +179,17 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.duckTarget.Store(unityGain)
 	s.mixer.SetGainImmediate(unityGain)
-	if err := s.Init(); err != nil {
-		return nil, err
-	}
-	return s, nil
+	// The controller's depth until something says otherwise: a device that
+	// has never been told who owns the plane must not start with the shallow
+	// buffer, because the one producer it is certain to meet is the
+	// controller's own 0x04 stream over WiFi.
+	s.musicPrime.Store(primePeriods)
+	go func() {
+		if retryOpen(s.Init, s.stopCh, speakerRetryInterval) {
+			s.ready.Store(true)
+		}
+	}()
+	return s
 }
 
 func (p *PcmSpeaker) Init() error {
@@ -179,7 +213,15 @@ func (p *PcmSpeaker) Init() error {
 	// before we open it.
 	stopMedia := func() { exec.Command("stop", "media").Run() }
 	stopMedia()
-	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout, stopMedia)
+	if !waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout, stopMedia) {
+		// Return rather than open. tinyalsa's open has no timeout, so
+		// entering it against a device we have just watched stay held for
+		// ten seconds is how a goroutine parks for ever. Retrying is only
+		// affordable because nothing waits on us any more — see
+		// NewPcmSpeaker — and it is what lets a device recover on its own
+		// once mediaserver finally lets go.
+		return errSpeakerHeld
+	}
 	// Connect the DAC to the output mixer before opening the stream: DAPM
 	// decides what to power at stream open, and an unrouted DAC is powered
 	// down, which presents as a clean "voice stream complete, underruns=0"
@@ -223,16 +265,20 @@ func (p *PcmSpeaker) Init() error {
 // backstop against a holder that never lets go, not a tuning parameter.
 const pcmFreeTimeout = 10 * time.Second
 
-// waitForFreePcm blocks until the playback substream is released, or the
-// timeout expires.
+// errSpeakerHeld says another process still owns the playback substream, so
+// the open was not attempted. The caller retries; it is not fatal, and since
+// 2026-09-10 it is not even user-visible beyond the audio itself.
+var errSpeakerHeld = errors.New("playback device still held by another process")
+
+// waitForFreePcm blocks until the playback substream is released, and reports
+// whether it was.
 //
-// On timeout it RETURNS ANYWAY and lets the open proceed. That open may then
-// block forever, which is the pre-existing behaviour — this function's job is
-// to make the common case work and to leave a log line naming the holder when
-// it does not. Refusing to open would be a bigger behaviour change than the
-// bug warrants, and the proper fix for a permanently-held device is to stop
-// gating the rest of main() on the speaker at all.
-func waitForFreePcm(card, device int, timeout time.Duration, nudge func()) {
+// It used to return on timeout and let the open proceed anyway, on the grounds
+// that refusing was a bigger behaviour change than the bug warranted — true
+// while the whole of main() was gated on this call returning, because refusing
+// then meant refusing to start. It is not true any more: nothing waits on the
+// speaker, so a false answer costs a three-second retry rather than a device.
+func waitForFreePcm(card, device int, timeout time.Duration, nudge func()) bool {
 	path := statusPath(card, device)
 	held := func() (int, bool) {
 		b, err := os.ReadFile(path)
@@ -244,16 +290,17 @@ func waitForFreePcm(card, device int, timeout time.Duration, nudge func()) {
 
 	pid, busy := held()
 	if !busy {
-		return // free, or no status file to consult — open immediately
+		return true // free, or no status file to consult — open immediately
 	}
 
 	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pid, timeout)
 	if waitFree(held, nudge, timeout, pcmPollInterval, nudgeInterval) {
-		return
+		return true
 	}
 	pid, _ = held()
-	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
+	log.Printf("[speaker] speaker STILL held by pid %d after %s — will ask again",
 		pid, timeout)
+	return false
 }
 
 // SetJackRouting puts the codec into the state the current plug position
@@ -394,7 +441,7 @@ func (p *PcmSpeaker) silenceLoop() {
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
 		}
-		if p.music.ready(primePeriods) {
+		if p.music.ready(int(p.musicPrime.Load())) {
 			music = p.music.take()
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
@@ -494,6 +541,9 @@ func toStereo(data []byte) []byte {
 // consumed a slot (rate-limiting to playback speed), or returns an error if
 // that loop has died — preventing an infinite block on a dead consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
+	if !p.ready.Load() {
+		return errSpeakerNotReady
+	}
 	_, err := p.voice.pump(toStereo(data), len(data))
 	return err
 }
@@ -503,8 +553,35 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 // discard semantics, not a lesser one — but kept separate so a voice turn
 // can duck it rather than stopping it.
 func (p *PcmSpeaker) PumpMusic(data []byte) error {
+	if !p.ready.Load() {
+		return errSpeakerNotReady
+	}
 	_, err := p.music.pump(toStereo(data), len(data))
 	return err
+}
+
+// errSpeakerNotReady is what a pump gets before the ALSA open has succeeded.
+// Named rather than a bare nil-drop so a caller logging it says WHY nothing
+// played, which is the difference between a diagnosable silence and a device
+// that appears to work.
+var errSpeakerNotReady = errors.New("speaker not open yet")
+
+// SetMusicPrime sets how deep the music plane fills before playback starts.
+//
+// Called on every music-plane handover, from the one observer that sees them
+// (cmd/server.go). A device-local producer has no WiFi hop in front of this
+// buffer, so the cushion that protects a controller stream is permanent
+// latency for it — see MusicPrimeFor.
+//
+// It takes effect on the NEXT stream rather than the current one, which is
+// correct and worth stating: `ready` consults it only while `playing` is
+// false, so a handover cannot re-gate audio that is already flowing. A source
+// that took the plane mid-track keeps the depth it primed at until it drains.
+func (p *PcmSpeaker) SetMusicPrime(periods int) {
+	if periods < 1 {
+		periods = 1
+	}
+	p.musicPrime.Store(int32(periods))
 }
 
 // SetDuck sets the gain applied to music while it plays under voice, in dB of
@@ -576,7 +653,12 @@ func (p *PcmSpeaker) Close() {
 	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute
 	exec.Command("tinymix", "-D", "0", "5", "Off").Run()     // amp off
 	close(p.stopCh)
-	p.session.Close()
+	// May be nil: the open runs on its own goroutine and may never have
+	// succeeded, which since 2026-09-10 is a state the device runs in
+	// perfectly happily rather than one it dies in.
+	if p.session != nil {
+		p.session.Close()
+	}
 	log.Println("PcmSpeaker closed — output muted, amp off")
 }
 

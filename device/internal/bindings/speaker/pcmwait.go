@@ -62,3 +62,41 @@ func waitFree(held func() (int, bool), nudge func(),
 	}
 	return false
 }
+
+// speakerRetryInterval is how long to wait before trying the ALSA open again
+// after a device that would not let go.
+//
+// Seconds rather than milliseconds because the thing being waited for is an
+// Android service being restarted by init, and because nothing is now blocked
+// on the answer: the device registers, listens and answers its buttons with no
+// speaker at all, so retrying patiently costs a few seconds of silence rather
+// than the whole device.
+const speakerRetryInterval = 3 * time.Second
+
+// retryOpen calls open until it succeeds or stop is closed, waiting delay
+// between attempts. It reports whether the open eventually succeeded.
+//
+// Injected rather than inlined for waitFree's reason — pcm_speaker.go is
+// `//go:build server` and cannot be tested at all, and what is worth pinning
+// here is that the loop RETRIES rather than giving up, and that a stop is
+// honoured between attempts rather than only after another full delay.
+func retryOpen(open func() error, stop <-chan struct{}, delay time.Duration) bool {
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-stop:
+			return false
+		default:
+		}
+		err := open()
+		if err == nil {
+			return true
+		}
+		log.Printf("[speaker] open attempt %d failed: %v — retrying in %s",
+			attempt, err, delay)
+		select {
+		case <-stop:
+			return false
+		case <-time.After(delay):
+		}
+	}
+}

@@ -46,6 +46,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -58,9 +59,13 @@ import (
 const BinaryPath = "/data/local/bin/shairport-sync"
 
 // ConfigPath is shairport-sync's own configuration file. Written by this
-// package rather than pushed as a payload: everything in it is derived from
-// settings the controller already sends, and a second copy of the device name
-// is a second thing to keep in step.
+// package rather than pushed as a payload: what goes in it is DERIVED from
+// this device's own audio pipeline, so a payload would be a second copy of a
+// number only the firmware knows.
+//
+// It was declared and never written for the whole life of this package, which
+// is why `audio_backend_latency_offset_in_seconds` — the one setting that can
+// take latency out of an AirPlay stream — was unreachable.
 const ConfigPath = "/data/local/etc/revoice/shairport-sync.conf"
 
 const (
@@ -117,6 +122,17 @@ type Options struct {
 	// SourceRate is the rate the binary emits. 44100 for classic AirPlay,
 	// 48000 for AirPlay 2. Zero means classic.
 	SourceRate int
+	// BackendDelaySec is how long OUR side holds a sample between taking it
+	// off the pipe and the speaker emitting it — the music plane's prime
+	// depth. shairport-sync plays each packet at the instant the sender
+	// stamped it, so it has to be told what sits behind it or every packet
+	// lands that much late; see renderConfig for the sign.
+	//
+	// Zero writes no offset at all rather than writing 0.0, so a caller that
+	// does not know its own delay does not assert that there is none.
+	BackendDelaySec float64
+	// ConfigPath overrides ConfigPath, for tests.
+	ConfigPath string
 	// ExtraArgs are appended verbatim.
 	ExtraArgs []string
 }
@@ -140,6 +156,9 @@ func New(opts Options, sink MusicSink, plane PlaneOwner) *Client {
 	}
 	if opts.SourceRate == 0 {
 		opts.SourceRate = SourceRate
+	}
+	if opts.ConfigPath == "" {
+		opts.ConfigPath = ConfigPath
 	}
 	return &Client{opts: opts, sink: sink, plane: plane}
 }
@@ -294,9 +313,79 @@ func (c *Client) name() string {
 //   - `-a <name>` is what appears in the AirPlay list.
 //   - `--` separates the backend's own options, and `-d` under stdout would
 //     mean something else entirely; nothing is passed after it by default.
-func (c *Client) args() []string {
+//   - `-c <file>` is the config written by writeConfig, carrying the one
+//     setting that cannot go on the command line. Passed only when the file
+//     was actually written: shairport-sync REFUSES TO START on a missing
+//     config file, so a failed write must cost the latency compensation and
+//     not the receiver.
+func (c *Client) args(cfg string) []string {
 	a := []string{"-a", c.name(), "-o", "stdout"}
+	if cfg != "" {
+		a = append(a, "-c", cfg)
+	}
 	return append(a, c.opts.ExtraArgs...)
+}
+
+// renderConfig builds the shairport-sync configuration.
+//
+// It carries ONE setting. The name stays on the command line where it already
+// was — it is what SetName restarts the receiver for, and a second copy in a
+// file is a second thing to keep in step.
+//
+// **The sign.** shairport-sync's own sample puts it plainly: "if the output
+// device delays by 100 ms, set this to -0.1". Our music plane holds
+// `localPrimePeriods` before it starts, so the delay behind shairport is that
+// depth, and the compensation is its negative — shairport then hands the audio
+// over that much earlier and the sound leaves the speaker at the instant the
+// sender scheduled it, rather than a buffer-length late.
+//
+// Zero delay writes NO offset rather than `0.0`. The two are the same number
+// and not the same statement: absent means nobody measured, and a caller that
+// does not know its own delay should not assert there is none.
+func renderConfig(delaySec float64) string {
+	if delaySec == 0 {
+		return "general = {\n};\n"
+	}
+	return fmt.Sprintf(
+		"general = {\n"+
+			"  audio_backend_latency_offset_in_seconds = %.4f;\n"+
+			"};\n", -delaySec)
+}
+
+// writeConfig puts the configuration where shairport-sync will read it, and
+// returns the path — or "" if it could not be written.
+//
+// Temp file and rename, so a half-written config can never be read:
+// shairport-sync refuses to start on a config it cannot parse, and the
+// observable of that is a receiver that never appears, with the reason on a
+// stderr nobody is reading yet.
+//
+// A failure returns "" rather than an error the caller must decide about,
+// because there is only one sensible decision: start WITHOUT the config. The
+// compensation is worth ~171ms; the receiver is worth AirPlay working at all.
+func (c *Client) writeConfig() string {
+	path := c.opts.ConfigPath
+	if path == "" {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("[airplay] cannot create %s: %v — starting without the "+
+			"latency offset", filepath.Dir(path), err)
+		return ""
+	}
+	tmp := path + ".part"
+	if err := os.WriteFile(tmp, []byte(renderConfig(c.opts.BackendDelaySec)), 0o644); err != nil {
+		log.Printf("[airplay] cannot write %s: %v — starting without the "+
+			"latency offset", tmp, err)
+		return ""
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("[airplay] cannot install %s: %v — starting without the "+
+			"latency offset", path, err)
+		_ = os.Remove(tmp)
+		return ""
+	}
+	return path
 }
 
 func (c *Client) supervise(ctx context.Context) {
@@ -333,7 +422,10 @@ func (c *Client) supervise(ctx context.Context) {
 }
 
 func (c *Client) session(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, c.opts.Binary, c.args()...)
+	// Rewritten per session rather than once at Start: the delay it describes
+	// is a property of this device's pipeline, and a session is the only
+	// moment that is certain to be before shairport reads it.
+	cmd := exec.CommandContext(ctx, c.opts.Binary, c.args(c.writeConfig())...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

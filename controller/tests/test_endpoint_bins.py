@@ -313,3 +313,74 @@ def test_parse_stat_returns_none_when_the_shell_said_nothing_usable():
 def test_parse_stat_keeps_ok_when_only_the_size_is_unreadable():
     # The executable bit is the gate; the size is presentation.
     assert ebins.parse_stat("EMBIN:ok:") == {"ok": True}
+
+
+# ─── install_needed — the automatic install's only gate ──────────────────────
+#
+# This decides whether ~9MB crosses a link measured at 5-7% packet loss, on
+# every connect, for every device. Each "no" below is a rule from elsewhere in
+# the tree, and every one of them fails silently if it goes: too eager pushes
+# a binary nobody asked for, over and over; too shy leaves an endpoint that
+# never arrives with nothing said.
+
+class _Store:
+    """A store directory holding one binary of a known size."""
+
+    def __init__(self, tmp_path, size):
+        self.tmp_path = tmp_path
+        (tmp_path / ebins.STORE_SUBDIR).mkdir(parents=True, exist_ok=True)
+        (tmp_path / ebins.STORE_SUBDIR / "librespot").write_bytes(b"x" * size)
+        self.db = str(tmp_path / "revoice.db")
+
+
+ON = {"spotifyEnabled": True}
+CAPS = ["spotify", "airplay"]
+K = ebins.KINDS["spotify"]
+
+
+def test_a_device_with_no_binary_is_installed_to(tmp_path):
+    st = _Store(tmp_path, 100)
+    why = ebins.install_needed(K, CAPS, ON, {"ok": False, "reason": "not_installed"},
+                              db_path=st.db)
+    assert why and "not_installed" in why
+
+
+def test_a_matching_size_is_left_alone(tmp_path):
+    st = _Store(tmp_path, 100)
+    assert ebins.install_needed(K, CAPS, ON, {"ok": True, "size": 100},
+                               db_path=st.db) is None
+
+
+def test_a_different_size_is_reinstalled(tmp_path):
+    st = _Store(tmp_path, 100)
+    why = ebins.install_needed(K, CAPS, ON, {"ok": True, "size": 99}, db_path=st.db)
+    assert why and "99" in why and "100" in why
+
+
+def test_the_toggle_being_off_is_the_first_word(tmp_path):
+    # The store being full is not an instruction to fill the fleet.
+    st = _Store(tmp_path, 100)
+    assert ebins.install_needed(K, CAPS, {"spotifyEnabled": False},
+                               {"ok": False, "reason": "not_installed"},
+                               db_path=st.db) is None
+
+
+def test_firmware_without_the_capability_is_never_pushed_to(tmp_path):
+    st = _Store(tmp_path, 100)
+    assert ebins.install_needed(K, ["airplay"], ON,
+                               {"ok": False, "reason": "not_installed"},
+                               db_path=st.db) is None
+
+
+def test_a_shell_that_said_nothing_is_not_evidence_of_absence(tmp_path):
+    # parse_stat returns None when the marker never came back — the shell
+    # plane is very likely not up yet moments after a connect, and pushing
+    # 9MB on that is a guess, not a repair.
+    st = _Store(tmp_path, 100)
+    assert ebins.install_needed(K, CAPS, ON, None, db_path=st.db) is None
+
+
+def test_an_empty_store_installs_nothing(tmp_path):
+    (tmp_path / ebins.STORE_SUBDIR).mkdir(parents=True, exist_ok=True)
+    assert ebins.install_needed(K, CAPS, ON, {"ok": False, "reason": "not_installed"},
+                               db_path=str(tmp_path / "revoice.db")) is None
