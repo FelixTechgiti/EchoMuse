@@ -12,6 +12,40 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.21.0-fx.1
+
+AirPlay is about a second quicker.
+
+### What's new
+
+**Roughly a second of the AirPlay delay was ours, and it is gone.** The
+speaker fills about a second of audio before it starts playing anything. That
+cushion exists for music sent by the controller over WiFi, where a two-second
+network stall used to punch an audible hole in a track — but AirPlay and
+Spotify Connect run as programs on the Echo itself and hand their audio over
+a pipe, with no network in between. There was nothing for the cushion to
+absorb, and because both of those pace themselves in real time, the delay
+never went away after the first second: every sample waited behind it.
+
+Those two sources now start after about 170 milliseconds instead. Music sent
+from Home Assistant is unchanged and keeps the full cushion.
+
+**AirPlay is also told what the Echo adds behind it**, so it hands the audio
+over correspondingly earlier and the sound lands when your phone intended.
+This is the smaller half of the win, and the direction of the correction comes
+from shairport-sync's documentation rather than from a measurement on real
+hardware — if the delay gets slightly worse rather than better, that is the
+sign to flip, and it can be corrected on a device without a new firmware.
+
+What remains is AirPlay's own protocol delay of about two seconds, which is
+imposed by the sender and is not ours to shorten.
+
+### What is required of you
+
+Nothing. If music from Home Assistant develops gaps it never had, that is the
+one change that could cause it — tell us, because it would mean the cushion is
+being applied to the wrong source.
+
 ## 2.20.0-fx.1
 
 The Echo comes up even when the speaker does not.

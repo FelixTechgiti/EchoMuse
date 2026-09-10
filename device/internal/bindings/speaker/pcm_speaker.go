@@ -21,12 +21,9 @@ import (
 )
 
 // cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
-// the status path — this file is ARM-only (build tag `server`).
-// sampleRate is the speaker path's rate everywhere — the wire, the ALSA
-// config and the output chain's filter design all assume it.
-const sampleRate = 48000
+// the status path, and sampleRate/periodSize in format.go so musicprime.go can
+// do arithmetic with them — this file is ARM-only (build tag `server`).
 
-const periodSize = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
 // The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
@@ -54,14 +51,9 @@ const audioChanDepth = 128
 // have the server starve us.
 const MusicBufferSeconds = float64(audioChanDepth) * float64(periodSize) / 48000.0
 
-// primePeriods — playback holds on silence until this many periods are
-// queued (or the stream's EOS has arrived, for clips shorter than the
-// prime). Protects the opening seconds of playback, when the sender's
-// lead is still ~zero and a single WiFi stall used to stutter. 24 periods
-// ≈ 1s of audio ≈ ~0.5s added start latency at 2× realtime delivery
-// (accepted trade, 2026-07-14). The controller's post-playback drain
-// sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
-const primePeriods = 24
+// primePeriods and localPrimePeriods live in musicprime.go, untagged, with
+// the reasoning for why the music plane no longer uses one number for both
+// kinds of producer.
 
 var silencePeriod = make([]byte, periodBytes)
 
@@ -78,6 +70,13 @@ type PcmSpeaker struct {
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
+
+	// musicPrime is how many periods the MUSIC plane fills before playback
+	// starts, set from the plane's current owner (SetMusicPrime). Atomic
+	// because it is written from the control plane and read by the ALSA
+	// goroutine every period. The voice plane keeps primePeriods
+	// unconditionally — TTS always comes from the controller.
+	musicPrime atomic.Int32
 
 	// ready reports that Init has opened the PCM and silenceLoop is running.
 	// Until then the pumps refuse rather than queue: a period handed to an
@@ -180,6 +179,11 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) *PcmSpeaker
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.duckTarget.Store(unityGain)
 	s.mixer.SetGainImmediate(unityGain)
+	// The controller's depth until something says otherwise: a device that
+	// has never been told who owns the plane must not start with the shallow
+	// buffer, because the one producer it is certain to meet is the
+	// controller's own 0x04 stream over WiFi.
+	s.musicPrime.Store(primePeriods)
 	go func() {
 		if retryOpen(s.Init, s.stopCh, speakerRetryInterval) {
 			s.ready.Store(true)
@@ -437,7 +441,7 @@ func (p *PcmSpeaker) silenceLoop() {
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
 		}
-		if p.music.ready(primePeriods) {
+		if p.music.ready(int(p.musicPrime.Load())) {
 			music = p.music.take()
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
@@ -561,6 +565,24 @@ func (p *PcmSpeaker) PumpMusic(data []byte) error {
 // played, which is the difference between a diagnosable silence and a device
 // that appears to work.
 var errSpeakerNotReady = errors.New("speaker not open yet")
+
+// SetMusicPrime sets how deep the music plane fills before playback starts.
+//
+// Called on every music-plane handover, from the one observer that sees them
+// (cmd/server.go). A device-local producer has no WiFi hop in front of this
+// buffer, so the cushion that protects a controller stream is permanent
+// latency for it — see MusicPrimeFor.
+//
+// It takes effect on the NEXT stream rather than the current one, which is
+// correct and worth stating: `ready` consults it only while `playing` is
+// false, so a handover cannot re-gate audio that is already flowing. A source
+// that took the plane mid-track keeps the depth it primed at until it drains.
+func (p *PcmSpeaker) SetMusicPrime(periods int) {
+	if periods < 1 {
+		periods = 1
+	}
+	p.musicPrime.Store(int32(periods))
+}
 
 // SetDuck sets the gain applied to music while it plays under voice, in dB of
 // attenuation (0 = no ducking). The change is ramped by the mixer rather than

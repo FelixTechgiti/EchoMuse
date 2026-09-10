@@ -182,6 +182,14 @@ func main() {
 	// controller believing a playing device went quiet.
 	dataClient.MusicPlane().OnChange(func(src musicplane.Source) {
 		controlClient.SendAudioSource(src.String())
+		// The handover is also the only moment that knows how deep the music
+		// plane should fill. A device-local producer writes to a pipe with no
+		// WiFi hop in front of it, so the ~1s cushion that protects a
+		// controller stream from a link stall is pure added latency there —
+		// and a permanent one, because both local producers pace themselves
+		// at realtime and the buffer never drains below what the prime gate
+		// demanded. See speaker.MusicPrimeFor.
+		pcmSpeaker.SetMusicPrime(speaker.MusicPrimeFor(src.Local()))
 	})
 	controlClient.SetAudioSourceFunc(func() string {
 		return dataClient.MusicPlane().Owner().String()
@@ -266,8 +274,22 @@ func main() {
 	// rule as Spotify: AirPlay offers no goodbye from outside the receiver
 	// either, and a receiver that is listed, selected and silent is worse
 	// than one that is not listed.
-	airplayClient := airplay.New(airplay.Options{Name: deviceID},
-		pcmSpeaker, dataClient.MusicPlane().For(musicplane.AirPlay))
+	//
+	// BackendDelaySec is what OUR pipeline adds behind shairport-sync, which
+	// plays each packet at the instant the sender stamped it and therefore has
+	// to be told what sits behind it. Derived from the music plane's own
+	// local prime depth, so the two cannot drift.
+	//
+	// EM_AIRPLAY_LATENCY_OFFSET overrides it, in seconds. An env var rather
+	// than a config key, for EM_AEC_HW_REF's reason: this is a property of
+	// this device's audio path rather than a user preference, and it exists so
+	// the number can be corrected against a real speaker without a rebuild —
+	// the sign convention comes from shairport-sync's own documentation and
+	// has not been measured here.
+	airplayClient := airplay.New(airplay.Options{
+		Name:            deviceID,
+		BackendDelaySec: envFloat("EM_AIRPLAY_LATENCY_OFFSET", speaker.LocalPrimeSeconds()),
+	}, pcmSpeaker, dataClient.MusicPlane().For(musicplane.AirPlay))
 	dataClient.MusicPlane().Register(musicplane.AirPlay, func(why musicplane.Reason) {
 		airplayClient.Leave(string(why))
 	})
@@ -1279,6 +1301,27 @@ func applySpotifyConfig(c *spotify.Client) {
 // effective config. Same shape as applySpotifyConfig, and a failure to start
 // is logged with its reason for the same purpose: it is almost always "the
 // binary is not on this device", and that is a thing somebody can fix.
+// envFloat reads a float from the environment, falling back to def.
+//
+// A local copy rather than exporting internal/config's: that one belongs to
+// the CONFIG snapshot, whose values arrive from the controller and are
+// overridable per device, and EM_AIRPLAY_LATENCY_OFFSET is deliberately
+// neither — it is a correction for one device's audio path, read once at
+// startup. An unparseable value takes the default and says so, because a
+// silently ignored setting is the failure this tree names most often.
+func envFloat(key string, def float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		log.Printf("[cmd] %s=%q is not a number — using %.4f", key, raw, def)
+		return def
+	}
+	return v
+}
+
 func applyAirplayConfig(c *airplay.Client) {
 	snap := config.Get().Snapshot()
 	c.SetName(snap.AirplayName)
