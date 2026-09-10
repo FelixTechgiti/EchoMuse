@@ -73,7 +73,7 @@ hör die Antwort aus dem Dot. Gebrauchte Geräte kosten um die 10 €.
 | **Kein Phone-Home** | Keine Telemetrie, keine Analytics, kein Installationszähler. Niemand — wir eingeschlossen — kann sehen, wer Revoice benutzt. |
 | **Echte Hardware-Stummschaltung** | Die Mute-Taste schaltet den Mikrofon-Wandler ab, nicht bloß eine Softwarevariable. Roter Ring, und es kommt nichts mehr durch. |
 | **Verschlüsselte Geräteverbindung** | TLS mit eigener Zertifizierungsstelle und Token pro Gerät. Der Einrichtungsassistent legt das automatisch an. |
-| **Die einzige Verbindung nach draußen** | Eine stündliche Abfrage bei GitHub, ob es eine neuere Version gibt — abschaltbar, siehe [Konfiguration](docs/configuration.md#what-leaves-your-network). |
+| **Die einzige Verbindung nach draußen** | Eine stündliche Abfrage bei GitHub, ob es eine neuere Version gibt — abschaltbar, siehe [Konfiguration](docs/configuration.md#was-dein-netzwerk-verlässt). |
 
 ### 🛠️ Verwaltung
 
@@ -176,7 +176,9 @@ Schalter, der stillschweigend nichts tut.
 | [Geräte-Protokoll](docs/device-controller-interface.md) | Für alle, die eine eigene Firmware bauen |
 | [SETUP.md](SETUP.md) · [JOURNAL.md](JOURNAL.md) | Wie die Hardware funktioniert und wie das herausgefunden wurde |
 
-Die Dokumentation im Ordner `docs/` ist derzeit auf Englisch.
+Die Dokumentation im Ordner `docs/` ist auf Deutsch. `SETUP.md`,
+`JOURNAL.md` und `CLAUDE.md` bleiben auf Englisch — sie sind
+Entwicklungsaufzeichnungen und keine Anleitungen.
 
 ---
 
