@@ -1118,6 +1118,26 @@ class Device:
         return (self.stats or {}).get("aecRef")
 
     @property
+    def endpoint_health(self):
+        """
+        What the streaming endpoints say about themselves, or None.
+
+        None means firmware too old to report it, NOT that nothing is
+        running — the same distinction as aec_ref above, and here it is the
+        one that matters most: a device with an orphaned shairport-sync
+        holding TCP 5000 has an installed, executable, correctly-sized binary
+        and does not appear in a single AirPlay picker. "I cannot see" and
+        "it is down" must not render the same, because only one of them is
+        worth walking over to the device for.
+        """
+        return (self.stats or {}).get("endpoints")
+
+    @property
+    def endpoint_health_capable(self):
+        """Whether this firmware reports endpoint liveness at all."""
+        return "endpoint_health" in (self.capabilities or [])
+
+    @property
     def base_os(self):
         """
         The userspace the device booted: "emos", "fireos", or None.
@@ -4347,6 +4367,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # allowlist: it is a state, not a metric, and
                             # the hourly rollup averages numbers.
                             "aecRef":        msg.get("aecRef"),
+                            # How the streaming endpoints are actually doing,
+                            # keyed "spotify"/"airplay". A state rather than a
+                            # metric, like aecRef above, so it is not rolled
+                            # up hourly either — and absent from firmware that
+                            # cannot say, which is NOT "nothing is running".
+                            "endpoints":     msg.get("endpoints"),
                         }
                         # Shadow summary → hourly rollup. Present only while the
                         # device is scoring, so its presence is also the "was it

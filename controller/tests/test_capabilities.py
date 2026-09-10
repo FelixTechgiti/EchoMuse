@@ -317,3 +317,58 @@ def test_the_controller_announces_its_own_features_and_the_device_reads_them():
         f"controller announces {announced - consumed} which the device never "
         f"looks for — the feature would never be used and nothing would say so"
     )
+
+
+def test_endpoint_liveness_is_a_capability_and_a_runtime_state():
+    """
+    Installed is not running, and until now only the first was reported.
+
+    `spotify`/`airplay` say the FIRMWARE can run an endpoint;
+    `spotify_status`/`airplay_status` say the BINARY is on the device. Both
+    were true of a device that did not appear in a single AirPlay picker for
+    two hours, because an orphaned shairport-sync from before the last OTA
+    still held TCP 5000 and every new instance exited immediately.
+
+    So `endpoint_health` is a third fact and needs its own capability, for the
+    reason `audio_state` needed one: a capability to DO something is never
+    evidence of a capability to REPORT it, and all three endpoints shipped
+    before this. Without it, "this firmware cannot say" and "it is not
+    running" are the same absence, and one of them is an accusation against a
+    working device.
+
+    It rides the STATS tick rather than the register message because it is not
+    a static property of the boot: it is true at 14:44 and false at 14:45.
+    """
+    caps = device_capabilities()
+    assert "endpoint_health" in caps, "firmware no longer announces endpoint_health"
+
+    ctl = CONTROLLER.read_text()
+    assert '"endpoints"' in ctl, \
+        "the stats allowlist must carry endpoints, or it is dropped in the relay"
+    assert "endpoint_health_capable" in ctl, \
+        "em_controller must expose the endpoint-health capability"
+
+    api = API.read_text()
+    for field in ("endpointHealthCapable", "endpointHealth"):
+        assert field in api, f"/api/devices must surface {field}"
+
+
+def test_endpoint_liveness_rides_the_stats_tick_not_registration():
+    """
+    The register message is for static properties of the boot. A process that
+    is alive now and dead in a minute reported once at registration would be
+    reported wrong for however long the device stayed connected — which on
+    this fleet is days. Same rule that moved base_os the other way: ask where
+    the consumer needs the answer.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent.parent
+    stats = (root / "device" / "internal" / "client" / "stats.go").read_text()
+    assert "Endpoints" in stats, \
+        "endpoint health left the stats report"
+
+    control = (root / "device" / "internal" / "client" / "control.go").read_text()
+    reg = control[control.index('"type":      "register"'):]
+    reg = reg[:reg.index("regBytes")]
+    assert "endpoint" not in reg.lower() or "endpoint_health" not in reg, \
+        "endpoint liveness moved onto the register message, where it goes stale"

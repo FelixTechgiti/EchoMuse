@@ -2235,6 +2235,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 spotifyStatus={device.spotifyStatus}
                 airplayCapable={!device.connected || !!device.airplayCapable}
                 airplayStatus={device.airplayStatus}
+                endpointHealth={device.endpointHealth}
+                endpointHealthCapable={device.endpointHealthCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
@@ -3475,6 +3477,47 @@ function _wizardFlow() {
     if (want === 'fireos') return 'fireos';
   } catch { /* no location in a test harness; take the default */ }
   return 'emos';
+}
+
+// What one streaming endpoint is actually doing, as a sentence — or null when
+// there is nothing honest to say.
+//
+// **The two absences are different and neither may read as "it is down".**
+// Firmware too old to report liveness, and firmware that has simply not sent
+// its first stats tick yet (up to 30s after connecting), both arrive here as
+// no health object. Saying "not running" for either accuses a working Echo,
+// which is the failure this whole field exists to prevent — installed,
+// executable, correctly sized, and invisible in every AirPlay picker for two
+// hours because an orphan held its port.
+//
+// Pure and lifted by controller/tests/endpoint_health.test.mjs, for the
+// reason classifyBootTarget is: the dashboard has no module boundary, so the
+// alternative to extracting it is a second copy that drifts.
+function endpointHealthLine(health, capable) {
+  if (!capable) return null;          // firmware cannot say — say nothing
+  if (!health) return null;           // capable, no tick yet — still nothing
+  if (!health.enabled) return null;   // nobody asked for it to run
+
+  if (health.alive) {
+    // Uptime is the reassurance: "running" alone is also true of something
+    // that started 200ms ago and is about to die again.
+    const up = health.uptimeS || 0;
+    const since = up >= 3600 ? `${Math.floor(up / 3600)}h`
+                : up >= 60   ? `${Math.floor(up / 60)}m`
+                :              `${up}s`;
+    return `running — up ${since}`;
+  }
+
+  // The case worth the whole feature. Restarts is what separates "briefly
+  // between sessions" from "failing every minute for two hours" without
+  // waiting for a second sample, and lastExit names the reason: `exit status
+  // 1` is a port it cannot bind, `signal: killed` is a preemption we asked
+  // for.
+  const why = health.lastExit ? ` — last exit: ${health.lastExit}` : '';
+  if (health.restarts > 1) {
+    return `NOT running — ${health.restarts} start attempts${why}`;
+  }
+  return `not running${why}`;
 }
 
 function ProvisionWizard({ token, onClose, knownDevices }) {
@@ -7222,6 +7265,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             sendspinCapable = true,
                             spotifyCapable = true, spotifyStatus = null,
                             airplayCapable = true, airplayStatus = null,
+                            endpointHealth = null, endpointHealthCapable = false,
                             emosFleet = true }) {
   // null means "we have not heard from this device", which is neither
   // "installed" nor "missing" — an offline device must not be told its
@@ -7232,6 +7276,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const airplayReady = airplayStatus === null || airplayStatus === undefined
     ? true : !!airplayStatus.ok;
   const airplayWhy = (airplayStatus && airplayStatus.reason) || 'not installed';
+  // Installed is not running, and only the first was ever shown. Null from
+  // either of these keeps the existing sentence unchanged — see
+  // endpointHealthLine for why both absences must stay silent.
+  const spotifyLive = endpointHealthLine(
+    endpointHealth && endpointHealth.spotify, endpointHealthCapable);
+  const airplayLive = endpointHealthLine(
+    endpointHealth && endpointHealth.airplay, endpointHealthCapable);
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -7838,7 +7889,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!spotifyCapable
               ? 'needs newer firmware on this Echo — it has no Spotify endpoint'
               : (spotifyReady
-                ? 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path'
+                ? (spotifyLive
+                  ? `librespot: ${spotifyLive}`
+                  : 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path')
                 : `librespot is not installed on this Echo (${spotifyWhy})`)}
             value={spotifyCapable && spotifyReady && (config.spotifyEnabled ?? false)}
             onChange={v => set('spotifyEnabled', v)}/>
@@ -7854,7 +7907,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!airplayCapable
               ? 'needs newer firmware on this Echo — it has no AirPlay receiver'
               : (airplayReady
-                ? 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet'
+                ? (airplayLive
+                  ? `shairport-sync: ${airplayLive}`
+                  : 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet')
                 : `shairport-sync is not installed on this Echo (${airplayWhy})`)}
             value={airplayCapable && airplayReady && (config.airplayEnabled ?? false)}
             onChange={v => set('airplayEnabled', v)}/>

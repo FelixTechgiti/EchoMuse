@@ -1098,7 +1098,18 @@ func capabilities() []string {
 		// and cannot say so, and a controller reading "can play locally" as
 		// "will tell me it is playing" would advertise an entity that reads
 		// off through a whole album.
-		"audio_state"}
+		"audio_state",
+		// "endpoint_health": this firmware reports, on every stats tick,
+		// whether the streaming programs are ALIVE — not merely installed.
+		//
+		// A fourth capability where three would do, for `audio_state`'s
+		// reason turned on a different axis: "spotify" says the firmware can
+		// run librespot and `spotify_status` says the binary is on the
+		// device, and BOTH were true of a device that did not appear in any
+		// AirPlay picker for two hours because an orphan held its port. The
+		// dashboard needs to tell "this firmware is too old to say" from "it
+		// is not running", and those are the same absence without this.
+		"endpoint_health"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
