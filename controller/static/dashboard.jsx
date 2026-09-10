@@ -406,6 +406,88 @@ function TextField({ label, sub, value, onChange, placeholder, disabled = false 
   );
 }
 
+// A plain number box, for settings where the exact value is the point.
+//
+// Slider is right for anything tuned by ear against a real room — the LED
+// meter response, duck depth — where you drag and listen and the number is
+// incidental. It is wrong when somebody already knows what they want, because
+// `step` decides which values exist at all: the console timeout ran 0-90 at
+// step 5, so "twenty minutes" meant hunting a 1px target and "seven" was not
+// expressible.
+//
+// `disabled` is honoured in the HANDLER as well as the styling, for the reason
+// spelled out on Toggle below: a control that greys itself while still writing
+// is worse than one that does nothing, because the stored setting then
+// disagrees with what is on screen.
+//
+// INTEGERS ONLY, and enforced by stripping non-digits as they are typed rather
+// than by rounding afterwards. Rounding looks equivalent and is not: `0.1`
+// rounds to 0, and 0 here means NEVER — so the one entry a person makes when
+// they want the shortest possible timeout would silently turn the timeout off.
+// Stripping makes 0 reachable only by typing it, which is the property worth
+// having. It also matches the device, whose parser reads digits and stops at
+// anything else (`console_timeout_secs` in emos/init/init.c), so a fraction
+// would land there as 0 regardless — better refused at the box than
+// reinterpreted three layers down.
+//
+// Empty input is allowed WHILE TYPING and simply not committed — clearing the
+// box to type a new number must not write 0 mid-keystroke, for the same
+// reason. The value is clamped on commit rather than rejected, so a typed 200
+// becomes the maximum instead of an error nobody can act on.
+function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
+                       onChange, disabled = false }) {
+  const [text, setText] = useState(String(value ?? min));
+
+  // Follow the stored value when it changes underneath us (a fleet config
+  // load, or reverting a section), except while this box is being edited.
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setText(String(value ?? min)); }, [value, editing, min]);
+
+  const digits = (s) => String(s).replace(/[^0-9]/g, '');
+
+  const commit = (raw) => {
+    if (disabled) return;
+    if (raw === '') return;                       // still typing
+    const n = Number(raw);
+    if (!Number.isInteger(n)) return;
+    onChange(Math.min(max, Math.max(min, n)));
+  };
+
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
+      </div>
+      {sub && <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 8 }}>{sub}</div>}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
+        {/* text, not type="number": a number input still ACCEPTS "0.1" and
+            "1e3" (and reports an empty string for them in some browsers,
+            which is worse), so the filtering below would have nothing to bite
+            on. inputMode brings up the numeric keypad regardless. */}
+        <input type="text" inputMode="numeric" autoComplete="off"
+          value={text} disabled={disabled}
+          onFocus={() => setEditing(true)}
+          onChange={e => { const d = digits(e.target.value); setText(d); commit(d); }}
+          onBlur={e => {
+            setEditing(false);
+            // Snap the box back to what was actually stored, so a cleared or
+            // out-of-range entry cannot be left on screen looking saved.
+            const d = digits(e.target.value);
+            const v = d === '' ? (value ?? min)
+                               : Math.min(max, Math.max(min, Number(d)));
+            setText(String(v));
+            commit(String(v));
+          }}
+          className="em-inset"
+          style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, width: 84, minWidth: 0,
+                   color: 'var(--text)', border: '1px solid var(--border-hard)',
+                   opacity: disabled ? 0.45 : 1 }}/>
+        {unit && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
@@ -3313,6 +3395,23 @@ class _EmosConsole {
       }
       await new Promise(r => setTimeout(r, 100));
     }
+    // A console sitting at emOS's password gate swallows everything sent to
+    // it, so every command times out and the generic message above points the
+    // operator at the boot, the flash and the image — at everything except a
+    // login. That cost an evening on 2026-09-09, on a device re-provisioned
+    // out of a fleet that had a console password set.
+    //
+    // The install step now clears that record, so the wizard should not meet
+    // this. It is still worth naming, because the wizard is not the only way
+    // to reach a console and a device we did NOT provision can be sitting at
+    // one. Reporting the cause is cheap; guessing at it is not.
+    if (this.buf.includes('emOS console password:')) {
+      throw new Error('The console is asking for a password, so it never ran '
+        + `"${cmd}". This device is running emOS with a console password set `
+        + '— log in over the serial port by hand, or clear '
+        + '/data/local/etc/echomuse/console.pw from TWRP. It is re-applied '
+        + 'from the controller config when the device next connects.');
+    }
     throw new Error(`The console did not answer "${cmd}" within `
                   + `${Math.round(timeoutMs / 1000)}s.`);
   }
@@ -5065,6 +5164,55 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // step would either overwrite it (fine) or fail loudly and get
     // caught by that verification anyway.
     addLog('Cleared.', 'ok');
+
+    // The console password record goes with the binary, and it is the one
+    // piece of state here that belongs to a PREVIOUS OWNER rather than to
+    // this device.
+    //
+    // It lives on /data (config.ConsolePasswordPath), which a boot-partition
+    // write leaves alone, so a device moved between EchoMuse deployments
+    // arrives carrying the old operator's password — and emOS's init puts
+    // that in front of the console before handing over a shell. The new
+    // owner, holding the device and its cable, is locked out of it by
+    // somebody who no longer has either.
+    //
+    // Deleting it is not a weakening: the feature's threat model already
+    // excludes physical access ("a nod to security, not Fort Knox" — anyone
+    // holding the device deletes this file from TWRP), and this code IS in
+    // TWRP with /data mounted. What it protects is the PASSWORD, which the
+    // owner has probably reused, and that argument is unaffected by removing
+    // the record from hardware being handed on.
+    //
+    // Safe because it is restored automatically: em_controller pushes the
+    // whole effective config on every connect, not only when it changes
+    // (`send_control({"type": "config", **config})`), and the device's
+    // WriteConsolePassword writes it back. So the gap is provisioning-to-
+    // first-connect, with the operator holding the cable.
+    //
+    // It also unbroke the emOS wizard, which drives the serial console at
+    // steps 8 and 9 and had no way past a password prompt — it sent
+    // `uname -a` into the gate and reported that the console "did not
+    // answer", pointing the operator at the boot, the flash and the image
+    // rather than at a login (2026-09-09).
+    addLog('Clearing console password and timeout from the previous install…');
+    const pwRm = (await c.shell(
+      'su -c "rm -f /data/local/etc/echomuse/console.pw '
+      + '/data/local/etc/echomuse/console.timeout" 2>&1')).trim();
+    if (pwRm) addLog(`  → ${pwRm}`);
+    const pwProbe = await c.shell(
+      'su -c "cat /data/local/etc/echomuse/console.pw; echo _PWCHK" 2>/dev/null');
+    if (!pwProbe.includes('_PWCHK')) {
+      throw new Error('Could not confirm the console password was cleared — '
+        + 'the check produced no output at all, so "su" is not working rather '
+        + 'than the record being gone. Retry the previous step.');
+    }
+    if (pwProbe.replace('_PWCHK', '').trim()) {
+      throw new Error('The console password record is still present after rm. '
+        + 'A device provisioned with it in place will ask for the previous '
+        + "owner's password on its serial console. Check mount state with "
+        + '"su -c mount" before retrying.');
+    }
+    addLog('  → cleared; the controller re-applies it when the device connects', 'ok');
 
     addLog('Installing to /data/local/bin/ (A slot)…');
     // Each step checked individually instead of && chained — the original
@@ -6916,7 +7064,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
   "bluetooth": ["bleProxyEnabled"],
   "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName"]
 };
@@ -7602,6 +7750,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
             isSet={config.consolePassword === '__unchanged__'}
             onChange={v => set('consolePassword', v)}/>
+          {/* The gate runs when init SPAWNS the console, not per keystroke, so
+              a session authenticated before a change keeps its old behaviour
+              until something ends it. That is what this ends. */}
+          <NumberField
+            label="Console idle timeout"
+            sub={emosFleet
+              ? 'minutes of no typing before the USB console logs out, 0-90. 0 = never. A long command is not interrupted — only an idle prompt.'
+              : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
+            value={config.consoleTimeoutMin ?? 0}
+            min={0} max={90} unit="min"
+            disabled={!emosFleet}
+            onChange={v => set('consoleTimeoutMin', v)}/>
         </div>
         {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
