@@ -19,9 +19,23 @@ const pcmPollInterval = 200 * time.Millisecond
 
 // nudgeInterval is how often the holder is asked AGAIN to let go. Every poll
 // would spawn fifty processes across the window for a service that takes about
-// a second to die and come back; every two seconds gives it four more chances
-// and costs four fork/execs on a path that runs once per process start.
+// a second to die and come back; every two seconds gives it four more chances.
 const nudgeInterval = 2 * time.Second
+
+// maxNudges bounds how many times ONE wait may ask, and it exists because the
+// comment above used to end "on a path that runs once per process start" —
+// which stopped being true the moment the open began retrying.
+//
+// With a plug in the jack, Android's mediaserver holds the speaker for as long
+// as the plug is there and no amount of asking changes that. Unbounded nudging
+// then means killing an Android system service roughly every 2.6 seconds for
+// the life of the process, on a board sharing 512MB with Android — a permanent
+// cost paid to lose a race that cannot be won.
+//
+// Four is what the original ten-second window already spent, so the case this
+// was built for — mediaserver restarting after an OTA and letting go within a
+// second or two — is untouched.
+const maxNudges = 4
 
 // waitFree is the wait loop, with the status read and the stop command
 // injected so its cadence can be tested without a device. It reports whether
@@ -46,6 +60,7 @@ func waitFree(held func() (int, bool), nudge func(),
 	start := time.Now()
 	deadline := start.Add(timeout)
 	nextNudge := start.Add(nudgeEvery)
+	nudges := 0
 	for time.Now().Before(deadline) {
 		time.Sleep(poll)
 		if _, busy := held(); !busy {
@@ -53,34 +68,57 @@ func waitFree(held func() (int, bool), nudge func(),
 				time.Since(start).Round(time.Millisecond))
 			return true
 		}
-		if nudge != nil && !time.Now().Before(nextNudge) {
+		if nudge != nil && nudges < maxNudges && !time.Now().Before(nextNudge) {
 			log.Printf("[speaker] still held after %s — asking again",
 				time.Since(start).Round(time.Millisecond))
 			nudge()
+			nudges++
 			nextNudge = time.Now().Add(nudgeEvery)
 		}
 	}
 	return false
 }
 
-// speakerRetryInterval is how long to wait before trying the ALSA open again
-// after a device that would not let go.
+// speakerRetryInterval is the FIRST wait before trying the ALSA open again,
+// and speakerRetryMax the ceiling it backs off to.
 //
 // Seconds rather than milliseconds because the thing being waited for is an
-// Android service being restarted by init, and because nothing is now blocked
-// on the answer: the device registers, listens and answers its buttons with no
-// speaker at all, so retrying patiently costs a few seconds of silence rather
-// than the whole device.
+// Android service being restarted by init, and because nothing is blocked on
+// the answer: the device registers, listens and answers its buttons with no
+// speaker at all, so retrying patiently costs silence rather than the device.
+//
+// The CEILING is what a flat interval was missing. The two cases look the same
+// from here and are nothing alike: mediaserver restarting after an OTA lets go
+// within seconds, and mediaserver holding the speaker because a plug is in the
+// jack never lets go at all. A flat three seconds serves the first and, in the
+// second, spends a fork/exec pair and a codec probe every three seconds for
+// the life of the process. Backing off to a minute costs the recoverable case
+// nothing — it is over long before the delay grows — and turns the
+// unrecoverable one from a busy loop into a heartbeat.
 const speakerRetryInterval = 3 * time.Second
+const speakerRetryMax = 60 * time.Second
 
-// retryOpen calls open until it succeeds or stop is closed, waiting delay
-// between attempts. It reports whether the open eventually succeeded.
+// nextDelay doubles a retry delay up to the ceiling.
+func nextDelay(d, max time.Duration) time.Duration {
+	d *= 2
+	if d > max {
+		return max
+	}
+	return d
+}
+
+// retryOpen calls open until it succeeds or stop is closed, backing off from
+// delay to max between attempts. It reports whether the open eventually
+// succeeded.
 //
 // Injected rather than inlined for waitFree's reason — pcm_speaker.go is
 // `//go:build server` and cannot be tested at all, and what is worth pinning
-// here is that the loop RETRIES rather than giving up, and that a stop is
-// honoured between attempts rather than only after another full delay.
-func retryOpen(open func() error, stop <-chan struct{}, delay time.Duration) bool {
+// here is that the loop RETRIES rather than giving up, that it BACKS OFF
+// rather than hammering, and that a stop is honoured between attempts rather
+// than only after another full delay.
+func retryOpen(open func() error, stop <-chan struct{},
+	delay, max time.Duration) bool {
+
 	for attempt := 1; ; attempt++ {
 		select {
 		case <-stop:
@@ -98,5 +136,6 @@ func retryOpen(open func() error, stop <-chan struct{}, delay time.Duration) boo
 			return false
 		case <-time.After(delay):
 		}
+		delay = nextDelay(delay, max)
 	}
 }
