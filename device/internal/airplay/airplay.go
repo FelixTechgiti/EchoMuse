@@ -358,7 +358,7 @@ func (c *Client) syncMetadataReader() {
 	fn := c.opts.OnVolume
 	c.mu.Unlock()
 
-	go readMetadataPipe(pipe, stop, fn)
+	go startMetadataReader(pipe, stop, fn)
 }
 
 // SetVolumeHandler installs (or removes) the AirPlay volume callback, live.
