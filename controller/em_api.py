@@ -438,6 +438,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/config",        _get_device_config)
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
+    app.router.add_post("/api/devices/{id}/supervisor_log",
+                        _post_fetch_supervisor_log)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
@@ -1483,6 +1485,49 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     if msg.get("error"):
         return _error("scan_failed", msg["error"], 502)
     return _ok({"networks": msg.get("networks") or []})
+
+
+@auth.require_admin
+async def _post_fetch_supervisor_log(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/supervisor_log
+
+    Fetch the device's persistent log on demand and push it into that
+    device's log events, where the Logs tab already shows it.
+
+    The automatic fetch only fires when an UPDATE failed, and the fault this
+    file exists for is wider than that: a device that finds no controller for
+    twenty minutes, or whose speaker Android never released, is not a failed
+    update and nothing was ever owed. So the evidence was written, kept
+    through the power cycle, and then read by nobody — the same shape as the
+    ambient-light status before it rode the register message.
+
+    Admin, and a POST rather than a GET, because it costs a shell session on
+    the device.
+    """
+    device_id = request.match_info["id"]
+    live = _live(device_id)
+    if live is None:
+        return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    # Twice what the automatic fetch takes, deliberately: that one runs
+    # unattended and only has to carry the last failed start, while this one
+    # was asked for by somebody looking at a specific fault and wants the
+    # boots either side of it.
+    out = await _shell_run(live, f"busybox tail -c 8192 {SUPERVISOR_LOG}",
+                           timeout=30.0)
+    text = (out or "").strip()
+    if not text:
+        # Absence has two causes and they want different things from the
+        # reader, so name both rather than reporting an empty file.
+        await _push_log_event(device_id, "warn", "controller",
+            "No supervisor log on the device — firmware and start_server.sh "
+            "predating it, or it has not rebooted since they landed.")
+        return _ok({"text": "", "empty": True})
+
+    await _push_log_event(device_id, "info", "controller",
+        "Supervisor log:\n" + text)
+    return _ok({"text": text, "empty": False})
 
 
 @auth.require_auth

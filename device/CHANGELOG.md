@@ -12,6 +12,44 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.24.0-fx.1
+
+The Echo now keeps a record that a power cycle cannot erase.
+
+### What's new
+
+**When an Echo cannot find the controller, there is no way to ask it why.**
+The device's own log lives in memory, so pulling the plug — the only thing
+left to try — erases it. Its shell runs through the controller, so with the
+controller missing there is no shell either. Four restarts on one day ended
+that way, each after 8 to 30 minutes of an orange pulsing ring, and each took
+its explanation with it.
+
+The firmware now writes the few things worth keeping to the same persistent
+file the start-up script already uses, on storage that survives a power cut
+and an update. Four kinds of line: which firmware version actually started,
+a controller that cannot be found (with the device's own IP address, which is
+what separates "this Echo is off the network" from "this Echo is on the
+network and the controller is not answering"), a controller that is found and
+never accepts the connection, and a speaker Android will not hand over.
+
+A working device writes **one line per start** and nothing else. Fault lines
+are spaced out deliberately — after one minute, then five, fifteen, thirty,
+and half-hourly after that — because the storage they go to cannot be
+replaced and these faults can last all night. Anything shorter would wear the
+flash of every device that ever restarts, and every ordinary restart is
+finished inside that first minute.
+
+Each fault also writes one line when it clears, so the file says how long it
+lasted rather than only that it happened.
+
+### What is required of you
+
+Nothing. If your Echo goes quiet and does not come back, the file is already
+waiting — the controller collects it by itself after a failed update, and it
+is in a support bundle. Pull the plug as you always would; the record is what
+survives it.
+
 ## 2.23.0-fx.1
 
 The Echo can now say what went wrong.

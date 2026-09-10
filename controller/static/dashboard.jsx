@@ -1371,6 +1371,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [securing, setSecuring] = useState(false);
+  const [fetchingSup, setFetchingSup] = useState(false);
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
   const [installing, setInstalling] = useState(false);
@@ -1511,6 +1512,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     } catch(e) { alert(e.error || 'Secure link failed'); }
     // Leave the button disabled briefly — transfer + reconnect takes ~10s.
     setTimeout(() => setSecuring(false), 15000);
+  }
+
+  async function doSupervisorLog() {
+    // The device's own persistent log, fetched on demand. The automatic
+    // fetch fires only after a FAILED UPDATE, and the faults this file
+    // records are wider than that — a controller never found, a speaker
+    // Android never released. Both survive the power cycle used to recover
+    // from them, and until this button nothing asked for them.
+    //
+    // It lands in the log list below rather than in an alert, so it can be
+    // scrolled, copied and read beside the lines the device relayed live.
+    setFetchingSup(true);
+    try {
+      const r = await API.post(`/api/devices/${device.device_id}/supervisor_log`, {});
+      if (r.empty) alert('No supervisor log on the device yet.');
+      const logs = await API.get(`/api/devices/${device.device_id}/logs?limit=50`);
+      setLogs(logs);
+    } catch(e) { alert(e.error || 'Could not fetch the supervisor log'); }
+    setFetchingSup(false);
   }
 
   async function doDebloat() {
@@ -2670,7 +2690,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* LOGS */}
           {tab === 'logs' && (
             <div>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 16 }}>Device logs</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em' }}>Device logs</div>
+                {isAdmin && (
+                  <Pill small disabled={fetchingSup || !device.connected}
+                        onClick={doSupervisorLog}>
+                    {fetchingSup ? 'Fetching…' : 'Fetch supervisor log'}
+                  </Pill>
+                )}
+              </div>
               {logsLoading ? (
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--muted)' }}>Loading…</div>
               ) : logs.length === 0 ? (

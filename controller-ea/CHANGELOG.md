@@ -20,6 +20,19 @@ history that would otherwise be spent on routine chatter.
 This needs firmware 2.23.0-fx.1 or newer to have anything to write — that is
 the release where the device starts sending these lines at all.
 
+### The device's own persistent log, on a button
+
+That relay travels over the connection to the controller, so it cannot say
+anything about a device that has no connection — which is exactly when
+somebody is standing in front of an Echo that will not come back. Firmware
+2.24.0-fx.1 writes those faults to storage on the device instead, where the
+power cycle used to recover cannot erase them.
+
+The Logs tab now has **Fetch supervisor log**, which pulls that file and shows
+it with the rest of the device's log lines. Until now it was collected
+automatically only after a failed update, so a device that simply never found
+the controller wrote the explanation and nobody read it.
+
 ### What is required of you
 
 Nothing.

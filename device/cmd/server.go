@@ -29,6 +29,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
+	"github.com/wilbowes/EchoMuse/internal/bootlog"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/logrelay"
@@ -46,6 +47,15 @@ import (
 func main() {
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
+
+	// One line per process start on /data, and it is the version rather than
+	// anything else because that is the field the supervisor cannot supply.
+	// start_server.sh already records `start pid=… slot=server_a`, but a slot
+	// name says which symlink was followed, not what is in it — so after an
+	// OTA that appears to have worked, the persistent record could say a
+	// device restarted and never what it restarted INTO. The rest of this
+	// file's firmware lines are faults; this is what dates them.
+	bootlog.Appendf("%s starting", client.Version)
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
