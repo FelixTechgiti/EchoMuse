@@ -172,8 +172,14 @@ func (p *PcmSpeaker) Init() error {
 	// takeover as `stop mixer` above and `stop smarthomewifid` in main: on a
 	// device where Revoice drives the codec directly, mediaserver has no
 	// work to do and is only ever in the way.
-	exec.Command("stop", "media").Run()
-	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout)
+	// Re-issued INSIDE the wait, not only here: `stop media` does not stick.
+	// Android brings mediaserver back — measured, with init.svc.media reading
+	// `running` again while we still hold the PCM — so one stop before the
+	// wait is a race we lose whenever it returns and re-grabs the device
+	// before we open it.
+	stopMedia := func() { exec.Command("stop", "media").Run() }
+	stopMedia()
+	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout, stopMedia)
 	// Connect the DAC to the output mixer before opening the stream: DAPM
 	// decides what to power at stream open, and an unrouted DAC is powered
 	// down, which presents as a clean "voice stream complete, underruns=0"
@@ -226,26 +232,28 @@ const pcmFreeTimeout = 10 * time.Second
 // it does not. Refusing to open would be a bigger behaviour change than the
 // bug warrants, and the proper fix for a permanently-held device is to stop
 // gating the rest of main() on the speaker at all.
-func waitForFreePcm(card, device int, timeout time.Duration) {
+func waitForFreePcm(card, device int, timeout time.Duration, nudge func()) {
 	path := statusPath(card, device)
-	b, err := os.ReadFile(path)
-	if err != nil || pcmFree(string(b)) {
+	held := func() (int, bool) {
+		b, err := os.ReadFile(path)
+		if err != nil || pcmFree(string(b)) {
+			return 0, false
+		}
+		return pcmOwner(string(b)), true
+	}
+
+	pid, busy := held()
+	if !busy {
 		return // free, or no status file to consult — open immediately
 	}
 
-	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pcmOwner(string(b)), timeout)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		b, err := os.ReadFile(path)
-		if err != nil || pcmFree(string(b)) {
-			log.Printf("[speaker] speaker released after %s", time.Since(deadline.Add(-timeout)).Round(time.Millisecond))
-			return
-		}
+	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pid, timeout)
+	if waitFree(held, nudge, timeout, pcmPollInterval, nudgeInterval) {
+		return
 	}
-	b, _ = os.ReadFile(path)
+	pid, _ = held()
 	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
-		pcmOwner(string(b)), timeout)
+		pid, timeout)
 }
 
 // SetJackRouting puts the codec into the state the current plug position
