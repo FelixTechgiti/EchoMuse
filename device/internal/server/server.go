@@ -89,11 +89,6 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		return server.ledController
 	}, nil)
 
-	// Give volume controller access to mute state so it can restore the red ring
-	server.volume.isMuted = func() bool {
-		return server.mute.IsMuted()
-	}
-
 	// When the volume arc's display window ends, hand the ring back to the
 	// last controller-set state (listening/thinking/playing mid-turn, all
 	// off when idle). SetLEDs keeps recording frames into baseLEDs during

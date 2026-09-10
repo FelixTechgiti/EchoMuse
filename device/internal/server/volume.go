@@ -62,14 +62,22 @@ type volumeController struct {
 	level          int
 	ledCtrl        func() led.Controller // getter so we handle nil during boot
 	timer          *time.Timer
-	displayActive  bool        // volume arc currently on the ring — see DisplayActive
-	isMuted        func() bool // set after construction to avoid circular dependency
-	onVolumeChange func(int)   // set after construction; called after every Set()
+	displayActive  bool      // volume arc currently on the ring — see DisplayActive
+	onVolumeChange func(int) // set after construction; called after every Set()
 	// onDisplayExpire, when set, replaces the default clear-to-black at the
 	// end of the display window: the server wires it to repaint the ring
 	// from its stored controller state, so a volume press mid-turn hands
 	// back to the listening/thinking/playing animation instead of going
-	// dark. The muted → red-ring case stays here either way.
+	// dark.
+	//
+	// It used to be preceded by a muted → RED RING branch, and that was a
+	// leftover of a rule that had already been removed. Mute stopped owning
+	// the ring when the ring became Home Assistant's (em_ring_light): the
+	// indicator is the microphone button's own GPIO LED, which nothing can
+	// overpaint. This one paint site was missed, so a volume press on a muted
+	// device painted the ring red — over whatever resting colour HA had set,
+	// with no TTL and nothing to clear it until the next paint. Reported from
+	// a real device 2026-09-10 as "the ring glowed red, and now it does not".
 	onDisplayExpire func()
 }
 
@@ -264,25 +272,27 @@ func (vc *volumeController) showLEDs(level int) {
 	if vc.timer != nil {
 		vc.timer.Stop()
 	}
-	vc.timer = time.AfterFunc(volumeLEDSecs*time.Second, func() {
-		vc.mu.Lock()
-		vc.displayActive = false
-		expire := vc.onDisplayExpire
-		vc.mu.Unlock()
-		if vc.isMuted != nil && vc.isMuted() {
-			// Restore mute indicator — red ring
-			leds := make([]led.Led, numLEDs)
-			for i := 0; i < numLEDs; i++ {
-				leds[i] = led.Led{ID: i, R: 180, G: 0, B: 0}
-			}
-			lc.SetLEDs(leds...)
-		} else if expire != nil {
-			// Hand back to whatever the controller last painted —
-			// listening/thinking/playing ring mid-turn, all-off when idle.
-			expire()
-		} else {
-			clearLeds(lc)
-		}
-	})
+	vc.timer = time.AfterFunc(volumeLEDSecs*time.Second, func() { vc.expireDisplay(lc) })
 	vc.mu.Unlock()
+}
+
+// expireDisplay ends the volume arc's window and hands the ring back.
+//
+// A named method rather than the closure it was, so a test can drive it
+// without waiting out volumeLEDSecs — the behaviour worth pinning here is
+// what it PAINTS, and it took a report from a real device to notice that it
+// painted anything at all.
+func (vc *volumeController) expireDisplay(lc led.Controller) {
+	vc.mu.Lock()
+	vc.displayActive = false
+	expire := vc.onDisplayExpire
+	vc.mu.Unlock()
+
+	if expire != nil {
+		// Hand back to whatever the controller last painted —
+		// listening/thinking/playing ring mid-turn, all-off when idle.
+		expire()
+		return
+	}
+	clearLeds(lc)
 }
