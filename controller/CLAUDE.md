@@ -1765,6 +1765,37 @@ it into the device's log events. Takes effect on the next device reboot after
 the script syncs.
 
 
+**An update that does not confirm in 90s is OPEN, not failed, and saying
+otherwise was a bug that cost most of a day.** `_monitor_reconnect` returned
+one `False` for two different facts — "it came back on the old version" and
+"it never came back" — and the caller then settled it by reading `firmware_ver`
+out of the database, which for a device that never reconnected is *by
+definition* still the old one, because only the device ever writes it. So
+every slow update was reported as `auto-rolled back — new binary failed 3
+start attempts`: a specific accusation against the new firmware, quoting a
+count of attempts it had not made, which sends whoever reads it hunting a
+firmware bug that does not exist.
+
+It is now three outcomes. `confirmed`, `rolled_back` (the device came back
+running what it started on — the only case that may claim a rollback), and
+`absent`, which records that there has been no contact and **leaves the
+verdict open**: `_pending_ota` holds it and `_settle_pending_ota` closes it
+from the register message when the device returns, however much later. The
+device is the sole witness and reports its version on connect, so the answer
+arrives on its own; the only way to get it wrong is to answer before it does.
+
+Two things confirm the diagnosis rather than merely arguing for it. The
+device's own supervisor log writes a `fast-exit` line per failed start and a
+`rollback` line when it gives up, and across two weeks of one fleet's log
+there is **not one of either** — every rollback the dashboard ever reported
+was this. And on 2026-09-10 a device took v2.24.0-fx.1 at 16:34, was declared
+rolled back at 16:36, and was observed at 16:45 connected and running
+v2.24.0-fx.1, with the dashboard still saying its binary had failed to start.
+
+Raising the 90s would only move the line: the measured reconnect for a device
+that has to boot is 1m57s, and the stranded case is unbounded. Settling on
+reconnect removes the line instead.
+
 The device runs an A/B slot binary system:
 - `/data/local/bin/server` is a symlink to either `server_a` or `server_b`
 - `start_server.sh` counts fast exits (< 15s runtime); after 3 consecutive failures it flips the symlink to the other slot and exits, letting Android init restart with the fallback binary

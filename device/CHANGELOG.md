@@ -12,6 +12,56 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.25.0-fx.1
+
+The Echo remembers where its controller is.
+
+### What's new
+
+**This is the fix for "the Echo disappears after an update and only comes back
+when I unplug it."**
+
+When the Echo restarts — which every firmware update does — it had no memory
+of the controller it had been talking to seconds earlier, and had to find it
+again by broadcasting on the network. After a restart that broadcast search
+often finds nothing, for minutes, while the Echo sits there with a perfectly
+good network connection. Pulling the plug fixed it, because a full reboot
+repairs whatever the restart broke.
+
+Measured on a device, the first boot of the previous release, from the log
+that now survives a power cut:
+
+```
+16:34:39  v2.24.0-fx.1 starting
+16:35:58  no controller for 1m15s — 4 browse rounds, wlan0=192.168.178.140
+16:40:18  no controller for 5m35s — 8 browse rounds, wlan0=192.168.178.140
+16:45:00  (reboot) — connected within seconds
+```
+
+The firmware started correctly. The network was fine and the Echo's own
+address is right there. Only the *finding* was broken, and the same
+restart-then-reboot pair appears six times in that one day.
+
+So the Echo now writes down the controller's address whenever it registers,
+on storage that survives both a reboot and an update, and tries that address
+first when it starts. A restart reconnects in seconds without broadcasting at
+all.
+
+If the controller has genuinely moved, the remembered address simply does not
+answer within three seconds and the Echo searches for it exactly as before —
+so this can cost three seconds and never a wrong answer. The address is
+written only when it changes, because that storage cannot be replaced.
+
+The log also now says **which** of the two failed: a remembered address that
+does not answer means the network, and no answer to a broadcast while the
+address does answer means the broadcast. Those want opposite fixes and
+previously read the same.
+
+### What is required of you
+
+Nothing. The benefit starts one update after this one — this release is the
+one that begins remembering.
+
 ## 2.24.0-fx.1
 
 The Echo now keeps a record that a power cycle cannot erase.
