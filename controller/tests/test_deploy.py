@@ -2706,3 +2706,87 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
         + " — an emOS device has no package manager to hide packages from and "
           "no Magisk daemon to have created the service.d directory."
     )
+
+
+def test_a_slow_update_is_not_reported_as_a_rollback():
+    """
+    "It did not come back" and "it came back on the old version" are two
+    different facts, and _monitor_reconnect returned the same False for both.
+    The caller then read firmware_ver out of the database — which for a device
+    that never reconnected is still the OLD version, because only the device
+    ever writes it — and concluded an auto-rollback from the one piece of
+    evidence that cannot tell them apart.
+
+    The message it produced accused the new binary of failing to start, with a
+    count of attempts it had not made, which sends whoever reads it hunting a
+    firmware bug that does not exist. Observed on hardware 2026-09-10: the
+    device came back 10 minutes later running the new firmware perfectly,
+    while the dashboard said it had rolled back.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    fn = api[api.index("async def _monitor_reconnect"):]
+    fn = fn[:fn.index("\n# ─── Shell helpers")]
+    assert "reconnected" in fn, \
+        "_monitor_reconnect no longer tracks whether the device came back at all"
+    assert '"absent"' in fn and '"rolled_back"' in fn and '"confirmed"' in fn, \
+        "the three outcomes collapsed back into a boolean"
+
+    # The rollback claim may be made ONLY where the device actually returned.
+    body = api[api.index("outcome = await _monitor_reconnect"):]
+    body = body[:body.index("async def _run_rollback")]
+    rolled = body.index('elif outcome == "rolled_back"')
+    absent = body.index("else:", rolled)
+    assert "auto-rolled back" not in body[absent:], \
+        "a device that never came back is still being called a rollback"
+    assert "_pending_ota[device_id]" in body[absent:], \
+        "the verdict is not left open for the device to settle"
+
+
+def test_the_open_verdict_is_settled_when_the_device_returns():
+    """
+    Leaving it open is only right because something closes it. The device is
+    the sole witness and reports its version on the register message, so the
+    answer arrives on its own — the only way to get it wrong is to answer
+    before it does.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    connect = api[api.index("async def notify_device_connected"):]
+    connect = connect[:connect.index("async def notify_device_disconnected")]
+    assert "_settle_pending_ota" in connect, \
+        "nothing closes a pending update when the device comes back"
+
+    fn = api[api.index("async def _settle_pending_ota"):]
+    fn = fn[:fn.index("\nasync def ", 10)]
+    assert "device_updated" in fn, "a late success is never recorded as one"
+    assert "device_auto_rolled_back" in fn, "a real rollback learned late is lost"
+
+
+def test_exec_is_admin_and_leaves_a_record():
+    """
+    The one-shot exec grants nothing the interactive shell did not — that is
+    already a full root shell for an admin — so it must sit at the SAME bar,
+    not a lesser one because it looks smaller than a terminal.
+
+    And it must be as loud: an interactive session logs "Shell session opened
+    by <user>", so a scriptable one that logged nothing would be the quieter
+    of the two, which is the wrong way round for the person who owns the
+    device.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    assert '/api/devices/{id}/exec' in api, "no one-shot exec endpoint"
+
+    i = api.index("async def _post_device_exec")
+    assert "@auth.require_admin" in api[max(0, i - 200):i], \
+        "exec runs root commands on a device and must be admin-only"
+
+    fn = api[i:i + 3000]
+    assert "_push_log_event" in fn, \
+        "a command was run on somebody's device and nothing recorded it"
+    assert 'request["user"]' in fn, \
+        "the record does not name who ran the command"

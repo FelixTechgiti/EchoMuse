@@ -1009,6 +1009,59 @@ write for nothing. `Escalator.Reset` puts the cadence back afterwards, or a
 device flapping all night would be recorded once and then be as invisible as
 it was before any of this existed.
 
+## The controller's address is remembered, because a restart cannot rediscover it
+
+`lastServer` was an in-memory field, so it existed for the life of ONE
+process. A reboot repopulates it the slow way and nobody notices; an in-place
+restart — every OTA, every supervisor restart — begins with nothing and has no
+path to the controller except mDNS.
+
+**That is the whole of "the Echo disappears after every update and comes back
+after a power cycle."** Measured 2026-09-10 on the first boot of
+v2.24.0-fx.1, in the persistent log that shipped the same day:
+
+```
+16:34:39  start pid=3101 slot=server_a
+16:34:39  firmware: v2.24.0-fx.1 starting
+16:35:58  firmware: no controller for 1m15s — 4 browse rounds, wlan0=192.168.178.140
+16:40:18  firmware: no controller for 5m35s — 8 browse rounds, wlan0=192.168.178.140
+16:45:00  boot slot=server_a        ← uptime resets: a REBOOT, connected in seconds
+```
+
+The binary started immediately, no fast exit, no rollback. The device held a
+valid address the entire time. Only DISCOVERY was broken, and the same
+restart-then-reboot pair appears **six times** in that one day's log — every
+one of them a person deciding to pull the plug.
+
+`discovery.SaveEndpoint`/`LoadEndpoint` persist the endpoint to
+`/data/local/etc/echomuse/controller.json`, beside the TLS credentials and
+`state.json`, which OTA slot flips do not touch. `Run` seeds `lastServer` from
+it when the field is empty, so the fast path exists in a process that has
+never registered.
+
+Four things not to undo:
+
+- **It is a HINT and the probe is the judge.** `Run` proves the address with a
+  3s TCP connect before using it and browses when that fails, so a controller
+  that has moved costs three seconds and is then found the old way. This adds
+  no way to be *wrong*, only a way to be fast.
+- **Written only when it CHANGES.** The call site is every successful connect
+  and this fleet reconnects often; unconditional would be a flash write per
+  reconnect on eMMC that cannot be replaced. Same rule as
+  `WriteConsolePassword`.
+- **The TLS port is stored with it.** Without it, a device holding a CA
+  re-browses to discover `tls_port`, which is the mDNS round trip this exists
+  to avoid.
+- **This does not fix mDNS**, it removes mDNS from the path a restart depends
+  on. Why the browse stops being answered after an in-place restart is still
+  open — `ip link set p2p0 down` at every start, and Android's multicast
+  filtering, are the two candidates that have not been ruled out. The log now
+  distinguishes them without anybody being present: `remembered <addr> did not
+  answer` while the device holds an IP is a UNICAST failure and the fault is
+  the network; `no remembered controller — mDNS only`, or a remembered address
+  that answers, points at multicast. Those want opposite fixes and read
+  identically until 2026-09-10.
+
 ## The endpoints are children, and a restart does not take them with it
 
 **This is what "AirPlay disappears after every update and comes back after a
