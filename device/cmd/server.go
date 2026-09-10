@@ -721,6 +721,17 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	// The endpoints are CHILDREN, and exiting does not take them with us: they
+	// are reparented to init and keep holding the ports their protocols are
+	// defined on, so the next run cannot bind and loops for ever. Stopping
+	// them here is the tidy path and is deliberately NOT the fix — it cannot
+	// run on `kill -9`, on a panic, or on the supervisor's own restart, so
+	// each Start takes the ports over as well (internal/orphan). Both, because
+	// either alone leaves the failure reachable.
+	spotifyClient.Stop()
+	airplayClient.Stop()
+	// Sendspin is deliberately NOT here: it runs in-process, so there is no
+	// child to orphan, and its socket drops with us.
 	pcmSpeaker.Close()
 	os.Exit(0)
 }

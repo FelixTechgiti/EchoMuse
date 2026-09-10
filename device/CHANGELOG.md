@@ -12,6 +12,40 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.22.0-fx.1
+
+AirPlay and Spotify Connect survive an update.
+
+### What's new
+
+**After every update the Echo vanished from the AirPlay list, and came back
+only after being unplugged.** This is what that was, and it was not about the
+network announcement at all.
+
+The Echo runs AirPlay and Spotify Connect as separate programs. Updating the
+firmware restarts the firmware — but not those two, which keep running and keep
+holding the network ports their protocols are defined on. The new copy then
+cannot claim the port, gives up immediately, and tries again a minute later,
+for ever. Nothing is announced because nothing is running.
+
+Each start now takes the ports back from a leftover copy before starting its
+own. That also repairs a device already stuck in the loop, which is every
+device that has been updated — no power cycle needed. The programs are stopped
+on the way down as well, but that is the tidy half rather than the fix: it
+cannot run if the firmware is killed outright or crashes.
+
+**A device whose speaker Android will not release no longer floods its own
+log.** Since 2.20.0 such a device runs normally and stays silent, which is
+deliberate — but it was reporting the refusal for every fragment of audio,
+about twenty times a second, into a log held in memory. That crowded out the
+very lines needed to explain it. It now says so once every few seconds and
+counts what it suppressed.
+
+### What is required of you
+
+Nothing. If AirPlay or Spotify were missing since your last update, they come
+back on this one without unplugging anything.
+
 ## 2.21.0-fx.1
 
 AirPlay is about a second quicker.

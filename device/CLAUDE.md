@@ -880,6 +880,58 @@ thought to watch. Idle sits at 31–34°C, nowhere near throttling.
 this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
 
+## The endpoints are children, and a restart does not take them with it
+
+**This is what "AirPlay disappears after every update and comes back after a
+power cycle" actually was**, reported for days, with two mDNS theories in
+between that were both wrong. The announcement was never the problem: the
+process was never up to make one.
+
+`main()` exits and its children are reparented to init. librespot and
+shairport-sync keep running, still holding the ports their protocols are
+defined on — shairport listens on TCP 5000 for RTSP — so the new instance
+cannot bind and exits immediately. The supervisor then retries for ever.
+Measured on a device 2026-09-10, after an OTA from v2.19.0 to v2.21.0-fx.1:
+
+```
+1154 /data/local/bin/shairport-sync -a EchoDot  -o stdout    (alive, port 5000)
+14:44:29 [airplay] shairport-sync exited: exit status 1       (and every minute after)
+```
+
+Three facts made it certain rather than likely, and each is worth knowing as a
+technique:
+
+- **`/tmp` is RAM-backed, so the log's own age dates the boot.** It still held
+  lines from the previous hour, which proves the device had not rebooted —
+  only the process had restarted. That single observation separates "OTA
+  restart" from "power cycle" with no other instrumentation.
+- **The surviving command line carried no `-c`**, a flag the firmware only
+  began passing in the version that was supposedly running. A process older
+  than its own parent is an orphan.
+- **Port 5000 was listening while our supervisor was looping.** Both at once is
+  only possible if the listener is not ours.
+
+`internal/orphan` takes the ports over at **Start**, and that is the
+load-bearing half. Stopping the children on the way down is also done (the
+SIGTERM handler in `cmd/server.go`) and is NOT sufficient: it cannot run after
+`kill -9`, after a panic, or on the supervisor's own restart path, and it does
+nothing for a device already looping — which on a fielded fleet is every device
+that has ever been updated. Same posture the firmware already takes with
+Android's `mediaserver` and `mixer`: ask whoever holds the resource to let go,
+every start, so one bad exit cannot strand the feature permanently.
+
+Two details not to simplify:
+
+- **Match argv[0] EXACTLY, never a substring.** `/proc/<pid>/cmdline` is
+  NUL-separated and the first field is the executable as invoked. A `busybox
+  grep` for the path, a shell about to run it, our own log line — all contain
+  the path and none holds the port. A substring match kills the user's shell.
+- **`/proc`, not `pkill`.** `pkill` is not on FireOS and busybox's applet set
+  varies by SKU, so shelling out would be a check that silently cannot run.
+
+Sendspin is deliberately not covered: it runs in-process, so there is no child
+to orphan.
+
 ## AirPlay latency, and why the prime depth is not one number
 
 **The music plane's prime gate was ~1s of PERMANENT latency for every

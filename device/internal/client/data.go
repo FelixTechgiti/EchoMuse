@@ -150,6 +150,14 @@ const (
 )
 
 type DataClient struct {
+	// Throttles for the two pump error logs. They fire per PERIOD, and a
+	// device whose PCM Android will not release refuses every one of them
+	// since the speaker stopped gating main() — ~23 lines a second into a
+	// RAM-backed log that is also the only account of why anything failed.
+	// See pumplog.go.
+	voiceErr errThrottle
+	musicErr errThrottle
+
 	deviceID string
 	mic      mic.Subscribable
 	spk      speaker.Speaker
@@ -725,7 +733,12 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 		case frameTypeSpeaker:
 			if len(data) > 1 && d.spk != nil {
 				if err := d.spk.PumpPeriod(data[1:]); err != nil {
-					log.Printf("[data] PumpPeriod error: %v", err)
+					// Throttled: this fires per PERIOD, and since the
+					// speaker stopped gating main() a device whose PCM is
+					// held refuses every one of them. See pumplog.go.
+					if ok, missed := d.voiceErr.allow(time.Now(), pumpLogInterval); ok {
+						log.Printf("[data] PumpPeriod error: %v%s", err, andMore(missed))
+					}
 				}
 			}
 		case frameTypeEOS:
@@ -747,7 +760,9 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 				// the plane is already ours.
 				d.music.Claim(musicplane.Controller)
 				if err := d.spk.PumpMusic(data[1:]); err != nil {
-					log.Printf("[data] PumpMusic error: %v", err)
+					if ok, missed := d.musicErr.allow(time.Now(), pumpLogInterval); ok {
+						log.Printf("[data] PumpMusic error: %v%s", err, andMore(missed))
+					}
 				}
 			}
 		case frameTypeMusicEOS:
