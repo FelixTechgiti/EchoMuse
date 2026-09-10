@@ -87,7 +87,7 @@ HA offers, so **nothing is gated on it**.
 forwards the authenticated user as `X-Remote-User-Id` (plus optional name
 headers) and **strips any client-supplied copies** before proxying, so on a
 genuine ingress request those values are proof of an HA session. `POST
-/api/auth/ingress` mints an Revoice session from them and the landing page
+/api/auth/ingress` mints a Revoice session from them and the landing page
 tries it before rendering any form, which also removes the bootstrap-token
 step under the add-on — the first HA user through the door becomes admin,
 exactly as the token holder does on the container.

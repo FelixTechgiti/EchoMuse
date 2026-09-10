@@ -1,353 +1,376 @@
-# The Voice Pipeline, Explained
+# Die Sprachpipeline, erklärt
 
-What actually happens between you saying "Hey Rhasspy, turn off the lights"
-and the lights going off — stage by stage, in plain language, with the
-benefits and trade-offs of each design choice.
+Was zwischen deinem „Hey Rhasspy, mach das Licht aus" und dem Ausgehen des
+Lichts tatsächlich passiert — Stufe für Stufe, in verständlichen Worten, mit
+Nutzen und Kompromiss jeder Entwurfsentscheidung.
 
-The one-sentence version: **the Dot is deliberately dumb** — it captures
-sound as cleanly as possible and streams it out; all the intelligence
-(recognising the wake word, deciding when you've finished speaking,
-understanding you) lives on the controller and in Home Assistant, where it
-can be updated, tuned, and observed without touching the hardware.
+Die Ein-Satz-Fassung: **Der Dot ist bewusst einfach gehalten** — er nimmt
+Klang so sauber wie möglich auf und schickt ihn weiter; die ganze Intelligenz
+(Wakeword erkennen, entscheiden, wann du fertig gesprochen hast, dich
+verstehen) sitzt im Controller und in Home Assistant, wo sie aktualisiert,
+abgestimmt und beobachtet werden kann, ohne die Hardware anzufassen.
 
 ```
- YOUR VOICE
+ DEINE STIMME
     │
     ▼
-┌─ On the Echo Dot ───────────────────────────────────────────┐
-│  7 microphones → gain boost → echo cancel → mic selection   │
+┌─ Auf dem Echo Dot ──────────────────────────────────────────┐
+│  7 Mikrofone → Verstärkung → Echo-Auslöschung → Mikrofonwahl│
 └──────────────────────────────│──────────────────────────────┘
-                               │  continuous audio stream (WiFi)
+                               │  durchgehender Audiostrom (WLAN)
                                ▼
-┌─ On the controller ─────────────────────────────────────────┐
-│  wake-word spotting → conversation management → sound shaping│
+┌─ Auf dem Controller ────────────────────────────────────────┐
+│  Wakeword-Erkennung → Gesprächsführung → Klangbearbeitung   │
 └──────────────────────────────│──────────────────────────────┘
                                │
                                ▼
 ┌─ In Home Assistant ─────────────────────────────────────────┐
-│  speech-to-text → understanding → action → text-to-speech   │
+│  Spracherkennung → Verstehen → Aktion → Sprachausgabe       │
 └──────────────────────────────│──────────────────────────────┘
-                               │  spoken response
+                               │  gesprochene Antwort
                                ▼
-                     back to the Dot's speaker
+                   zurück zum Lautsprecher des Dots
 ```
 
 ---
 
-## Stage 1 — Seven microphones
+## Stufe 1 — Sieben Mikrofone
 
-The Dot has 6 microphones in a ring plus 1 in the centre, all captured
-together, 16,000 times per second in high-precision 24-bit audio.
+Der Dot hat 6 Mikrofone im Ring plus 1 in der Mitte, alle zusammen
+aufgenommen, 16.000-mal pro Sekunde in hochauflösendem 24-Bit-Audio.
 
-**Benefit:** hearing from every direction at once, plus the raw material for
-knowing *which direction* you spoke from.
+**Nutzen:** aus allen Richtungen gleichzeitig hören, dazu das Rohmaterial für
+die Frage, aus *welcher Richtung* du gesprochen hast.
 
-**Caveat:** they're tiny microphones in a small puck sitting in your room —
-they hear the TV, the dishwasher, and the Dot's own speaker just as keenly
-as they hear you. Most of the rest of the pipeline exists to deal with that.
+**Haken:** Es sind winzige Mikrofone in einem kleinen Puck, der in deinem
+Zimmer steht — sie hören den Fernseher, die Spülmaschine und den eigenen
+Lautsprecher des Dots genauso deutlich wie dich. Der größte Teil des Rests
+der Pipeline existiert, um damit umzugehen.
 
-## Stage 2 — Gain boost ("mic gain")
+## Stufe 2 — Verstärkung („mic gain")
 
-The raw capture is *extremely* quiet — measurements showed normal speech
-using only a tiny fraction of the available signal range, and the old
-processing threw the quietest (most information-rich) part away when
-converting the audio for transmission. The fix: amplify the full-precision
-24-bit signal by 24dB (≈16×) *before* that conversion, keeping detail that
-would otherwise be lost forever.
+Die Rohaufnahme ist *extrem* leise — Messungen zeigten, dass normale Sprache
+nur einen winzigen Bruchteil des verfügbaren Signalbereichs nutzt, und die
+alte Verarbeitung warf den leisesten (informationsreichsten) Teil beim
+Umwandeln für die Übertragung weg. Die Lösung: das volle 24-Bit-Signal *vor*
+dieser Umwandlung um 24 dB (≈16×) anheben und so Details bewahren, die sonst
+für immer verloren wären.
 
-**Benefit:** this single change took speech recognition from "fails on 1 in
-3 requests" to "reliable" in real-room testing. It's the foundation
-everything downstream stands on.
+**Nutzen:** Diese eine Änderung brachte die Spracherkennung im echten Raum von
+„scheitert bei jeder dritten Anfrage" auf „zuverlässig". Sie ist das
+Fundament, auf dem alles Nachfolgende steht.
 
-**Caveat:** a fixed boost means a very loud event (a shout next to the
-device) can hit the ceiling and distort briefly. The device counts these
-"clipped" moments in its log; in practice, even TV-at-movie-volume produces
-zero.
+**Haken:** Eine feste Anhebung bedeutet, dass ein sehr lautes Ereignis (ein
+Ruf direkt neben dem Gerät) an die Decke stoßen und kurz verzerren kann. Das
+Gerät zählt diese „geclippten" Momente in seinem Log; in der Praxis erzeugt
+selbst Fernsehen in Kinolautstärke null davon.
 
-## Stage 3 — Echo cancellation (AEC)
+## Stufe 3 — Echo-Auslöschung (AEC)
 
-When the Dot is speaking, its microphones hear its own voice — loudly. AEC
-keeps a copy of exactly what the speaker is playing and mathematically
-subtracts it from what the mics hear, leaving only *other* sounds — like you
-interrupting.
+Wenn der Dot spricht, hören seine Mikrofone seine eigene Stimme — laut. Die
+AEC behält eine Kopie dessen, was der Lautsprecher genau abspielt, und zieht
+sie rechnerisch von dem ab, was die Mikrofone hören. Übrig bleiben nur
+*andere* Geräusche — etwa du, wie du dazwischengehst.
 
-**Benefit:** follow-up questions work properly (the device can hear you over
-the tail of its own response), and its own speech can't trigger or confuse
-the listening logic. It's also what makes **barge-in** possible —
-interrupting the assistant mid-sentence with the wake word (see the
-configuration guide's Barge-in setting).
+**Nutzen:** Rückfragen funktionieren richtig (das Gerät hört dich über dem
+Ausklang seiner eigenen Antwort), und seine eigene Sprache kann die
+Zuhörlogik weder auslösen noch verwirren. Sie ist auch die Voraussetzung für
+**Barge-in** — den Assistenten mitten im Satz mit dem Wakeword unterbrechen
+(siehe die Einstellung „Barge-in" im Konfigurationsleitfaden).
 
-**Caveats:** it only removes the *Dot's own* sound — it does nothing about
-the TV (that's a different problem; see Stage 8). It ships disabled until
-you've turned it on and sanity-checked it. (Since v2.7.8 the canceller
-stays "warmed up" between responses instead of relearning each time —
-if barge-in used to need a raised voice, it shouldn't anymore.)
+**Haken:** Sie entfernt nur den *eigenen* Klang des Dots — gegen den
+Fernseher tut sie nichts (das ist ein anderes Problem, siehe Stufe 8). Sie
+kommt ausgeschaltet, bis du sie eingeschaltet und geprüft hast. (Seit v2.7.8
+bleibt die Auslöschung zwischen Antworten „warm", statt jedes Mal neu zu
+lernen — wenn Barge-in früher eine erhobene Stimme brauchte, sollte es das
+nicht mehr tun.)
 
-## Stage 4 — Microphone selection ("beamforming" + "lock-back")
+## Stufe 4 — Mikrofonwahl („Beamforming" + „Lock-back")
 
-For idle listening, the device always uses the centre microphone — it hears
-all directions equally, so the wake word works wherever you stand. When you
-*do* wake it, the device switches to the ring microphone facing you, which
-hears you a little better and the rest of the room a little worse.
+Beim ruhigen Zuhören nutzt das Gerät immer das mittlere Mikrofon — es hört
+alle Richtungen gleich, also funktioniert das Wakeword, wo immer du stehst.
+Wachst du es *tatsächlich* auf, wechselt das Gerät auf das Ringmikrofon, das
+dir zugewandt ist: Es hört dich etwas besser und den Rest des Raums etwas
+schlechter.
 
-The subtle part is *how it picks*: by the time the controller has recognised
-the wake word, half a second has passed and the sound of you saying it has
-faded. So the device continuously keeps a two-second memory of how much
-sound energy came from each direction, and when the wake arrives, it looks
-**back** through that memory to find where the wake word actually came from
-— not where sound is coming from right now. It also scores directions by
-*sudden change* rather than raw loudness, so a voice beats a permanently
-loud TV.
+Der feine Teil ist das *Wie* der Auswahl: Bis der Controller das Wakeword
+erkannt hat, ist eine halbe Sekunde vergangen, und der Klang deines
+Aussprechens ist verklungen. Also führt das Gerät durchgehend ein
+Zwei-Sekunden-Gedächtnis darüber, wie viel Schallenergie aus welcher Richtung
+kam, und schaut beim Eintreffen des Wakewords **zurück** in dieses Gedächtnis,
+um zu finden, woher das Wakeword wirklich kam — nicht, woher gerade jetzt
+Klang kommt. Außerdem bewertet es Richtungen nach *plötzlicher Änderung* statt
+nach roher Lautstärke, damit eine Stimme einen dauerhaft lauten Fernseher
+schlägt.
 
-**Benefit:** better speech-to-text from the mic pointed at you, and the LED
-direction indicator actually points at you.
+**Nutzen:** bessere Spracherkennung durch das auf dich gerichtete Mikrofon —
+und die LED-Richtungsanzeige zeigt tatsächlich auf dich.
 
-**Caveats:** one selected mic is a modest improvement, not a magic zoom
-lens. And in the gap between conversations, the device's own speech can
-linger in that two-second memory — follow-up conversations get the weaker
-version of this feature until barge-in/AEC work matures.
+**Haken:** Ein ausgewähltes Mikrofon ist eine maßvolle Verbesserung, kein
+magisches Teleobjektiv. Und in der Lücke zwischen Gesprächen kann die eigene
+Sprache des Geräts in diesem Zwei-Sekunden-Gedächtnis nachhallen —
+Folgegespräche bekommen die schwächere Fassung dieser Funktion, bis die
+Arbeit an Barge-in und AEC reift.
 
-## Stage 5 — The continuous stream
+## Stufe 5 — Der durchgehende Strom
 
-Every 32 milliseconds, the processed audio is sent over WiFi to the
-controller. Always. There is deliberately **no** "only send when it sounds
-like speech" gate on this stream.
+Alle 32 Millisekunden geht der verarbeitete Ton per WLAN an den Controller.
+Immer. Es gibt bewusst **kein** „nur senden, wenn es nach Sprache klingt"
+vor diesem Strom.
 
-**Benefit:** the wake-word recogniser sees smooth, uninterrupted audio,
-which measurably improves its accuracy — and there's no on-device logic
-that can drift, misjudge your room, or degrade over days (both of which
-actually happened with earlier, cleverer designs; boring won).
+**Nutzen:** Die Wakeword-Erkennung sieht gleichmäßiges, ununterbrochenes
+Audio, was ihre Genauigkeit messbar verbessert — und es gibt keine Logik auf
+dem Gerät, die driften, den Raum falsch einschätzen oder über Tage
+schlechter werden kann (beides ist bei früheren, klügeren Entwürfen
+tatsächlich passiert; langweilig hat gewonnen).
 
-That uninterrupted stream is also what makes it possible to run the *same*
-recogniser on the Dot itself and compare the two on byte-identical audio —
-which is exactly what the experimental on-device scoring mode does, without
-being allowed to act on the result. It is also why gating this stream on
-"sounds like speech" would be harder than it looks: the recogniser's internal
-buffers assume continuity, and splicing gated bursts together measurably
-depresses its scores.
+Dieser ununterbrochene Strom macht es außerdem möglich, *dieselbe* Erkennung
+auf dem Dot selbst laufen zu lassen und beide auf bytegleichem Audio zu
+vergleichen — genau das tut der experimentelle Bewertungsmodus auf dem Gerät,
+ohne auf das Ergebnis reagieren zu dürfen. Es ist auch der Grund, warum ein
+„klingt nach Sprache"-Gatter vor diesem Strom schwieriger wäre, als es
+aussieht: Die internen Puffer der Erkennung setzen Kontinuität voraus, und
+zusammengesetzte gegatterte Stücke drücken ihre Werte messbar.
 
-**Caveat:** a constant ~32KB/s per device on your WiFi — about 1/6th of
-what streaming the *response* audio uses, so in practice a non-issue on any
-home network. And to be clear about privacy: the stream goes to *your*
-controller on *your* LAN and nowhere else.
+**Haken:** dauerhaft rund 32 KB/s pro Gerät in deinem WLAN — etwa ein Sechstel
+dessen, was das Streamen der *Antwort* braucht, in der Praxis also in keinem
+Heimnetz ein Thema. Und zur Klarheit in Sachen Privatsphäre: Der Strom geht an
+*deinen* Controller in *deinem* LAN und nirgendwo sonst.
 
-## Stage 6 — Wake-word spotting
+## Stufe 6 — Wakeword-Erkennung
 
-The controller runs openwakeword, a small neural network, over each
-device's stream, scoring every moment: "how much did that sound like the
-wake word?" Cross the sensitivity bar and the conversation starts.
+Der Controller lässt openwakeword, ein kleines neuronales Netz, über den
+Strom jedes Geräts laufen und bewertet jeden Moment: „Wie sehr klang das nach
+dem Wakeword?" Wird die Empfindlichkeitsschwelle überschritten, beginnt das
+Gespräch.
 
-With more than one device online, the **first** Echo to hear you answers
-straight away, and any other device detecting the same word within the
-**arbitration window** (default 700ms, configurable) stands down silently,
-its ring going dark as soon as the other device claims the turn.
-One utterance, one response, even in earshot of two devices — and no added
-latency, because the winner claims the turn on the spot rather than waiting
-out the window.
+Sind mehrere Geräte online, antwortet der **erste** Echo, der dich hört,
+sofort; jedes andere Gerät, das dasselbe Wort innerhalb des
+**Arbitrierungsfensters** erkennt (standardmäßig 700 ms, einstellbar), tritt
+still zurück, und sein Ring erlischt, sobald das andere Gerät das Gespräch
+für sich beansprucht. Eine Äußerung, eine Antwort, auch in Hörweite zweier
+Geräte — und ohne zusätzliche Verzögerung, weil der Gewinner das Gespräch
+sofort beansprucht, statt das Fenster abzuwarten.
 
-An earlier design instead waited out the window and gave the turn to
-whichever device heard you *best*. It was dropped for two measured reasons:
-it taxed every wake by ~364ms even with nothing competing, and the
-signal-to-noise winner produced a *worse* transcript than the device that
-simply heard you first.
+Ein früherer Entwurf wartete das Fenster stattdessen ab und gab das Gespräch
+dem Gerät, das dich am *besten* gehört hatte. Er wurde aus zwei gemessenen
+Gründen verworfen: Er belastete jedes Aufwachen mit rund 364 ms, selbst ohne
+Konkurrenz, und der Gewinner nach Signal-Rausch-Abstand lieferte ein
+*schlechteres* Transkript als das Gerät, das dich schlicht zuerst gehört
+hatte.
 
-**Benefit:** because this runs on the controller rather than the Dot, you
-can change the wake word or sensitivity live from the dashboard, see every
-detection *and* every near-miss in the Status tab, and future improvements
-don't need firmware updates.
+**Nutzen:** Weil das auf dem Controller statt auf dem Dot läuft, kannst du
+Wakeword und Empfindlichkeit live im Dashboard ändern, jeden Treffer *und*
+jeden Beinahe-Treffer im Reiter „Status" sehen, und künftige Verbesserungen
+brauchen keine Firmware-Updates.
 
-**Caveat:** it's a probability, not a certainty — the sensitivity slider is
-a false-accepts vs. false-rejects trade-off you tune to your room (the
-near-miss counter exists precisely to make that tuning informed rather than
-vibes-based).
+**Haken:** Es ist eine Wahrscheinlichkeit, keine Gewissheit — der
+Empfindlichkeitsregler ist ein Kompromiss zwischen Fehlauslösern und
+Nichterkennungen, den du auf deinen Raum abstimmst (der Beinahe-Treffer-Zähler
+existiert genau dafür, diese Abstimmung informiert statt gefühlsmäßig zu
+machen).
 
-## Stage 7 — The conversation ("turn")
+## Stufe 7 — Das Gespräch („Turn")
 
-On wake: the LED goes green, the device's mic selection locks toward you,
-and the controller pipes your audio to Home Assistant, which decides when
-you've stopped talking (its own speech detector does this — with a
-controller-side backstop that quietly ends things after 5 seconds if a
-false wake meant nobody was speaking, judged against that room's measured
-background noise level).
+Beim Aufwachen: Die LED wird grün, die Mikrofonwahl des Geräts richtet sich
+auf dich aus, und der Controller leitet deinen Ton an Home Assistant weiter,
+das entscheidet, wann du aufgehört hast zu sprechen (das übernimmt dessen
+eigene Sprachaktivitätserkennung — mit einer Rückfallsicherung im Controller,
+die nach 5 Sekunden still beendet, wenn ein Fehlwecken bedeutete, dass
+niemand sprach; gemessen am erfassten Grundgeräuschpegel dieses Raums).
 
-**Benefit:** endpointing ("has the user finished?") is done by Home
-Assistant's well-maintained detector rather than home-grown logic, and the
-false-wake backstop adapts to each room by itself — a quiet study and a
-loud lounge get equally sensible behaviour with zero tuning.
+**Nutzen:** Das Erkennen des Sprechendes („ist der Nutzer fertig?") erledigt
+die gut gepflegte Erkennung von Home Assistant statt selbstgebauter Logik,
+und die Fehlwecken-Sicherung passt sich jedem Raum von allein an — ein ruhiges
+Arbeitszimmer und ein lautes Wohnzimmer verhalten sich beide vernünftig, ohne
+dass du etwas einstellst.
 
-**There is a second backstop, for when that detector never starts at all.**
-Home Assistant needs to hear about a third of a second of speech it is
-confident about before it will decide you have started talking — and until it
-decides that, it cannot decide you have stopped. A short command like "stop"
-may never clear that bar, in which case Home Assistant waits out its own
-fifteen-second limit and then reports the turn as though you had simply
-finished speaking. Nothing it sends says otherwise, which is why this looked
-for a long time like the Echo being slow.
+**Es gibt eine zweite Sicherung, für den Fall, dass diese Erkennung gar nicht
+erst anspringt.** Home Assistant muss etwa eine drittel Sekunde Sprache hören,
+bei der es sich sicher ist, bevor es entscheidet, dass du angefangen hast zu
+sprechen — und bevor es das entscheidet, kann es nicht entscheiden, dass du
+aufgehört hast. Ein kurzer Befehl wie „Stopp" nimmt diese Hürde womöglich nie;
+dann wartet Home Assistant sein eigenes Fünfzehn-Sekunden-Limit ab und meldet
+das Gespräch, als hättest du einfach zu Ende gesprochen. Nichts, was es
+sendet, sagt etwas anderes — deshalb sah das lange so aus, als wäre der Echo
+langsam.
 
-So the controller watches for that specific shape — speech heard, and Home
-Assistant still not having said it noticed — and ends the turn itself about a
-second after you stop. Whenever Home Assistant's own detector is working, it
-still decides; its judgement is better than ours. Reported upstream as
+Also achtet der Controller auf genau dieses Muster — Sprache gehört, und Home
+Assistant hat immer noch nicht gesagt, dass es das bemerkt hat — und beendet
+das Gespräch etwa eine Sekunde nach deinem Verstummen selbst. Wann immer die
+eigene Erkennung von Home Assistant funktioniert, entscheidet weiterhin sie;
+ihr Urteil ist besser als unseres. Upstream gemeldet als
 home-assistant/core#181747.
 
-**Caveat:** in a noisy room, the detector sometimes hangs on a beat too
-long and the tail of TV dialogue rides along into speech-to-text (you'll
-occasionally see a stray phrase appended to your transcript). Cleaning the
-audio sent to speech-to-text is the next planned fix for this.
+**Haken:** In einem lauten Raum hängt die Erkennung manchmal einen Takt zu
+lange, und der Ausklang eines Fernsehdialogs reist mit in die Spracherkennung
+(gelegentlich siehst du einen fremden Satzfetzen an dein Transkript
+angehängt). Den Ton vor der Spracherkennung zu säubern ist die nächste
+geplante Verbesserung dafür.
 
-## Stage 8 — Speech-to-text, understanding, action
+## Stufe 8 — Spracherkennung, Verstehen, Aktion
 
-Home Assistant's Assist pipeline takes over: your speech becomes text
-(Whisper or whichever STT you've configured), the text becomes intent
-("turn off + kitchen lights"), the action happens, and a reply is composed.
+Die Assist-Pipeline von Home Assistant übernimmt: Deine Sprache wird Text
+(Whisper oder welche Spracherkennung du konfiguriert hast), der Text wird
+Absicht („ausschalten + Küchenlicht"), die Aktion passiert, und eine Antwort
+wird formuliert.
 
-**Benefit:** this is all standard, well-documented Home Assistant machinery
-— every STT/LLM/TTS option HA supports works, and Revoice doesn't need to
-know anything about it.
+**Nutzen:** Das ist alles gewöhnliche, gut dokumentierte
+Home-Assistant-Maschinerie — jede STT-, LLM- und TTS-Option, die HA
+unterstützt, funktioniert, und Revoice muss nichts davon wissen.
 
-**Caveat:** it's also where most of the *time* goes (transcription and
-response generation are the slow steps, especially on modest hardware), and
-where background-noise transcription errors ultimately land. Better mics and
-cleaner audio help; they can't fully substitute for a good STT model.
+**Haken:** Hier geht auch die meiste *Zeit* hin (Transkription und
+Antworterzeugung sind die langsamen Schritte, besonders auf bescheidener
+Hardware), und hier landen letztlich die Transkriptionsfehler durch
+Hintergrundgeräusche. Bessere Mikrofone und saubereres Audio helfen; ein gutes
+STT-Modell ersetzen sie nicht.
 
-## Stage 9 — The response
+## Stufe 9 — Die Antwort
 
-The reply audio comes back through the controller, which shapes the sound
-and streams it to the Dot, which plays it while a copy is fed to the echo
-canceller (Stage 3) so the mics can subtract it. The audio arrives at the
-hardware's native rate: the satellite tells Home Assistant what format the
-speaker wants (48kHz mono), so recent HA versions transcode at source, and
-ffmpeg covers anything else during decode.
+Der Antwortton kommt durch den Controller zurück, der den Klang bearbeitet
+und ihn zum Dot streamt, der ihn abspielt, während eine Kopie an die
+Echo-Auslöschung geht (Stufe 3), damit die Mikrofone ihn abziehen können. Der
+Ton kommt in der nativen Rate der Hardware an: Der Satellit sagt Home
+Assistant, welches Format der Lautsprecher will (48 kHz mono), sodass neuere
+HA-Versionen an der Quelle umwandeln; ffmpeg deckt beim Dekodieren alles
+Übrige ab.
 
-While it plays, the ring throbs in time with the audio, and it clears when
-the Dot reports that it has *actually* finished rather than when the
-controller estimates it should have. The old estimate could clear the ring
-several seconds before the speaker stopped on a slow WiFi link — the device
-is the only party that knows when its own buffer runs dry.
+Während der Wiedergabe pulsiert der Ring im Takt, und er erlischt, wenn der
+Dot meldet, dass er *tatsächlich* fertig ist — nicht, wenn der Controller
+schätzt, er müsste es sein. Die alte Schätzung konnte den Ring auf einer
+langsamen WLAN-Strecke mehrere Sekunden vor dem Verstummen des Lautsprechers
+löschen; nur das Gerät weiß, wann sein eigener Puffer leerläuft.
 
-Shaping is three stages, in order: the **equalizer**, then the **bass
-guard**, then the **limiter** — all from the configuration guide. The order
-matters. The guard drops low frequencies the little speaker cannot actually
-produce, which is what makes the middle sound clear rather than boxy; doing
-that before the limiter means the limiter is not holding the whole response
-down to fit bass peaks nobody was going to hear. Measured, the midrange comes
-out slightly *louder* with the guard on than with it off.
+Die Bearbeitung hat drei Stufen, in dieser Reihenfolge: **Equalizer**, dann
+**Bass-Schutz**, dann **Limiter** — alle aus dem Konfigurationsleitfaden. Die
+Reihenfolge ist wichtig. Der Schutz entfernt tiefe Frequenzen, die der kleine
+Lautsprecher gar nicht erzeugen kann, und genau das lässt die Mitten klar
+statt kastig klingen; das vor dem Limiter zu tun heißt, dass der Limiter nicht
+die ganze Antwort herunterhält, um Bassspitzen unterzubringen, die ohnehin
+niemand gehört hätte. Gemessen kommen die Mitten mit eingeschaltetem Schutz
+sogar etwas *lauter* heraus als ohne.
 
-**Benefit:** centrally-applied processing means every device gets consistent,
-tuned sound, adjustable live from the dashboard — and none of it costs the Dot
-any CPU, which matters on hardware already running a mic pipeline and possibly
-a wake word model.
+**Nutzen:** Zentral angewandte Bearbeitung heißt, dass jedes Gerät gleichen,
+abgestimmten Klang bekommt, live im Dashboard änderbar — und nichts davon
+kostet den Dot CPU, was auf Hardware zählt, die schon eine Mikrofonpipeline
+und womöglich ein Wakeword-Modell betreibt.
 
-The reply is **streamed while Home Assistant is still generating it**: the
-response is piped through ffmpeg and out to the Dot as it arrives, rather
-than being fetched and decoded in full first. A long answer starts speaking
-at roughly the same moment a short one would, instead of making you wait for
-the last word to be synthesised before hearing the first. All three stages
-carry their state across chunks, so there's no click at the joins.
+Die Antwort wird **gestreamt, während Home Assistant sie noch erzeugt**: Sie
+läuft durch ffmpeg und zum Dot hinaus, sowie sie ankommt, statt erst
+vollständig geholt und dekodiert zu werden. Eine lange Antwort fängt etwa im
+selben Moment an zu sprechen wie eine kurze, statt dich auf die Synthese des
+letzten Worts warten zu lassen, bevor du das erste hörst. Alle drei Stufen
+tragen ihren Zustand über die Stücke hinweg, es knackt also nicht an den
+Nahtstellen.
 
-**Caveat:** interrupting a response by voice (**barge-in**) works when
-enabled — say the wake word over the top and the response cuts off — but
-it's off by default and depends on AEC being on and tuned (Stage 3): the
-mics stay live during playback, and echo cancellation is what stops the
-device waking itself. Interrupting by *just talking* (without the wake
-word) is deliberately not attempted.
+**Haken:** Eine Antwort per Stimme zu unterbrechen (**Barge-in**)
+funktioniert, wenn es aktiviert ist — sag das Wakeword darüber, und die
+Antwort bricht ab —, aber es ist standardmäßig aus und hängt davon ab, dass
+AEC an und abgestimmt ist (Stufe 3): Die Mikrofone bleiben während der
+Wiedergabe scharf, und die Echo-Auslöschung ist das, was das Gerät davon
+abhält, sich selbst zu wecken. Unterbrechen durch *bloßes Reden* (ohne
+Wakeword) wird bewusst nicht versucht.
 
-## Beyond voice — music
+## Jenseits von Sprache — Musik
 
-Each Echo appears in Home Assistant as a **media player** you can
-actually play things on: `media_player.play_media`, the HA media
-browser, Music Assistant, radio streams. The controller decodes
-whatever you throw at it with ffmpeg and streams it to the speaker,
-running a few seconds ahead so a WiFi hiccup doesn't become an audible
-gap. Pause and stop are still instant — they don't wait for that buffer
-to drain, they throw it away.
+Jeder Echo erscheint in Home Assistant als **Media Player**, auf dem man
+wirklich etwas abspielen kann: `media_player.play_media`, der HA-Medienbrowser,
+Music Assistant, Radiostreams. Der Controller dekodiert mit ffmpeg, was immer
+du ihm hinwirfst, und streamt es zum Lautsprecher, dabei ein paar Sekunden
+voraus, damit ein WLAN-Schluckauf keine hörbare Lücke wird. Pause und Stopp
+sind trotzdem sofort — sie warten nicht, bis dieser Puffer leerläuft, sie
+werfen ihn weg.
 
-Saying the wake word over music **ducks** it: the music drops to a quiet
-bed under the answer and comes back up afterwards. It doesn't pause.
-That matters because those few seconds of lead are already inside the
-Dot when you start speaking, so ducking has to happen on the device —
-and because a Music Assistant flow stream can't be seeked, so pausing
-one used to cost you however long the conversation took, sometimes
-landing you in the next track. The voice itself is never turned down,
-only the bed under it. How far it drops is yours to set (**Ducking**,
-in the Playback section) — it's a taste call best made by ear in the
-actual room.
+Das Wakeword über Musik zu sagen macht sie **leiser** (Ducking): Die Musik
+sinkt zu einem leisen Bett unter der Antwort und kommt danach wieder hoch. Sie
+pausiert nicht. Das ist wichtig, weil diese paar Sekunden Vorlauf beim
+Sprechen schon im Dot liegen, das Absenken also auf dem Gerät passieren muss
+— und weil sich ein Flow-Stream von Music Assistant nicht spulen lässt, eine
+Pause dich also früher so viel kostete, wie das Gespräch dauerte, und dich
+mitunter im nächsten Titel absetzte. Die Stimme selbst wird nie leiser
+gedreht, nur das Bett darunter. Wie weit es absinkt, entscheidest du
+(**Ducking**, im Abschnitt „Playback") — eine Geschmacksfrage, die man am
+besten im echten Raum nach Gehör trifft.
 
-For reliable wake-over-music, enable AEC and barge-in (Stage 3): the
-same echo cancellation that lets you interrupt the assistant's own
-voice is what lets it hear you over a song.
+Damit das Aufwecken über Musik zuverlässig klappt, aktiviere AEC und Barge-in
+(Stufe 3): Dieselbe Echo-Auslöschung, mit der du die eigene Stimme des
+Assistenten unterbrechen kannst, lässt ihn dich über einem Lied hören.
 
-Older firmware that can't mix the two streams falls back to the previous
-behaviour — pause for the turn, resume after.
+Ältere Firmware, die die beiden Ströme nicht mischen kann, fällt auf das
+frühere Verhalten zurück — Pause fürs Gespräch, danach weiter.
 
 ---
 
-## Design principles, if you're wondering "why is it like this?"
+## Entwurfsprinzipien, falls du dich fragst „warum ist das so?"
 
-1. **Dumb device, smart controller.** Anything that can drift, misjudge, or
-   need tuning lives where it can be observed and updated without touching
-   hardware. The Dot captures, amplifies, cancels its own echo, and streams
-   — that's it.
-2. **Measure, don't modify.** The controller tracks each room's noise floor
-   and uses it to make *decisions* (is anyone speaking?), but never rewrites
-   the audio on its way to speech-to-text. Adaptive audio-mangling is how
-   the system's worst historical bugs happened.
-3. **Boring and continuous beats clever and gated.** The always-on,
-   unprocessed wake stream replaced a cleverer design that degraded over
-   days. When in doubt, the pipeline chooses the predictable option.
+1. **Einfaches Gerät, kluger Controller.** Alles, was driften, falsch
+   einschätzen oder abgestimmt werden muss, lebt dort, wo es beobachtet und
+   aktualisiert werden kann, ohne Hardware anzufassen. Der Dot nimmt auf,
+   verstärkt, löscht sein eigenes Echo und streamt — das war's.
+2. **Messen, nicht verändern.** Der Controller verfolgt den
+   Grundgeräuschpegel jedes Raums und nutzt ihn für *Entscheidungen* (spricht
+   jemand?), schreibt den Ton auf dem Weg zur Spracherkennung aber nie um.
+   Adaptives Am-Audio-Herumdrehen ist die Quelle der schlimmsten Fehler in der
+   Geschichte dieses Systems.
+3. **Langweilig und durchgehend schlägt klug und gegattert.** Der immer
+   laufende, unbearbeitete Wakeword-Strom ersetzte einen klügeren Entwurf, der
+   über Tage schlechter wurde. Im Zweifel wählt die Pipeline die
+   vorhersehbare Option.
 
-## What a healthy turn looks like
+## Wie ein gesundes Gespräch aussieht
 
-If your Echo feels slow, the useful question is *which stage* is slow — the
-answer sends you to a completely different component each time. These are
-measured on the reference setup below, so you have something to compare
-against rather than a feeling.
+Wenn sich dein Echo langsam anfühlt, ist die nützliche Frage, *welche Stufe*
+langsam ist — die Antwort schickt dich jedes Mal zu einer völlig anderen
+Komponente. Diese Werte sind auf dem Referenzaufbau unten gemessen, du hast
+also etwas zum Vergleichen statt eines Gefühls.
 
-A "turn on the office light" command, end to end:
+Ein Befehl „mach das Bürolicht an", Ende zu Ende:
 
-| Stage | What it is | Reference |
+| Stufe | Was es ist | Referenz |
 |---|---|---|
-| wake → first frame | the Echo starts streaming | **3ms** |
-| speech | you talking, until Home Assistant's VAD says you stopped | 3.1s |
-| **speech recognition** | Whisper turning audio into text | **1.8s** |
-| **intent** | Home Assistant deciding what you meant, and generating speech | **0.04s** |
-| fetch | downloading the spoken reply | 0.4s |
-| playback | the reply, spoken | 2.2s |
-| **total** | wake word to finished | **7.1s** |
+| Aufwachen → erstes Frame | der Echo beginnt zu streamen | **3 ms** |
+| Sprechen | du redest, bis HAs Erkennung sagt, du hast aufgehört | 3,1 s |
+| **Spracherkennung** | Whisper macht aus Audio Text | **1,8 s** |
+| **Absicht** | Home Assistant entscheidet, was du meintest, und erzeugt Sprache | **0,04 s** |
+| Abholen | die gesprochene Antwort herunterladen | 0,4 s |
+| Wiedergabe | die Antwort, gesprochen | 2,2 s |
+| **gesamt** | Wakeword bis fertig | **7,1 s** |
 
-Most of that is you speaking and the assistant replying. The part a slow
-system inflates is **speech recognition**, and it is the stage most sensitive
-to how much CPU the machine running it has: on two shared cores the same
-commands took **4.8s median and up to 20.5s**, against 2.1s median and a
-1.6–2.6s spread on four. Nothing else in the pipeline changed.
+Das meiste davon bist du beim Sprechen und der Assistent beim Antworten. Der
+Teil, den ein langsames System aufbläht, ist die **Spracherkennung**, und sie
+ist die Stufe, die am empfindlichsten darauf reagiert, wie viel CPU die
+Maschine hat: Auf zwei geteilten Kernen brauchten dieselben Befehle **4,8 s im
+Median und bis zu 20,5 s**, gegen 2,1 s im Median und eine Spanne von 1,6–2,6 s
+auf vier Kernen. Sonst hat sich in der Pipeline nichts geändert.
 
-A local intent like a light or a timer resolves in **tens of milliseconds**.
-If your *intent* stage is seconds rather than milliseconds, you are probably
-routing through a conversation agent (an LLM) rather than Home Assistant's
-built-in intents — which is a choice, not a fault, but it is worth knowing
-which one you made.
+Eine lokale Absicht wie eine Lampe oder ein Timer löst sich in
+**Millisekunden** auf. Wenn deine *Absichts*-Stufe Sekunden statt
+Millisekunden braucht, leitest du wahrscheinlich über einen Konversationsagenten
+(ein LLM) statt über die eingebauten Absichten von Home Assistant — das ist
+eine Entscheidung und kein Fehler, aber es lohnt zu wissen, welche du
+getroffen hast.
 
-Two things worth knowing before you compare:
+Zwei Dinge, die man vor dem Vergleichen wissen sollte:
 
-- **The first request after a restart is always slow**, because the speech
-  model loads on demand. Discard it.
-- **These numbers are a reference, not a target.** A slower machine is not
-  broken. The point is to tell "my speech recognition takes 15 seconds" from
-  "my Echo is not responding", because only one of those is about Revoice.
+- **Die erste Anfrage nach einem Neustart ist immer langsam**, weil das
+  Sprachmodell erst bei Bedarf geladen wird. Verwirf sie.
+- **Diese Zahlen sind eine Referenz, kein Ziel.** Eine langsamere Maschine ist
+  nicht kaputt. Der Punkt ist, „meine Spracherkennung braucht 15 Sekunden" von
+  „mein Echo antwortet nicht" unterscheiden zu können, denn nur eines davon
+  hat mit Revoice zu tun.
 
-### The reference setup
+### Der Referenzaufbau
 
 | | |
 |---|---|
-| Home Assistant | OS 18.2, Core 2026.8.3, in a VM |
-| CPU / RAM | 4 vCPU, 8GB |
-| Speech to text | Whisper add-on, `faster-whisper`, model `auto` |
-| Text to speech | Piper |
-| Revoice controller | Home Assistant add-on |
-| Devices | 2 × Echo Dot 2nd gen, on-device wake word, 2.4GHz WiFi |
+| Home Assistant | OS 18.2, Core 2026.8.3, in einer VM |
+| CPU / RAM | 4 vCPU, 8 GB |
+| Spracherkennung | Whisper-Add-on, `faster-whisper`, Modell `auto` |
+| Sprachausgabe | Piper |
+| Revoice-Controller | Home-Assistant-Add-on |
+| Geräte | 2 × Echo Dot 2. Generation, Wakeword auf dem Gerät, 2,4-GHz-WLAN |
 
-Home Assistant, Whisper, Piper, Music Assistant and the Revoice controller
-all share those four cores. Speech recognition is the hungriest of them by a
-wide margin, so if you run other add-ons on the same box, that is the one
-that will feel it.
-
+Home Assistant, Whisper, Piper, Music Assistant und der Revoice-Controller
+teilen sich diese vier Kerne. Die Spracherkennung ist davon mit weitem Abstand
+die hungrigste — wenn du weitere Add-ons auf derselben Kiste betreibst, ist
+sie diejenige, die es zu spüren bekommt.

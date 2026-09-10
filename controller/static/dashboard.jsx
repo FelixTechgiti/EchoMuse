@@ -8657,7 +8657,7 @@ function App() {
 
       {devices.length === 0 && !loadError && !isAdmin && (
         <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--muted)' }}>
-          No devices yet — power on an Revoice device to see it appear here
+          No devices yet — power on a Revoice device to see it appear here
         </div>
       )}
 

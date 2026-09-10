@@ -1,94 +1,100 @@
-# Support bundles
+# Support-Bundles
 
-When something misbehaves and it isn't obvious why, a support bundle collects
-the diagnostics in one file you can attach to a
-[GitHub issue](https://github.com/wilbowes/EchoMuse/issues).
+Wenn sich etwas seltsam verhält und der Grund nicht offensichtlich ist,
+sammelt ein Support-Bundle die Diagnosen in einer Datei, die du an ein
+[GitHub-Issue](https://github.com/wilbowes/EchoMuse/issues) hängen kannst.
 
-**Settings → Support → Collect bundle**, then Download, or
-`GET /api/support/bundle` if you prefer the API. Admin only.
+**Settings → Support → Collect bundle**, dann Herunterladen — oder
+`GET /api/support/bundle`, wenn dir die API lieber ist. Nur für
+Administratoren.
 
-It is a plain JSON file. **Open it before you send it** — it is readable, and
-you should be able to satisfy yourself about the contents rather than take
-this page's word for it.
+Es ist eine schlichte JSON-Datei. **Öffne sie, bevor du sie verschickst** —
+sie ist lesbar, und du solltest dich selbst vom Inhalt überzeugen können,
+statt dieser Seite zu glauben.
 
-## What it deliberately does not contain
+## Was bewusst nicht darin steht
 
-A bundle is meant to be attached to a public issue, so anything private in it
-is public the moment you send it, permanently. It is built as an **allowlist**:
-every field is named individually and everything else is dropped. A new
-column added to the database is excluded until someone deliberately includes
-it — the failure mode is that support loses a field, never that your data
-leaks.
+Ein Bundle ist dafür gedacht, an ein öffentliches Issue gehängt zu werden —
+alles Private darin ist also in dem Moment öffentlich, in dem du es
+verschickst, und zwar dauerhaft. Es ist als **Positivliste** gebaut: Jedes
+Feld wird einzeln benannt, alles andere fällt weg. Eine neue Spalte in der
+Datenbank ist ausgeschlossen, bis jemand sie bewusst aufnimmt — der
+Fehlerfall ist, dass dem Support ein Feld fehlt, nie dass deine Daten
+abfließen.
 
-Excluded, with no option to include them:
+Ausgeschlossen, ohne Möglichkeit, sie aufzunehmen:
 
-| Not included | Why |
+| Nicht enthalten | Warum |
 |---|---|
-| **Anything you said** — transcripts, `stt_text`, saved audio | Speech from inside your home. There is no opt-in flag, because a flag is a thing people tick and this one cannot be untickled once the file is public. |
-| **Device labels** | You wrote them, and they routinely contain names — "Bedroom - Sam" is a real example. Replaced with `device-1`, `device-2`… |
-| **Network identifiers** — WiFi SSID, BSSID, IP addresses | An SSID is geolocatable from public wardriving databases, so publishing one discloses roughly where you live. |
-| **Credentials** — device tokens, ESPHome PSKs, password hashes, login sessions | Obvious, but stated so it is checkable. |
-| **Dashboard account names** | They appear in log lines like "Shell session opened by …", which nothing else here would have caught. Replaced with the account's role — `<admin>` — which is the part worth knowing. |
-| **File paths** | A data directory is `/home/<your name>/…` on a bare-metal install, so the controller reports sizes only. |
-| **URLs and quoted strings in log lines** | Media URLs carry provider paths and session tokens; quoted strings in turn traces carry transcripts. |
+| **Alles, was du gesagt hast** — Transkripte, `stt_text`, gespeicherter Ton | Sprache aus dem Inneren deines Hauses. Es gibt keinen Opt-in-Schalter, denn ein Schalter ist etwas, das Leute anklicken, und dieser lässt sich nicht mehr zurücknehmen, sobald die Datei öffentlich ist. |
+| **Gerätebezeichnungen** | Die hast du geschrieben, und sie enthalten regelmäßig Namen — „Schlafzimmer – Sam" ist ein echtes Beispiel. Ersetzt durch `device-1`, `device-2` … |
+| **Netzwerkkennungen** — WLAN-SSID, BSSID, IP-Adressen | Eine SSID lässt sich über öffentliche Wardriving-Datenbanken geolokalisieren; sie zu veröffentlichen verrät also ungefähr, wo du wohnst. |
+| **Zugangsdaten** — Geräte-Token, ESPHome-PSKs, Passwort-Hashes, Anmeldesitzungen | Offensichtlich, aber ausgeschrieben, damit es prüfbar ist. |
+| **Kontonamen des Dashboards** | Sie tauchen in Logzeilen wie „Shell session opened by …" auf, was sonst nichts hier abgefangen hätte. Ersetzt durch die Rolle des Kontos — `<admin>` —, denn das ist der Teil, der interessiert. |
+| **Dateipfade** | Ein Datenverzeichnis heißt auf einer Bare-Metal-Installation `/home/<dein Name>/…`, deshalb meldet der Controller nur Größen. |
+| **URLs und Zeichenketten in Anführungszeichen in Logzeilen** | Medien-URLs tragen Anbieterpfade und Sitzungstoken; Zeichenketten in Gesprächsspuren tragen Transkripte. |
 
-Log lines from sources known to carry speech are dropped **whole** rather than
-edited, because partially redacting a line that quotes a transcript is a bet
-on a regular expression.
+Logzeilen aus Quellen, von denen bekannt ist, dass sie Sprache tragen, werden
+**vollständig** verworfen statt bearbeitet — eine Zeile, die ein Transkript
+zitiert, nur teilweise zu schwärzen wäre eine Wette auf einen regulären
+Ausdruck.
 
-## What it does contain, and why each part earns its place
+## Was darin steht, und warum sich jeder Teil seinen Platz verdient
 
-| Included | Why it is needed |
+| Enthalten | Warum es gebraucht wird |
 |---|---|
-| Controller version, schema version | Almost every "is this fixed?" question starts here. |
-| Device serials | Nothing correlates without them. They identify your hardware to you; they are not otherwise meaningful. |
-| Firmware version, rollback slot, approval state | Tells us whether a fix is even present on that device. |
-| **Capabilities** (`mic`, `oww_shadow`, `ambient_light`…) | Decides which Home Assistant entities exist at all. "The light sensor didn't appear" is answered here in one line. |
-| Configuration — thresholds, EQ, LED scenes, wake model | Behaviour, not identity. Keys whose *name* looks credential-shaped are redacted anyway. |
-| Turn metadata — outcome, wake score, stage latencies, underruns | What happened and how long each stage took. No words, just timings and outcomes. |
-| Hourly metrics per device — CPU, memory, storage, temperature, RSSI, RTT | Trends. Signal strength is included; the network's name is not. |
-| The controller's own CPU (1m/5m/1h), memory, storage and uptime | A device starving for audio can be the host running out of CPU, memory or disk. The three windows separate "busy right now" from "busy earlier", which need different answers. Sizes and counts only, never paths. |
-| Wake counters — near-misses, on-device drops, inference timings | Wake-word behaviour without any audio. |
-| Recent controller log lines, sanitised | What the controller itself was doing — the part that explains most "it did the wrong thing" reports. Quoted text and URLs removed. |
-| Recent per-device log lines, sanitised | What each device reported. Repetitive memory dumps are thinned so they cannot crowd out the rest. |
+| Controller-Version, Schemaversion | Fast jede „ist das behoben?"-Frage beginnt hier. |
+| Geräte-Seriennummern | Ohne sie korreliert nichts. Sie identifizieren deine Hardware für dich; darüber hinaus sagen sie nichts aus. |
+| Firmware-Version, Rückfall-Slot, Freigabestatus | Sagt uns, ob eine Behebung auf dem Gerät überhaupt vorhanden ist. |
+| **Fähigkeiten** (`mic`, `oww_shadow`, `ambient_light` …) | Entscheidet, welche Home-Assistant-Entitäten überhaupt existieren. „Der Lichtsensor tauchte nicht auf" wird hier in einer Zeile beantwortet. |
+| Konfiguration — Schwellwerte, EQ, LED-Szenen, Wake-Modell | Verhalten, nicht Identität. Schlüssel, deren *Name* nach Zugangsdaten aussieht, werden ohnehin geschwärzt. |
+| Gesprächs-Metadaten — Ausgang, Wake-Wert, Stufenlatenzen, Aussetzer | Was passiert ist und wie lange jede Stufe brauchte. Keine Worte, nur Zeiten und Ergebnisse. |
+| Stündliche Messwerte pro Gerät — CPU, Speicher, Ablage, Temperatur, RSSI, RTT | Trends. Die Signalstärke ist dabei, der Name des Netzwerks nicht. |
+| Die CPU des Controllers selbst (1 min / 5 min / 1 h), Speicher, Ablage, Laufzeit | Ein Gerät, dem Audio ausgeht, kann ein Host sein, dem CPU, Speicher oder Platte ausgehen. Die drei Zeitfenster trennen „gerade jetzt beschäftigt" von „vorhin beschäftigt", was unterschiedliche Antworten braucht. Nur Größen und Anzahlen, nie Pfade. |
+| Wake-Zähler — Beinahe-Treffer, Verwürfe auf dem Gerät, Inferenzzeiten | Wakeword-Verhalten ganz ohne Ton. |
+| Jüngste Logzeilen des Controllers, bereinigt | Was der Controller selbst getan hat — der Teil, der die meisten „er hat das Falsche gemacht"-Meldungen erklärt. Zitierter Text und URLs entfernt. |
+| Jüngste Logzeilen je Gerät, bereinigt | Was jedes Gerät gemeldet hat. Sich wiederholende Speicherauszüge werden ausgedünnt, damit sie den Rest nicht verdrängen. |
 
-Roughly the last 24 hours, capped per device.
+Grob die letzten 24 Stunden, pro Gerät gedeckelt.
 
-## Reviewing one before you send it
+## Es durchsehen, bevor du es verschickst
 
-Open the file and look at the top: `redaction` states the contract, and
-`devices[].name` should read `device-1`, not your room names. Searching it for
-your WiFi name or something you said should come up empty.
+Öffne die Datei und sieh dir den Anfang an: `redaction` benennt die Zusage,
+und `devices[].name` sollte `device-1` lauten und nicht deine Raumnamen. Eine
+Suche nach deinem WLAN-Namen oder nach etwas, das du gesagt hast, sollte leer
+ausgehen.
 
-If you find anything in there you would rather not publish, **that is a bug
-and we want to hear about it** — please report it privately rather than in a
-public issue.
+Wenn du darin etwas findest, das du lieber nicht veröffentlichen würdest,
+**ist das ein Fehler, und wir wollen davon hören** — bitte melde ihn privat
+statt in einem öffentlichen Issue.
 
-## If a provisioning step failed instead
+## Wenn stattdessen ein Einrichtungsschritt gescheitert ist
 
-A support bundle describes a device the controller already knows about. A Dot
-that is halfway through the provisioning wizard is not one of those, so the
-wizard collects its own file.
+Ein Support-Bundle beschreibt ein Gerät, das der Controller bereits kennt.
+Ein Dot mitten im Einrichtungsassistenten ist keines davon, also sammelt der
+Assistent seine eigene Datei.
 
-When a step fails it reads the device's state there and then, and a **Download
-diagnostics** button appears next to the error. Collection happens
-automatically, because by the time you have been asked to run `getprop` by
-hand the device has usually been retried or rebooted and the state that failed
-is gone. Sharing it is still your decision.
+Wenn ein Schritt scheitert, liest er den Gerätezustand genau dann aus, und
+neben dem Fehler erscheint eine Schaltfläche **Diagnose herunterladen**. Das
+Sammeln passiert automatisch, denn bis man dich gebeten hätte, `getprop` von
+Hand auszuführen, ist das Gerät meist erneut versucht oder neu gestartet
+worden und der gescheiterte Zustand weg. Ob du sie teilst, bleibt deine
+Entscheidung.
 
-It carries what a failed step needs explaining: which step, the error, the
-build and model, whether root and the package manager answered, free space,
-and what the radio can see. It follows the same rules as a bundle: no speech,
-no network names, no addresses. WiFi scan results keep the security flags and
-frequencies, which are the part that explains a failure, with the network
-names replaced by `network-1`, `network-2` and so on, and the one you were
-trying to join marked.
+Sie enthält, was ein gescheiterter Schritt zur Erklärung braucht: welcher
+Schritt, der Fehler, Build und Modell, ob Root und Paketverwaltung geantwortet
+haben, freier Speicher und was das Funkmodul sieht. Es gelten dieselben Regeln
+wie beim Bundle: keine Sprache, keine Netzwerknamen, keine Adressen.
+WLAN-Scanergebnisse behalten Sicherheitsmerkmale und Frequenzen — den Teil,
+der ein Scheitern erklärt —, während die Netzwerknamen durch `network-1`,
+`network-2` und so weiter ersetzt werden und dasjenige, dem du beitreten
+wolltest, markiert ist.
 
-Same advice: open it before you send it.
+Derselbe Rat: Öffne sie, bevor du sie verschickst.
 
-## Retention
+## Aufbewahrung
 
-The bundle is a file on your machine. Nothing is uploaded anywhere by
-generating one; it goes wherever you choose to put it, and deleting it is
-enough. Regenerate rather than keeping old ones around — they are only useful
-alongside a current problem.
+Das Bundle ist eine Datei auf deinem Rechner. Durch das Erzeugen wird nichts
+irgendwohin hochgeladen; es landet dort, wo du es hinlegst, und Löschen
+genügt. Erzeuge lieber ein neues, statt alte aufzuheben — sie sind nur neben
+einem aktuellen Problem nützlich.
