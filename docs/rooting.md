@@ -1,308 +1,357 @@
-# Rooting the Echo Dot Gen 2 (biscuit)
+# Den Echo Dot Gen 2 (biscuit) rooten
 
-> **You do this at your own risk. We accept no responsibility for negative
-> outcomes experienced.**
+> **Du tust das auf eigenes Risiko. Wir übernehmen keine Verantwortung für
+> negative Folgen.**
 
-Revoice needs an Echo Dot Gen 2 that is already unlocked and running
-FireOS 5. Two separate jobs get you there, and they carry very different
-risk.
+Revoice braucht einen Echo Dot Gen 2, der bereits entsperrt ist und FireOS 5
+läuft. Zwei getrennte Arbeiten bringen dich dorthin, und sie tragen sehr
+unterschiedliche Risiken.
 
 ## Hardware
 
-- Amazon Echo Dot 2nd Gen (RS03QR, 2016)
+- Amazon Echo Dot 2. Generation (RS03QR, 2016)
 - Codename: biscuit
-- SoC: MediaTek MT8163, quad-core ARM Cortex-A53 @ 1.5GHz
-- RAM: 512MB
-- OS: FireOS 5 (Android 5.1, API 22) — see the note below on FireOS 6
-- MicroUSB cable required
+- SoC: MediaTek MT8163, Quad-Core ARM Cortex-A53 @ 1,5 GHz
+- RAM: 512 MB
+- Betriebssystem: FireOS 5 (Android 5.1, API 22) — siehe den Hinweis unten zu
+  FireOS 6
+- Micro-USB-Kabel erforderlich
 
-> **FireOS 6 exists for biscuit and cannot be booted once you have unlocked.**
-> `Fire OS 6.5.7.0 (NS6570/6077)` is real, and amonet's instructions tell you
-> to update *to* it before unlocking, because the exploit downgrades the
-> firmware partitions on the way through. But after unlocking, only FireOS 5
-> based ROMs boot — R0rt1z2's thread is explicit that flashing FireOS 6 "may
+> **FireOS 6 gibt es für biscuit und es lässt sich nach dem Entsperren nicht
+> mehr booten.** `Fire OS 6.5.7.0 (NS6570/6077)` existiert wirklich, und die
+> Anleitung von amonet sagt dir, du sollst vor dem Entsperren *darauf*
+> aktualisieren, weil der Exploit die Firmware-Partitionen unterwegs
+> herabstuft. Nach dem Entsperren booten aber nur ROMs auf FireOS-5-Basis —
+> R0rt1z2s Thread sagt ausdrücklich, dass das Flashen von FireOS 6 „may
 > result in a (soft) brick".
 >
-> Two reasons, and the second is the real one. FireOS 6 on this board is a
-> **32-bit** kernel while amonet's payload forced 64-bit — since fixed
-> upstream, by parsing the cmdline. The blocker underneath is the signature
-> chain: FireOS 6 likely needs a newer TrustZone, and a newer TZ cannot be
-> flashed because the FireOS 5 preloader refuses to boot one whose signature
-> differs. That is below the boundary this project writes to, so it is not
-> something Revoice can address.
+> Zwei Gründe, und der zweite ist der eigentliche. FireOS 6 ist auf diesem
+> Board ein **32-Bit**-Kernel, während amonets Payload 64 Bit erzwang — das
+> ist upstream behoben, indem die cmdline ausgewertet wird. Der Blocker
+> darunter ist die Signaturkette: FireOS 6 braucht vermutlich eine neuere
+> TrustZone, und eine neuere TZ lässt sich nicht flashen, weil der
+> FireOS-5-Preloader eine mit abweichender Signatur nicht bootet. Das liegt
+> unterhalb der Grenze, in die dieses Projekt schreibt, Revoice kann daran
+> also nichts ändern.
 >
-> Practically: Revoice targets FireOS 5, and a newer Android is not a route
-> to a newer kernel on this device.
+> Praktisch: Revoice zielt auf FireOS 5, und ein neueres Android ist auf
+> diesem Gerät kein Weg zu einem neueren Kernel.
 
-## What you need
+## Was du brauchst
 
-For the unlock itself (R0rt1z2's thread has the authoritative list):
+Für das Entsperren selbst (die maßgebliche Liste steht in R0rt1z2s Thread):
 
-- **Linux machine** with ADB and fastboot installed — see the note below on macOS
-- Python 3 (for boot image patching and Magisk DB creation)
-- The following files downloaded and ready:
-  - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread
-  - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
-    (**this exact build** — see below)
-  - `f1r30s.zip` — from R0rt1z2's XDA thread. Does four things, not one:
-    enables ADB and UART console access, blocks Amazon's OTA domains in
-    `/system/etc/hosts` so the device cannot update itself, and disables
-    dm-verity. **Always flash it after a stock firmware image or the OS
-    will not boot** — a stock flash restores verity against a partition
-    table the unlock modified.
-  - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
-  - `server` — compiled Revoice binary (ARM, API 22)
+- **Linux-Rechner** mit installiertem ADB und fastboot — siehe den Hinweis
+  unten zu macOS
+- Python 3 (fürs Patchen des Boot-Images und Anlegen der Magisk-Datenbank)
+- Die folgenden Dateien heruntergeladen und bereit:
+  - `amonet-biscuit-v1.1.0.zip` — aus R0rt1z2s XDA-Thread
+  - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` —
+    FireOS-5-Firmware (**genau dieser Build** — siehe unten)
+  - `f1r30s.zip` — aus R0rt1z2s XDA-Thread. Tut vier Dinge, nicht eines:
+    aktiviert ADB und den UART-Konsolenzugang, blockiert Amazons
+    OTA-Domänen in `/system/etc/hosts`, damit sich das Gerät nicht selbst
+    aktualisieren kann, und deaktiviert dm-verity. **Flashe es immer nach
+    einem Stock-Firmware-Image, sonst startet das System nicht** — ein
+    Stock-Flash stellt Verity gegen eine Partitionstabelle wieder her, die
+    das Entsperren verändert hat.
+  - `Magisk-v17.3.zip` — von
+    [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
+  - `server` — kompiliertes Revoice-Binary (ARM, API 22)
 
-> **Which FireOS 5 build?** R0rt1z2's thread lists six that boot on an
-> unlocked Dot, and Revoice is developed and tested against exactly one:
-> **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`. Every device in the
-> project's own fleet runs it. The older builds are not known to be broken —
-> they are simply untested here, and firmware defaults differ between builds
-> in ways that reach USB and ADB behaviour. If you are choosing, choose this
-> one. If you already have a device on another build and something behaves
-> oddly, that is the first thing to mention when reporting it.
+> **Welcher FireOS-5-Build?** R0rt1z2s Thread listet sechs, die auf einem
+> entsperrten Dot booten, und Revoice wird gegen genau einen entwickelt und
+> getestet: **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`. Jedes Gerät in
+> der Flotte dieses Projekts läuft damit. Die älteren Builds sind nicht als
+> kaputt bekannt — sie sind hier schlicht ungetestet, und
+> Firmware-Voreinstellungen unterscheiden sich zwischen Builds auf Weisen,
+> die bis ins USB- und ADB-Verhalten reichen. Wenn du die Wahl hast, nimm
+> diesen. Wenn du bereits ein Gerät auf einem anderen Build hast und sich
+> etwas seltsam verhält, ist das die erste Angabe für eine Fehlermeldung.
 >
-> Check what you have with `adb shell getprop ro.build.version.name`. The
-> provisioning wizard reads it at the first step and says so in the log.
+> Prüfe deinen Stand mit `adb shell getprop ro.build.version.name`. Der
+> Einrichtungsassistent liest ihn im ersten Schritt und schreibt ihn ins Log.
 
-> **Why Magisk 17.3?** Newer versions dropped support for Android 5.1 (API 22). 25.x installs but the daemon silently fails. 17.3 is the last version that works reliably on this device.
+> **Warum Magisk 17.3?** Neuere Versionen haben die Unterstützung für Android
+> 5.1 (API 22) fallen lassen. 25.x installiert sich, aber der Daemon scheitert
+> still. 17.3 ist die letzte Version, die auf diesem Gerät zuverlässig
+> funktioniert.
 
-> **Use Linux for the unlock.** `brick.sh` has been reported failing on
-> macOS, and the project's own devices were unlocked from a Linux install on
-> a Mac rather than from macOS itself. A live USB is enough — the unlock is
-> the only step that needs it. The unlock is R0rt1z2's work, so questions
-> about it belong on the XDA thread; this is only a note about what has been
-> observed to work.
+> **Nimm für das Entsperren Linux.** Von `brick.sh` wurde berichtet, dass es
+> unter macOS scheitert, und die Geräte des Projekts wurden von einer
+> Linux-Installation auf einem Mac entsperrt und nicht aus macOS heraus. Ein
+> Live-USB-Stick genügt — das Entsperren ist der einzige Schritt, der ihn
+> braucht. Das Entsperren ist R0rt1z2s Arbeit, Fragen dazu gehören also in den
+> XDA-Thread; das hier ist nur eine Notiz darüber, was beobachtet
+> funktioniert.
 >
-> **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`.
+> **ADB-Stabilität unter Linux:** Linux verwaltet die Energie von USB-Geräten
+> von Haus aus aggressiv, was ADB-Abbrüche verursacht. Schalte das
+> automatische Aussetzen vor dem Start ab:
+> `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`.
 
-For the Revoice half, the provisioning wizard needs only a **Chromium-based
-browser** (Chrome or Edge — it talks to the device over WebUSB) and a running
-controller. It fetches the firmware itself, so the `server` binary above is
-only needed if you are provisioning by hand.
+Für die Revoice-Hälfte braucht der Einrichtungsassistent nur einen
+**Chromium-basierten Browser** (Chrome oder Edge — er spricht per WebUSB mit
+dem Gerät) und einen laufenden Controller. Er holt die Firmware selbst, das
+`server`-Binary oben brauchst du also nur, wenn du von Hand einrichtest.
 
 ---
 
-## Unlocking the device — R0rt1z2's amonet-biscuit
+## Das Gerät entsperren — R0rt1z2s amonet-biscuit
 
-The persistent unlock, the bootrom exploit and TWRP for this device are
-**R0rt1z2's** work, documented and maintained here:
+Das dauerhafte Entsperren, der Bootrom-Exploit und TWRP für dieses Gerät sind
+**R0rt1z2s** Arbeit, dokumentiert und gepflegt hier:
 
 - [amonet-biscuit — unlock, root, TWRP, unbrick](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
-  on XDA Forums
+  im XDA-Forum
 
-Follow that thread, not this page. We link to it rather than copying it
-because a copy goes out of date without anyone noticing. If the two ever
-disagree, the thread is correct.
+Folge diesem Thread, nicht dieser Seite. Wir verlinken ihn, statt ihn zu
+kopieren, weil eine Kopie veraltet, ohne dass es jemand merkt. Sollten die
+beiden sich je widersprechen, hat der Thread recht.
 
-**This is the part that can ruin a device.** It runs a bootrom exploit,
-modifies the partition table and wipes userdata. A failure here can leave a
-Dot soft-bricked badly enough that recovery means opening the case and
-shorting contacts on the board. Read the thread first, and do not start on a
-device you cannot afford to lose.
+**Das ist der Teil, der ein Gerät ruinieren kann.** Er führt einen
+Bootrom-Exploit aus, verändert die Partitionstabelle und löscht `userdata`.
+Ein Fehler hier kann einen Dot so weit soft-bricken, dass die Rettung heißt,
+das Gehäuse zu öffnen und Kontakte auf der Platine zu brücken. Lies zuerst den
+Thread, und fang nicht auf einem Gerät an, dessen Verlust du dir nicht leisten
+kannst.
 
-## Where Revoice picks up
+## Wo Revoice übernimmt
 
-Everything below assumes you already have:
+Alles Weitere setzt voraus, dass du bereits hast:
 
-- An Echo Dot Gen 2 (**biscuit**) with the persistent unlock applied
-- **TWRP** installed and bootable
-- **FireOS 5** (Android 5.1) sideloaded
+- Einen Echo Dot Gen 2 (**biscuit**) mit angewandtem dauerhaftem Entsperren
+- **TWRP** installiert und startfähig
+- **FireOS 5** (Android 5.1) per Sideload aufgespielt
 
-Once those are done, Revoice takes over. The provisioning wizard in the
-dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
-from a device already in that state; it does not run the exploit.
+Sind die erledigt, übernimmt Revoice. Der Einrichtungsassistent im Dashboard
+erledigt den Rest — siehe den [Schnellstart](quickstart.md). Er beginnt bei
+einem Gerät, das bereits in diesem Zustand ist; er führt den Exploit nicht
+aus.
 
-### The wizard has two flows, and they write different things
+### Der Assistent hat zwei Abläufe, und sie schreiben Unterschiedliches
 
-**This matters before you start, because they are not equally reversible.**
+**Das ist vor dem Start wichtig, weil sie nicht gleich gut umkehrbar sind.**
 
-- **emOS** — the current default. Nine steps, all inside TWRP. It escrows your
-  boot partition and hands you the file, then replaces that partition with an
-  image built from your own kernel and device trees plus our init. The result
-  runs no Amazon userspace at all. See [`emos/README.md`](../emos/README.md).
-- **FireOS** — thirteen steps, chosen on the wizard's first step (or by
-  adding `?flow=fireos` to the dashboard URL).
-  Keeps Android and adds root: the SELinux cmdline patch, Magisk, and the
-  root-grant database. This is the path every device in the field took.
+- **emOS** — die aktuelle Voreinstellung. Neun Schritte, alle innerhalb von
+  TWRP. Er legt deine Boot-Partition in Verwahrung und gibt dir die Datei,
+  dann ersetzt er diese Partition durch ein Image aus deinem eigenen Kernel
+  und deinen Device Trees plus unserer init. Das Ergebnis betreibt überhaupt
+  keine Amazon-Userspace-Software. Siehe
+  [`emos/README.md`](../emos/README.md).
+- **FireOS** — dreizehn Schritte, auf dem ersten Schritt des Assistenten
+  wählbar (oder durch Anhängen von `?flow=fireos` an die Dashboard-URL).
+  Behält Android und ergänzt Root: den SELinux-cmdline-Patch, Magisk und die
+  Datenbank der Root-Freigaben. Diesen Weg ist jedes Gerät im Feld gegangen.
 
-Both leave a failed step with the device still in TWRP and say so. The
-difference that matters afterwards:
+Beide lassen bei einem gescheiterten Schritt das Gerät in TWRP zurück und
+sagen das auch. Der Unterschied, auf den es danach ankommt:
 
-**A device on emOS cannot be re-provisioned by the wizard, and going back
-wipes it.** emOS runs no adbd — it cannot, since adbd needs Android's property
-service — so the wizard's first step finds no device to talk to. Returning to
-FireOS means booting TWRP by hand, wiping cache and data, sideloading the
-FireOS 5 image and then flashing `f1r30s.zip`. That erases `/data`, taking
-Revoice, its configuration and its credentials with it. **`f1r30s.zip` is not
-optional** — a stock flash restores dm-verity against a partition table the
-unlock modified, and without it the device does not boot.
+**Ein Gerät auf emOS kann der Assistent nicht erneut einrichten, und der Weg
+zurück löscht es.** emOS betreibt kein adbd — es kann das nicht, denn adbd
+braucht Androids Property-Dienst —, der erste Schritt des Assistenten findet
+also kein Gerät zum Ansprechen. Zurück zu FireOS heißt: TWRP von Hand starten,
+Cache und Daten löschen, das FireOS-5-Image per Sideload aufspielen und danach
+`f1r30s.zip` flashen. Das löscht `/data` und nimmt Revoice, seine
+Konfiguration und seine Zugangsdaten mit. **`f1r30s.zip` ist nicht optional**
+— ein Stock-Flash stellt dm-verity gegen eine Partitionstabelle wieder her,
+die das Entsperren verändert hat, und ohne die Datei bootet das Gerät nicht.
 
-Keep the escrowed boot image the emOS flow hands you at step 3. Writing it back
-takes about ten seconds, leaves `/data` alone, and is the undo for everything
-below.
+Bewahre das verwahrte Boot-Image auf, das dir der emOS-Ablauf in Schritt 3
+gibt. Es zurückzuschreiben dauert etwa zehn Sekunden, lässt `/data` in Ruhe
+und ist das Rückgängig für alles Weitere.
 
-## What Revoice writes, and what it does not
+## Was Revoice schreibt und was nicht
 
-This device has several layers below the operating system, and Revoice only
-ever writes the FireOS one. Lowest first:
+Dieses Gerät hat mehrere Schichten unterhalb des Betriebssystems, und Revoice
+schreibt immer nur in die FireOS-Schicht. Die unterste zuerst:
 
-| Layer | What it is | Written by Revoice |
+| Schicht | Was es ist | Von Revoice beschrieben |
 |---|---|---|
-| Preloader | First stage of boot. Tracks boot attempts per slot. | No |
-| LK (bootloader) | What `lk_build_desc` and `unlock_status` come from. amonet patches this. | No |
-| amonet's unlock payload | Chainloads the real kernel. `mmcblk0p17` / `p18`. | No |
-| TWRP (recovery) | | No, the wizard only runs commands inside it |
-| FireOS kernel and ramdisk | `mmcblk0p10` / `p11`. | **Yes**, one write |
-| `/system`, `/data` | FireOS userspace. | Yes, files only |
+| Preloader | Erste Bootstufe. Zählt Bootversuche je Slot. | Nein |
+| LK (Bootloader) | Woher `lk_build_desc` und `unlock_status` kommen. amonet patcht das. | Nein |
+| amonets Entsperr-Payload | Lädt den echten Kernel nach. `mmcblk0p17` / `p18`. | Nein |
+| TWRP (Recovery) | | Nein, der Assistent führt darin nur Befehle aus |
+| FireOS-Kernel und -Ramdisk | `mmcblk0p10` / `p11`. | **Ja**, ein Schreibvorgang |
+| `/system`, `/data` | FireOS-Userspace. | Ja, nur Dateien |
 
-There is a single partition write either way, and TWRP presents that partition
-as `/dev/block/other-boot`. What goes into it differs by flow: the **FireOS**
-flow's Patch Boot Image step adds the SELinux permissive cmdline and the
-`service revoice` init entry to the kernel already there, while the **emOS**
-flow replaces the partition with an image rebuilt from that same kernel and
-device trees. Neither touches any layer above `No` in the table.
+Es gibt in beiden Abläufen genau einen Partitionsschreibvorgang, und TWRP
+zeigt diese Partition als `/dev/block/other-boot`. Was hineingeht,
+unterscheidet sich je Ablauf: Der Schritt „Patch Boot Image" des
+**FireOS**-Ablaufs ergänzt am bereits vorhandenen Kernel die
+SELinux-permissive-cmdline und den init-Eintrag `service revoice`, während
+der **emOS**-Ablauf die Partition durch ein Image ersetzt, das aus genau
+diesem Kernel und diesen Device Trees neu gebaut wurde. Keiner von beiden
+rührt eine Schicht über `Nein` in der Tabelle an.
 
-**The by-name directory means different things in TWRP and in Android**, which
-is worth knowing before reading any of it as gospel. Measured on hardware:
+**Das By-Name-Verzeichnis bedeutet in TWRP etwas anderes als in Android**, und
+das ist gut zu wissen, bevor man irgendetwas davon für bare Münze nimmt. Auf
+Hardware gemessen:
 
-| by-name entry | In TWRP | In Android |
+| By-Name-Eintrag | In TWRP | In Android |
 |---|---|---|
-| `boot_a` | `p10`, the kernel | `p17`, the payload |
-| `boot_a_x` | `p10`, the kernel | `p10`, the kernel |
-| `boot_a_amonet` | `p17`, the payload | not present |
+| `boot_a` | `p10`, der Kernel | `p17`, die Payload |
+| `boot_a_x` | `p10`, der Kernel | `p10`, der Kernel |
+| `boot_a_amonet` | `p17`, die Payload | nicht vorhanden |
 
-TWRP remaps the bare names onto the kernel partitions and exposes the payload
-explicitly as `*_amonet`. So the same name means opposite things depending on
-where you are standing, and `p10` answers to two names at once.
+TWRP bildet die bloßen Namen auf die Kernel-Partitionen ab und legt die
+Payload ausdrücklich als `*_amonet` offen. Derselbe Name bedeutet also
+Gegensätzliches, je nachdem, wo man steht, und `p10` hört auf zwei Namen
+zugleich.
 
-Before writing, the wizard resolves `/dev/block/other-boot`, collects every
-by-name alias of whatever it points at, and refuses if any of them is an
-amonet payload partition. Writing a kernel there would destroy the unlock and
-mean running amonet again, so it is checked rather than assumed. It also
-verifies the image it read is a real boot image before patching it, and reads
-the cmdline back off the partition afterwards rather than trusting that the
-write succeeded.
+Vor dem Schreiben löst der Assistent `/dev/block/other-boot` auf, sammelt
+jeden By-Name-Alias dessen, worauf es zeigt, und verweigert, wenn einer davon
+eine amonet-Payload-Partition ist. Einen Kernel dorthin zu schreiben würde das
+Entsperren zerstören und bedeuten, amonet erneut laufen zu lassen — deshalb
+wird es geprüft und nicht angenommen. Er prüft außerdem, dass das gelesene
+Image wirklich ein Boot-Image ist, bevor er es patcht, und liest die cmdline
+danach von der Partition zurück, statt dem Schreibvorgang zu vertrauen.
 
-If any of those checks fail the wizard stops with the device still in TWRP,
-which is a recoverable place to be.
+Scheitert eine dieser Prüfungen, hält der Assistent an, mit dem Gerät noch in
+TWRP — ein Ort, von dem aus man sich erholen kann.
 
-## If a device will not boot
+## Wenn ein Gerät nicht bootet
 
-Anything at or below the bootloader is the unlock's territory, and
-[R0rt1z2's thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
-is the authority on it. One thing from that thread is worth repeating here
-because it is time-critical:
+Alles auf oder unterhalb des Bootloaders ist das Gebiet des Entsperrens, und
+[R0rt1z2s Thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
+ist dafür maßgeblich. Eine Sache aus diesem Thread ist es wert, hier wiederholt
+zu werden, weil sie zeitkritisch ist:
 
-> **Stop trying to boot it.** The preloader tracks boot attempts per slot, and
-> if both slots run out of attempts the device stops booting altogether.
+> **Hör auf, es booten zu wollen.** Der Preloader zählt Bootversuche je Slot,
+> und wenn beiden Slots die Versuche ausgehen, bootet das Gerät gar nicht
+> mehr.
 
-That state is recoverable, but the easy routes are gone: getting back in means
-opening the case and shorting a pin on the board to reach the bootrom, which
-R0rt1z2's thread documents and describes as not especially difficult. A device
-sitting in fastboot or TWRP on the end of a cable needs none of that.
-Repeatedly power cycling one that will not boot is what turns the first
-situation into the second.
+Aus diesem Zustand kommt man wieder heraus, aber die leichten Wege sind weg:
+Der Rückweg heißt, das Gehäuse zu öffnen und einen Pin auf der Platine zu
+brücken, um an das Bootrom zu kommen — R0rt1z2s Thread dokumentiert das und
+beschreibt es als nicht besonders schwierig. Ein Gerät, das am Kabel in
+fastboot oder TWRP sitzt, braucht nichts davon. Eines, das nicht bootet,
+wiederholt vom Strom zu trennen, ist es, was aus der ersten Lage die zweite
+macht.
 
-## How well tested is this?
+## Wie gut ist das getestet?
 
-**The two flows have very different amounts of evidence behind them, and the
-default is the newer one.**
+**Die beiden Abläufe haben sehr unterschiedlich viel Beleg hinter sich, und
+die Voreinstellung ist der neuere.**
 
-Eight devices have been through the **FireOS** flow's steps without a failure.
-That is a small sample, all of it on the same model by the same person, so
-treat it as encouraging rather than conclusive.
+Acht Geräte haben die Schritte des **FireOS**-Ablaufs ohne Fehler durchlaufen.
+Das ist eine kleine Stichprobe, alles am selben Modell von derselben Person —
+nimm es also als ermutigend, nicht als abschließend.
 
-The **emOS** flow has completed end to end on hardware, but only recently and
-on a handful of devices. Its first full run against a device restored to
-genuine stock failed at four separate steps before it worked — all four were
-faults in the wizard's own checks rather than in the writes, and all four are
-fixed, but that is the maturity to price in. If you want the better-evidenced
-path today, pick FireOS on the wizard's first step.
+Der **emOS**-Ablauf ist von Anfang bis Ende auf Hardware durchgelaufen, aber
+erst seit Kurzem und auf einer Handvoll Geräte. Sein erster vollständiger Lauf
+gegen ein auf echten Auslieferungszustand zurückgesetztes Gerät scheiterte an
+vier verschiedenen Schritten, bevor er funktionierte — alle vier waren Fehler
+in den Prüfungen des Assistenten selbst und nicht in den Schreibvorgängen, und
+alle vier sind behoben, aber das ist die Reife, die man einpreisen sollte.
+Wenn du heute den besser belegten Weg willst, wähle im ersten Schritt des
+Assistenten FireOS.
 
-## Recovery
+## Wiederherstellung
 
-**The rule that matters: if a device will not boot, do not keep power cycling
-it.** Repeatedly power cycling one that will not come up is what turns a
-device recoverable from a cable into one that needs the case opened and a pin
-shorted. Go to TWRP instead — it is one button combo away and it costs about
-ten seconds to put the old boot image back.
+**Die Regel, auf die es ankommt: Wenn ein Gerät nicht bootet, trenne es nicht
+immer wieder vom Strom.** Eines, das nicht hochkommt, wiederholt vom Strom zu
+trennen, macht aus einem per Kabel rettbaren Gerät eines, bei dem das Gehäuse
+geöffnet und ein Pin gebrückt werden muss. Geh stattdessen nach TWRP — es ist
+eine Tastenkombination entfernt und kostet etwa zehn Sekunden, das alte
+Boot-Image zurückzulegen.
 
-**Reaching TWRP on a device that will not boot:**
+**TWRP auf einem Gerät erreichen, das nicht bootet:**
 
-1. Unplug the power.
-2. Hold the **mute** button down, and keep holding it.
-3. Apply power with the button still held.
-4. Wait for the ring to show an **alternating cyan pattern** — that is the
-   confirmation you are in recovery, and you can let go once you see it.
+1. Strom trennen.
+2. Die **Mute**-Taste gedrückt halten und weiter halten.
+3. Strom anlegen, die Taste weiter gedrückt.
+4. Warten, bis der Ring ein **abwechselndes cyanfarbenes Muster** zeigt — das
+   ist die Bestätigung, dass du im Recovery bist, und dann kannst du
+   loslassen.
 
-`adb reboot recovery` is the easy route and it needs a device that is already
-up, which is exactly what you do not have here.
+`adb reboot recovery` ist der einfache Weg und braucht ein Gerät, das schon
+oben ist — genau das, was du hier nicht hast.
 
-### If a wizard step failed
+### Wenn ein Schritt des Assistenten gescheitert ist
 
-The device is still in TWRP and the wizard says so. Reconnect and use
-**Restore escrowed boot image** — it writes back the image read off your own
-device at the escrow step, verifies it against the partition, and leaves
-`/data` untouched. If you have reloaded the page since, choose the
-`revoice-stock-boot-*.img` file you downloaded at that step; it is the same
-bytes.
+Das Gerät ist noch in TWRP, und der Assistent sagt das. Verbinde neu und nutze
+**Restore escrowed boot image** — es schreibt das Image zurück, das im
+Verwahrungsschritt von deinem eigenen Gerät gelesen wurde, prüft es gegen die
+Partition und lässt `/data` unangetastet. Wenn du die Seite seitdem neu
+geladen hast, wähle die Datei `revoice-stock-boot-*.img`, die du in jenem
+Schritt heruntergeladen hast; es sind dieselben Bytes.
 
-### If the first boot after flashing emOS does not come up
+### Wenn der erste Start nach dem Flashen von emOS nicht hochkommt
 
-The light ring says which case you are in:
+Der Lichtring sagt dir, in welchem Fall du bist:
 
-| Ring | What it means | What to do |
+| Ring | Was es bedeutet | Was zu tun ist |
 |---|---|---|
-| Filling, then white, then fading | Up and on the network | Nothing — done, about 30 seconds |
-| Two lit segments at the top, throbbing | Waiting for the network | Nothing — this is most of the boot |
-| Solid amber | emOS is restoring its own last known-good image | **Leave it.** It reboots itself |
-| Red, stopped | A boot stage failed | Recoverable — go to TWRP and restore |
-| One segment orbiting a full blue ring, for more than a minute | emOS never started | Go to TWRP and restore |
+| Füllt sich, dann weiß, dann verblassend | Oben und im Netzwerk | Nichts — fertig, etwa 30 Sekunden |
+| Zwei leuchtende Segmente oben, pulsierend | Wartet auf das Netzwerk | Nichts — das ist der größte Teil des Starts |
+| Dauerhaft bernsteinfarben | emOS stellt sein eigenes letztes funktionierendes Image wieder her | **Lass es.** Es startet sich selbst neu |
+| Rot, stehend | Eine Bootstufe ist gescheitert | Rettbar — nach TWRP gehen und wiederherstellen |
+| Ein Segment kreist um einen vollen blauen Ring, länger als eine Minute | emOS ist nie gestartet | Nach TWRP gehen und wiederherstellen |
 
-The last row is the only one that needs you. It means the kernel came up and
-our init never ran, so nothing on the device is going to fix itself — the
-orbit is the kernel's own boot animation, still running because userspace
-never claimed the ring.
+Die letzte Zeile ist die einzige, die dich braucht. Sie heißt, dass der Kernel
+hochkam und unsere init nie lief — nichts auf dem Gerät wird sich also selbst
+richten. Das Kreisen ist die eigene Boot-Animation des Kernels, die noch
+läuft, weil der Userspace den Ring nie beansprucht hat.
 
-The amber row is worth knowing about precisely so you *do not* intervene:
-emOS counts boots that never reached the network and, after three, puts its
-own known-good image back and reboots. Interrupting that is the one way to
-make it worse.
+Die bernsteinfarbene Zeile ist gerade deshalb wichtig, damit du *nicht*
+eingreifst: emOS zählt Starts, die nie das Netzwerk erreicht haben, und legt
+nach dreien sein eigenes funktionierendes Image zurück und startet neu. Das zu
+unterbrechen ist die eine Art, es schlimmer zu machen.
 
-### If it will not reach TWRP either
+### Wenn es auch TWRP nicht erreicht
 
-That is the unlock's territory rather than ours, and R0rt1z2's thread covers
-recovery and unbricking.
+Das ist das Gebiet des Entsperrens und nicht unseres, und R0rt1z2s Thread
+behandelt Wiederherstellung und Unbricking.
 
-## Credits
+## Dank
 
 - **R0rt1z2** — [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/):
-  persistent unlock, TWRP and unbrick for this device
-- **Dragon863** — [EchoCLI](https://github.com/Dragon863/EchoCLI): tethered root research
-- **Binozo** — [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) and the original EchoGo SDK
+  dauerhaftes Entsperren, TWRP und Unbrick für dieses Gerät
+- **Dragon863** — [EchoCLI](https://github.com/Dragon863/EchoCLI):
+  Forschung zum getetherten Root
+- **Binozo** — [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) und das
+  ursprüngliche EchoGo-SDK
 
 ---
 
-# Manual reference
+# Referenz zur Handarbeit
 
-The wizard performs the steps below for you. They are kept here for anyone
-provisioning by hand, debugging a wizard step, or wanting to know exactly what
-is being done to their device before letting something do it automatically.
+Der Assistent führt die folgenden Schritte für dich aus. Sie stehen hier für
+alle, die von Hand einrichten, einen Assistentenschritt debuggen oder genau
+wissen wollen, was mit ihrem Gerät passiert, bevor sie etwas automatisch
+machen lassen.
 
-## Step 3 — Patch the Boot Image for SELinux Permissive
+## Schritt 3 — Das Boot-Image auf SELinux permissive patchen
 
-This is the step that isn't documented anywhere else.
+Das ist der Schritt, der nirgendwo sonst dokumentiert ist.
 
-The Little Kernel (LK) bootloader hardcodes `androidboot.selinux=enforce` into the kernel command line — this is set before Android even loads, and it's what blocks every attempt to disable SELinux at runtime. You cannot `setenforce 0` as shell, you cannot `resetprop`, you cannot use `magiskpolicy`. The kernel won't let you.
+Der Little-Kernel-Bootloader (LK) verdrahtet `androidboot.selinux=enforce`
+fest in die Kernel-Kommandozeile — das wird gesetzt, bevor Android überhaupt
+lädt, und es ist das, was jeden Versuch blockiert, SELinux zur Laufzeit
+abzuschalten. Du kannst als Shell weder `setenforce 0` noch `resetprop` noch
+`magiskpolicy` benutzen. Der Kernel lässt es nicht zu.
 
-The fix: we append `androidboot.selinux=permissive` to the boot image's own cmdline field. LK splices that field into the middle of its own parameters and adds its `enforce` afterwards, so both values end up on the kernel command line with ours first — and **the first one wins**. `androidboot.*` becomes a `ro.boot.*` property through Android's init, read-only properties are write-once, and the second set is refused. Measured on two devices, 2026-09-06: `getenforce` Permissive, `ro.boot.selinux` permissive.
+Die Lösung: Wir hängen `androidboot.selinux=permissive` an das cmdline-Feld
+des Boot-Images selbst an. LK fügt dieses Feld mitten in seine eigenen
+Parameter ein und ergänzt danach sein `enforce`, es landen also beide Werte
+auf der Kernel-Kommandozeile, unserer zuerst — und **der erste gewinnt**. Aus
+`androidboot.*` wird über Androids init eine `ro.boot.*`-Eigenschaft,
+schreibgeschützte Eigenschaften lassen sich nur einmal schreiben, und der
+zweite Satz wird abgewiesen. Am 2026-09-06 auf zwei Geräten gemessen:
+`getenforce` Permissive, `ro.boot.selinux` permissive.
 
-Do not reason about this as a kernel parameter, where a later value would override an earlier one. `androidboot.selinux` is not one — the kernel's own switches are `selinux=` and `enforcing=`, which nothing here sets.
+Denk darüber nicht wie über einen Kernel-Parameter nach, wo ein späterer Wert
+einen früheren überschriebe. `androidboot.selinux` ist keiner — die eigenen
+Schalter des Kernels heißen `selinux=` und `enforcing=`, und die setzt hier
+nichts.
 
-> **Note:** The cmdline is a null-terminated ASCII string in a 512-byte field at a fixed offset (byte 64) of the Android boot image header. We patch it directly rather than using magiskboot, which doesn't support cmdline modification on this version.
+> **Hinweis:** Die cmdline ist eine nullterminierte ASCII-Zeichenkette in
+> einem 512-Byte-Feld an fester Position (Byte 64) im Header des
+> Android-Boot-Images. Wir patchen sie direkt, statt magiskboot zu benutzen,
+> das in dieser Version keine cmdline-Änderung unterstützt.
 
-### From TWRP, extract magiskboot and pull the boot image:
+### Aus TWRP heraus magiskboot entpacken und das Boot-Image holen:
 
 ```bash
 adb shell 'mkdir -p /tmp/work /tmp/bin'
@@ -312,20 +361,21 @@ adb shell 'dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576'
 adb pull /tmp/work/boot.img boot_fresh.img
 ```
 
-### Patch the cmdline on your host machine:
+### Die cmdline auf deinem Rechner patchen:
 
-This **appends** to what FireOS already put there. An earlier version of these
-instructions zeroed the whole 512-byte field and wrote a short replacement,
-which silently discarded FireOS's own arguments — `rootwait`, `ro`,
-`init=/init`, `buildvariant`, the `lowmemorykiller` tuning and `veritykeyid`.
-Devices booted anyway, because LK supplies `root=` and `androidboot.hardware`
-and kernel defaults covered the rest, so it went unnoticed for a long time. It
-is still the wrong thing to do to somebody's boot image.
+Das **hängt an**, was FireOS dort schon hingeschrieben hat. Eine frühere
+Fassung dieser Anleitung nullte das ganze 512-Byte-Feld und schrieb einen
+kurzen Ersatz hinein, was FireOS' eigene Argumente stillschweigend verwarf —
+`rootwait`, `ro`, `init=/init`, `buildvariant`, die Abstimmung des
+`lowmemorykiller` und `veritykeyid`. Geräte booteten trotzdem, weil LK `root=`
+und `androidboot.hardware` liefert und Kernel-Voreinstellungen den Rest
+abdeckten, es fiel also lange nicht auf. Trotzdem ist es das Falsche, was man
+mit dem Boot-Image von jemandem tun kann.
 
 ```python
 python3 - <<'EOF'
 ARG = b'androidboot.selinux=permissive'
-START, END = 64, 576          # the 512-byte cmdline field
+START, END = 64, 576          # das 512-Byte-cmdline-Feld
 
 with open('boot_fresh.img', 'rb') as f:
     data = bytearray(f.read())
@@ -347,7 +397,7 @@ elif any(a.startswith(b'androidboot.selinux=') for a in existing.split()):
         "value rather than adding a second one.")
 else:
     addition = (b' ' if used else b'') + ARG
-    if used + len(addition) >= len(field):      # keep room for the terminator
+    if used + len(addition) >= len(field):      # Platz für den Terminator lassen
         raise SystemExit("Cmdline too long to append without truncating it.")
     data[START + used:START + used + len(addition)] = addition
     data[START + used + len(addition)] = 0
@@ -359,9 +409,10 @@ else:
 EOF
 ```
 
-Check that the new cmdline is your original one with `androidboot.selinux=permissive` on the end, and nothing missing from the front.
+Prüfe, dass die neue cmdline deine ursprüngliche mit
+`androidboot.selinux=permissive` am Ende ist und vorne nichts fehlt.
 
-### Flash the patched image:
+### Das gepatchte Image flashen:
 
 ```bash
 adb push boot_patched.img /tmp/work/boot_patched.img
@@ -369,26 +420,29 @@ adb shell 'dd if=/tmp/work/boot_patched.img of=/dev/block/other-boot bs=1048576'
 adb reboot
 ```
 
-### Verify:
+### Prüfen:
 
 ```bash
 adb shell getenforce
-# Expected: Permissive
+# Erwartet: Permissive
 ```
 
-Check the kernel cmdline in logcat to confirm both values are present:
+Prüfe die Kernel-cmdline im logcat, um zu bestätigen, dass beide Werte da
+sind:
 
 ```
 androidboot.selinux=permissive androidboot.selinux=enforce
 ```
 
-Both appear — LK always appends its value after ours — but the device ends up in permissive mode.
+Beide erscheinen — LK hängt seinen Wert immer hinter unseren —, aber das Gerät
+landet im permissiven Modus.
 
 ---
 
-## Step 4 — Install Magisk 17.3
+## Schritt 4 — Magisk 17.3 installieren
 
-With SELinux permissive, Magisk's daemon can now start and run properly.
+Mit permissivem SELinux kann Magisks Daemon jetzt starten und ordentlich
+laufen.
 
 ```bash
 adb reboot recovery
@@ -397,15 +451,19 @@ adb shell twrp install /sdcard/Magisk-v17.3.zip
 adb reboot
 ```
 
-Do **not** try `adb shell su -c id` yet — it will hang. The grant prompt requires a screen to approve, and the Echo Dot has no screen.
+Probiere **noch nicht** `adb shell su -c id` — es hängt. Die Freigabe verlangt
+einen Bildschirm zum Bestätigen, und der Echo Dot hat keinen.
 
 ---
 
-## Step 5 — Pre-seed the Magisk Grant Database
+## Schritt 5 — Die Magisk-Freigabedatenbank vorbelegen
 
-Magisk's `su` hangs on a screenless device because it's waiting for the user to tap "Grant" on a dialog that never appears. The fix is to create the policy database ourselves and push it before booting.
+Magisks `su` hängt auf einem bildschirmlosen Gerät, weil es darauf wartet,
+dass jemand in einem Dialog auf „Grant" tippt, der nie erscheint. Die Lösung
+ist, die Richtliniendatenbank selbst anzulegen und sie vor dem Start
+aufzuspielen.
 
-### On your host machine:
+### Auf deinem Rechner:
 
 ```python
 python3 - <<'EOF'
@@ -415,7 +473,7 @@ c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS policies
              (uid INTEGER, package_name TEXT, policy INTEGER,
               until INTEGER, logging INTEGER, notification INTEGER)''')
-# uid 2000 = shell, policy 2 = always grant
+# uid 2000 = shell, policy 2 = immer gewähren
 c.execute("INSERT INTO policies VALUES (2000, 'com.android.shell', 2, 0, 1, 0)")
 c.execute("INSERT INTO policies VALUES (0, 'root', 2, 0, 1, 0)")
 conn.commit()
@@ -424,7 +482,7 @@ print("Done — magisk.db created")
 EOF
 ```
 
-### Push from TWRP:
+### Aus TWRP heraus aufspielen:
 
 ```bash
 adb reboot recovery
@@ -433,62 +491,77 @@ adb shell chmod 600 /data/adb/magisk.db
 adb reboot
 ```
 
-### Verify root:
+### Root prüfen:
 
 ```bash
 adb shell su -c id
-# Expected: uid=0(root) gid=0(root) context=u:r:magisk:s0
+# Erwartet: uid=0(root) gid=0(root) context=u:r:magisk:s0
 ```
 
-If you see `uid=0(root)` — you have persistent root. Reboot again and confirm it survives.
+Wenn du `uid=0(root)` siehst, hast du dauerhaften Root. Starte noch einmal neu
+und bestätige, dass er das übersteht.
 
 ---
 
-## Step 6 — Disable the Alexa Stack
+## Schritt 6 — Den Alexa-Stack abschalten
 
-With root, `pm disable` now works. Run these one at a time:
+Mit Root funktioniert `pm disable` jetzt. Führe diese einzeln aus:
 
 ```bash
-# Core Alexa voice pipeline
+# Kern der Alexa-Sprachpipeline
 adb shell su -c 'pm disable amazon.speech.davs.davcservice'
 adb shell su -c 'pm disable amazon.speech.sim'
 adb shell su -c 'pm disable com.amazon.alexa.beaconbroadcaster'
 adb shell su -c 'pm disable com.amazon.alexa.externalmediaplayer.fireos'
 adb shell su -c 'pm disable com.amazon.wha.mediabrowserservice'
 
-# Whisperjoin (Alexa device provisioning/cloud)
+# Whisperjoin (Alexa-Geräteeinrichtung / Cloud)
 adb shell su -c 'pm disable com.amazon.whisperjoin.middleware'
 adb shell su -c 'pm disable com.amazon.whisperjoin.wss.wifiprovisioner'
 
-# Smart home and media agent (crash-loop after disabling above)
+# Smart Home und Medien-Agent (Absturzschleife nach dem Abschalten oben)
 adb shell su -c 'pm disable com.amazon.device.smarthome.dshs.services'
 adb shell su -c 'pm disable com.amazon.mediaplayeragent'
 
-# WiFi management — only needed if you intend to reconfigure WiFi away from
-# whatever network Alexa setup originally connected to. Both actively fight
-# manual wpa_supplicant.conf edits by re-asserting their own saved network
-# profile. See v2.5.0 changelog for the full investigation.
+# WLAN-Verwaltung — nur nötig, wenn du das WLAN weg von dem Netzwerk
+# umstellen willst, mit dem die Alexa-Einrichtung sich ursprünglich verbunden
+# hat. Beide bekämpfen aktiv manuelle Änderungen an wpa_supplicant.conf, indem
+# sie ihr eigenes gespeichertes Netzwerkprofil erneut durchsetzen. Die
+# vollständige Untersuchung steht im Changelog zu v2.5.0.
 adb shell su -c 'pm disable com.amazon.android.service.wifiprofilemanager'
 adb shell su -c 'pm disable com.amazon.device.smarthome.adapters.wifi'
-# pm disable above does NOT stop the native SmartHomeWifid binary — it's
-# launched by init via a property trigger chain, not as a normal package
-# component. This durably prevents that trigger from ever firing:
+# Das obige pm disable stoppt das native Binary SmartHomeWifid NICHT — es wird
+# von init über eine Property-Trigger-Kette gestartet, nicht als normale
+# Paketkomponente. Das hier verhindert dauerhaft, dass dieser Trigger je
+# feuert:
 adb shell su -c 'setprop persist.wifi.migrate.complete 0'
 ```
 
-Reboot and check logcat. You should see "Unable to start service" messages for these packages — that's expected and harmless. No crash loops.
+Starte neu und sieh ins logcat. Du solltest Meldungen „Unable to start
+service" für diese Pakete sehen — das ist erwartet und harmlos. Keine
+Absturzschleifen.
 
-> **Keep `com.amazon.device.echoaudioservice` enabled.** This service initialises the MediaTek audio DSP at boot. Without it, the I2S clock never starts and audio playback will hang silently. You can disable Alexa's voice stack without touching this service.
+> **Lass `com.amazon.device.echoaudioservice` aktiviert.** Dieser Dienst
+> initialisiert beim Start den Audio-DSP von MediaTek. Ohne ihn startet der
+> I2S-Takt nie, und die Audiowiedergabe hängt still. Du kannst Alexas
+> Sprachstack abschalten, ohne diesen Dienst anzufassen.
 >
-> **What echoaudioservice actually does:** The APK is a stub (manifest only, no Java classes). It triggers `audio.primary.mt8163.so` (the MT8163 audio HAL) to initialise the DSP when Android starts the service. The HAL does all the real work — echoaudioservice is just the trigger.
+> **Was echoaudioservice tatsächlich tut:** Das APK ist ein Rumpf (nur
+> Manifest, keine Java-Klassen). Es bringt `audio.primary.mt8163.so` (den
+> Audio-HAL des MT8163) dazu, den DSP zu initialisieren, wenn Android den
+> Dienst startet. Der HAL macht die eigentliche Arbeit — echoaudioservice ist
+> nur der Auslöser.
 
 ---
 
-## Step 7 — Disable WiFi Direct (p2p0)
+## Schritt 7 — WiFi Direct (p2p0) abschalten
 
-The device has a WiFi Direct interface (`p2p0`) that interferes with mDNS multicast interface selection. It must be brought down before Revoice starts.
+Das Gerät hat eine WiFi-Direct-Schnittstelle (`p2p0`), die die Auswahl der
+Multicast-Schnittstelle für mDNS stört. Sie muss heruntergefahren werden,
+bevor Revoice startet.
 
-This is handled in `start_server.sh` — no manual action needed if you're following the full guide. If testing manually, run:
+Das erledigt `start_server.sh` — wenn du der vollständigen Anleitung folgst,
+ist nichts von Hand zu tun. Zum manuellen Testen:
 
 ```bash
 adb shell su -c 'ip link set p2p0 down'
@@ -497,14 +570,19 @@ adb shell su -c 'ip link set p2p0 down'
 ---
 
 ---
+## Schritt 8 — Revoice installieren
 
-## Step 8 — Install Revoice
+Revoice läuft als Go-Binary auf dem Gerät. Es abstrahiert die Hardware
+(Mikrofon, Lautsprecher, LEDs, Tasten) und verbindet sich über zwei
+dauerhafte WebSocket-Verbindungen nach außen zum Revoice-Controller (plus
+eine bei Bedarf geöffnete Shell-Ebene). Auf dem Gerät läuft kein HTTP-Server
+— keine eingehenden Ports, keine iptables-Regeln nötig.
 
-Revoice runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the Revoice controller over two persistent WebSocket connections (plus a demand-opened shell plane). There is no HTTP server on the device — no inbound ports, no iptables rules required.
+### Das Binärverzeichnis einrichten (A/B-Slots):
 
-### Set up the binary directory (A/B slots):
-
-Revoice v2.4.4+ uses A/B slots: `server_a` and `server_b` with `/data/local/bin/server` as a symlink. This allows instant rollback without a binary transfer.
+Revoice ab v2.4.4 nutzt A/B-Slots: `server_a` und `server_b` mit
+`/data/local/bin/server` als symbolischem Link. Das erlaubt sofortiges
+Zurückrollen ohne Übertragung eines Binarys.
 
 ```bash
 adb shell "su -c 'mkdir -p /data/local/bin'"
@@ -512,35 +590,58 @@ adb push server /sdcard/server
 adb shell "su -c 'cp /sdcard/server /data/local/bin/server_a && chmod 755 /data/local/bin/server_a && ln -sf server_a /data/local/bin/server && chown root:root /data/local/bin/server_a'"
 ```
 
-`server_b` starts empty. The first OTA update from the dashboard populates it.
+`server_b` beginnt leer. Das erste OTA-Update aus dem Dashboard füllt es.
 
-### Create the startup script:
+### Das Startskript anlegen:
 
-The canonical script is **`controller/device_payloads/start_server.sh`** in the repo (`device/scripts/start_server.sh` is a symlink to it) — the controller serves that exact file at `/api/provision/start_script` (this is what the provisioning wizard installs), read from disk per request. Don't hand-maintain a copy; earlier revisions of this document and of `em_api.py` embedded copies and they drifted.
+Das maßgebliche Skript ist **`controller/device_payloads/start_server.sh`** im
+Repository (`device/scripts/start_server.sh` ist ein symbolischer Link
+darauf) — der Controller liefert genau diese Datei unter
+`/api/provision/start_script` aus (das installiert der
+Einrichtungsassistent), je Anfrage frisch von der Platte gelesen. Pflege
+keine eigene Kopie; frühere Fassungen dieses Dokuments und von `em_api.py`
+hatten eingebettete Kopien, und die sind auseinandergelaufen.
 
 ```bash
-# From the repo root:
+# Aus dem Wurzelverzeichnis des Repositorys:
 adb push device/scripts/start_server.sh /sdcard/start_server.sh
 adb shell "su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh && chown root:root /data/local/bin/start_server.sh'"
 ```
 
-> The script waits for `echoaudio` before starting — this ensures the audio DSP is initialised. `p2p0` is brought down to prevent mDNS interference. The WiFi wake lock prevents FireOS from suspending the wireless interface. All server output is logged to `/tmp/server.log` for debugging via `adb shell su -c 'cat /tmp/server.log'`.
+> Das Skript wartet vor dem Start auf `echoaudio` — damit ist der Audio-DSP
+> initialisiert. `p2p0` wird heruntergefahren, um mDNS-Störungen zu
+> verhindern. Der WLAN-Wake-Lock hindert FireOS daran, die
+> Funkschnittstelle schlafen zu legen. Die gesamte Serverausgabe geht nach
+> `/tmp/server.log` und ist per
+> `adb shell su -c 'cat /tmp/server.log'` zu lesen.
 
-> **Log cap (v2.7.1):** `/tmp` is RAM-backed and the script only ever appends — a background loop in the script checks every 5 minutes and, past 5MB, keeps the newest 512KB in `/tmp/server.log.1` and truncates `server.log` in place (the server's `O_APPEND` fd continues at the new EOF). Total log footprint stays bounded at ~5.5MB. A 45MB log was observed in the wild before this existed.
+> **Log-Obergrenze (v2.7.1):** `/tmp` liegt im RAM, und das Skript hängt nur
+> an — eine Hintergrundschleife im Skript prüft alle 5 Minuten und behält
+> jenseits von 5 MB die neuesten 512 KB in `/tmp/server.log.1` und kürzt
+> `server.log` an Ort und Stelle (der `O_APPEND`-Deskriptor des Servers macht
+> am neuen Dateiende weiter). Der gesamte Log-Fußabdruck bleibt bei ~5,5 MB
+> begrenzt. Vorher wurde im Feld ein 45-MB-Log beobachtet.
 
-> The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — init restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
+> Das Skript führt den Server als Unterprozess aus (nicht per `exec`), damit
+> SIGTERM per `trap` von Androids init weitergereicht werden kann. Beendet
+> sich das Binary dreimal hintereinander in weniger als 15 Sekunden, wird der
+> inaktive A/B-Slot per symbolischem Link wiederhergestellt und das Skript
+> endet sauber — init startet es mit dem alten Binary neu. Läuft das Binary
+> ≥15 s, bevor es abstürzt, wird der Versuchszähler zurückgesetzt (ein
+> Betriebsabsturz, kein Auslieferungsfehler).
 
-### Add Revoice and mixer service to the ramdisk:
+### Revoice und den Mixer-Dienst in die Ramdisk eintragen:
 
-The init scripts on FireOS 5 live in the boot image ramdisk. We need to unpack it, edit `init.csm.project.rc`, and repack.
+Die init-Skripte von FireOS 5 liegen in der Ramdisk des Boot-Images. Wir
+müssen sie entpacken, `init.csm.project.rc` bearbeiten und wieder einpacken.
 
-Boot into TWRP:
+Nach TWRP starten:
 
 ```bash
 adb reboot recovery
 ```
 
-Extract magiskboot and unpack the boot image:
+magiskboot entpacken und das Boot-Image auspacken:
 
 ```bash
 adb shell 'mkdir -p /tmp/work /tmp/bin'
@@ -551,13 +652,15 @@ adb shell 'cd /tmp/work && /tmp/bin/magiskboot unpack boot.img'
 adb shell 'mkdir -p /tmp/ramdisk && cd /tmp/ramdisk && cpio -idv < /tmp/work/ramdisk.cpio 2>/dev/null | tail -3'
 ```
 
-Pull the init script and edit it on your machine:
+Das init-Skript holen und auf deinem Rechner bearbeiten:
 
 ```bash
 adb pull /tmp/ramdisk/init.csm.project.rc init.csm.project.rc
 ```
 
-Append the following two service blocks to the end of `init.csm.project.rc`. The `mixer` stub must come first — Revoice's speaker Init() calls `stop mixer` as its first step:
+Hänge die folgenden zwei Dienstblöcke ans Ende von `init.csm.project.rc`. Der
+`mixer`-Rumpf muss zuerst kommen — Revoices `Init()` für den Lautsprecher
+ruft als ersten Schritt `stop mixer` auf:
 
 ```
 service mixer /system/bin/sh
@@ -571,7 +674,7 @@ service revoice /data/local/bin/start_server.sh
     class late_start
 ```
 
-Push back, fix permissions, repack and flash:
+Zurückschieben, Rechte richten, wieder einpacken und flashen:
 
 ```bash
 adb push init.csm.project.rc /tmp/ramdisk/init.csm.project.rc
@@ -582,131 +685,139 @@ adb shell 'dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576'
 adb reboot
 ```
 
-### Verify:
+### Prüfen:
 
-After full boot (allow ~90 seconds):
+Nach vollständigem Start (rechne mit ~90 Sekunden):
 
 ```bash
 adb shell "su -c 'getprop init.svc.revoice'"
-# Expected: running
+# Erwartet: running
 
 adb shell "su -c 'cat /tmp/server.log'"
-# Expected: Initializing... Ready... mDNS browsing...
+# Erwartet: Initializing... Ready... mDNS browsing...
 ```
 
 ---
 
 ---
 
-## End State
+## Endzustand
+
+Die Liste unten ist ein Meilenstein-Protokoll: was erreicht wurde und in
+welcher Version. Die Formulierungen sind absichtlich knapp und tragen
+Bezeichner aus dem Code, damit sich jeder Punkt einer Stelle im Quelltext
+zuordnen lässt.
 
 ```
-✅ Persistent unlock (amonet-biscuit)
-✅ TWRP installed
+✅ Dauerhaftes Entsperren (amonet-biscuit)
+✅ TWRP installiert
 ✅ FireOS 5 (Android 5.1)
-✅ SELinux permissive — survives reboots
-✅ Magisk 17.3 — persistent root, survives reboots
-✅ Alexa voice stack disabled
-✅ echoaudioservice retained (required for audio DSP init)
-✅ Revoice running as init service on boot (exec mode, no crash loop)
-✅ Dummy mixer service for Revoice init compatibility
-✅ Audio mixer configured at boot (tinymix in start_server.sh)
-✅ Mic gain equalised across all four ADCs — digital volume 88, MICPGA 40
-✅ WiFi wake lock — FireOS cannot suspend wireless interface
-✅ p2p0 (WiFi Direct) disabled — no mDNS interference
-✅ Full LED ring RGB control (IS31FL3236A, 12 RGB LEDs)
-✅ Microphone streaming (9 channels, S24_3LE, 16kHz, card 0 device 24)
-✅ Speaker audio working (card 0, device 23, 48kHz stereo, period 2048 count 4)
-✅ Button events (evdev)
-✅ WiFi working
-✅ Stable boot
-✅ No HTTP server on device — no inbound ports, no iptables rules
-✅ Three outbound WebSocket connections (control + data + shell planes)
-✅ Device identity via ro.serialno — stable across reboots, matches adb devices
-✅ Device approval flow — strict mode (pending) or auto mode
-✅ Orange LED pulse while disconnected / searching for server
-✅ Slow white LED pulse while pending controller approval
-✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
-✅ Wake word detection on ch6 (centre/omni mic) — equidistant, no directional bias
-✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
-✅ Mic channel mapping confirmed empirically (tone injection, analyse_capture.py)
-✅ Directional mic selection — best perimeter mic locked at voice turn start
-✅ Direction estimation — onset ratio (fast/slow EWMA) robust to background noise (TV etc.)
-✅ LED direction overlay — light green segment on listening ring during voice turn only
-✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
-✅ Audio processing pipeline — speexdsp AEC (v2.7.3) + AGC; device RNNoise removed 2026-07-12, NS is controller-side DTLN on the STT stream (`nsAsr` flag)
-✅ AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
-✅ Ungated continuous wake stream (v2.7.0) — no VAD gate/AGC/preroll on the always-on stream; OWW scores uninterrupted audio; ~32KB/s per device
-✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
-✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
-✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart
-✅ Beamformer lock-back selection (v2.7.2) — Lock() scores directions over a ~2s energy-history ring covering the wake word, not the decayed present (see pipeline state table)
-✅ Acoustic echo cancellation (v2.7.3, working since v2.7.7, convergence holds since v2.7.8, default OFF) — speexdsp canceller on the whole mic path; reference tapped at the speaker ALSA write. Keep aecDelayMs at 0 (measured; higher values are non-causal — see v2.7.7). Converges to ~14dB per response and *stays* converged across turns since v2.7.8 (governor trims no longer reset the filter); `[aec] att=` and `[mic] clock/stall` telemetry in the device log show live attenuation and capture health. Enable from the dashboard Microphones advanced section
-✅ 24-bit fixed mic gain (v2.7.1) — `micGainDb` (default +24dB) applied to the full 24-bit sample during S16 extraction; recovers the low byte the old truncation discarded (speech was ~3–20 LSB in 16-bit). Validated: STT empty-transcript rate went from 6/19 turns to 0/5, detection rms 0.0003 → 0.006–0.009, clipped=0
-✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
-✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
-✅ State-aware landing page (v2.7.1) — / shows first-run setup (amber ring) or login (green ring) and redirects authenticated visitors to /dashboard; sessions in localStorage
-✅ HA-driven conversation continuation — continue_conversation flag wired; after TTS playback, re-triggers voice turn immediately if HA sets flag in INTENT_END (v2.6.4)
-✅ Speaker audioChanDepth 32 — prevents mid-stream underrun stutter on longer TTS responses (v2.6.4)
-✅ Dashboard offline IP display — shows last known IP with "(last seen)" annotation when offline; suppresses Docker-NAT 127.0.0.1 artefact (v2.6.4)
-✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
-✅ OWW near-miss visibility — scores > 0.05 logged at INFO (rate-limited 1/2s per device), persistent counter on dashboard status tab (v2.6.5)
-✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
-✅ Beamformer structural fix — smoothers always run, output by lock state not flag
-✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
-✅ Acoustic feedback fix — controller sleeps for audio duration after EOS before mic restart
-✅ Spinner runs for full response duration — duration calculated from PCM length
-✅ VAD threshold default 0.001 — matches measured conversational speech range at 1.3m (v2.6.5; was 0.003, which sat above soft speech)
-✅ Mute button — toggles mic mute, red LED ring, blocks action button
-✅ Volume buttons — local interception, cyan LED ring feedback
-✅ Amp boot click suppressed — mute → clock DAC with silence → amp on → unmute ordering in pcm_speaker.go Init (fixed order 2026-07-10)
-✅ Amp idle hiss eliminated — graceful SIGTERM shutdown mutes + disables amp (PcmSpeaker.Close); start_server.sh repeats amp-off after every server exit as SIGKILL/panic backstop
-✅ LED thinking spinner — triggered by THINKING signal from voice server
-✅ Preroll discard — first frames of mic stream discarded to avoid wake word bleed-through
-✅ Speech threshold — quiet recordings discarded without hitting Whisper
-✅ OWW suppressed during speaker playback — prevents false wake triggers on own voice
-✅ Stale mic queue drained after voice turn — prevents immediate re-trigger
-✅ Config pushed from controller on connect — VAD/OWW params applied at runtime
-✅ Device logs streamed to controller over control WebSocket
-✅ Mute state change notifications — device sends mute_state message to controller
-✅ Shell access — device dials outbound to controller on shell_open, no inbound ports
-✅ OTA updates via controller dashboard — A/B slot system, local binary upload, instant rollback (symlink flip, no transfer)
-✅ Auto-rollback on device — start_server.sh retries 3× before flipping to inactive slot; works without controller
-✅ 8-band parametric EQ (controller-side, SVG frequency response curve, live updating)
-✅ Wake word model hot-reload without device reconnect
-✅ Hardware resource monitoring — CPU%, RAM, storage, WiFi RSSI every 30s; dashboard signal bars
-✅ Voice server turn timeout (45s) — controller never hangs on unresponsive voice server
-✅ Boot logging to /tmp/server.log
-✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
-✅ WebSocket protocol keepalives — dead connections detected within 30s
-✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
-✅ Safe per-device WiFi change (dashboard WiFi tab) — device-side executor with auto-rollback: full wpa_supplicant.conf replacement written *while WiFi is disabled* + verified `svc wifi` bounce (via sh — the script has no shebang), gated on associate-to-target-SSID ≤45s → IP ≤20s → controller reconnect ≤90s; any failure restores the backed-up config; uncommitted changes roll back on boot (pending-marker recovery, same philosophy as the A/B binary slots); result delivery is at-least-once (re-sent until the controller's wifi_commit ack); last-known-controller-address fast path makes cross-subnet controllers reachable without mDNS. All three paths hardware-validated 2026-07-11: rollback (garbage SSID, 65s round trip), startup recovery, happy path (30s)
-✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
-✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
-✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
-✅ ESPHome native API satellite integration (the only voice backend since 2026-07-12)
-✅ Both devices registered in HA as voice satellites (port 16001, 16002)
-✅ ESPHome setup wizard passes on both devices
-✅ TTS announcements via HA Assist pipeline (MP3→PCM via ffmpeg, standalone play)
-✅ MediaPlayerState ANNOUNCING/IDLE transitions for wizard audio test
-✅ ESPHome port lifecycle — ports up/down with physical device connect/disconnect
-✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
-✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
-✅ ~~VOICE_MODE env var~~ — claracore backend removed 2026-07-12; esphome is unconditional
-✅ OWW/button-triggered voice turns in esphome mode — full wake word → STT → intent → TTS → speaker round-trip confirmed working end-to-end against real HA Core 2026.6.4
-✅ HA-side announce (setup wizard test, push TTS) plays correctly on device — live callback lookup, not a snapshot taken at connect
-✅ Local no-speech timeout (5s) — matches Alexa's "wake word, then silence" behaviour; scoped correctly to bounded voice turns only, never the permanent OWW listening stream
-✅ HA VAD-end is the turn endpointing authority — _stream_mic_audio exits on HA's STT_VAD_END/ERROR, device RMS-gate sentinel advisory, 20s hard cap; fixes stuck spinner in noisy rooms (v2.6.5, C1)
-✅ Conversation continuation actually works — mic restarted before each continuation turn; shipped broken in v2.6.4 (v2.6.5, C2)
-✅ Preroll discard wake-turns-only — button/continuation turns pass 0, no first-word clipping on those paths (v2.6.5, C3)
-✅ Mute is device-authoritative — mute stops the running mic stream, unmute restores it; audio stops leaving the device while the ring is red (v2.6.5, C5 partial — full-chip ADC mute pending)
-✅ OWW speex NS toggle (owwSpeexNs) — openwakeword's 16kHz-native speexdsp suppressor on the wake path only, dashboard/API/DB wired, off by default (v2.6.5, Q1)
-✅ Device preroll ring — ~512ms of pre-gate audio flushed on VAD gate open; fixes onset splice that depressed OWW scores and clipped first phonemes (v2.6.5)
-✅ AGC reset at every mic stream start + mic stopped before TTS playback — TTS-echo-crushed gain can't poison the next turn; enabled AGC re-enable (v2.6.5)
-✅ Speaker EOS vs underrun disambiguation — 0x03 EOS sets EndStream(), natural drain no longer logged as underrun (v2.6.5)
-✅ Mic queue overflow drops oldest frame, not newest — audio tail stays contiguous with real time (v2.6.5)
-✅ voice_queue drained before oww_paused routing flip — stale ambient frames no longer bleed into the next turn as STT preamble (v2.6.5 regression fix)
-✅ ADC mute controls identified for all four chips — tinymix dump in device/tools/ confirms B–D at 123/124, 141/142, 159/160
+✅ SELinux permissive — übersteht Neustarts
+✅ Magisk 17.3 — dauerhafter Root, übersteht Neustarts
+✅ Alexa-Sprachstack abgeschaltet
+✅ echoaudioservice behalten (für die DSP-Initialisierung nötig)
+✅ Revoice läuft beim Start als init-Dienst (exec-Modus, keine Absturzschleife)
+✅ Attrappen-Mixer-Dienst für die Init-Kompatibilität von Revoice
+✅ Audio-Mixer beim Start konfiguriert (tinymix in start_server.sh)
+✅ Mikrofonverstärkung über alle vier ADCs angeglichen — digitale Lautstärke 88, MICPGA 40
+✅ WLAN-Wake-Lock — FireOS kann die Funkschnittstelle nicht schlafen legen
+✅ p2p0 (WiFi Direct) abgeschaltet — keine mDNS-Störung
+✅ Volle RGB-Steuerung des LED-Rings (IS31FL3236A, 12 RGB-LEDs)
+✅ Mikrofon-Streaming (9 Kanäle, S24_3LE, 16 kHz, Karte 0 Gerät 24)
+✅ Lautsprecherausgabe funktioniert (Karte 0, Gerät 23, 48 kHz stereo, Periode 2048, Anzahl 4)
+✅ Tastenereignisse (evdev)
+✅ WLAN funktioniert
+✅ Stabiler Start
+✅ Kein HTTP-Server auf dem Gerät — keine eingehenden Ports, keine iptables-Regeln
+✅ Drei ausgehende WebSocket-Verbindungen (Control-, Daten- und Shell-Ebene)
+✅ Geräteidentität über ro.serialno — stabil über Neustarts, passt zu adb devices
+✅ Freigabeablauf für Geräte — strikter Modus (ausstehend) oder Automatikmodus
+✅ Oranges LED-Pulsieren bei getrennter Verbindung / Suche nach dem Server
+✅ Langsames weißes LED-Pulsieren, solange die Freigabe durch den Controller aussteht
+✅ Energie-VAD auf dem Gerät — VAD-Endsignal (0x04) bei Stille an den Controller
+✅ Wakeword-Erkennung auf ch6 (mittleres Rundum-Mikrofon) — gleich weit, keine Richtungsverzerrung
+✅ OpenWakeWord — „Hey Jarvis" serverseitig erkannt (Schwelle 0,3)
+✅ Kanalzuordnung der Mikrofone empirisch bestätigt (Toneinspeisung, analyse_capture.py)
+✅ Gerichtete Mikrofonwahl — bestes Randmikrofon zu Beginn eines Sprachgesprächs gesperrt
+✅ Richtungsschätzung — Onset-Verhältnis (schnelles/langsames EWMA), robust gegen Hintergrundgeräusche (Fernseher etc.)
+✅ LED-Richtungsüberlagerung — hellgrünes Segment auf dem Zuhör-Ring, nur während eines Sprachgesprächs
+✅ LED-Zuordnung kalibriert — LED 0 bei 240°, aus dem Lautstärkedurchlauf bestätigt
+✅ Audioverarbeitungspipeline — speexdsp-AEC (v2.7.3) + AGC; RNNoise auf dem Gerät am 2026-07-12 entfernt, die Rauschunterdrückung ist controllerseitiges DTLN auf dem STT-Strom (Flag `nsAsr`)
+✅ AGC gilt seit v2.7.0 nur für lock_mic-Gespräche (der Wake-Strom ist dauerhaft AGC-frei)
+✅ Ungegatterter durchgehender Wake-Strom (v2.7.0) — kein VAD-Gatter, kein AGC, kein Vorlauf auf dem immer laufenden Strom; OWW bewertet ununterbrochenes Audio; ~32 KB/s pro Gerät
+✅ Leck im Mikrofonstrom behoben (v2.7.0) — Besitzprüfung beim Verlassen von streamMic; Stop/Start-Paare können keinen parallelen Doppelstrom mehr lecken (die historische Ursache von „das Aufwachen wird über Tage schlechter, ein Neustart hilft")
+✅ Erfassung des Grundgeräuschpegels je Raum (v2.7.0, Controller) — rein messendes asymmetrisches EWMA; treibt die auf den Störabstand bezogene 5-s-Abschaltung ohne Sprache (Wakeword-dann-Stille endet wieder leise)
+✅ Beam-Sperre mitten im Strom (v2.7.0) — Kontrollnachrichten beam_lock/beam_unlock; Wake-Gespräche bekommen die Randmikrofonwahl ohne Neustart des Stroms
+✅ Lock-back-Auswahl des Beamformers (v2.7.2) — Lock() bewertet Richtungen über einen ~2-s-Energieverlaufsring, der das Wakeword abdeckt, statt über die abgeklungene Gegenwart (siehe Zustandstabelle der Pipeline)
+✅ Akustische Echoauslöschung (v2.7.3, funktionsfähig seit v2.7.7, Konvergenz hält seit v2.7.8, standardmäßig AUS) — speexdsp-Auslöschung auf dem gesamten Mikrofonpfad; Referenz am ALSA-Schreibvorgang des Lautsprechers abgegriffen. aecDelayMs auf 0 lassen (gemessen; höhere Werte sind nicht kausal — siehe v2.7.7). Konvergiert je Antwort auf ~14 dB und *bleibt* seit v2.7.8 über Gespräche hinweg konvergiert (Trimmungen des Reglers setzen den Filter nicht mehr zurück); die Telemetrie `[aec] att=` und `[mic] clock/stall` im Gerätelog zeigt Live-Dämpfung und Aufnahmegesundheit. Im Dashboard unter den erweiterten Mikrofoneinstellungen aktivierbar
+✅ Feste 24-Bit-Mikrofonverstärkung (v2.7.1) — `micGainDb` (Standard +24 dB) auf das volle 24-Bit-Sample während der S16-Extraktion angewandt; holt das niedrige Byte zurück, das die alte Abschneidung verwarf (Sprache lag in 16 Bit bei ~3–20 LSB). Validiert: Die Rate leerer STT-Transkripte fiel von 6/19 Gesprächen auf 0/5, das Erkennungs-RMS von 0,0003 auf 0,006–0,009, clipped=0
+✅ PTY-Shell im Dashboard (v2.7.1) — das Gerät legt ein echtes Pseudoterminal an (mksh-Prompt, Zeilenbearbeitung, top/vi, Größenänderung); das Dashboard-Terminal ist xterm.js; programmatische Sitzungen (OTA) behalten die rohe Pipe
+✅ Größenbegrenzung für /tmp/server.log (v2.7.1) — Trimmschleife in start_server.sh, begrenzt auf ~5,5 MB; VAD-Diagnose auf ~10 min verlangsamt, mit sofortiger Meldung der Clipping-Zählung
+✅ Zustandsbewusste Startseite (v2.7.1) — / zeigt Ersteinrichtung (bernsteinfarbener Ring) oder Anmeldung (grüner Ring) und leitet angemeldete Besucher nach /dashboard; Sitzungen im localStorage
+✅ Von HA gesteuerte Gesprächsfortsetzung — Flag continue_conversation verdrahtet; nach der TTS-Wiedergabe wird sofort ein neues Sprachgespräch ausgelöst, wenn HA das Flag im INTENT_END setzt (v2.6.4)
+✅ audioChanDepth des Lautsprechers auf 32 — verhindert Aussetzerstottern mitten im Strom bei längeren TTS-Antworten (v2.6.4)
+✅ Offline-IP-Anzeige im Dashboard — zeigt die zuletzt bekannte IP mit dem Zusatz „(last seen)", wenn offline; unterdrückt das Docker-NAT-Artefakt 127.0.0.1 (v2.6.4)
+✅ Strukturierte Spur je Gespräch — [TURN]-Logzeile mit vollständigen Stufenzeiten am Gesprächsende
+✅ Sichtbarkeit von OWW-Beinahe-Treffern — Werte > 0,05 auf INFO protokolliert (ratenbegrenzt, 1 alle 2 s je Gerät), dauerhafter Zähler im Status-Reiter des Dashboards (v2.6.5)
+✅ VAD-Schwelle bis 0,0001 einstellbar (Untergrenze des Dashboard-Reglers korrigiert)
+✅ Struktureller Beamformer-Fix — die Glätter laufen immer, die Ausgabe hängt vom Sperrzustand ab und nicht von einem Flag
+✅ AGC-Release während Stille eingefroren — verhindert, dass der Grundgeräuschpegel über die VAD-Schwelle verstärkt wird
+✅ Akustische Rückkopplung behoben — der Controller schläft nach dem EOS die Audiodauer ab, bevor das Mikrofon neu startet
+✅ Der Spinner läuft die volle Antwortdauer — Dauer aus der PCM-Länge berechnet
+✅ VAD-Schwelle standardmäßig 0,001 — passt zum gemessenen Bereich von Gesprächssprache auf 1,3 m (v2.6.5; war 0,003 und lag damit über leiser Sprache)
+✅ Mute-Taste — schaltet das Mikrofon stumm, roter LED-Ring, blockiert die Aktionstaste
+✅ Lautstärketasten — lokal abgefangen, cyanfarbene LED-Rückmeldung
+✅ Klicken des Verstärkers beim Start unterdrückt — Reihenfolge Mute → DAC mit Stille takten → Verstärker an → Mute aus in pcm_speaker.go Init (Reihenfolge korrigiert am 2026-07-10)
+✅ Rauschen des Verstärkers im Leerlauf beseitigt — geordnetes Herunterfahren per SIGTERM schaltet stumm und den Verstärker ab (PcmSpeaker.Close); start_server.sh wiederholt das Abschalten nach jedem Serverende als Rückfallsicherung für SIGKILL/Panik
+✅ LED-Denkspinner — vom THINKING-Signal des Voice-Servers ausgelöst
+✅ Vorlauf verwerfen — die ersten Frames des Mikrofonstroms werden verworfen, um ein Durchschlagen des Wakewords zu vermeiden
+✅ Sprachschwelle — leise Aufnahmen werden verworfen, ohne Whisper zu bemühen
+✅ OWW während der Lautsprecherwiedergabe unterdrückt — verhindert Fehlauslöser auf die eigene Stimme
+✅ Veraltete Mikrofon-Warteschlange nach einem Sprachgespräch geleert — verhindert sofortiges erneutes Auslösen
+✅ Konfiguration beim Verbinden vom Controller geschoben — VAD-/OWW-Parameter zur Laufzeit angewandt
+✅ Gerätelogs über den Control-WebSocket zum Controller gestreamt
+✅ Benachrichtigung bei Mute-Wechsel — das Gerät sendet eine mute_state-Nachricht an den Controller
+✅ Shell-Zugang — das Gerät wählt bei shell_open nach außen zum Controller, keine eingehenden Ports
+✅ OTA-Updates über das Controller-Dashboard — A/B-Slot-System, lokaler Binary-Upload, sofortiges Zurückrollen (Link umlegen, keine Übertragung)
+✅ Automatisches Zurückrollen auf dem Gerät — start_server.sh versucht es 3×, bevor es auf den inaktiven Slot umlegt; funktioniert ohne Controller
+✅ Parametrischer 8-Band-EQ (controllerseitig, SVG-Frequenzgangkurve, live aktualisierend)
+✅ Wakeword-Modell ohne Neuverbinden des Geräts austauschbar
+✅ Überwachung der Hardware-Ressourcen — CPU-%, RAM, Speicher, WLAN-RSSI alle 30 s; Signalbalken im Dashboard
+✅ Zeitlimit für Gespräche des Voice-Servers (45 s) — der Controller hängt nie an einem nicht reagierenden Voice-Server
+✅ Boot-Protokollierung nach /tmp/server.log
+✅ mDNS über grandcat/zeroconf — konform zu RFC 6762/6763, zuverlässiges Auffinden
+✅ Keepalives im WebSocket-Protokoll — tote Verbindungen innerhalb von 30 s erkannt
+✅ Verwaltungs-Dashboard des Controllers — React-SPA, mitgelieferte Assets, keine CDN-Abhängigkeit
+✅ Sicherer WLAN-Wechsel je Gerät (Reiter „WiFi" im Dashboard) — Ausführung auf dem Gerät mit automatischem Zurückrollen: vollständiger Ersatz der wpa_supplicant.conf, geschrieben *während das WLAN deaktiviert ist*, plus geprüfter `svc wifi`-Neustart (über sh — das Skript hat keine Shebang-Zeile), gekoppelt an Verbinden mit der Ziel-SSID ≤45 s → IP ≤20 s → Controller-Wiederverbindung ≤90 s; jeder Fehlschlag stellt die gesicherte Konfiguration wieder her; nicht bestätigte Änderungen rollen beim Start zurück (Wiederherstellung über eine Ausstehend-Markierung, dieselbe Philosophie wie bei den A/B-Slots); die Ergebniszustellung erfolgt mindestens einmal (wird wiederholt, bis der Controller mit wifi_commit quittiert); ein Schnellpfad über die zuletzt bekannte Controller-Adresse macht Controller in anderen Subnetzen ohne mDNS erreichbar. Alle drei Pfade am 2026-07-11 auf Hardware validiert: Zurückrollen (Unsinns-SSID, 65 s Umlauf), Wiederherstellung beim Start, Gutfall (30 s)
+✅ LED-Ring-Szenen (vom Controller gerendert) — Paletten Standard/Airy/Malevolent/Pride/Custom für Zuhör-Ring und Denkspinner (em_scenes.py); der Mute-Ring bleibt in jeder Szene rot und der Lautstärkebogen cyan; die Frames tragen ein ausdrückliches `listening`-Flag, damit die Richtungsüberlagerung des Geräts bei jeder Farbe funktioniert (mit Rückfall auf die Alles-Grün-Heuristik für alte Controller), und die Überlagerung hellt die Szenenfarbe auf, statt Grün zu malen
+✅ Live-Zustand im Dashboard — mute/listen/speak/offline über WebSocket-Ereignisse plus 5-s-Abfrage
+✅ Shell-Terminal im Dashboard — Root-Shell im Browser, Strg+C unterstützt
+✅ Satelliten-Integration über die native ESPHome-API (das einzige Sprach-Backend seit 2026-07-12)
+✅ Beide Geräte in HA als Sprachsatelliten registriert (Port 16001, 16002)
+✅ Der ESPHome-Einrichtungsassistent läuft auf beiden Geräten durch
+✅ TTS-Durchsagen über die Assist-Pipeline von HA (MP3→PCM per ffmpeg, eigenständige Wiedergabe)
+✅ Übergänge MediaPlayerState ANNOUNCING/IDLE für den Audiotest des Assistenten
+✅ Lebenszyklus der ESPHome-Ports — Ports gehen mit dem physischen Verbinden/Trennen des Geräts hoch und runter
+✅ mDNS _esphomelib._tcp je Gerät (Suffix device_id[-12:], um Präfixkollisionen zu vermeiden)
+✅ DB-Migration v2 — Spalten esphome_api_port, esphome_noise_psk, next_esphome_port
+✅ ~~Umgebungsvariable VOICE_MODE~~ — das claracore-Backend wurde am 2026-07-12 entfernt; esphome gilt bedingungslos
+✅ Von OWW und Taste ausgelöste Sprachgespräche im esphome-Modus — vollständiger Umlauf Wakeword → STT → Absicht → TTS → Lautsprecher gegen echtes HA Core 2026.6.4 bestätigt
+✅ Durchsage von HA-Seite (Test im Einrichtungsassistenten, TTS-Push) spielt korrekt auf dem Gerät — Callback wird live nachgeschlagen, nicht beim Verbinden eingefroren
+✅ Lokales Zeitlimit ohne Sprache (5 s) — entspricht Alexas Verhalten bei „Wakeword, dann Stille"; korrekt auf begrenzte Sprachgespräche beschränkt, nie auf den dauerhaften OWW-Zuhörstrom
+✅ Das VAD-Ende von HA ist maßgeblich für das Gesprächsende — _stream_mic_audio endet bei HAs STT_VAD_END/ERROR, die RMS-Gatter-Endmarke des Geräts ist beratend, harte Grenze bei 20 s; behebt den hängenden Spinner in lauten Räumen (v2.6.5, C1)
+✅ Gesprächsfortsetzung funktioniert tatsächlich — das Mikrofon wird vor jedem Fortsetzungsgespräch neu gestartet; in v2.6.4 kaputt ausgeliefert (v2.6.5, C2)
+✅ Vorlauf verwerfen nur bei Wake-Gesprächen — Tasten- und Fortsetzungsgespräche übergeben 0, auf diesen Pfaden wird das erste Wort nicht abgeschnitten (v2.6.5, C3)
+✅ Mute ist auf dem Gerät maßgeblich — Mute stoppt den laufenden Mikrofonstrom, Unmute stellt ihn wieder her; solange der Ring rot ist, verlässt kein Ton das Gerät (v2.6.5, C5 teilweise — vollständiges ADC-Mute des Chips steht aus)
+✅ Schalter für OWW-Speex-Rauschunterdrückung (owwSpeexNs) — openwakewords 16-kHz-nativer speexdsp-Unterdrücker nur auf dem Wake-Pfad, in Dashboard/API/DB verdrahtet, standardmäßig aus (v2.6.5, Q1)
+✅ Vorlaufring auf dem Gerät — ~512 ms Audio vor dem Gatter werden beim Öffnen des VAD-Gatters ausgespült; behebt die Ansatz-Naht, die OWW-Werte drückte und erste Laute abschnitt (v2.6.5)
+✅ AGC-Reset bei jedem Start des Mikrofonstroms und Mikrofon vor der TTS-Wiedergabe gestoppt — eine vom TTS-Echo zerdrückte Verstärkung kann das nächste Gespräch nicht mehr vergiften; ermöglichte das Wiedereinschalten des AGC (v2.6.5)
+✅ Unterscheidung zwischen Lautsprecher-EOS und Aussetzer — 0x03 EOS setzt EndStream(), natürliches Leerlaufen wird nicht mehr als Aussetzer protokolliert (v2.6.5)
+✅ Bei Überlauf der Mikrofon-Warteschlange fällt das älteste Frame, nicht das neueste — der Audioausklang bleibt lückenlos an der Echtzeit (v2.6.5)
+✅ voice_queue vor dem Umschalten der oww_paused-Weiterleitung geleert — alte Umgebungsframes bluten nicht mehr als STT-Vorspann ins nächste Gespräch (Regressionsfix in v2.6.5)
+✅ ADC-Mute-Regler für alle vier Chips identifiziert — der tinymix-Auszug in device/tools/ bestätigt B–D bei 123/124, 141/142, 159/160
 ```
 
-**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." Revoice devices work as real Home Assistant voice satellites without ClaraCore.
+**HA-MVP erreicht** — das ist der Meilenstein, den ESPHOME_SPEC.md §1 „die
+letzte funktionale Hürde vor einer öffentlichen v1-Ankündigung" nannte.
+Revoice-Geräte arbeiten ohne ClaraCore als echte
+Home-Assistant-Sprachsatelliten.
