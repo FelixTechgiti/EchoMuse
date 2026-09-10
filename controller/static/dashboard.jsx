@@ -1567,6 +1567,26 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     if (store) setEndpointStore(store);
   }
 
+  async function doUsePublished(kind) {
+    // Point the store at the published build and record provenance, so the
+    // automatic fetch keeps it current from here on. That second half is the
+    // point: without it this would be a one-off copy and the store would go
+    // stale again the moment the next release lands.
+    setEpBusy(kind);
+    setEpResult(r => ({ ...r, [kind]: null }));
+    try {
+      const res = await API.post(`/api/endpoint_binaries/${kind}/use_published`, {});
+      setEpResult(r => ({ ...r, [kind]: { ok: true,
+        text: `Took ${res.stored?.filename || 'the published build'} from ${res.tag || 'the release'}` } }));
+      const store = await API.get('/api/endpoint_binaries');
+      setEndpointStore(store);
+    } catch (e) {
+      setEpResult(r => ({ ...r, [kind]: { ok: false,
+        text: e.error || 'Could not take the published build' } }));
+    }
+    setEpBusy(null);
+  }
+
   async function doUploadEndpoint(kind, file) {
     if (!file) return;
     setEpBusy(kind);
@@ -2504,6 +2524,29 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                             ? `Uploaded: ${store.filename} · ${(store.size/1024/1024).toFixed(1)} MB · md5 ${store.md5.slice(0,12)}…`
                             : `Nothing uploaded yet — build one with ${ep.source}`}
                         </div>
+                        {/* Where the fleet store stands against the published
+                            release. Separate from the line above because
+                            "what is stored" and "is it the current published
+                            build" are different questions, and only the first
+                            had an answer anywhere. */}
+                        {(() => {
+                          const k = (endpointStore?.kinds || []).find(x => x.kind === ep.kind);
+                          const st = publishedStoreState(k, endpointStore?.release?.tag);
+                          if (!st.text) return null;
+                          return (
+                            <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
+                              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9,
+                                color: k?.state === 'published' ? 'var(--ok)' : 'var(--muted)' }}>
+                                Fleet store: {st.text}
+                              </span>
+                              {st.action && (
+                                <Pill small disabled={busy} onClick={() => doUsePublished(ep.kind)}>
+                                  {busy ? 'Working…' : st.action}
+                                </Pill>
+                              )}
+                            </div>
+                          );
+                        })()}
                         <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
                           <input type="file" accept="*/*" style={{ display:'none' }}
                             ref={el => { epFileRefs.current[ep.kind] = el; }}
@@ -3493,6 +3536,60 @@ function _wizardFlow() {
 // Pure and lifted by controller/tests/endpoint_health.test.mjs, for the
 // reason classifyBootTarget is: the dashboard has no module boundary, so the
 // alternative to extracting it is a second copy that drifts.
+// What the fleet store holds for one endpoint, against what the published
+// release offers — and whether there is anything the user can do about it.
+//
+// Returns { text, action } where action is the label for a button, or null
+// when there is nothing to press.
+//
+// **`unmanaged` is the state this exists for.** The automatic fetch replaces
+// only what the controller can prove it wrote, which is right — it must never
+// overwrite a patched build somebody is testing. But that same rule covers
+// every store filled before provenance existed, which is all of them, and
+// those two are indistinguishable from here: the record that would tell them
+// apart is the record that is missing. So a user who uploaded a binary by
+// hand once was stuck with it for ever, with nothing on screen saying so.
+// That is the one-way door #47 is about, and the button is the way back.
+//
+// Pure and lifted by controller/tests/endpoint_store.test.mjs, for
+// classifyBootTarget's reason.
+function publishedStoreState(kind, releaseTag) {
+  if (!kind) return { text: null, action: null };
+  const tag = releaseTag || null;
+
+  switch (kind.state) {
+    case 'published':
+      return { text: `the published build${tag ? ` (${tag})` : ''}`, action: null };
+
+    case 'outdated':
+      // The automatic fetch handles this one on its own, so the button is
+      // offered rather than urged: it only makes the next poll happen now.
+      return {
+        text: `from ${kind.stored_tag || 'an older release'}${tag ? ` — ${tag} is published` : ''}`,
+        action: tag ? 'Update from the release' : null,
+      };
+
+    case 'empty':
+      return {
+        text: tag ? `nothing stored — ${tag} will be fetched automatically`
+                  : 'nothing stored, and no published release found',
+        action: tag ? 'Fetch it now' : null,
+      };
+
+    case 'unmanaged':
+      // Never overwritten automatically, by design. Say so plainly: the cost
+      // of not saying it is somebody wondering for weeks why the published
+      // build never arrives.
+      return {
+        text: 'uploaded by hand — automatic updates leave this alone',
+        action: tag ? 'Use the published build' : null,
+      };
+
+    default:
+      return { text: null, action: null };
+  }
+}
+
 function endpointHealthLine(health, capable) {
   if (!capable) return null;          // firmware cannot say — say nothing
   if (!health) return null;           // capable, no tick yet — still nothing
