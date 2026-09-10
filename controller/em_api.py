@@ -2022,6 +2022,71 @@ async def _run_update(device_id: str, release: dict,
         _ota_lock.release()
 
 
+async def _leds_updating(device_id: str) -> None:
+    """
+    Turn the ring while an update transfers, so an update in progress and a
+    device that has died again stop being the same dark ring.
+
+    Best-effort throughout. This is feedback about an update, and an update
+    that failed because its LED push failed would be a strictly worse
+    outcome than one that ran without a light.
+    """
+    live = _live(device_id)
+    if live is None or not getattr(live, "led_anim_capable", False):
+        return
+    anim = (getattr(live, "led_scene", None) or {}).get("update_anim")
+    if not anim:
+        return
+    try:
+        await live.send_led_anim(anim)
+    except Exception as e:
+        log.debug(f"[api] update ring push failed for {device_id}: {e}")
+
+
+async def _leds_update_done(device_id: str) -> None:
+    """
+    Hand the ring back at the end of an update, on EVERY exit path.
+
+    In a `finally`, because the paths that skip it are the failure ones — a
+    fetch that 404s, a transfer that times out, an exception — and those are
+    precisely when a device would otherwise sit turning for ever with nothing
+    left to stop it. The 180s TTL is a backstop for a controller that dies,
+    not a substitute for this.
+
+    Best-effort, and deliberately quiet when the device is gone: after a
+    successful update the device has restarted and is not connected yet, which
+    is the ordinary case rather than a failure. The new firmware paints its
+    own ring when it comes up.
+
+    The resting colour is Home Assistant's, not ours — the ring light entity
+    owns what is shown when nothing is claiming the ring, and an update is a
+    transient that must hand it back rather than blank it. Painted here
+    directly rather than through em_controller.leds_idle because the import
+    runs the other way: em_controller imports this module.
+    """
+    live = _live(device_id)
+    if live is None:
+        return
+    rgb = em_ring_light.painted_rgb(
+        getattr(live, "idle_ring", em_ring_light.DEFAULT_COLOR),
+        getattr(live, "idle_ring_brightness", 0),
+    )
+    try:
+        if rgb is None:
+            # Rest is dark. A raw frame rather than {"pattern": "off"} for
+            # leds_idle's reason: a frame supersedes a running animation on
+            # the device's own generation counter, so this stops the rotation
+            # on firmware that animates locally AND on firmware that does not.
+            await live.set_leds([{"id": i, "r": 0, "g": 0, "b": 0}
+                                 for i in range(12)])
+        else:
+            r, g, b = rgb
+            await live.set_leds([{"id": i, "r": r, "g": g, "b": b}
+                                 for i in range(12)])
+    except Exception as e:
+        log.debug(f"[api] update ring clear failed for {device_id}: {e}")
+
+
 async def _run_update_locked(device_id: str, release: dict,
                              binary_override: bytes | None = None) -> None:
     """
@@ -2035,6 +2100,7 @@ async def _run_update_locked(device_id: str, release: dict,
     try:
         await _push_log_event(device_id, "info", "controller",
                               f"OTA update starting → {version}")
+        await _leds_updating(device_id)
 
         # Fetch binary
         if binary_override is not None:
@@ -2251,6 +2317,11 @@ async def _run_update_locked(device_id: str, release: dict,
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
+    finally:
+        # Every exit path, including the ones that returned early. A device
+        # left turning after a failed update is the exact "is it working or
+        # dead" ambiguity this ring exists to remove, inverted.
+        await _leds_update_done(device_id)
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:

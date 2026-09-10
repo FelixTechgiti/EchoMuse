@@ -103,6 +103,18 @@ METER_TTL_PAD = 20
 # replaces. Keep these two in step if either moves.
 SPIN_TTL = 135
 
+# Dead-man for the ring that turns while an OTA transfers. Sized off the
+# transfer's own ceiling rather than a round number: `_stream_binary_to_slot`
+# gives up at 120s, and the ring must outlast the thing it describes or it
+# clears while the transfer is still running — which is exactly the "is it
+# working or dead" question this exists to answer.
+#
+# It is a BACKSTOP and not the mechanism. The update clears the ring itself on
+# every exit path (`_run_update_locked`'s finally); this only covers a
+# controller that dies mid-update, which would otherwise leave a device
+# spinning until somebody power-cycled it.
+UPDATE_TTL = 180
+
 # Meter response-curve config keys → the wire field the device reads, with
 # the range the dashboard offers. The device clamps independently
 # (resolveMeter in animator.go) — this is the UI range, not the guard.
@@ -196,6 +208,49 @@ def resolve(config: dict) -> dict:
             "periodMs": 80,
             "ttlSec":   SPIN_TTL,
         }
+    # The ring that turns while an update transfers.
+    #
+    # From the room, an update in progress and a device that has died again
+    # are the same dark ring, and on 2026-09-10 somebody spent an afternoon
+    # unable to tell them apart. This is the difference.
+    #
+    # **The same branch spin_anim takes, and it is not decoration.** `rotate`
+    # walks a PALETTE around the ring, so with one colour it paints every LED
+    # identically on every frame — a ring that does not appear to move at all,
+    # which is exactly the signal this exists to give. Only a multi-colour
+    # preset has anything to rotate; a single-colour scene needs the head-and-
+    # trail `spin` to read as motion.
+    #
+    # **Slow deliberately.** The spinner runs at 80ms because it covers a
+    # think time measured in seconds and must read as activity; a transfer
+    # takes a minute or more, and a fast rotation over that long reads as
+    # agitation rather than progress. 220ms is a little over two seconds a
+    # revolution, which reads as patient.
+    #
+    # In the scene's own colours, unlike no_ha_anim below: an update is not a
+    # fault, so borrowing the orange that means "the link upstream is down"
+    # would say the wrong thing in the one place a user is already anxious.
+    #
+    # **It cannot survive the restart, and nothing here pretends it can.** The
+    # firmware rendering this ticker is the firmware being replaced, so at
+    # `kill $PPID` the ring freezes on its last frame until the new binary
+    # paints something. Frozen is still better than dark — it reads as
+    # mid-update rather than off — but it is not an animation and the release
+    # notes must not promise one.
+    if preset["rotate"]:
+        update_anim = {
+            "pattern":  "rotate",
+            "colors":   [list(c) for c in preset["listening"]],
+            "periodMs": 220,
+            "ttlSec":   UPDATE_TTL,
+        }
+    else:
+        update_anim = {
+            "pattern":  "spin",
+            "colors":   [list(preset["spin_head"]), list(preset["spin_trail"])],
+            "periodMs": 220,
+            "ttlSec":   UPDATE_TTL,
+        }
     listening_anim = {
         "pattern":   "solid",
         "colors":    [list(c) for c in preset["listening"]],
@@ -285,6 +340,30 @@ def resolve(config: dict) -> dict:
             "pattern": "pulse", "colors": [list(LINK_ORANGE)],
             "periodMs": 500, "ttlSec": 1,
         },
+        # A slow rotation while an update transfers — "this is working, wait."
+        #
+        # From the room, an update in progress and a device that has died
+        # again are the same dark ring, and on 2026-09-10 somebody spent an
+        # afternoon unable to tell them apart. This is the difference.
+        #
+        # **Slow deliberately.** The spinner runs at 80ms because it covers a
+        # think time measured in seconds and has to read as activity; a
+        # transfer takes a minute or more, and a fast rotation over that long
+        # reads as agitation rather than progress. 220ms is a bit over two
+        # seconds a revolution, which reads as patient.
+        #
+        # In the scene's own colours, unlike no_ha_anim above: an update is
+        # not a fault, so borrowing the orange that means "the link upstream
+        # is down" would say the wrong thing in the one place a user is
+        # already anxious.
+        #
+        # **It cannot survive the restart, and nothing here pretends it can.**
+        # The firmware rendering this ticker is the firmware being replaced,
+        # so at `kill $PPID` the ring freezes on its last frame until the new
+        # binary paints something. A frozen ring is still better than a dark
+        # one — it says "mid-update" rather than "off" — but it is not an
+        # animation and the notes must not promise one.
+        "update_anim":    update_anim,
     }
 
 

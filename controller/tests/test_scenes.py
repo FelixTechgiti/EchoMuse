@@ -193,3 +193,72 @@ def test_no_ha_cue_is_two_throbs_and_self_clearing():
     assert cue["ttlSec"] == 1, \
         "must retire on the device's own ticker with no follow-up message"
     assert cue["ttlSec"] * 1000 / cue["periodMs"] == 2
+
+
+def test_the_update_ring_actually_appears_to_move_in_every_scene():
+    """
+    The trap this exists to avoid, and it is silent.
+
+    `rotate` walks a PALETTE around the ring — with one colour it paints every
+    LED identically on every frame, which is a ring that does not appear to
+    move at all. Every single-colour scene (the default among them) would have
+    shown a solid ring during an update: indistinguishable from a device
+    sitting idle, which is the exact ambiguity this feature exists to remove.
+
+    So a single-colour scene must use the head-and-trail `spin` instead, the
+    same branch spin_anim already takes.
+    """
+    for name in em_scenes._PRESETS:
+        anim = em_scenes.resolve({"ledScene": name})["update_anim"]
+        if anim["pattern"] == "rotate":
+            assert len(anim["colors"]) > 1, (
+                f"scene {name}: rotate with {len(anim['colors'])} colour(s) "
+                f"paints a static ring — nothing would appear to happen"
+            )
+        else:
+            assert anim["pattern"] == "spin", \
+                f"scene {name}: update ring pattern {anim['pattern']} does not move"
+            assert len(anim["colors"]) == 2, \
+                f"scene {name}: spin needs a head and a trail to read as motion"
+
+
+def test_the_update_ring_is_slower_than_the_spinner():
+    """
+    The spinner covers a think time measured in seconds and has to read as
+    activity. A transfer takes a minute or more, and the spinner's cadence
+    over that long reads as agitation rather than progress — in the one place
+    a user is already anxious about their device.
+    """
+    for name in em_scenes._PRESETS:
+        scene = em_scenes.resolve({"ledScene": name})
+        assert scene["update_anim"]["periodMs"] > scene["spin_anim"]["periodMs"], (
+            f"scene {name}: the update ring is not slower than the spinner"
+        )
+
+
+def test_the_update_ring_outlasts_the_transfer_it_describes():
+    """
+    The TTL is a dead-man for a controller that dies mid-update, so it has to
+    outlast the transfer's own ceiling — `_stream_binary_to_slot` gives up at
+    120s. A shorter TTL clears the ring while the transfer is still running,
+    which answers the question wrongly rather than not answering it.
+    """
+    for name in em_scenes._PRESETS:
+        ttl = em_scenes.resolve({"ledScene": name})["update_anim"]["ttlSec"]
+        assert ttl > 120, \
+            f"scene {name}: update ring TTL {ttl}s can expire mid-transfer"
+
+
+def test_the_update_ring_is_not_the_link_down_colour():
+    """
+    An update is not a fault. `no_ha_anim` borrows orange deliberately because
+    orange already means "the link upstream is down" on this hardware — so an
+    update wearing it would say exactly the wrong thing at the moment somebody
+    is most worried about their device.
+    """
+    for name in em_scenes._PRESETS:
+        colors = em_scenes.resolve({"ledScene": name})["update_anim"]["colors"]
+        assert list(em_scenes.LINK_ORANGE) not in colors, (
+            f"scene {name}: the update ring uses the link-down orange, which "
+            f"reads as a fault"
+        )
