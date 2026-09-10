@@ -2826,3 +2826,45 @@ def test_the_published_build_is_reachable_from_the_dashboard():
         "automatic fetch will not keep it current"
     assert "elf_problem" in fn, \
         "a release asset is checked less than a person's upload"
+
+
+def test_the_update_ring_is_cleared_on_every_exit_path():
+    """
+    A ring that turns during an update has one failure mode worse than not
+    having it: a device left turning for ever after an update that failed.
+    That inverts the exact ambiguity it exists to remove — "is it working or
+    is it dead" — and it would happen on the paths that return early, which
+    are the failure ones.
+
+    So the clear belongs in a `finally`, not at the end of the happy path.
+    The animation's own TTL is a backstop for a controller that dies, not a
+    substitute: 180s of spinning after a failed update is still wrong.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    fn = api[api.index("async def _run_update_locked"):]
+    fn = fn[:fn.index("async def _run_rollback")]
+
+    assert "_leds_updating" in fn, "the ring never starts turning"
+    assert "finally:" in fn, \
+        "no finally — a failed update leaves the ring spinning"
+    tail = fn[fn.rindex("finally:"):]
+    assert "_leds_update_done" in tail, \
+        "the ring is not handed back in the finally"
+
+
+def test_the_update_ring_hands_back_to_home_assistants_colour():
+    """
+    The ring light entity owns the RESTING colour; the update animation is a
+    transient, and every transient in this codebase hands the ring back rather
+    than blanking it. Blanking would turn a light Home Assistant believes is
+    on into a dark ring, on every update.
+    """
+    from pathlib import Path
+    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    fn = api[api.index("async def _leds_update_done"):]
+    fn = fn[:fn.index("async def _run_update_locked")]
+    assert "painted_rgb" in fn, \
+        "the update ring blanks the ring instead of restoring the resting colour"

@@ -94,6 +94,21 @@ automatic updates leave this alone* — and offers a button to take the
 published build when that is what you want. Taking it also records it, so
 updates continue automatically from then on.
 
+### The ring turns while an update is running
+
+From across the room, an Echo mid-update and an Echo that has gone dead again
+looked exactly the same: a dark ring. The ring now turns slowly while the new
+firmware is being transferred, and goes back to its resting colour when the
+update ends — including when it ends badly, so nothing is left spinning.
+
+It cannot keep turning through the restart itself: the firmware drawing the
+animation is the firmware being replaced, so the ring freezes on its last
+frame for those few seconds until the new one comes up. Frozen still reads as
+"mid-update" rather than "off", which was the whole problem.
+
+Needs firmware 2.9 or newer (anything that animates its own ring); older Echos
+are unaffected.
+
 ### What is required of you
 
 Nothing.
