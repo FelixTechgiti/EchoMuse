@@ -8,7 +8,7 @@
 # the full aioesphomeapi package because that package is a *client*
 # implementation (designed for HA-as-client / device-as-server) and pulls in
 # a Noise-PSK crypto stack (cryptography, noiseprotocol,
-# chacha20poly1305-reuseable) that EchoMuse's Phase 1 plaintext-only server
+# chacha20poly1305-reuseable) that Revoice's Phase 1 plaintext-only server
 # never calls — see ESPHOME_SPEC.md §5/§7.1/§7.2. It also requires
 # zeroconf>=0.149.16, which conflicts with the controller's existing
 # zeroconf==0.148.0 pin.

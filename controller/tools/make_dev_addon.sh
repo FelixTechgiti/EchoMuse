@@ -25,7 +25,7 @@
 set -eu
 
 SRC="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-OUT="${1:-$SRC/../dist/echomuse-dev}"
+OUT="${1:-$SRC/../dist/revoice-dev}"
 
 [ -f "$SRC/config.yaml" ] || { echo "no config.yaml in $SRC" >&2; exit 1; }
 
@@ -66,7 +66,7 @@ text = open(path, encoding="utf-8").read()
 # pulling a published image, which this build deliberately does not do.
 text = re.sub(r'(?:^#.*\n)*^image:.*\n', '', text, count=1, flags=re.M)
 
-text = re.sub(r'^name:.*$',    'name: "EchoMuse (dev)"',   text, count=1, flags=re.M)
+text = re.sub(r'^name:.*$',    'name: "Revoice (dev)"',   text, count=1, flags=re.M)
 text = re.sub(r'^slug:.*$',    'slug: "controller-dev"',   text, count=1, flags=re.M)
 text = re.sub(r'^version:.*$', f'version: "{version}"',    text, count=1, flags=re.M)
 

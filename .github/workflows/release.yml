@@ -24,7 +24,7 @@ jobs:
           submodules: true   # fetches GoTinyAlsa submodule
 
       - name: Build compiler image
-        run: docker build -t echomuse-compiler device/compiler/
+        run: docker build -t revoice-compiler device/compiler/
 
       - name: Compile
         run: |
@@ -34,7 +34,7 @@ jobs:
             -e CGO_LDFLAGS="-Wl,--hash-style=both" \
             -v "${{ github.workspace }}/device":/sdk \
             -v "${{ github.workspace }}/GoTinyAlsa":/GoTinyAlsa \
-            echomuse-compiler \
+            revoice-compiler \
             -c "cd /sdk && mkdir -p build && go build \
               -tags server \
               -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${{ github.ref_name }} \
@@ -79,7 +79,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: EchoMuse ${{ github.ref_name }}
+          name: Revoice ${{ github.ref_name }}
           files: device/build/server
           body_path: /tmp/release-notes.md
           generate_release_notes: true

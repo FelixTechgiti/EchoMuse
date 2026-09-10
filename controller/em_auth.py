@@ -1,5 +1,5 @@
 """
-auth.py — EchoMuse Controller authentication layer
+auth.py — Revoice Controller authentication layer
 ===================================================
 
 Handles password hashing, session token generation, login/logout,
@@ -39,7 +39,7 @@ from aiohttp import web
 import em_db as db
 import em_ingressauth
 
-log = logging.getLogger("echomuse.auth")
+log = logging.getLogger("revoice.auth")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -369,7 +369,7 @@ def maybe_generate_bootstrap_token() -> Optional[str]:
     print(
         f"\n"
         f"  ┌─────────────────────────────────────────────────────────┐\n"
-        f"  │  EchoMuse first-run setup                               │\n"
+        f"  │  Revoice first-run setup                               │\n"
         f"  │                                                         │\n"
         f"  │  No users found. Visit /setup to create an admin        │\n"
         f"  │  account using this one-time token:                     │\n"

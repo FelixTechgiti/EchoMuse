@@ -1,6 +1,6 @@
 # Switching an existing install to this fork
 
-You are running EchoMuse from `wilbowes/EchoMuse` — the add-on, the published
+You are running Revoice from `wilbowes/EchoMuse` — the add-on, the published
 container, or both — and you want to run this fork instead.
 
 **Read the whole page before you start.** Two of the steps cannot be undone
@@ -16,8 +16,8 @@ Home Assistant entities, same dashboard. What differs:
 
 | | upstream | this fork |
 |---|---|---|
-| Add-on repository | `github.com/wilbowes/EchoMuse` | `github.com/FelixTechgiti/EchoMuse` |
-| Controller image | `ghcr.io/wilbowes/echomuse-controller` | `ghcr.io/felixtechgiti/echomuse-controller` |
+| Add-on repository | `github.com/wilbowes/EchoMuse` | `github.com/FelixTechgiti/Revoice` |
+| Controller image | `ghcr.io/wilbowes/echomuse-controller` | `ghcr.io/felixtechgiti/revoice-controller` |
 | Firmware releases | upstream's `v*` tags | this fork's `v*` tags |
 
 And the features this fork adds on the device: the output chain running
@@ -101,7 +101,7 @@ install** stored upstream's name when it was created, so the controller
 repoints it once, on the first start, and says so in the log:
 
 ```
-[db] Update source set to FelixTechgiti/EchoMuse — this database was created by an upstream controller.
+[db] Update source set to FelixTechgiti/Revoice — this database was created by an upstream controller.
 ```
 
 Cached release information from the old repository is dropped at the same

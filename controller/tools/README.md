@@ -6,8 +6,8 @@ mint a temporary session token directly in the SQLite `sessions` table, use
 it as `Authorization: Bearer`, and delete it afterwards):
 
 ```bash
-docker cp controller/tools/devshell.py echomuse-controller:/tmp/
-docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<another>" ...]
+docker cp controller/tools/devshell.py revoice-controller:/tmp/
+docker exec revoice-controller python /tmp/devshell.py "<shell command>" ["<another>" ...]
 ```
 
 - **devshell.py** — run commands on a device over the `/shell` proxy (PTY
@@ -19,7 +19,7 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
   stopping the service kills the shell mid-command and takes the device down
   until it is power cycled.
 - **ota.py** — push a locally built binary: `docker cp device/build/server
-  echomuse-controller:/tmp/server-new` first, then
+  revoice-controller:/tmp/server-new` first, then
   `python /tmp/ota.py <device_id>` (upload → `/api/devices/{id}/update`).
 - **pull_so.py** — pull a file off the device (busybox base64 over the
   shell, echo disabled, split end-markers). Writes the decoded file to

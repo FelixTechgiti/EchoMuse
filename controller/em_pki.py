@@ -1,12 +1,12 @@
 """
-EchoMuse Controller — device-link PKI.
+Revoice Controller — device-link PKI.
 
 Generates and persists a private CA plus a server certificate for the
 device WebSocket TLS listener. Files live in TLS_DIR (default: a tls/
 directory next to the SQLite database, so the existing /app/data volume
 mount persists them across container rebuilds):
 
-    ca.pem / ca.key         — the EchoMuse controller CA (what devices pin)
+    ca.pem / ca.key         — the Revoice controller CA (what devices pin)
     server.pem / server.key — leaf cert presented on the TLS listener
 
 Design constraints (see CLAUDE.md "TLS device link"):
@@ -34,12 +34,12 @@ import logging
 import os
 import ssl
 
-log = logging.getLogger("echomuse.pki")
+log = logging.getLogger("revoice.pki")
 
 # DNS name devices expect in the server cert — coupled with
 # device/internal/client/tlscreds.go (tlsServerName). Not resolvable on
 # purpose; it's an identity label, not an address.
-TLS_SERVER_NAME = "echomuse-controller"
+TLS_SERVER_NAME = "revoice-controller"
 
 _NOT_BEFORE_BACKDATE = datetime.timedelta(days=3650)   # 10 years
 _VALIDITY            = datetime.timedelta(days=365 * 25)
@@ -70,7 +70,7 @@ def _generate(tls_dir: str) -> None:
 
     # ── CA ────────────────────────────────────────────────────────────────
     ca_key  = ec.generate_private_key(ec.SECP256R1())
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "EchoMuse Controller CA")])
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Revoice Controller CA")])
     ca_cert = (
         x509.CertificateBuilder()
         .subject_name(ca_name)

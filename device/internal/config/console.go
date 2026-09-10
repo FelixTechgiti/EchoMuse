@@ -13,8 +13,8 @@ import (
 //
 // The FIRMWARE writes it and INIT reads it, which is the whole reason it is a
 // file rather than something held in memory: the console has to work when
-// EchoMuse is not running, since that is exactly when someone needs it.
-const ConsolePasswordPath = "/data/local/etc/echomuse/console.pw"
+// Revoice is not running, since that is exactly when someone needs it.
+const ConsolePasswordPath = "/data/local/etc/revoice/console.pw"
 
 // WriteConsolePassword stores the record emOS's init checks against, or
 // removes it when the record is empty.

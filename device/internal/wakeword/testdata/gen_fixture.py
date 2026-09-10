@@ -9,10 +9,10 @@ it tensor for tensor without needing ONNX Runtime in CI.
 Run inside the controller container (it has openwakeword + onnxruntime and
 the model files):
 
-    docker cp gen_fixture.py echomuse-controller:/tmp/
-    docker exec echomuse-controller python /tmp/gen_fixture.py \
+    docker cp gen_fixture.py revoice-controller:/tmp/
+    docker exec revoice-controller python /tmp/gen_fixture.py \
         /app/data/recordings/<some>.wav /tmp/stream_fixture.bin
-    docker cp echomuse-controller:/tmp/stream_fixture.bin \
+    docker cp revoice-controller:/tmp/stream_fixture.bin \
         device/internal/wakeword/testdata/
 
 Any 16kHz mono 16-bit WAV of at least ~2.5s works; the utterance recordings

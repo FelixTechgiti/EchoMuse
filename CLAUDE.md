@@ -4,11 +4,57 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-EchoMuse repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "biscuit") as an open-source voice assistant satellite. Two components:
+Revoice repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "biscuit") as an open-source voice assistant satellite. Two components:
 
 - **`device/`** — Go binary that runs directly on the rooted Echo Dot
 - **`controller/`** — Python asyncio WebSocket server that manages devices, runs wake word detection, and proxies to a voice pipeline
 - **`oww_forge/`** — standalone Docker batch trainer for custom openWakeWord models (synthetic TTS positives → augmentation → classifier head → `.onnx`). Not part of the controller; see `oww_forge/README.md`. **Published as an image** since 2026-08-20 (`forge-v*` tags → `forge-release.yml` → `ghcr.io/wilbowes/echomuse-forge`, CUDA on amd64 as `:latest` and CPU multi-arch as `:latest-cpu`) — prefer it to a local build, because the pins below are only preserved by a published artifact. Upstream pins in its Dockerfile are load-bearing (piper-sample-generator v2.0.0 flat layout; openWakeWord SHA with a `--convert_to_tflite` argparse patch). **Extra voices come from `piper_voices.py`, and its catalogue is FETCHED, never hardcoded** — 55 languages, ranked by speaker count, because a baked-in list of English voices makes every other language a code change; the same module backs the phrase preview. `google_tts.py` is rate-limited by Google at any real concurrency, so it retries transient failures and only retires a voice on a permanent refusal. Models install via the dashboard (Config → Wake word → "+ Custom model" → `/api/oww_models/upload`) into `oww_models/` beside the SQLite DB; `owwModel` stores the file path for custom models. openwakeword keys predictions by filename *stem*, never the path — always score via `em_oww_models.prediction_key`
+
+## The name: Revoice, and what deliberately still says EchoMuse
+
+The project was renamed from **EchoMuse** to **Revoice** on 2026-09-10, all
+the way through: prose, UI strings, log channels, filenames, on-device paths
+(`/data/local/etc/revoice`), the SQLite file (`revoice.db`), the published
+image (`ghcr.io/felixtechgiti/revoice-controller`), the TLS server name
+(`revoice-controller`), the emOS service entry (`svc_add("revoice", …)`) and
+the `REVOICE_HOME_ASSISTANT_INGRESS` env var. Upstream is still called
+EchoMuse; this fork is not.
+
+**Four things kept the old name on purpose**, and each is a trap if
+"finished the rename" is read as a reason to change them later:
+
+- **The Go module path stays `github.com/wilbowes/EchoMuse`.** It is
+  upstream's module path, it appears in every import line in `device/`, and
+  it is invisible to users. Renaming it turns every weekly upstream sync into
+  a full-file conflict on every Go file, permanently, in exchange for nothing.
+- **Links to `github.com/wilbowes/EchoMuse/issues/...` stay**, because they
+  are references to upstream's tracker, not to ours. So do
+  `ghcr.io/wilbowes/echomuse-*` image references — those are images upstream
+  publishes, including the digest-pinned base `ci.yml` scans against.
+- **`JOURNAL.md` and both `CHANGELOG.md` files were not rewritten.** They are
+  the record of what happened, and what happened happened under the old name.
+  A changelog that claims Revoice shipped in v2.3.0 is a false record.
+- **The `em_`/`EM_`/`emos`/`_emcontroller` short prefixes stay.** They are
+  prefixes, not the name: renaming 47 Python modules, every import of them,
+  every documented env var and the mDNS service type would break every
+  existing `.env`, break discovery against fielded firmware, and change
+  nothing anyone reads as branding.
+
+**Two compatibility shims exist solely because of the rename**, and both are
+about files that the old name left on a device: `_sync_debloat` deletes
+`echomuse-debloat.sh` as it installs `revoice-debloat.sh`, and the wizard's
+init.rc patch treats `service echomuse` as already-patched. Magisk's
+`service.d` runs *every* script it finds, so a leftover means the debloat
+runs twice off two files that will drift; the init.rc check means a second
+service entry starting the same `start_server.sh`. Neither is dead code —
+delete them only once no device provisioned as EchoMuse can reach this
+controller, which is not a date anybody can name.
+
+The upgrade is **not** transparent for an existing install: the database file,
+the certificate SAN and the image name all changed. The procedure is in the
+README's "Umstieg von EchoMuse" section, and it is the only place a user is
+told to rename `echomuse.db` — losing that paragraph means somebody starts
+with an empty fleet and does not know why.
 
 ## Where the detail lives
 
@@ -27,7 +73,7 @@ the relevant one before changing anything there.
 
 ## Direction: portable, and not dependent on Amazon
 
-**EchoMuse should run on more than one piece of hardware, with minimal change
+**Revoice should run on more than one piece of hardware, with minimal change
 per platform, and should not depend on Amazon's software to work.** That is
 the direction, stated 2026-08-18. It is written here because contributors have
 sent multi-thousand-line PRs without knowing which project they were
@@ -212,7 +258,7 @@ PR stretches it to however long passes before somebody remembers to cut, and
 what a user sees for the whole of that window is
 
 ```
-Error updating EchoMuse: An unknown error occurred with app
+Error updating Revoice: An unknown error occurred with app
 46aaf331_controller. Check Supervisor logs for details
 ```
 
@@ -279,9 +325,9 @@ Controller is discovered by the device via mDNS (`_emcontroller._tcp.local`).
 
 ### Device-link TLS + token auth
 
-All three WS planes exist twice: plain on `SERVER_PORT` (8767) and TLS on `SERVER_TLS_PORT` (8770, `wss://`). `em_pki.py` generates a private CA + server cert on first start (persisted in `tls/` next to the SQLite DB; delete the dir to rotate — every device then needs a fresh credential push). The leaf's identity is the fixed DNS SAN `echomuse-controller` (`TLS_SERVER_NAME`, coupled with `tlsServerName` in `device/internal/client/tlscreds.go`) — never an IP, so the controller can move address freely. Certs are backdated 10y/valid 25y **and** the device clamps its verification clock to the firmware build time (`BuildUnix` ldflag): Echos boot with bogus clocks pre-NTP, and a device that can't connect can't fix its clock. Don't "normalise" either half of that.
+All three WS planes exist twice: plain on `SERVER_PORT` (8767) and TLS on `SERVER_TLS_PORT` (8770, `wss://`). `em_pki.py` generates a private CA + server cert on first start (persisted in `tls/` next to the SQLite DB; delete the dir to rotate — every device then needs a fresh credential push). The leaf's identity is the fixed DNS SAN `revoice-controller` (`TLS_SERVER_NAME`, coupled with `tlsServerName` in `device/internal/client/tlscreds.go`) — never an IP, so the controller can move address freely. Certs are backdated 10y/valid 25y **and** the device clamps its verification clock to the firmware build time (`BuildUnix` ldflag): Echos boot with bogus clocks pre-NTP, and a device that can't connect can't fix its clock. Don't "normalise" either half of that.
 
-Device behaviour (`tlscreds.go`): credentials live at `/data/local/etc/echomuse/{ca.pem,token}` (canonical path constant: `em_api.DEVICE_TLS_DIR`) and are **re-read on every dial**, so a push takes effect on the next reconnect, no restart. CA present + `tls_port` mDNS TXT property → dial wss; CA present but no TXT → plain with a warning (deliberate rollout fallback). The token rides as `X-EM-Token` on all three dials.
+Device behaviour (`tlscreds.go`): credentials live at `/data/local/etc/revoice/{ca.pem,token}` (canonical path constant: `em_api.DEVICE_TLS_DIR`) and are **re-read on every dial**, so a push takes effect on the next reconnect, no restart. CA present + `tls_port` mDNS TXT property → dial wss; CA present but no TXT → plain with a warning (deliberate rollout fallback). The token rides as `X-EM-Token` on all three dials.
 
 Controller enforcement (`em_linkauth.decide`, called by `_link_auth_ok`): presented-but-wrong token always rejects; stored-token-but-none-presented is allowed (the credential push itself rides the plain shell plane, and rejecting there would deadlock the rollout); a token presented for a device with NOTHING on record is **ignored, not rejected**. Rejecting it made deleting a device a one-way door, since delete takes the token with the row while the device keeps re-reading its credential file, and the refusal covered the shell plane the controller would have fixed it over. It also bought nothing: a connection presenting no token at all is already allowed, so an attacker just omits the header. `REQUIRE_DEVICE_TLS=1` flips the posture to TLS+token mandatory and is unaffected by that: a deleted device is still refused there and needs credentials pushed over USB. Flip it only when every device shows `wss (TLS)` in the dashboard (Status tab "Link" row; `linkTls` in `/api/devices`).
 
@@ -304,7 +350,7 @@ Configurable parameters: `consolePassword`, `vadThreshold`, `vadSpeechMs`, `vadS
 
 ```bash
 git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
-cd device && ./compile.sh            # needs the echomuse-compiler image
+cd device && ./compile.sh            # needs the revoice-compiler image
 cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
 cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check

@@ -87,7 +87,7 @@ HA offers, so **nothing is gated on it**.
 forwards the authenticated user as `X-Remote-User-Id` (plus optional name
 headers) and **strips any client-supplied copies** before proxying, so on a
 genuine ingress request those values are proof of an HA session. `POST
-/api/auth/ingress` mints an EchoMuse session from them and the landing page
+/api/auth/ingress` mints an Revoice session from them and the landing page
 tries it before rendering any form, which also removes the bootstrap-token
 step under the add-on — the first HA user through the door becomes admin,
 exactly as the token holder does on the container.
@@ -1182,7 +1182,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_outchain.py` | Who shapes the audio — the controller or the device. One pure predicate on the `output_chain` capability, plus a `Bypass` that returns the caller's own bytes. Split out because neither `em_controller` nor `em_player` is importable by the suite, and because both failure directions are audible and silent |
 | `em_ring_light.py` | The LED ring as an HA light — the ring's RESTING colour, which every voice state outranks. Owns the partial-update semantics of `LightCommandRequest` (each field rides its own `has_*` flag) and the encoding decision that on/off lives in the brightness, so the colour survives being switched off and HA's card can offer it back |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
-| `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
+| `em_esphome.py` | ESPHome-mode satellite servers (`RevoiceSatellite`, `DeviceESPhomeServer`) |
 | `em_arbiter.py` | Multi-device wake arbitration — pools same-utterance detections, best SNR answers |
 | `em_player.py` | Media playback sessions — `media_player.play_media` → streaming ffmpeg decode → paced 0x02 feed; pause/resume/stop; voice preempts music (`interrupt`/`resume_interrupted`) |
 | `em_config_sections.py` | Fleet-vs-device config scoping — the six sections, `STATE_KEYS`, and the merge that resolves a device's effective config |
@@ -1602,7 +1602,7 @@ used to recover a device that never came back wipes exactly the lines that
 would explain it (2026-08-01, still unexplained as a direct result). The
 supervisor therefore ALSO writes its own decisions — boot slot, start, exit
 with runtime and code, each fast-exit, the rollback, and **why it is exiting**
-— to `/data/local/etc/echomuse/supervisor.log` (`em_api.SUPERVISOR_LOG`; a
+— to `/data/local/etc/revoice/supervisor.log` (`em_api.SUPERVISOR_LOG`; a
 test pins the two paths together). Bounded at 64KB with the trim **before**
 the append, so a crash-loop cannot outrun it. Timestamps are seconds since
 boot, not wall clock, for the usual reason. The controller cannot fetch it at
@@ -1769,7 +1769,7 @@ it: a tag contains dots, so pathlib reads `server-v2.11.0` as stem
 digest filename that never matches its payload — every read a miss, the cache
 doing nothing, and nothing saying so.
 
-Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
+Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`revoice-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 **All three payloads reconcile when the device CONNECTS** (`em_api.reconcile_on_connect`, called from the register handler). A device arriving is the one moment we know what it has, and until 2026-09-02 nothing used it: the wake word assets reconciled here but returned early unless the device scored locally and then checked only the selected classifier, while `_sync_start_script` and `_sync_debloat` ran **only** inside an OTA or from the Maintenance button. So a device already on the latest firmware never received a payload change at all — Office sat without three of the four stock classifiers for a fortnight with every panel calling it healthy. Four rules:
 
@@ -1791,7 +1791,7 @@ each of which has already been broken once and each of which fails *silently*
 when broken — the wizard drives hardware nobody is watching a log of.
 
 - **The finishing reboot belongs to the LAST step, and moving the last step
-  means moving the reboot.** Install EchoMuse used to be last, so it ended by
+  means moving the reboot.** Install Revoice used to be last, so it ended by
   rebooting and clearing `adb`. When the wake word asset step was appended
   after it, that step's auto-run gate (`&& adb`) was false, so it never fired
   once: no error, no log line, no button, just a wizard sitting on a step
@@ -1856,7 +1856,7 @@ Two device behaviours the wizard works around rather than fixes:
   Keyevents rather than a volume API: `service call audio` needs a
   transaction number that differs per release, and
   `settings put system volume_music` is not read live by AudioService. Safe
-  to leave muted — EchoMuse drives the codec and seeds `startupVolume` after
+  to leave muted — Revoice drives the codec and seeds `startupVolume` after
   the final reboot. **It does not reliably work.** Observed 2026-08-08: she
   talks regardless, either raising the volume back or playing on a stream
   `keyevent 25` does not address (25 adjusts whichever stream is ACTIVE).
@@ -1991,7 +1991,7 @@ failure and the first-boot failure leave it.
 ### The one partition the wizard writes
 
 Patch Boot Image is the only partition write in the whole wizard, and the only
-point at which it could reach below FireOS. EchoMuse writes the FireOS kernel
+point at which it could reach below FireOS. Revoice writes the FireOS kernel
 and userspace; it does not write the preloader, LK, amonet's unlock payload or
 TWRP. `docs/rooting.md` states that boundary for users.
 

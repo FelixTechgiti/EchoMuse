@@ -18,7 +18,7 @@ import (
 // often than the binary, and embedding it would double both the OTA payload and
 // the space taken by the A/B slots. It is installed out of band, and its
 // absence is an ordinary, expected condition — see Open.
-const DefaultDir = "/data/local/share/echomuse/oww"
+const DefaultDir = "/data/local/share/revoice/oww"
 
 // Dir returns the configured model directory.
 func Dir() string {

@@ -13,7 +13,7 @@ Implements the controller's outward-facing ESPHome satellite interface
 
 Architecture:
 
-  EchoMuseSatellite   — SatelliteServerProtocol subclass, one instance per
+  RevoiceSatellite   — SatelliteServerProtocol subclass, one instance per
                         active HA connection. Handles the full message sequence
                         confirmed against real HA Core 2026.6.4 (see session
                         handoff). Sends VoiceAssistantRequest to HA and streams
@@ -23,7 +23,7 @@ Architecture:
   DeviceESPhomeServer — Owns the asyncio TCP server for one device port.
                         Enforces single-claimant: a second inbound connection
                         gets DisconnectResponse + close immediately. Holds a
-                        reference to the current active EchoMuseSatellite
+                        reference to the current active RevoiceSatellite
                         instance so the controller can reach it for OWW/button
                         triggers.
 
@@ -33,8 +33,8 @@ Architecture:
 Voice turn flow:
   1. OWW fires (or button press) → em_controller calls
      trigger_voice_turn(device) in this module
-  2. trigger_voice_turn() finds the active EchoMuseSatellite for that device
-  3. EchoMuseSatellite sends VoiceAssistantRequest(start=True, flags=0) to HA
+  2. trigger_voice_turn() finds the active RevoiceSatellite for that device
+  3. RevoiceSatellite sends VoiceAssistantRequest(start=True, flags=0) to HA
      (flags=0 = device already detected wake word, skip HA-side wake word detection)
   4. Streams VoiceAssistantAudio chunks from device.voice_queue
   5. Sends VoiceAssistantAudio(end=True) on VAD sentinel
@@ -201,13 +201,13 @@ from esphome.vendor import api_pb2
 if TYPE_CHECKING:
     pass
 
-log = logging.getLogger("echomuse.esphome")
+log = logging.getLogger("revoice.esphome")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
-MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
+MDNS_NAME    = os.environ.get("MDNS_NAME", "revoice")
 
 # ESPHome controller firmware version string reported to HA.
 # Defaults to the real controller version (version.py) so HA's device page
@@ -317,9 +317,9 @@ CONVERSATION_TRIGGER = "start_conversation"
 VOICE_REQUEST_FLAGS_WAKE_WORD_DONE = 0
 
 
-# ─── EchoMuseSatellite ───────────────────────────────────────────────────────
+# ─── RevoiceSatellite ───────────────────────────────────────────────────────
 
-class EchoMuseSatellite(SatelliteServerProtocol):
+class RevoiceSatellite(SatelliteServerProtocol):
     """
     One instance per active HA connection for one device.
 
@@ -345,7 +345,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                               # None in tests or the reject-connection path.
     ) -> None:
         super().__init__(
-            server_name=f"echomuse-{device_id[-12:].lower()}",
+            server_name=f"revoice-{device_id[-12:].lower()}",
             log_name=f"esphome.{device_id[-8:]}",
         )
         self.device_id      = device_id
@@ -653,13 +653,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 name=self.server_name,
                 friendly_name=f"{self.label} Voice Assistant",
                 mac_address=self.mac_address,
-                manufacturer="EchoMuse",
+                manufacturer="Revoice",
                 model=ESPHOME_DEVICE_MODEL,
                 # CRITICAL: dot notation required — HA's manager.py does
                 # project_name.split(".") unconditionally. No dot → IndexError
                 # → device silently never appears in Devices & Services.
                 # (session handoff finding #1)
-                project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+                project_name=f"Revoice.{ESPHOME_DEVICE_MODEL}",
                 project_version=ESPHOME_PROJECT_VERSION,
                 voice_assistant_feature_flags=self._voice_assistant_flags(),
             )
@@ -872,7 +872,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     f"[{self._log_name}] VoiceAssistantSetConfiguration asked "
                     f"for active_wake_words={requested or '[] (no wake word)'} "
                     f"— not applied; this device's wake word is set in the "
-                    f"EchoMuse dashboard and stays {self.oww_model_id}"
+                    f"Revoice dashboard and stays {self.oww_model_id}"
                 )
             yield _HANDLED
             return
@@ -2489,7 +2489,7 @@ class DeviceESPhomeServer:
         self.oww_model_info = oww_model_info
         self.port         = port
         self._server: Optional[asyncio.AbstractServer] = None
-        self._active_satellite: Optional[EchoMuseSatellite] = None
+        self._active_satellite: Optional[RevoiceSatellite] = None
         self._mdns_info: Optional[ServiceInfo] = None
         # Current volume as HA float (0.0–1.0). Seeded from stored config
         # by update_device_volume() when the device connects; updated on
@@ -2559,7 +2559,7 @@ class DeviceESPhomeServer:
     def set_capabilities(self, caps: list[str]) -> None:
         self.capabilities = list(caps or [])
 
-    def get_satellite(self) -> Optional[EchoMuseSatellite]:
+    def get_satellite(self) -> Optional[RevoiceSatellite]:
         """Return the active HA connection's satellite instance, or None."""
         return self._active_satellite
 
@@ -2631,7 +2631,7 @@ class DeviceESPhomeServer:
             )
             return _RejectProtocol()
 
-        satellite = EchoMuseSatellite(
+        satellite = RevoiceSatellite(
             device_id=self.device_id,
             label=self.label,
             mac_address=self.mac_address,
@@ -2644,7 +2644,7 @@ class DeviceESPhomeServer:
         log.info(f"[esphome.{self.device_id[-8:]}] HA connected on port {self.port}")
         return satellite
 
-    def _on_satellite_disconnected(self, satellite: EchoMuseSatellite) -> None:
+    def _on_satellite_disconnected(self, satellite: RevoiceSatellite) -> None:
         if self._active_satellite is satellite:
             self._active_satellite = None
             log.info(f"[esphome.{self.device_id[-8:]}] HA disconnected")
@@ -2763,7 +2763,7 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
         return existing
 
     loop  = asyncio.get_event_loop()
-    label = label or f"EchoMuse {device_id[-8:]}"
+    label = label or f"Revoice {device_id[-8:]}"
     # Use MAC from device_id (ro.serialno) as a stable identifier.
     # ro.serialno on the biscuit is a 12-char hex string — format it
     # as a MAC-style address for ESPHome's mac_address field.
@@ -3126,7 +3126,7 @@ async def trigger_voice_turn(
 
     Called from em_controller._run_voice_locked(). Finds the active HA
     connection for this device and delegates to
-    EchoMuseSatellite.run_esphome_voice_turn().
+    RevoiceSatellite.run_esphome_voice_turn().
 
     preroll_discard: forwarded to run_esphome_voice_turn/_stream_mic_audio.
     Callers should pass VOICE_PREROLL_DISCARD for wake-word turns and 0 for
@@ -3199,7 +3199,7 @@ def cancel_voice_turn(device_id: str, abort_ha: bool = False,
 
     abort_ha=True also aborts HA's pipeline — pass it whenever another turn
     is going to start on this connection (barge-in during thinking). See
-    EchoMuseSatellite.cancel_turn.
+    RevoiceSatellite.cancel_turn.
 
     Called from em_controller.handle_button_event() when voice_lock is held,
     and from _barge_watcher.
@@ -3220,7 +3220,7 @@ def abort_ha_run(device_id: str) -> None:
     For a barge during playback: the response was delivered, so the turn is
     not "cancelled", but an interrupting turn is about to start on the same
     connection and the protocol serialises runs at the satellite or not at
-    all. See EchoMuseSatellite.abort_ha_run.
+    all. See RevoiceSatellite.abort_ha_run.
     """
     server = get_server(device_id)
     if server is None:
@@ -3608,7 +3608,7 @@ def update_device_volume(device_id: str, volume: float) -> None:
 
 def _mdns_service_name(device_id: str) -> str:
     """Short stable service name for mDNS registration."""
-    return f"echomuse-{device_id[-12:].lower()}"
+    return f"revoice-{device_id[-12:].lower()}"
 
 
 def _make_device_mdns_info(device_id: str, label: str, port: int,
@@ -3632,7 +3632,7 @@ def _make_device_mdns_info(device_id: str, label: str, port: int,
             # required to agree, and nothing reports it if they stop.
             "mac": mac.replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+            "project_name": f"Revoice.{ESPHOME_DEVICE_MODEL}",
             "project_version": ESPHOME_PROJECT_VERSION,
         },
         server=f"{svc_name}.local.",

@@ -7,7 +7,7 @@ set -euo pipefail
 REF="${1:-v0.7.1}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
-IMAGE=echomuse-librespot
+IMAGE=revoice-librespot
 
 # --no-default-features drops the rodio backend and with it cpal, alsa-sys and
 # every other system library. What is LEFT is what this device needs:

@@ -10,7 +10,7 @@
 // Each frame: 9 samples × 3 bytes = 27 bytes
 // Each period (512 frames): 13,824 bytes
 //
-// Build inside echomuse-compiler Docker container:
+// Build inside revoice-compiler Docker container:
 //   go build -tags server -o capture_mics .
 
 package main
@@ -47,7 +47,7 @@ func main() {
 	}
 
 	// Must stop the mixer service to release the ALSA capture device —
-	// same requirement as EchoMuse pcm_microphone.go
+	// same requirement as Revoice pcm_microphone.go
 	fmt.Println("Stopping mixer service...")
 	// Use exec if available, fall back silently
 	stopMixer()

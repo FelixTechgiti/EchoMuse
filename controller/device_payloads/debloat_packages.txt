@@ -1,4 +1,4 @@
-# EchoMuse debloat — packages hidden at provisioning (Debloat wizard step).
+# Revoice debloat — packages hidden at provisioning (Debloat wizard step).
 #
 # `pm hide` is the mechanism, NOT `pm disable`: FireOS 5 ignores disable for
 # PERSISTENT system apps and starts them at boot anyway; hide survives reboots

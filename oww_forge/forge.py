@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""oww_forge — train custom openWakeWord models for EchoMuse.
+"""oww_forge — train custom openWakeWord models for Revoice.
 
 Runs inside the oww-forge container (see Dockerfile / docker-compose.yml).
 Everything persistent lives on the /data volume:
@@ -341,7 +341,7 @@ def cmd_build(args) -> None:
             sys.exit("training config changed during the build; refusing to publish mismatched metadata")
         publish_model(src, dest, config)
         log(f"model ready: {dest} ({dest.stat().st_size / 1e3:.0f} kB)")
-        log("install into EchoMuse: see oww_forge/README.md §Installing")
+        log("install into Revoice: see oww_forge/README.md §Installing")
 
 
 # ---------------------------------------------------------------- google-tts

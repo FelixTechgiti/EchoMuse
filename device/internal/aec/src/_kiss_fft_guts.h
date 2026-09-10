@@ -1,4 +1,4 @@
-/* EchoMuse vendoring note: include guard added — kiss_fft.c and
+/* Revoice vendoring note: include guard added — kiss_fft.c and
    kiss_fftr.c are compiled as one translation unit via the cgo preamble
    (see aec.go) and both include this unguarded upstream header. */
 #ifndef _KISS_FFT_GUTS_H

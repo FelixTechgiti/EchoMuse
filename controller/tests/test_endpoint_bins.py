@@ -124,7 +124,7 @@ class FakeDevice:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A DB_PATH whose neighbour dir is this test's own store."""
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "echomuse.db"))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "revoice.db"))
     return tmp_path / ebins.STORE_SUBDIR
 
 

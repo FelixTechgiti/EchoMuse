@@ -18,7 +18,7 @@ git submodule update --init
 
 # Build the compiler Docker image (from device/)
 cd device
-docker build -t echomuse-compiler compiler/
+docker build -t revoice-compiler compiler/
 ```
 
 **The compiler base is pinned by DIGEST, and must stay that way.**
@@ -312,7 +312,7 @@ separates "the device missed this" from "the device was not looking";
 turn are the false-accept side that per-turn rows structurally cannot show.
 
 Requirements and cost: ONNX Runtime plus the three models must be installed at
-`shadow.DefaultDir` (`/data/local/share/echomuse/oww`, override `EM_OWW_DIR`)
+`shadow.DefaultDir` (`/data/local/share/revoice/oww`, override `EM_OWW_DIR`)
 — they are **not** in the firmware, since 12.3MB would double the OTA payload
 and both A/B slots. Absence is an ordinary condition, logged once, and the
 device carries on with controller-side wake word. `device/tools/oww_probe`
@@ -874,7 +874,7 @@ reaches audible.
 
 Volume is **state, not a setting** — it rides the config channel but has no dashboard control (the slider was removed 2026-07-25: `SeedVolume` ignores later pushes, so moving it did nothing until the device restarted and any real volume change overwrote it). It is listed in `em_config_sections.STATE_KEYS`, exempt from section scoping, and shown read-only on the Status tab.
 
-Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, button LED after LED init; the ring is not touched).
+Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/revoice/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, button LED after LED init; the ring is not touched).
 
 ## LED priority system
 
@@ -934,7 +934,7 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 ## The emOS console password
 
 `consolePassword` arrives on the config push and the firmware does exactly one
-thing with it: writes `/data/local/etc/echomuse/console.pw`
+thing with it: writes `/data/local/etc/revoice/console.pw`
 (`config.WriteConsolePassword`). It never checks it. **emOS's init reads that
 file and puts the prompt in front of the shell**, because the console has to
 work when the firmware is not running — which is precisely when someone needs
@@ -965,4 +965,4 @@ including why hashing is worth it when deleting the file defeats it, is in
 
 ## cgo dependency
 
-SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.
+SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `revoice-compiler` image against the FireOS 5 sysroot.

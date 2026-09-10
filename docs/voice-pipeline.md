@@ -187,7 +187,7 @@ Home Assistant's Assist pipeline takes over: your speech becomes text
 ("turn off + kitchen lights"), the action happens, and a reply is composed.
 
 **Benefit:** this is all standard, well-documented Home Assistant machinery
-— every STT/LLM/TTS option HA supports works, and EchoMuse doesn't need to
+— every STT/LLM/TTS option HA supports works, and Revoice doesn't need to
 know anything about it.
 
 **Caveat:** it's also where most of the *time* goes (transcription and
@@ -318,7 +318,7 @@ Two things worth knowing before you compare:
   model loads on demand. Discard it.
 - **These numbers are a reference, not a target.** A slower machine is not
   broken. The point is to tell "my speech recognition takes 15 seconds" from
-  "my Echo is not responding", because only one of those is about EchoMuse.
+  "my Echo is not responding", because only one of those is about Revoice.
 
 ### The reference setup
 
@@ -328,10 +328,10 @@ Two things worth knowing before you compare:
 | CPU / RAM | 4 vCPU, 8GB |
 | Speech to text | Whisper add-on, `faster-whisper`, model `auto` |
 | Text to speech | Piper |
-| EchoMuse controller | Home Assistant add-on |
+| Revoice controller | Home Assistant add-on |
 | Devices | 2 × Echo Dot 2nd gen, on-device wake word, 2.4GHz WiFi |
 
-Home Assistant, Whisper, Piper, Music Assistant and the EchoMuse controller
+Home Assistant, Whisper, Piper, Music Assistant and the Revoice controller
 all share those four cores. Speech recognition is the hungriest of them by a
 wide margin, so if you run other add-ons on the same box, that is the one
 that will feel it.

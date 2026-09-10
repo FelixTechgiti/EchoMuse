@@ -1,6 +1,6 @@
 # The Device ↔ Controller Interface
 
-This is the contract a device binary implements to be driven by the EchoMuse
+This is the contract a device binary implements to be driven by the Revoice
 controller. It exists so a **new board** — the Echo Show 8 (`crown`) is the
 first after the Echo Dot (`biscuit`) — can be built against a written
 specification rather than by reading the Dot's source. The controller is
@@ -268,7 +268,7 @@ ignored, which is the correct degrade.
 - TLS is selected when the device has a CA on disk **and** the controller
   advertises a `tls_port` mDNS TXT record → dial `wss://`. CA present but no TXT
   → plain with a warning (deliberate rollout fallback). The server identity is
-  the fixed DNS SAN `echomuse-controller`, never an IP.
+  the fixed DNS SAN `revoice-controller`, never an IP.
 - Certs are backdated/long-lived **and** the device clamps its verification
   clock to the firmware build time, because an Echo boots with a bogus clock
   pre-NTP and a device that cannot connect cannot fix its clock. A new board
@@ -321,7 +321,7 @@ only what the *interface* commits to for MVP.
 | `oww_shadow` / `oww_trigger` | no (MVP) | MVP uses **controller-side** wake word |
 
 **Audio ownership** (ADR-0002): `crown` seizes the mic and speaker exclusively
-while EchoMuse runs, exactly like the Dot. The mic is **held continuously** —
+while Revoice runs, exactly like the Dot. The mic is **held continuously** —
 MVP wake word is controller-side, so the device streams mic PCM the whole time
 or it goes deaf to the next wake word. The **speaker** is grabbed for a turn
 (the reply plus any media the turn asked for) and released to idle — the Alexa

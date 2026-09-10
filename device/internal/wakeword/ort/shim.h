@@ -109,7 +109,7 @@ static char *em_ort_open(const char *path, em_runtime *out) {
 	}
 
 	OrtEnv *env = NULL;
-	OrtStatus *st = api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "echomuse", &env);
+	OrtStatus *st = api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "revoice", &env);
 	if (st) {
 		char *msg = em_err(api, st);
 		dlclose(dl);

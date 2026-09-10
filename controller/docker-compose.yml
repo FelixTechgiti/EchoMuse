@@ -1,12 +1,12 @@
 services:
-  echomuse-controller:
+  revoice-controller:
     build:
       context: .
       args:
         # CUDA onnxruntime for wake-word inference on this host's GPU.
         # The published GHCR image (docker-compose.deploy.yml) is CPU-only.
         GPU: "1"
-    container_name: echomuse-controller
+    container_name: revoice-controller
     restart: unless-stopped
     network_mode: host
     environment:
@@ -15,7 +15,7 @@ services:
       - .env
     volumes:
       # Persist database across container rebuilds
-      - ~EchoMuse/controller/data:/app/data
+      - ~Revoice/controller/data:/app/data
     deploy:
       resources:
         reservations:

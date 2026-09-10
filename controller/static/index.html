@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EchoMuse Device Management</title>
+  <title>Revoice Device Management</title>
   <link rel="icon" type="image/svg+xml" href="static/favicon.svg" />
   <style>
     @font-face { font-family: 'DM Sans'; font-weight: 400; src: url('static/vendor/fonts/dm-sans.woff2') format('woff2'); }
@@ -307,7 +307,7 @@
       </svg>
     </div>
 
-    <div class="title">EchoMuse</div>
+    <div class="title">Revoice</div>
     <div class="subtitle">Device Management</div>
 
     <div class="lcd">
@@ -484,7 +484,7 @@
             ? 'Home Assistant did not identify you to this add-on. ' +
               'Reload the panel, or use the setup token from the add-on log.'
             : 'The setup token is in the controller logs:<br/>' +
-              '<code>docker logs echomuse-controller</code>';
+              '<code>docker logs revoice-controller</code>';
           show('form-setup');
           document.getElementById('su-token').focus();
         } else {

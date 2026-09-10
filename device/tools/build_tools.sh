@@ -14,7 +14,7 @@ build_tool() {
         -e CGO_LDFLAGS="-Wl,--hash-style=both" \
         -v "$tool_dir":/sdk \
         -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-        echomuse-compiler \
+        revoice-compiler \
         -c "cd /sdk && go build -tags server -o $name ."
 
     mkdir -p "$BUILD_DIR"
@@ -37,7 +37,7 @@ build_module_tool() {
         -e CGO_LDFLAGS="-Wl,--hash-style=both" \
         -v "$(pwd)":/sdk \
         -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-        echomuse-compiler \
+        revoice-compiler \
         -c "cd /sdk && go build -o build/$name ./tools/$name"
 
     echo "Output: $BUILD_DIR/$name"
@@ -50,7 +50,7 @@ build_module_tool oww_probe
 
 echo ""
 echo "Deploy:"
-echo "  adb shell su -c 'stop echomuse'"
+echo "  adb shell su -c 'stop revoice'"
 echo "  adb push $BUILD_DIR/capture_mics /sdcard/capture_mics"
 echo "  adb push $BUILD_DIR/bf_capture /sdcard/bf_capture"
 echo "  adb shell \"su -c 'cp /sdcard/capture_mics /data/local/bin/capture_mics && chmod 755 /data/local/bin/capture_mics'\""

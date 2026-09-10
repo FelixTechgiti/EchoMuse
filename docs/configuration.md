@@ -203,11 +203,11 @@ It is also never inherited from the fleet, whatever the section's Fleet /
 Device switch says — otherwise a device would come back at another room's
 volume.
 
-**The top of the range changed in 2.20.0.** EchoMuse used to drive the
+**The top of the range changed in 2.20.0.** Revoice used to drive the
 codec's digital volume past the point where it can only clip — measured at
 65% distortion three button presses above the midpoint, and 89% at the
 maximum, with the output no longer getting any louder. Stock Alexa never
-touches that control, which is why EchoMuse sounded worse than stock when
+touches that control, which is why Revoice sounded worse than stock when
 turned up. The range now stops at the codec's unity gain, so the loudest
 setting is quieter than it was and everything below it is cleaner.
 
@@ -374,7 +374,7 @@ it's a "try it and compare" option.
 Who decides you said the wake word. Three settings:
 
 - **Controller** (default) — the Dot streams audio and the controller
-  listens. What EchoMuse has always done.
+  listens. What Revoice has always done.
 - **Both (compare)** — the Echo *also* runs the same model over the same
   audio and reports what it would have detected, without acting on it. It
   never triggers a turn. This is the one to use first: it tells you whether
@@ -425,7 +425,7 @@ Three things to know before leaving Controller:
 
 - **It needs files installed on the Dot** that aren't part of the firmware —
   ONNX Runtime plus the wake-word models, about 15MB, placed in
-  `/data/local/share/echomuse/oww`. They're deliberately not shipped in the
+  `/data/local/share/revoice/oww`. They're deliberately not shipped in the
   firmware image, because that would double both the download and the space
   each of the two firmware slots takes. Until they're there, the setting does
   nothing and the device log says which file is missing.
@@ -687,7 +687,7 @@ proxy would, and a diagnostic sensor counts received advertisements.
 Two things to know before enabling:
 
 - Enabling **permanently switches the Dot's Bluetooth chip away from
-  Android's stack** (it survives reboots). Nothing EchoMuse uses needs
+  Android's stack** (it survives reboots). Nothing Revoice uses needs
   Android Bluetooth — but stock-style Bluetooth speaker pairing stops being
   possible on that device.
 - The proxy is **receive-only** (passive scanning). Devices that need an
@@ -747,7 +747,7 @@ set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
 ### Home Assistant behind a private certificate authority
 
 If Home Assistant is served over HTTPS with a certificate from your own
-internal CA, EchoMuse cannot fetch the spoken response and **every turn ends
+internal CA, Revoice cannot fetch the spoken response and **every turn ends
 silently** — the controller starts normally, the Echo wakes, and no audio
 arrives. Nothing on screen explains it; the failure is a certificate
 verification error in the log.
@@ -757,10 +757,10 @@ still listens on plain HTTP and something in front of it (a reverse proxy,
 Nginx Proxy Manager, Cloudflare) handles TLS, set Home Assistant's **internal
 URL** to `http://<its-address>:8123`. Home Assistant builds the audio URL from
 that setting, so it becomes a plain local fetch and the problem disappears.
-EchoMuse is on your own network and the hop is local, so nothing is lost.
+Revoice is on your own network and the hop is local, so nothing is lost.
 
 **If Home Assistant itself is configured with `ssl_certificate`**, give
-EchoMuse the CA:
+Revoice the CA:
 
 - **Add-on** — put the CA certificate (PEM format) in Home Assistant's `ssl`
   folder, then set the **Private CA certificate** option to
@@ -796,7 +796,7 @@ here.
 
 ## What leaves your network
 
-EchoMuse has **no telemetry**. There is no usage reporting, no analytics, no
+Revoice has **no telemetry**. There is no usage reporting, no analytics, no
 crash reporting and no install counter. Nothing reports which features you
 use, how many devices you have, or that you installed it at all. This is a
 deliberate decision rather than an omission: the project exists to take a
@@ -804,7 +804,7 @@ cloud voice assistant off your network, and quietly adding a ping home would
 undo the reason to run it.
 
 A consequence worth stating plainly: **nobody, including the maintainers, can
-tell how many people use EchoMuse.** Adoption is guessed at from GitHub stars
+tell how many people use Revoice.** Adoption is guessed at from GitHub stars
 and release download counts, which is the trade being made.
 
 ### The one outbound connection
@@ -840,7 +840,7 @@ it still asks GitHub when you press it.
 - **Voice audio and transcripts.** Mic audio goes from the device to your
   controller and on to your Home Assistant, over your LAN. What happens next
   is whatever your Assist pipeline does — if you have configured HA to use a
-  cloud speech-to-text service, HA sends it there. EchoMuse itself sends it
+  cloud speech-to-text service, HA sends it there. Revoice itself sends it
   nowhere but HA.
 - **Saved utterance recordings** (`saveUtterances`, off by default) — written
   to disk beside the database and never uploaded. Playing or downloading them

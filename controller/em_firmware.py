@@ -33,7 +33,7 @@ import os
 import re
 from pathlib import Path
 
-log = logging.getLogger("echomuse.firmware")
+log = logging.getLogger("revoice.firmware")
 
 FIRMWARE_SUBDIR = "firmware"
 
@@ -55,7 +55,7 @@ def firmware_dir(db_path: str | None = None) -> Path:
     oww_models/ and tls/, so one persisted volume carries everything.
     """
     if db_path is None:
-        db_path = os.environ.get("DB_PATH", "echomuse.db")
+        db_path = os.environ.get("DB_PATH", "revoice.db")
     return (Path(db_path).resolve().parent / FIRMWARE_SUBDIR)
 
 

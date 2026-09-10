@@ -29,7 +29,7 @@ import logging
 
 from esphome.vendor import api_options_pb2, api_pb2
 
-log = logging.getLogger("echomuse.esphome.registry")
+log = logging.getLogger("revoice.esphome.registry")
 
 _ID_EXTENSION = api_options_pb2.id
 

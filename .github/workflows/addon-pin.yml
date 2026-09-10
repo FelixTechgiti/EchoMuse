@@ -6,7 +6,7 @@ name: Add-on pin has an image
 # installed offers an update that cannot install — and the error it shows says
 # nothing useful:
 #
-#   Error updating EchoMuse: An unknown error occurred with app
+#   Error updating Revoice: An unknown error occurred with app
 #   46aaf331_controller. Check Supervisor logs for details
 #
 # That happened on 2026-09-09: the 2.26.0-fx.1 pin was merged as part of the
@@ -54,7 +54,7 @@ jobs:
 
       - name: Every published channel must be installable
         env:
-          IMAGE: ${{ steps.owner.outputs.lc }}/echomuse-controller
+          IMAGE: ${{ steps.owner.outputs.lc }}/revoice-controller
           GH_USER: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

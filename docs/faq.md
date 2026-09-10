@@ -69,7 +69,7 @@ Add your HA URL at `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
 ### The USB connection drops and re-enumerates every few seconds.
 `persist.sys.usb.config` is set to `mtp,adb`, and the composite gadget is what
 drops the bus — roughly every six seconds, with `device firmware changed` in
-`dmesg` each time. Forcing it to `adb` alone fixes it. Nothing EchoMuse does
+`dmesg` each time. Forcing it to `adb` alone fixes it. Nothing Revoice does
 needs MTP.
 
 **`setprop` from a booted device will not work.** Android's property service
@@ -296,7 +296,7 @@ affected hardware is genuinely useful.
 
 ## Privacy
 
-### Does EchoMuse phone home?
+### Does Revoice phone home?
 **No.** No telemetry, no analytics, no crash reporting, no install counter.
 The consequence is stated plainly in
 [configuration.md](configuration.md#what-leaves-your-network): nobody,

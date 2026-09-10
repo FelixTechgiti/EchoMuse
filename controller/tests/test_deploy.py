@@ -99,7 +99,7 @@ def test_dashboard_paths_are_ingress_safe():
         "index.html and dashboard.html must get a <base href> injected"
     assert 'request.headers.get("X-Ingress-Path"' in api, \
         "the base path must come from Home Assistant's ingress header"
-    assert "ECHOMUSE_HOME_ASSISTANT_INGRESS" in config, \
+    assert "REVOICE_HOME_ASSISTANT_INGRESS" in config, \
         "config.yaml must set the env var that gates ingress-only mode"
 
 
@@ -238,7 +238,7 @@ def test_debloat_sync_reconciles_both_halves():
     fn = api[api.index("async def _sync_debloat"):]
     fn = fn[:fn.index("\nasync def ", 1)] if "\nasync def " in fn[1:] else fn
 
-    assert "echomuse-debloat.sh" in fn, "the boot script half must be synced"
+    assert "revoice-debloat.sh" in fn, "the boot script half must be synced"
     assert "_debloat_packages()" in fn, "the pm-hide half must be reconciled"
     assert "pm hide" in fn, "drifted packages must actually be hidden"
     # Rename-based replacement: the running shell keeps the old inode.
@@ -980,7 +980,7 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
 def test_tested_firmware_build_matches_the_docs():
     """
     The wizard warns when a device is on a FireOS build other than the one
-    EchoMuse is developed against, and docs/rooting.md tells people which to
+    Revoice is developed against, and docs/rooting.md tells people which to
     flash. Those two have to name the same build: a warning pointing at a
     version the docs do not mention is worse than no warning, because the
     person reading it has nowhere to go.

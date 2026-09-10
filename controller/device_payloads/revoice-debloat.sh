@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# EchoMuse debloat — Magisk service.d boot script.
+# Revoice debloat — Magisk service.d boot script.
 #
-# Installed to /sbin/.core/img/.core/service.d/echomuse-debloat.sh (0755) by
+# Installed to /sbin/.core/img/.core/service.d/revoice-debloat.sh (0755) by
 # the provisioning wizard (Debloat step). Runs on every boot after Magisk
 # mounts: `stop <service>` does not persist across reboots, so init-launched
 # daemons must be re-stopped each boot. The `pm hide` half of the debloat is
@@ -21,7 +21,7 @@
   # whad_cc is the native half of com.amazon.whad (hidden in
   # debloat_packages.txt) and avahi-daemon is the mDNS responder it finds
   # peers with. Neither has a consumer once Whole Home Audio is gone: the
-  # EchoMuse firmware resolves the controller with its own in-process mDNS
+  # Revoice firmware resolves the controller with its own in-process mDNS
   # (grandcat/zeroconf), not through avahi. Added 2026-07-30.
   for svc in vitals_service perfmonitord perfrecoveryd shblemeshd meshmgrservice drm \
              whad_cc avahi-daemon; do

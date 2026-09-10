@@ -170,7 +170,7 @@ func (p *PcmSpeaker) Init() error {
 	// no timeout — stranding the whole device, since everything else in
 	// main() is initialised after the speaker (issue #80). Same stock-service
 	// takeover as `stop mixer` above and `stop smarthomewifid` in main: on a
-	// device where EchoMuse drives the codec directly, mediaserver has no
+	// device where Revoice drives the codec directly, mediaserver has no
 	// work to do and is only ever in the way.
 	exec.Command("stop", "media").Run()
 	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout)

@@ -1,5 +1,5 @@
 """
-em_api.py — EchoMuse Controller HTTP API + Dashboard
+em_api.py — Revoice Controller HTTP API + Dashboard
 =====================================================
 
 aiohttp web application running in the same asyncio event loop as the
@@ -76,7 +76,7 @@ from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
 from version import parse as _parse_version
 
-log = logging.getLogger("echomuse.api")
+log = logging.getLogger("revoice.api")
 
 # Import time, which is startup: em_controller imports this module before it
 # serves anything. Close enough to process start for "how long has it been up",
@@ -119,7 +119,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # block) — gates the ingress-only middleware below. Unset for every other
 # deployment (docker-compose, bare python), which keeps serving the
 # dashboard directly exactly as before.
-INGRESS_ONLY = os.environ.get("ECHOMUSE_HOME_ASSISTANT_INGRESS") == "true"
+INGRESS_ONLY = os.environ.get("REVOICE_HOME_ASSISTANT_INGRESS") == "true"
 # Home Assistant Supervisor's ingress reverse proxy always calls in from this
 # fixed address on the internal hassio Docker network.
 INGRESS_GATEWAY_IP = "172.30.32.2"
@@ -714,7 +714,7 @@ async def _post_ingress_login(request: web.Request) -> web.Response:
     POST /api/auth/ingress — authenticate as the Home Assistant user that
     Supervisor forwarded. → {token, role} or 401.
 
-    Home Assistant has already authenticated this person; a second EchoMuse
+    Home Assistant has already authenticated this person; a second Revoice
     password would be a lock on a door that is already locked. Supervisor
     strips client-supplied copies of these headers before proxying, so their
     presence on a request that genuinely came from the gateway is proof of
@@ -1784,7 +1784,7 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
 
 def _extract_binary_version(binary: bytes) -> str | None:
     """
-    Scan a compiled Go binary for its embedded EchoMuse version string.
+    Scan a compiled Go binary for its embedded Revoice version string.
 
     Two schemes, because compile.sh changed and this did not:
 
@@ -2702,7 +2702,14 @@ async def _sync_start_script(live, device_id: str) -> None:
 
 # Magisk service.d location of the boot-time debloat script. Installed by the
 # provisioning wizard; synced from here afterwards.
-DEBLOAT_SCRIPT_PATH = "/sbin/.core/img/.core/service.d/echomuse-debloat.sh"
+DEBLOAT_SCRIPT_PATH = "/sbin/.core/img/.core/service.d/revoice-debloat.sh"
+# What the same script was called before the project was renamed. A device
+# provisioned as EchoMuse still carries it, and service.d runs EVERY script it
+# finds — so leaving it behind means the debloat runs twice at every boot, off
+# two files that will drift apart the next time the package list grows. The
+# sync below deletes it as it installs the new name; there is nothing to
+# migrate, the content is regenerated from the payload either way.
+DEBLOAT_SCRIPT_LEGACY_PATH = "/sbin/.core/img/.core/service.d/echomuse-debloat.sh"
 
 
 def _debloat_packages() -> list[str]:
@@ -2748,9 +2755,9 @@ async def _sync_debloat(live, device_id: str) -> None:
     """
     # ── half 1: the boot script ──────────────────────────────────────────────
     try:
-        script = (PAYLOADS_DIR / "echomuse-debloat.sh").read_bytes()
+        script = (PAYLOADS_DIR / "revoice-debloat.sh").read_bytes()
     except OSError as e:
-        log.error(f"[api] echomuse-debloat.sh payload unreadable — skipping sync: {e}")
+        log.error(f"[api] revoice-debloat.sh payload unreadable — skipping sync: {e}")
         script = None
 
     if script is not None:
@@ -2780,6 +2787,7 @@ async def _sync_debloat(live, device_id: str) -> None:
                     f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
                     f'if [ "$NEW" = "{want}" ]; then '
                     f'mv {tmp} {DEBLOAT_SCRIPT_PATH} && chmod 755 {DEBLOAT_SCRIPT_PATH} '
+                    f'&& rm -f {DEBLOAT_SCRIPT_LEGACY_PATH} '
                     f'&& echo DEBLOAT_SYNCED; '
                     f'else rm -f {tmp}; echo DEBLOAT_MD5_MISMATCH:$NEW; fi')
                 await _push_log_event(
@@ -3052,7 +3060,7 @@ def _read_payload(name: str) -> str:
 
 @auth.require_admin
 async def _get_provision_start_script(request: web.Request) -> web.Response:
-    """GET /api/provision/start_script — serves the EchoMuse startup script."""
+    """GET /api/provision/start_script — serves the Revoice startup script."""
     return web.Response(
         text=_read_payload("start_server.sh"),
         content_type='text/plain',
@@ -3065,9 +3073,9 @@ async def _get_provision_debloat_script(request: web.Request) -> web.Response:
     """GET /api/provision/debloat_script — the Magisk service.d boot script
     that re-stops init-launched daemons each boot (Debloat wizard step)."""
     return web.Response(
-        text=_read_payload("echomuse-debloat.sh"),
+        text=_read_payload("revoice-debloat.sh"),
         content_type='text/plain',
-        headers={'Content-Disposition': 'attachment; filename="echomuse-debloat.sh"'},
+        headers={'Content-Disposition': 'attachment; filename="revoice-debloat.sh"'},
     )
 
 
@@ -3188,7 +3196,7 @@ async def _get_provision_magisk_db(request: web.Request) -> web.Response:
 # device/internal/client/tlscreds.go. The Go client re-reads them on every
 # dial attempt, so pushed credentials take effect on the next reconnect
 # without a firmware restart.
-DEVICE_TLS_DIR = "/data/local/etc/echomuse"
+DEVICE_TLS_DIR = "/data/local/etc/revoice"
 
 # Per-device log lines in a support bundle, after thinning. Deep enough that
 # a startup line survives a day of chatter, small enough that six devices do
@@ -3806,7 +3814,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     global _release_cache, _release_cache_ts
 
-    repo = db.get_config("github_repo", "FelixTechgiti/EchoMuse")
+    repo = db.get_config("github_repo", "FelixTechgiti/Revoice")
     url  = GITHUB_API_URL.format(repo=repo)
 
     log.info(f"[api] Polling GitHub releases: {url}")
@@ -3920,7 +3928,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
             and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
         return _controller_cache
 
-    repo = db.get_config("github_repo", "FelixTechgiti/EchoMuse")
+    repo = db.get_config("github_repo", "FelixTechgiti/Revoice")
     headers = {"Accept": "application/vnd.github+json"}
     timeout = aiohttp.ClientTimeout(total=10)
 
@@ -4920,7 +4928,7 @@ def _controller_stats() -> dict:
 
     # Same resolution as em_recordings, via its helper — the DB path lives in
     # one place and this must not become a second definition of it.
-    db_path = Path(os.environ.get("DB_PATH", "echomuse.db")).resolve()
+    db_path = Path(os.environ.get("DB_PATH", "revoice.db")).resolve()
     try:
         usage = shutil.disk_usage(db_path.parent)
         stats["data_used_mb"] = round(usage.used / 1048576.0, 1)
@@ -4975,7 +4983,7 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
         body=em_support.to_json(diag).encode(),
         content_type="application/json",
         headers={"Content-Disposition":
-                 f'attachment; filename="echomuse-provision-{stamp}.json"'},
+                 f'attachment; filename="revoice-provision-{stamp}.json"'},
     )
 
 
@@ -5279,7 +5287,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         body=body.encode(),
         content_type="application/json",
         headers={"Content-Disposition":
-                 f'attachment; filename="echomuse-support-{stamp}.json"'},
+                 f'attachment; filename="revoice-support-{stamp}.json"'},
     )
 
 
@@ -5387,7 +5395,7 @@ _supervisor_log_wanted: set[str] = set()
 
 # Supervisor decisions kept on the device, surviving the reboot that /tmp does
 # not. Must match SUP_LOG in device_payloads/start_server.sh.
-SUPERVISOR_LOG = "/data/local/etc/echomuse/supervisor.log"
+SUPERVISOR_LOG = "/data/local/etc/revoice/supervisor.log"
 
 
 async def _collect_supervisor_log(device_id: str) -> None:

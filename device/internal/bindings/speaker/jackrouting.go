@@ -11,7 +11,7 @@ import (
 // `server`) and the mapping is worth pinning on the host — it is a table of
 // measured values, and a typo in one of them is silence rather than an error.
 //
-// MEASURED 2026-09-03 against a stock FireOS 5.5.5.4 Dot (root, no EchoMuse)
+// MEASURED 2026-09-03 against a stock FireOS 5.5.5.4 Dot (root, no Revoice)
 // driving the same cable, by diffing all 239 mixer controls across an insert
 // on both devices. Stock changed five controls; we changed one.
 

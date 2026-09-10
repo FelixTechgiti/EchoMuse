@@ -61,7 +61,7 @@ const BinaryPath = "/data/local/bin/shairport-sync"
 // package rather than pushed as a payload: everything in it is derived from
 // settings the controller already sends, and a second copy of the device name
 // is a second thing to keep in step.
-const ConfigPath = "/data/local/etc/echomuse/shairport-sync.conf"
+const ConfigPath = "/data/local/etc/revoice/shairport-sync.conf"
 
 const (
 	// SourceRate is what classic AirPlay delivers, by definition. AirPlay 2
@@ -282,7 +282,7 @@ func (c *Client) name() string {
 	if c.opts.Name != "" {
 		return c.opts.Name
 	}
-	return "EchoMuse"
+	return "Revoice"
 }
 
 // args builds shairport-sync's command line.

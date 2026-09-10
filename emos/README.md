@@ -1,7 +1,7 @@
 # emOS
 
 A Linux distribution for the Amazon Echo Dot Gen 2 ("biscuit") that runs
-EchoMuse with **no Amazon userspace at all** — no Android init, no
+Revoice with **no Amazon userspace at all** — no Android init, no
 `system_server`, no `mediaserver`, no audio HAL.
 
 It is a distribution in the ordinary sense: it does not include a kernel of its
@@ -32,7 +32,7 @@ back means a TWRP wipe that erases `/data`.
 
 ## Why
 
-EchoMuse's stated direction is to not depend on Amazon's software. The
+Revoice's stated direction is to not depend on Amazon's software. The
 Android-specific surface in the firmware is about twenty call sites, and the
 assumption was always that the remaining dependency was thin. It was thinner
 than that in one sense and much thicker in another:
@@ -196,7 +196,7 @@ better than us here, since adbd honours `ro.adb.secure`.
 
 Set it fleet-wide from the dashboard (Config → Advanced → USB console). The
 controller hashes it, pushes the record, and the firmware writes
-`/data/local/etc/echomuse/console.pw`; **init reads that file and prompts before
+`/data/local/etc/revoice/console.pw`; **init reads that file and prompts before
 handing over the shell**. Only the shell is gated — the boot trail and
 everything else the device prints stay readable, so a dead device is still
 diagnosable.
@@ -520,10 +520,10 @@ reparent to init and nobody else collects them), respawns with backoff, and on
   are usually transient, and a device that has silently stopped trying is worse
   than one still retrying slowly.
 - `req` means "must exist or give up, reported once"; `after` means "wait for
-  this and keep waiting". EchoMuse uses both: it is absent on a device where it
+  this and keep waiting". Revoice uses both: it is absent on a device where it
   is not installed, and it waits on `/run/net-up` so the boot ring has finished
   before the firmware claims the same twelve LEDs.
-- EchoMuse is started through `start_server.sh`, not directly, because that
+- Revoice is started through `start_server.sh`, not directly, because that
   script owns the A/B slot symlink and fast-exit backoff the OTA system depends
   on. Starting the binary would silently bypass firmware rollback.
 
@@ -575,7 +575,7 @@ ramdisk than A. So a provisioned device carries a **second stock image we did
 not put there**, which is a usable last resort if an operator loses the escrow
 downloaded at the wizard's escrow step. It is not a substitute for that file:
 nothing guarantees B stays pristine, and it boots FireOS without our permissive
-cmdline or the `service echomuse` init entry, so EchoMuse does not start. It
+cmdline or the `service revoice` init entry, so Revoice does not start. It
 boots, which is what recovery is for.
 
 **Our cmdline patch DESTROYS the original arguments rather than appending
@@ -732,11 +732,11 @@ is not proof it rebooted — compare uptime or a build fingerprint.
     `f1r30s.zip`**. That last step is not optional: a stock flash restores
     dm-verity against a partition table the unlock modified, so **the OS will
     not boot without it** (`docs/rooting.md`). It is also the same four steps
-    that prepare a device for EchoMuse in the first place, on FireOS or emOS,
+    that prepare a device for Revoice in the first place, on FireOS or emOS,
     so this returns the device to the state an install starts from rather than
     to a factory one.
 
-    Note it WIPES `/data`, so EchoMuse and its config go with it. That is the
+    Note it WIPES `/data`, so Revoice and its config go with it. That is the
     difference between this and restoring the escrowed boot image, which
     leaves `/data` alone but also leaves the device on FireOS with emOS's
     install still sitting there.

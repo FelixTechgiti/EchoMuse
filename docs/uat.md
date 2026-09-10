@@ -1,6 +1,6 @@
 # User Acceptance Testing
 
-**A checklist for confirming EchoMuse actually does what it claims on your
+**A checklist for confirming Revoice actually does what it claims on your
 hardware, in your house, with your Home Assistant.** Work through as much of it
 as applies to you and tell us what failed. Partial results are useful — one
 section done properly beats a whole pass skimmed.

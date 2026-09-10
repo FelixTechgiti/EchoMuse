@@ -1,6 +1,6 @@
-# EchoMuse Quickstart
+# Revoice Quickstart
 
-EchoMuse turns an Amazon Echo Dot (2nd generation) into a **fully local voice
+Revoice turns an Amazon Echo Dot (2nd generation) into a **fully local voice
 assistant** — no Amazon account, no cloud, no audio leaving your house. The
 Dot becomes a "satellite": its microphones and speaker are driven by a small
 server (the **controller**) running on a computer on your network, which in
@@ -55,7 +55,7 @@ always-on machine.
 <summary><b>As a Home Assistant add-on</b></summary>
 
 Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
-`https://github.com/FelixTechgiti/EchoMuse`, then install **EchoMuse** from the
+`https://github.com/FelixTechgiti/Revoice`, then install **Revoice** from the
 store. The README has a one-click badge for adding the repository.
 
 The dashboard appears as a **sidebar panel** — it is reached through Home
@@ -82,9 +82,9 @@ data directory before connecting them, or they cannot connect at all.
 Using the prebuilt image (nothing to compile):
 
 ```bash
-mkdir echomuse && cd echomuse
-curl -O https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/docker-compose.deploy.yml
-curl -o .env https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/.env.example
+mkdir revoice && cd revoice
+curl -O https://raw.githubusercontent.com/FelixTechgiti/Revoice/main/controller/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/FelixTechgiti/Revoice/main/controller/.env.example
 # Optional: set SERVER_IP in .env to this computer's LAN IP. Left empty it is
 # detected, and the address in use is printed at startup.
 docker compose -f docker-compose.deploy.yml up -d
@@ -96,8 +96,8 @@ To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker co
 <summary>Alternative: build from source (needed for NVIDIA GPU wake-word inference)</summary>
 
 ```bash
-git clone https://github.com/FelixTechgiti/EchoMuse.git
-cd EchoMuse/controller
+git clone https://github.com/FelixTechgiti/Revoice.git
+cd Revoice/controller
 cp .env.example .env
 # Optional: set SERVER_IP to this computer's LAN IP. Left empty it is detected.
 docker compose up -d --build
@@ -120,14 +120,14 @@ That's it. The controller is now running two things:
 ## Step 3 — Create your admin account
 
 **On the Home Assistant add-on** there is nothing to create. Open the
-**EchoMuse panel** in the sidebar and you are already signed in as your Home
+**Revoice panel** in the sidebar and you are already signed in as your Home
 Assistant user — it has authenticated you, so a second password would be a
 lock on a door that is already locked. The first person to open the panel
-becomes the EchoMuse admin; anyone after that gets read-only access until an
+becomes the Revoice admin; anyone after that gets read-only access until an
 admin promotes them under **Settings → Users**.
 
-Roles are EchoMuse's own and are **not** copied from Home Assistant — being an
-HA administrator does not make you an EchoMuse one. Read-only is a real
+Roles are Revoice's own and are **not** copied from Home Assistant — being an
+HA administrator does not make you an Revoice one. Read-only is a real
 restriction rather than a formality: recordings and the transcript text of a
 turn are admin-only, because reaching this dashboard is not the same as being
 trusted with speech from inside the house.
@@ -140,7 +140,7 @@ logs, so that only you (the person who can read the server's logs) can claim
 the controller:
 
 ```bash
-docker logs echomuse-controller
+docker logs revoice-controller
 ```
 
 Look for the boxed token near the top, paste it in, pick a username and
@@ -177,7 +177,7 @@ proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
 > **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
 > controller, devices should also pop up automatically as discovered
-> "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
+> "revoice-…" entries (fixed in v2.7.5 — earlier versions advertised
 > incompletely and HA silently ignored them, so manual entry was the only
 > way). Devices you've already added manually won't re-appear as
 > discoveries — HA knows it has them. If HA lives on a **different subnet
@@ -205,7 +205,7 @@ The LED ring tells you what's happening:
 
 ## Everyday things
 
-- **Updates**: when a new EchoMuse release is out, the dashboard shows an
+- **Updates**: when a new Revoice release is out, the dashboard shows an
   update badge — one click updates the device over WiFi. The release notes
   appear alongside it, so you can read what changed before deciding, rather
   than judging by version number. If an update ever

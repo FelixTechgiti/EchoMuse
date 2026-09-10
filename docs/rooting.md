@@ -3,7 +3,7 @@
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
-EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
+Revoice needs an Echo Dot Gen 2 that is already unlocked and running
 FireOS 5. Two separate jobs get you there, and they carry very different
 risk.
 
@@ -29,9 +29,9 @@ risk.
 > chain: FireOS 6 likely needs a newer TrustZone, and a newer TZ cannot be
 > flashed because the FireOS 5 preloader refuses to boot one whose signature
 > differs. That is below the boundary this project writes to, so it is not
-> something EchoMuse can address.
+> something Revoice can address.
 >
-> Practically: EchoMuse targets FireOS 5, and a newer Android is not a route
+> Practically: Revoice targets FireOS 5, and a newer Android is not a route
 > to a newer kernel on this device.
 
 ## What you need
@@ -51,10 +51,10 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
     will not boot** — a stock flash restores verity against a partition
     table the unlock modified.
   - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
-  - `server` — compiled EchoMuse binary (ARM, API 22)
+  - `server` — compiled Revoice binary (ARM, API 22)
 
 > **Which FireOS 5 build?** R0rt1z2's thread lists six that boot on an
-> unlocked Dot, and EchoMuse is developed and tested against exactly one:
+> unlocked Dot, and Revoice is developed and tested against exactly one:
 > **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`. Every device in the
 > project's own fleet runs it. The older builds are not known to be broken —
 > they are simply untested here, and firmware defaults differ between builds
@@ -76,7 +76,7 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
 >
 > **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`.
 
-For the EchoMuse half, the provisioning wizard needs only a **Chromium-based
+For the Revoice half, the provisioning wizard needs only a **Chromium-based
 browser** (Chrome or Edge — it talks to the device over WebUSB) and a running
 controller. It fetches the firmware itself, so the `server` binary above is
 only needed if you are provisioning by hand.
@@ -101,7 +101,7 @@ Dot soft-bricked badly enough that recovery means opening the case and
 shorting contacts on the board. Read the thread first, and do not start on a
 device you cannot afford to lose.
 
-## Where EchoMuse picks up
+## Where Revoice picks up
 
 Everything below assumes you already have:
 
@@ -109,7 +109,7 @@ Everything below assumes you already have:
 - **TWRP** installed and bootable
 - **FireOS 5** (Android 5.1) sideloaded
 
-Once those are done, EchoMuse takes over. The provisioning wizard in the
+Once those are done, Revoice takes over. The provisioning wizard in the
 dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
 from a device already in that state; it does not run the exploit.
 
@@ -134,7 +134,7 @@ wipes it.** emOS runs no adbd — it cannot, since adbd needs Android's property
 service — so the wizard's first step finds no device to talk to. Returning to
 FireOS means booting TWRP by hand, wiping cache and data, sideloading the
 FireOS 5 image and then flashing `f1r30s.zip`. That erases `/data`, taking
-EchoMuse, its configuration and its credentials with it. **`f1r30s.zip` is not
+Revoice, its configuration and its credentials with it. **`f1r30s.zip` is not
 optional** — a stock flash restores dm-verity against a partition table the
 unlock modified, and without it the device does not boot.
 
@@ -142,12 +142,12 @@ Keep the escrowed boot image the emOS flow hands you at step 3. Writing it back
 takes about ten seconds, leaves `/data` alone, and is the undo for everything
 below.
 
-## What EchoMuse writes, and what it does not
+## What Revoice writes, and what it does not
 
-This device has several layers below the operating system, and EchoMuse only
+This device has several layers below the operating system, and Revoice only
 ever writes the FireOS one. Lowest first:
 
-| Layer | What it is | Written by EchoMuse |
+| Layer | What it is | Written by Revoice |
 |---|---|---|
 | Preloader | First stage of boot. Tracks boot attempts per slot. | No |
 | LK (bootloader) | What `lk_build_desc` and `unlock_status` come from. amonet patches this. | No |
@@ -159,7 +159,7 @@ ever writes the FireOS one. Lowest first:
 There is a single partition write either way, and TWRP presents that partition
 as `/dev/block/other-boot`. What goes into it differs by flow: the **FireOS**
 flow's Patch Boot Image step adds the SELinux permissive cmdline and the
-`service echomuse` init entry to the kernel already there, while the **emOS**
+`service revoice` init entry to the kernel already there, while the **emOS**
 flow replaces the partition with an image rebuilt from that same kernel and
 device trees. Neither touches any layer above `No` in the table.
 
@@ -245,7 +245,7 @@ The device is still in TWRP and the wizard says so. Reconnect and use
 **Restore escrowed boot image** — it writes back the image read off your own
 device at the escrow step, verifies it against the partition, and leaves
 `/data` untouched. If you have reloaded the page since, choose the
-`echomuse-stock-boot-*.img` file you downloaded at that step; it is the same
+`revoice-stock-boot-*.img` file you downloaded at that step; it is the same
 bytes.
 
 ### If the first boot after flashing emOS does not come up
@@ -486,7 +486,7 @@ Reboot and check logcat. You should see "Unable to start service" messages for t
 
 ## Step 7 — Disable WiFi Direct (p2p0)
 
-The device has a WiFi Direct interface (`p2p0`) that interferes with mDNS multicast interface selection. It must be brought down before EchoMuse starts.
+The device has a WiFi Direct interface (`p2p0`) that interferes with mDNS multicast interface selection. It must be brought down before Revoice starts.
 
 This is handled in `start_server.sh` — no manual action needed if you're following the full guide. If testing manually, run:
 
@@ -498,13 +498,13 @@ adb shell su -c 'ip link set p2p0 down'
 
 ---
 
-## Step 8 — Install EchoMuse
+## Step 8 — Install Revoice
 
-EchoMuse runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the EchoMuse controller over two persistent WebSocket connections (plus a demand-opened shell plane). There is no HTTP server on the device — no inbound ports, no iptables rules required.
+Revoice runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the Revoice controller over two persistent WebSocket connections (plus a demand-opened shell plane). There is no HTTP server on the device — no inbound ports, no iptables rules required.
 
 ### Set up the binary directory (A/B slots):
 
-EchoMuse v2.4.4+ uses A/B slots: `server_a` and `server_b` with `/data/local/bin/server` as a symlink. This allows instant rollback without a binary transfer.
+Revoice v2.4.4+ uses A/B slots: `server_a` and `server_b` with `/data/local/bin/server` as a symlink. This allows instant rollback without a binary transfer.
 
 ```bash
 adb shell "su -c 'mkdir -p /data/local/bin'"
@@ -530,7 +530,7 @@ adb shell "su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && 
 
 > The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — init restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
 
-### Add EchoMuse and mixer service to the ramdisk:
+### Add Revoice and mixer service to the ramdisk:
 
 The init scripts on FireOS 5 live in the boot image ramdisk. We need to unpack it, edit `init.csm.project.rc`, and repack.
 
@@ -557,7 +557,7 @@ Pull the init script and edit it on your machine:
 adb pull /tmp/ramdisk/init.csm.project.rc init.csm.project.rc
 ```
 
-Append the following two service blocks to the end of `init.csm.project.rc`. The `mixer` stub must come first — EchoMuse's speaker Init() calls `stop mixer` as its first step:
+Append the following two service blocks to the end of `init.csm.project.rc`. The `mixer` stub must come first — Revoice's speaker Init() calls `stop mixer` as its first step:
 
 ```
 service mixer /system/bin/sh
@@ -565,7 +565,7 @@ service mixer /system/bin/sh
     disabled
     user root
 
-service echomuse /data/local/bin/start_server.sh
+service revoice /data/local/bin/start_server.sh
     user root
     group root system
     class late_start
@@ -587,7 +587,7 @@ adb reboot
 After full boot (allow ~90 seconds):
 
 ```bash
-adb shell "su -c 'getprop init.svc.echomuse'"
+adb shell "su -c 'getprop init.svc.revoice'"
 # Expected: running
 
 adb shell "su -c 'cat /tmp/server.log'"
@@ -608,8 +608,8 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Magisk 17.3 — persistent root, survives reboots
 ✅ Alexa voice stack disabled
 ✅ echoaudioservice retained (required for audio DSP init)
-✅ EchoMuse running as init service on boot (exec mode, no crash loop)
-✅ Dummy mixer service for EchoMuse init compatibility
+✅ Revoice running as init service on boot (exec mode, no crash loop)
+✅ Dummy mixer service for Revoice init compatibility
 ✅ Audio mixer configured at boot (tinymix in start_server.sh)
 ✅ Mic gain equalised across all four ADCs — digital volume 88, MICPGA 40
 ✅ WiFi wake lock — FireOS cannot suspend wireless interface
@@ -709,4 +709,4 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ ADC mute controls identified for all four chips — tinymix dump in device/tools/ confirms B–D at 123/124, 141/142, 159/160
 ```
 
-**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." EchoMuse devices work as real Home Assistant voice satellites without ClaraCore.
+**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." Revoice devices work as real Home Assistant voice satellites without ClaraCore.

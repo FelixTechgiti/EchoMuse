@@ -16,7 +16,7 @@ import (
 // no controller). Volume is the opposite — the controller's stored
 // startupVolume is the source of truth, re-applied via SeedVolume on the
 // first config push each run.
-const statePath = "/data/local/etc/echomuse/state.json"
+const statePath = "/data/local/etc/revoice/state.json"
 
 type deviceState struct {
 	Muted bool `json:"muted"`

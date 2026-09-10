@@ -44,7 +44,7 @@ import (
 
 func main() {
 	log.SetOutput(os.Stdout)
-	log.Printf("EchoMuse %s starting", client.Version)
+	log.Printf("Revoice %s starting", client.Version)
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
@@ -223,8 +223,8 @@ func main() {
 			Name:     deviceID,
 			ClientID: deviceID,
 			DeviceInfo: sendspin.DeviceInfo{
-				ProductName:     "EchoMuse",
-				Manufacturer:    "EchoMuse",
+				ProductName:     "Revoice",
+				Manufacturer:    "Revoice",
 				SoftwareVersion: client.Version,
 			},
 		},

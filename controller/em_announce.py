@@ -28,7 +28,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
-log = logging.getLogger("echomuse.announce")
+log = logging.getLogger("revoice.announce")
 
 # Whole-announcement cap: fetch plus playback. Sized to sit well under HA's
 # _ANNOUNCEMENT_TIMEOUT_SEC (5 minutes) so WE are the side that gives up and

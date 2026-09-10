@@ -81,7 +81,7 @@ const BinaryPath = "/data/local/bin/librespot"
 // CacheDir holds librespot's credential blob, so the Echo stays authorised
 // across reboots and the user does not have to re-select it in the app after
 // every restart.
-const CacheDir = "/data/local/etc/echomuse/spotify"
+const CacheDir = "/data/local/etc/revoice/spotify"
 
 const (
 	// SourceRate is what librespot's pipe backend emits, and it is not
@@ -316,7 +316,7 @@ func (c *Client) name() string {
 	if c.opts.Name != "" {
 		return c.opts.Name
 	}
-	return "EchoMuse"
+	return "Revoice"
 }
 
 // args builds librespot's command line.

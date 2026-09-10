@@ -2,7 +2,7 @@ FROM python:3.12-slim
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
-      org.opencontainers.image.description="EchoMuse controller — Echo Dot Gen 2 open-source voice assistant satellite"
+      org.opencontainers.image.description="Revoice controller — Echo Dot Gen 2 open-source voice assistant satellite"
 WORKDIR /app
 # `upgrade` before `install`, and it is not cosmetic (#365). A Debian
 # security update reaches stable-security days to weeks before
@@ -157,8 +157,8 @@ COPY static/ ./static/
 # Compile JSX dashboard with esbuild
 RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
 # Database persisted via volume mount
-# docker run -v ~/EchoMuse/controller/data:/app/data ...
-# Set DB_PATH=/app/data/echomuse.db in environment
+# docker run -v ~/Revoice/controller/data:/app/data ...
+# Set DB_PATH=/app/data/revoice.db in environment
 COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into

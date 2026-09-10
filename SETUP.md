@@ -1,12 +1,12 @@
-# EchoMuse — architecture reference
+# Revoice — architecture reference
 
-> **Looking for how to *set up* EchoMuse?** Start with the
+> **Looking for how to *set up* Revoice?** Start with the
 > **[Quickstart](docs/quickstart.md)**. This page is reference material about
 > how the hardware and pipeline actually work.
 
 | If you want… | Go to |
 |---|---|
-| To install and use EchoMuse | **[Quickstart](docs/quickstart.md)** — the actual onboarding guide |
+| To install and use Revoice | **[Quickstart](docs/quickstart.md)** — the actual onboarding guide |
 | To get a device rooted first | **[Rooting](docs/rooting.md)** — prerequisites, and R0rt1z2's XDA Forums thread, which is canon |
 | The history: what was built, what broke, why | **[Journal](JOURNAL.md)** |
 | How the mic array, audio pipeline and protocol work | This page |
@@ -433,7 +433,7 @@ Two known gaps, both recorded rather than hidden:
   the turn.
 
 ONNX Runtime plus three models must be installed at
-`/data/local/share/echomuse/oww` — they are **not** in the firmware (12.3MB
+`/data/local/share/revoice/oww` — they are **not** in the firmware (12.3MB
 would double the OTA payload and both A/B slots). The provisioning wizard
 pushes them over USB/ADB; fielded devices get them over the shell plane from
 the Updates tab. Absence is an ordinary condition, logged once, and the device
@@ -575,7 +575,7 @@ The controller proxies bytes verbatim in both modes; the framing is interpreted 
 Device boots
   → orange LED pulse (searching for server)
   → mDNS browse: _emcontroller._tcp.local (grandcat/zeroconf)
-  → credentials at /data/local/etc/echomuse/ + tls_port TXT property?
+  → credentials at /data/local/etc/revoice/ + tls_port TXT property?
       → dial wss://:8770 with pinned CA + X-EM-Token (v2.9.3)
       → else plain ws://:8767 (rollout fallback until REQUIRE_DEVICE_TLS=1)
   → connect /control → register (device_id = ro.serialno, version)
@@ -609,7 +609,7 @@ Controller detects dead connections within 30s via WebSocket protocol keepalives
 | `Magisk-v17.3.zip` | Magisk installer |
 | `f1r30s.zip` | R0rt1z2's patch: ADB + UART console, blocks OTA domains, disables dm-verity. Flash it after any stock firmware image or the OS will not boot |
 | `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` | FireOS 5 firmware |
-| `server` | Compiled EchoMuse binary (ARM, API 22) — or fetch from GitHub releases |
+| `server` | Compiled Revoice binary (ARM, API 22) — or fetch from GitHub releases |
 
 If you need to reflash: Steps 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9. Your saved `boot_patched.img` already contains the SELinux patch — no need to repatch from scratch.
 
@@ -624,7 +624,7 @@ adb shell su -c 'cat /tmp/server.log'
 ```
 
 Common causes:
-- **`mDNS: no server found`** — server not advertising. Check `dns-sd -B _emcontroller._tcp local` from Mac — should show `echomuse`.
+- **`mDNS: no server found`** — server not advertising. Check `dns-sd -B _emcontroller._tcp local` from Mac — should show `revoice`.
 - **White pulse, not orange** — device found the controller but hasn't been approved yet. Log into the management dashboard and approve the device.
 - **`Connection lost: unexpected EOF`** — connecting to wrong server (stale mDNS cache). Another device on network may be advertising `_emcontroller._tcp`. Check `dns-sd -B _emcontroller._tcp local` from Mac.
 - **p2p0 interference** — check `ip link show p2p0` on device — should be DOWN.
@@ -717,15 +717,15 @@ Two things this does NOT fix, so do not read it as "the jack works":
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 
-**The dummy mixer service is required.** EchoMuse's speaker Init() calls `stop mixer` as its first step. Without a `mixer` service in init.rc, this call fails. Adding a dummy service allows `stop mixer` to succeed.
+**The dummy mixer service is required.** Revoice's speaker Init() calls `stop mixer` as its first step. Without a `mixer` service in init.rc, this call fails. Adding a dummy service allows `stop mixer` to succeed.
 
 **Amp click/hiss suppression.** Order matters (found on hardware, 2026-07-10): `pcm_speaker.go` Init() mutes the output (tinymix ctl 61 → 0), opens the PCM stream and lets the silence loop clock the DAC for ~100ms, *then* enables the amp (ctl 5 On), waits 50ms for it to settle, and unmutes last. Enabling the amp onto a floating (unclocked) DAC and unmuting before stream-open was the source of the click on every service start. Shutdown is the mirror image: on SIGTERM the server's `PcmSpeaker.Close()` mutes → amp off → closes the stream, and `start_server.sh` repeats mute + amp-off after every server exit (covering SIGKILL/panic) — an enabled amp on an idle DAC audibly hisses for as long as the server is down (worst case: between OTA slots).
 
-**Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute sets the ADC mute controls on **all four codec chips** (tinymix ctls 105/106, 123/124, 141/142, 159/160 — chip-A-only coverage was a known gap until v2.7.4; the sibling controls were confirmed from the full `tinymix -D 0` dump in `device/tools/tinymix_controls_output.txt`), so every mic including ch6 is physically muted. The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted) and the discrete button LED (gpio444, active-high — v2.9.5; earlier firmware drove gpio445 per Amazon's HAL constant, which is off by one and muxed away, so the button never lit), and, until 2026-08-08, blocked dot button events outright. It no longer does: presses are forwarded carrying the mute state and the controller refuses only the voice turn (`em_button.decide`), so a **hold still fires its HA event while muted**. Blocking everything was correct while the dot button meant one thing and became wrong when a hold started firing an event. Mute remains device-sovereign regardless, because the guarantee is the ADC mute plus the device rejecting every `mic_start` while muted, not the button filter. Mute also stops a running mic stream (v2.6.5) and, controller-side, terminates an active voice turn (v2.7.8). Since v2.9.4 mute is **persistent**: written to `/data/local/etc/echomuse/state.json` on toggle and restored at boot before any connection — device-sovereign, so a muted Dot comes back muted with or without a controller.
+**Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute sets the ADC mute controls on **all four codec chips** (tinymix ctls 105/106, 123/124, 141/142, 159/160 — chip-A-only coverage was a known gap until v2.7.4; the sibling controls were confirmed from the full `tinymix -D 0` dump in `device/tools/tinymix_controls_output.txt`), so every mic including ch6 is physically muted. The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted) and the discrete button LED (gpio444, active-high — v2.9.5; earlier firmware drove gpio445 per Amazon's HAL constant, which is off by one and muxed away, so the button never lit), and, until 2026-08-08, blocked dot button events outright. It no longer does: presses are forwarded carrying the mute state and the controller refuses only the voice turn (`em_button.decide`), so a **hold still fires its HA event while muted**. Blocking everything was correct while the dot button meant one thing and became wrong when a hold started firing an event. Mute remains device-sovereign regardless, because the guarantee is the ADC mute plus the device rejecting every `mic_start` while muted, not the button filter. Mute also stops a running mic stream (v2.6.5) and, controller-side, terminates an active voice turn (v2.7.8). Since v2.9.4 mute is **persistent**: written to `/data/local/etc/revoice/state.json` on toggle and restored at boot before any connection — device-sovereign, so a muted Dot comes back muted with or without a controller.
 
 **Mic gain — all four ADCs.** All four ADC pairs (A–D) are set to digital volume 88 and MICPGA 40. This matches Amazon's own initialisation values confirmed by analysing the unmodified device mixer state. Equalising all four ensures consistent sensitivity across all perimeter mics for directional selection.
 
-**WiFi wake lock.** FireOS aggressively suspends the WiFi interface during inactivity, dropping WebSocket connections. Writing `"EchoMuse"` to `/sys/power/wake_lock` prevents this.
+**WiFi wake lock.** FireOS aggressively suspends the WiFi interface during inactivity, dropping WebSocket connections. Writing `"Revoice"` to `/sys/power/wake_lock` prevents this.
 
 **Speaker streaming.** Audio is streamed as binary frames (4096 bytes = one mono ALSA period — mono on the wire since v2.8.4; the device duplicates L=R at the ALSA write) over the data plane WebSocket. The device maintains a priority channel — the silence loop yields to real audio naturally, with backpressure at ALSA playback rate (~42ms/period). TTS is 48kHz mono end-to-end since v2.9.4 (ffmpeg decodes at the wire rate; HA transcodes at source when it honours the declared supported_formats — no controller resample step). The device buffers ~5.5s and holds playback until ~1s is queued or EOS arrives (v2.8.4 — WiFi-stall protection for marginal links).
 
@@ -800,7 +800,7 @@ hardware.
 tuning tables by that mode (only the `internal` block is populated on this
 unit). The second speaker is the 3.5mm line out, and the reason the front end
 cares is echo cancellation: headphones present no acoustic echo path at all,
-and an external speaker presents a completely different one. **EchoMuse has no
+and an external speaker presents a completely different one. **Revoice has no
 speaker-mode concept** — our AEC assumes the internal speaker always. Worth
 knowing for #117/#141 and before any line-out work.
 
@@ -865,7 +865,7 @@ You should hear a clean 440Hz tone.
 
 ## Step 10 — Server Setup
 
-EchoMuse connects to the controller via mDNS discovery. The controller must be running and advertising before the device boots (or the device will retry with exponential backoff until it finds it).
+Revoice connects to the controller via mDNS discovery. The controller must be running and advertising before the device boots (or the device will retry with exponential backoff until it finds it).
 
 ### mDNS advertisement
 

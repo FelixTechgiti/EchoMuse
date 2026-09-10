@@ -15,7 +15,7 @@ import em_recordings as rec
 
 
 def _db(tmp_path):
-    return str(tmp_path / "echomuse.db")
+    return str(tmp_path / "revoice.db")
 
 
 def _pcm(ms: int) -> bytes:
@@ -30,7 +30,7 @@ def test_recordings_dir_sits_beside_db(tmp_path):
 
 def test_recordings_dir_is_absolute_from_env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DB_PATH", "echomuse.db")
+    monkeypatch.setenv("DB_PATH", "revoice.db")
     assert rec.recordings_dir().is_absolute()
 
 
@@ -151,8 +151,8 @@ def test_resolve_refuses_another_devices_recording(tmp_path):
 def test_resolve_refuses_traversal(tmp_path):
     db = _db(tmp_path)
     rec.save("dev1", 3, _pcm(20), db_path=db)
-    assert rec.resolve("dev1", "../echomuse.db", db) is None
-    assert rec.resolve("dev1", "dev1_3.wav/../../echomuse.db", db) is None
+    assert rec.resolve("dev1", "../revoice.db", db) is None
+    assert rec.resolve("dev1", "dev1_3.wav/../../revoice.db", db) is None
 
 
 def test_resolve_missing_file_is_none(tmp_path):

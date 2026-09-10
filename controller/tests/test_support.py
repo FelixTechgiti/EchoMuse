@@ -84,9 +84,9 @@ def _bundle():
             }),
         }},
         controller_log=[
-            "10:00:01 [INFO] echomuse — Barge-in: cancelling playback",
-            "10:00:02 [DEBUG] echomuse.esphome — MediaPlayerCommandRequest command=PAUSE",
-            f"10:00:03 [INFO] echomuse — Shell session opened by {SECRETS['username']}",
+            "10:00:01 [INFO] revoice — Barge-in: cancelling playback",
+            "10:00:02 [DEBUG] revoice.esphome — MediaPlayerCommandRequest command=PAUSE",
+            f"10:00:03 [INFO] revoice — Shell session opened by {SECRETS['username']}",
         ],
         device_log=[
             f"[TURN] trigger=wakeword outcome=ok text='{SECRETS['speech']}'",
@@ -107,7 +107,7 @@ def _bundle():
                           "data_free_mb": 51204.0, "uptime_s": 3600,
                           # Not allowlisted: a data directory carries the
                           # account name on a bare-metal install.
-                          "data_dir": f"/home/{SECRETS['username']}/echomuse"},
+                          "data_dir": f"/home/{SECRETS['username']}/revoice"},
     )
 
 
@@ -515,7 +515,7 @@ def test_the_ring_ignores_the_dashboards_own_http_chatter():
     ring = S.LogRing(capacity=10)
     ring.setFormatter(logging.Formatter("%(message)s"))
     for name, msg in (("aiohttp.access", "GET /api/devices 200"),
-                      ("echomuse", "Barge-in: cancelling playback")):
+                      ("revoice", "Barge-in: cancelling playback")):
         ring.emit(logging.LogRecord(name, logging.INFO, "f", 1, msg, None, None))
     assert ring.tail() == ["Barge-in: cancelling playback"]
 
@@ -711,7 +711,7 @@ def test_the_wizard_probe_list_matches_the_allowlist():
 def test_home_assistant_display_names_are_redacted():
     """
     Ingress login provisions accounts from Home Assistant's user record, so
-    the user table now holds names that were never typed into EchoMuse —
+    the user table now holds names that were never typed into Revoice —
     and they contain spaces, unlike every local username. A multi-word name
     reaching a public issue is the same leak as #62's, from a new source.
     """

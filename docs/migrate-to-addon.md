@@ -1,6 +1,6 @@
 # Moving from the Docker container to the Home Assistant add-on
 
-You are running the EchoMuse controller as a standalone Docker container and
+You are running the Revoice controller as a standalone Docker container and
 you want it to run as a Home Assistant add-on instead. This is how to do that
 without losing your devices, your settings, or the Home Assistant entities you
 have already built automations against.
@@ -23,7 +23,7 @@ database file. In a standard `docker-compose` install that is
 
 ```
 data/
-├── echomuse.db      ← devices, settings, users, history
+├── revoice.db      ← devices, settings, users, history
 ├── tls/             ← the certificate authority your devices trust
 ├── oww_models/      ← custom wake word models, if you trained any
 └── recordings/      ← saved utterances, if you turned that on
@@ -60,7 +60,7 @@ credentials. Copying four files avoids it.
 It is shown in the dashboard header, or:
 
 ```bash
-docker exec echomuse-controller printenv EM_CONTROLLER_VERSION
+docker exec revoice-controller printenv EM_CONTROLLER_VERSION
 ```
 
 (If that prints `dev` you built the image yourself, and only you know what is
@@ -73,7 +73,7 @@ add-on, wait for the add-on to catch up.
 
 Going up several versions at once is fine and expected — the controller
 applies every upgrade it is missing in one start, and takes its own backup
-first (`echomuse.db.pre-v<N>.bak`, beside the database).
+first (`revoice.db.pre-v<N>.bak`, beside the database).
 
 **2. Write down your settings.**
 
@@ -117,7 +117,7 @@ directory is your rollback. Do not delete it until you are happy.
 ### 1. Stop the standalone controller
 
 ```bash
-cd /path/to/EchoMuse/controller
+cd /path/to/Revoice/controller
 docker compose down
 ```
 
@@ -136,10 +136,10 @@ new address when the old one has actually gone away.
 Add the repository (**Settings → Add-ons → Add-on Store → ⋮ → Repositories**):
 
 ```
-https://github.com/FelixTechgiti/EchoMuse
+https://github.com/FelixTechgiti/Revoice
 ```
 
-Install **EchoMuse**, then **start it once and stop it again**. That first
+Install **Revoice**, then **start it once and stop it again**. That first
 start creates the storage directory you are about to copy into. Do not fill in
 options yet, and do not open the dashboard — if you let it run it will
 generate the CA you are about to replace. (No harm done if you do; you are
@@ -173,7 +173,7 @@ cp -a /path/to/your/data/. "$DEST"/
 ls -la "$DEST" "$DEST/tls"
 ```
 
-That last line is the check that matters. You should see `echomuse.db` and a
+That last line is the check that matters. You should see `revoice.db` and a
 `tls/` directory containing **four** files. If `tls/` has fewer, stop and
 find the rest — the server certificate and the CA must match each other.
 
@@ -183,7 +183,7 @@ Fill in the options from step 2 of *Before you start*, remembering to update
 **Server IP** to the Home Assistant machine's address. Start the add-on and
 watch its log.
 
-`Opening database: /data/echomuse.db` should be followed by your device names
+`Opening database: /data/revoice.db` should be followed by your device names
 appearing as they connect. If the add-on is newer than your container you will
 also see `Running N migration(s) from vX`, a `Backed up vX schema to …` line
 before it, and `Schema migrated to vY` after — that is the upgrade doing
@@ -213,7 +213,7 @@ they already hold still verifies, because you copied `tls/`.
 
 ## Home Assistant re-points itself, if you copied the database
 
-Each EchoMuse device appears in Home Assistant as an ESPHome device on its own
+Each Revoice device appears in Home Assistant as an ESPHome device on its own
 port. Those port numbers live in the database, so copying it keeps every
 device on the port Home Assistant already knows.
 
@@ -230,9 +230,9 @@ re-approving; restore the database.
 
 ## Signing in changes
 
-On the standalone container you signed in with a local EchoMuse account. Under
+On the standalone container you signed in with a local Revoice account. Under
 the add-on, Home Assistant has already authenticated you and hands your
-identity to EchoMuse, so there is no login screen and no **Sign out** button —
+identity to Revoice, so there is no login screen and no **Sign out** button —
 signing out would sign you straight back in.
 
 **The first person to open the dashboard becomes the admin.** Everyone else in

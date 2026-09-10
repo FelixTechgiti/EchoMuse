@@ -78,10 +78,10 @@ class Channel:
 EA = Channel(
     dirname="controller-ea",
     slug="controller-ea",
-    name="EchoMuse (Early Access)",
-    panel_title="EchoMuse EA",
+    name="Revoice (Early Access)",
+    panel_title="Revoice EA",
     blurb=(
-        "Early Access build of the EchoMuse controller — the next release, "
+        "Early Access build of the Revoice controller — the next release, "
         "before it is general. Install this INSTEAD of the stable add-on, "
         "not alongside it: both use host networking and the same ports. "
         "Add-ons do not share storage, so switching channels starts with an "
@@ -91,7 +91,7 @@ EA = Channel(
     ),
     esphome_port_base=16101,
     docs_banner=(
-        "# EchoMuse — Early Access\n"
+        "# Revoice — Early Access\n"
         "\n"
         "This is the **Early Access** channel: the next controller release,\n"
         "before it is general. It is the same program as the stable add-on\n"
@@ -118,7 +118,7 @@ EA = Channel(
         "lights, and the turn dies with no pipeline behind it. With the\n"
         "ranges apart, a stale entry simply shows as unavailable.\n"
         "\n"
-        "Report anything you find against the EchoMuse repository, saying\n"
+        "Report anything you find against the Revoice repository, saying\n"
         "which channel you are on.\n"
         "\n"
         "---\n"
