@@ -64,12 +64,19 @@ class Kind:
     Device. Two gates, never one: the capability says the supervisor exists,
     the status says whether the program is there. Collapsing them tells
     somebody their firmware is too old when a file was simply never pushed.
+
+    `config_key` is the device's own toggle, and it is what the automatic
+    install is gated on. Pushing ~9MB to every device in the fleet because a
+    release exists would spend a lossy link on a program nobody asked to run;
+    turning the toggle on IS the ask, and it is the only signal that carries
+    the user's intent for this device rather than for the store.
     """
 
     __slots__ = ("key", "filename", "dest", "capability", "status_attr",
-                 "label", "source")
+                 "label", "source", "config_key")
 
-    def __init__(self, key, filename, dest, capability, status_attr, label, source):
+    def __init__(self, key, filename, dest, capability, status_attr, label,
+                 source, config_key):
         self.key         = key
         self.filename    = filename
         self.dest        = dest
@@ -77,6 +84,7 @@ class Kind:
         self.status_attr = status_attr
         self.label       = label
         self.source      = source
+        self.config_key  = config_key
 
 
 KINDS: dict[str, Kind] = {
@@ -88,6 +96,7 @@ KINDS: dict[str, Kind] = {
         status_attr="spotify_status",
         label="Spotify Connect (librespot)",
         source="device/librespot/build.sh",
+        config_key="spotifyEnabled",
     ),
     "airplay": Kind(
         key="airplay",
@@ -97,6 +106,7 @@ KINDS: dict[str, Kind] = {
         status_attr="airplay_status",
         label="AirPlay (shairport-sync)",
         source="device/shairport/build.sh",
+        config_key="airplayEnabled",
     ),
 }
 
@@ -307,6 +317,52 @@ def refuse_install(k: Kind, live, db_path: str | None = None) -> str | None:
         return (f"no {k.filename} has been uploaded — build one with "
                 f"{k.source} and upload it first")
     return None
+
+
+def install_needed(k: Kind, capabilities, effective: dict, status,
+                   db_path: str | None = None) -> str | None:
+    """
+    Why this device should be sent this binary now, or None to leave it be.
+
+    A string rather than a bool so the log says WHICH reason it was: "never
+    installed" and "the store has a different build" want the same action and
+    completely different reading when somebody is working out why a device
+    keeps being pushed to.
+
+    Pure and here rather than in em_api for `refuse_install`'s reason — the
+    suite cannot import em_api, and this decides whether ~9MB crosses a link
+    measured at 5-7% packet loss, on every connect, for every device.
+
+    Four ways of declining, each a rule from elsewhere in this tree:
+
+      * the toggle is off — the user has not asked for this endpoint HERE.
+        The store being full is not an instruction to fill the fleet.
+      * the firmware does not announce the capability — a binary with nothing
+        to exec it, which is what `refuse_install` already says by hand.
+      * the shell said nothing we understand (`status is None`) — failure to
+        LOOK is not evidence of absence, and moments after a connect the
+        shell plane is very likely not up yet. Pushing on that is a guess,
+        and the same rule `reconcile_oww_assets` is built on.
+      * the device reports a file of exactly the store's size — the only
+        agreement the two ends can reach, since the firmware stats the file
+        rather than hashing it. Suggestive and never proof, and the
+        alternative is re-pushing every binary on every connect for ever.
+    """
+    if not (effective or {}).get(k.config_key):
+        return None
+    if k.capability not in (capabilities or []):
+        return None
+    have = stored(k, db_path)
+    if have is None:
+        return None
+    if status is None:
+        return None
+    if not status.get("ok"):
+        return f"device reports {status.get('reason') or 'no usable binary'}"
+    size = status.get("size")
+    if isinstance(size, int) and size == have["size"]:
+        return None
+    return f"device has {size} bytes, the store has {have['size']}"
 
 
 # ─── Reading the binary back off the device ──────────────────────────────────

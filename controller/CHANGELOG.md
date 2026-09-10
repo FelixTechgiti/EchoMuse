@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.27.0-fx.1
+
+**Spotify Connect and AirPlay install themselves.** The two programs the Echo
+runs for those — librespot and shairport-sync — used to be built somewhere,
+uploaded by hand, and then installed on each device with a click. Now the
+controller fetches them from the published release and puts them on any Echo
+whose Spotify or AirPlay switch is on, the next time that Echo connects.
+
+### What's new
+
+- **Nothing to upload and nothing to click.** Turn the switch on; the binary
+  arrives. A device that already has the right one is left alone, so this
+  costs one quick check per connect and nothing else.
+- **It only touches its own copy.** If you uploaded a binary yourself — a
+  patched build you are testing — it is never replaced. The controller
+  replaces only what the controller put there.
+- **A published binary is checked exactly like an uploaded one.** A build for
+  the wrong processor is refused before it is stored, so it cannot reach a
+  fleet automatically.
+- **A device that is on a switch you turned off gets nothing.** The switch is
+  the request; a release existing is not.
+
+### What is required of you
+
+Nothing, and nothing changes for a device that is already working. If you want
+Spotify Connect or AirPlay on a device that does not have it, turn the switch
+on in Config → Streaming and reconnect the device.
+
 ## 2.26.0-fx.1
 
 **Home Assistant can now see whether an Echo is making a sound** — including
