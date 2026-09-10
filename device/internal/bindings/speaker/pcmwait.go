@@ -3,6 +3,8 @@ package speaker
 import (
 	"log"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/bootlog"
 )
 
 // The wait for Android to give the speaker back.
@@ -107,6 +109,16 @@ func nextDelay(d, max time.Duration) time.Duration {
 	return d
 }
 
+// The two test seams for the /data record below. Package vars rather than
+// parameters because every caller wants the production values and only the
+// test wants anything else — and a parameter nobody varies is a parameter
+// every call site has to carry.
+var (
+	speakerLogMilestones = bootlog.DefaultMilestones
+	speakerLogRepeat     = bootlog.DefaultRepeat
+	speakerLog           = bootlog.Appendf
+)
+
 // retryOpen calls open until it succeeds or stop is closed, backing off from
 // delay to max between attempts. It reports whether the open eventually
 // succeeded.
@@ -116,8 +128,24 @@ func nextDelay(d, max time.Duration) time.Duration {
 // here is that the loop RETRIES rather than giving up, that it BACKS OFF
 // rather than hammering, and that a stop is honoured between attempts rather
 // than only after another full delay.
+//
+// A speaker that never opens is recorded on /data, and this is the second
+// half of the same gap the controller search has. main() is no longer gated on
+// the speaker, so this fault no longer takes the device with it — it costs
+// only the audio. That makes it QUIETER, not smaller: the device registers,
+// answers its buttons and lights its ring while playing nothing, and every
+// line saying why goes to /tmp, which the power cycle used to recover from it
+// wipes. With a plug in the jack Android's mediaserver holds the speaker for
+// as long as the plug is there, so this is open-ended by nature and reports on
+// the same escalating cadence for the same flash-wear reason.
 func retryOpen(open func() error, stop <-chan struct{},
 	delay, max time.Duration) bool {
+
+	start := time.Now()
+	silent := bootlog.Escalator{
+		Milestones: speakerLogMilestones,
+		Repeat:     speakerLogRepeat,
+	}
 
 	for attempt := 1; ; attempt++ {
 		select {
@@ -127,10 +155,19 @@ func retryOpen(open func() error, stop <-chan struct{},
 		}
 		err := open()
 		if err == nil {
+			// Only worth a line if somebody was told about the silence.
+			if silent.Reported() > 0 {
+				speakerLog("speaker opened after %s and %d attempts",
+					time.Since(start).Round(time.Second), attempt)
+			}
 			return true
 		}
 		log.Printf("[speaker] open attempt %d failed: %v — retrying in %s",
 			attempt, err, delay)
+		if silent.Due(time.Since(start)) {
+			speakerLog("no speaker for %s — %d failed opens, last: %v",
+				time.Since(start).Round(time.Second), attempt, err)
+		}
 		select {
 		case <-stop:
 			return false

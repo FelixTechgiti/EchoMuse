@@ -675,6 +675,21 @@ def test_supervisor_log_path_matches_between_script_and_controller():
         f"controller reads {m.group(1)}"
     )
 
+    # Three writers now, not two: the FIRMWARE also appends to this file, for
+    # the faults the supervisor cannot see — a controller it never finds, a
+    # speaker Android will not release. Its lines are what make the file worth
+    # fetching for anything other than a crash loop, and a drifted constant
+    # there is silent at both ends: the firmware writes a file nobody reads
+    # and the controller fetches one nobody wrote.
+    bootlog = (root.parent / "device" / "internal" / "bootlog"
+               / "bootlog.go").read_text()
+    m = re.search(r'^const Path = "([^"]+)"', bootlog, re.M)
+    assert m, "internal/bootlog no longer defines Path"
+    assert m.group(1) == script_path, (
+        f"supervisor log path drifted: script writes {script_path}, "
+        f"firmware writes {m.group(1)}"
+    )
+
 
 def test_supervisor_log_is_persistent_and_bounded():
     """
@@ -696,12 +711,66 @@ def test_supervisor_log_is_persistent_and_bounded():
     assert m.group(1).startswith("/data/"), \
         "the supervisor log must live on persistent storage, not /tmp"
 
+    # The firmware trims the same file, so its bounds must be the SAME
+    # numbers — not merely safe ones. A firmware keeping more than the
+    # supervisor does has its extra deleted at the next boot, which reads as a
+    # deliberate 64KB of history and is really whatever the smaller trimmer
+    # left.
+    fw = (Path(__file__).resolve().parent.parent.parent / "device" / "internal"
+          / "bootlog" / "bootlog.go").read_text()
+    for const, shell in (("MaxBytes", "SUP_MAX"), ("keepBytes", "SUP_KEEP")):
+        m = re.search(rf"^const {const} = (.+)$", fw, re.M)
+        assert m, f"internal/bootlog no longer defines {const}"
+        value = eval(m.group(1).replace("MaxBytes", "65536"))  # noqa: S307
+        m = re.search(rf"^{shell}=(\d+)", script, re.M)
+        assert m, f"start_server.sh no longer defines {shell}"
+        assert value == int(m.group(1)), (
+            f"the two trimmers of one file disagree: {shell}={m.group(1)}, "
+            f"firmware {const}={value}"
+        )
+
     fn = script[script.index("sup_log() {"):]
     fn = fn[:fn.index("\n}")]
     trim = fn.index("SUP_MAX")
     append = fn.index('>> "$SUP_LOG"')
     assert trim < append, \
         "the size check must run before the append, or a crash-loop outruns it"
+
+
+def test_the_supervisor_log_can_be_fetched_without_a_failed_update():
+    """
+    The automatic fetch is owed only after a FAILED UPDATE, and the faults the
+    firmware records in that file are wider than that — a controller never
+    found, a speaker Android never released. Both survive the power cycle used
+    to recover from them, and both would otherwise be written and read by
+    nobody.
+
+    Admin, because it costs a shell session on the device; and it has to say
+    so when the file is absent rather than reporting an empty one, since
+    "firmware too old" and "nothing went wrong" are opposite answers.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    api = (root / "em_api.py").read_text()
+
+    assert '/api/devices/{id}/supervisor_log' in api, \
+        "no on-demand fetch for the device's persistent log"
+
+    i = api.index("async def _post_fetch_supervisor_log")
+    decorator = api[max(0, i - 200):i]
+    assert "@auth.require_admin" in decorator, \
+        "the supervisor log fetch opens a device shell and must be admin-only"
+
+    body = api[i:i + 2000]
+    assert "SUPERVISOR_LOG" in body, \
+        "the fetch does not use the shared path constant"
+    assert "_push_log_event" in body, \
+        "the fetched log goes nowhere a person would look"
+
+    jsx = (root / "static" / "dashboard.jsx").read_text()
+    assert "supervisor_log" in jsx, \
+        "nothing in the dashboard can reach the fetch — an endpoint with no " \
+        "caller is a feature nobody has"
 
 
 def test_a_failed_update_asks_for_the_supervisor_log():

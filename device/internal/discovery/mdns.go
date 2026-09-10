@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
+
+	"github.com/wilbowes/EchoMuse/internal/bootlog"
 )
 
 const serviceType = "_emcontroller._tcp"
@@ -24,9 +26,19 @@ type ServerInfo struct {
 	TLSPort int
 }
 
+// FindServer browses until a controller answers.
+//
+// A search that goes on is written to the supervisor log on /data, which is
+// the only record of it that survives the power cycle somebody performs to
+// recover the device. `/tmp/server.log` does not, and the device's shell is
+// proxied BY THE CONTROLLER — so in exactly this fault there is no channel to
+// ask over. See internal/bootlog.
 func FindServer(ctx context.Context) (*ServerInfo, error) {
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
+	start := time.Now()
+	var reporter bootlog.Escalator
+	rounds := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -34,10 +46,24 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 		}
 
 		log.Printf("mDNS: browsing for %s.local...", serviceType)
+		rounds++
 		info, err := browse(ctx)
 		if err == nil && info != nil {
 			log.Printf("mDNS: found Clara server at %s", info.Addr)
+			// Only worth a line if the search was worth one: an all-clear for
+			// something nobody was told about is noise on a flash write.
+			if reporter.Reported() > 0 {
+				bootlog.Appendf("controller found at %s after %s and %d browse rounds (%s)",
+					info.Addr, time.Since(start).Round(time.Second), rounds,
+					DescribeLink())
+			}
 			return info, nil
+		}
+
+		if reporter.Due(time.Since(start)) {
+			bootlog.Appendf("no controller for %s — %d browse rounds, %s",
+				time.Since(start).Round(time.Second), rounds,
+				DescribeLink())
 		}
 
 		log.Printf("mDNS: no server found, retrying in %s", backoff)
@@ -68,9 +94,9 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 	defer cancel()
 
 	opts := []zeroconf.ClientOption{}
-	iface, err := net.InterfaceByName("wlan0")
+	iface, err := net.InterfaceByName(searchIface)
 	if err != nil {
-		log.Printf("mDNS: could not find wlan0, using default interface: %v", err)
+		log.Printf("mDNS: could not find %s, using default interface: %v", searchIface, err)
 	} else {
 		opts = append(opts, zeroconf.SelectIfaces([]net.Interface{*iface}))
 	}

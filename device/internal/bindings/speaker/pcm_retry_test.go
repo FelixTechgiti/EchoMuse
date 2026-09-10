@@ -2,9 +2,13 @@ package speaker
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/bootlog"
 )
 
 // The bug retryOpen exists for: the ALSA open used to happen inside
@@ -158,5 +162,105 @@ func TestTheHolderIsAskedAFiniteNumberOfTimes(t *testing.T) {
 	if got := atomic.LoadInt32(&asks); got != maxNudges {
 		t.Fatalf("asked %d times, want the full budget %d before giving up",
 			got, maxNudges)
+	}
+}
+
+// A device whose speaker never opens is a device that registers, answers its
+// buttons, lights its ring and plays nothing — and until this, every line
+// saying why went to /tmp, which the power cycle used to recover from it
+// wipes. The record is on /data and has to survive that.
+func TestSilentSpeakerIsRecordedOnData(t *testing.T) {
+	var lines []string
+	restore := stubSpeakerLog(t, &lines,
+		[]time.Duration{20 * time.Millisecond, 60 * time.Millisecond},
+		40*time.Millisecond)
+	defer restore()
+
+	stop := make(chan struct{})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		close(stop)
+	}()
+	if retryOpen(func() error { return errStillHeld }, stop, time.Millisecond, time.Millisecond) {
+		t.Fatal("retryOpen claimed success")
+	}
+
+	if len(lines) == 0 {
+		t.Fatal("a speaker that never opened left no record on /data")
+	}
+	if !strings.Contains(lines[0], "no speaker for") {
+		t.Fatalf("first line does not say what is wrong: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], errStillHeld.Error()) {
+		t.Fatalf("first line does not carry the reason the open failed: %q", lines[0])
+	}
+	// Escalating, not per-attempt: this loop ran hundreds of times.
+	if len(lines) > 6 {
+		t.Fatalf("%d lines for one fault — the escalation is not holding, and "+
+			"this is flash that cannot be replaced", len(lines))
+	}
+}
+
+// The ordinary case — mediaserver letting go a second or two after an OTA —
+// must write nothing at all. It is every device, every update.
+func TestARecoverableOpenIsSilent(t *testing.T) {
+	var lines []string
+	restore := stubSpeakerLog(t, &lines, bootlog.DefaultMilestones, bootlog.DefaultRepeat)
+	defer restore()
+
+	attempts := 0
+	open := func() error {
+		attempts++
+		if attempts < 4 {
+			return errStillHeld
+		}
+		return nil
+	}
+	if !retryOpen(open, make(chan struct{}), time.Millisecond, time.Millisecond) {
+		t.Fatal("retryOpen gave up on a recoverable open")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("an ordinary restart wrote %d lines to /data: %v", len(lines), lines)
+	}
+}
+
+// An all-clear is only worth a flash write if somebody was told about the
+// fault it clears.
+func TestRecoveryIsRecordedOnlyAfterAReport(t *testing.T) {
+	var lines []string
+	restore := stubSpeakerLog(t, &lines,
+		[]time.Duration{20 * time.Millisecond}, time.Hour)
+	defer restore()
+
+	start := time.Now()
+	open := func() error {
+		if time.Since(start) < 50*time.Millisecond {
+			return errStillHeld
+		}
+		return nil
+	}
+	if !retryOpen(open, make(chan struct{}), time.Millisecond, time.Millisecond) {
+		t.Fatal("retryOpen gave up")
+	}
+	if len(lines) != 2 {
+		t.Fatalf("want one fault line and one recovery line, got %v", lines)
+	}
+	if !strings.Contains(lines[1], "speaker opened after") {
+		t.Fatalf("recovery not recorded: %q", lines[1])
+	}
+}
+
+var errStillHeld = errors.New("cannot open pcm23p: device or resource busy")
+
+func stubSpeakerLog(t *testing.T, into *[]string,
+	marks []time.Duration, repeat time.Duration) func() {
+	t.Helper()
+	oldLog, oldMarks, oldRepeat := speakerLog, speakerLogMilestones, speakerLogRepeat
+	speakerLog = func(format string, args ...any) {
+		*into = append(*into, fmt.Sprintf(format, args...))
+	}
+	speakerLogMilestones, speakerLogRepeat = marks, repeat
+	return func() {
+		speakerLog, speakerLogMilestones, speakerLogRepeat = oldLog, oldMarks, oldRepeat
 	}
 }

@@ -155,6 +155,44 @@ def select(releases: list) -> dict | None:
     return best
 
 
+def published_state(tag: str, prov: dict, store: dict, key: str) -> dict:
+    """
+    What the store holds for one kind, against what `tag` publishes.
+
+    Four answers, and they exist because "the store has a binary" was the only
+    thing anyone could see, and it hid the case that matters:
+
+      `empty`      nothing stored. The automatic fetch fills it.
+      `published`  ours, and current with this release.
+      `outdated`   ours, from an older release. The automatic fetch replaces
+                   it.
+      `unmanaged`  a binary the controller cannot prove it wrote, so the
+                   automatic fetch will never touch it.
+
+    **`unmanaged` is the one worth naming.** It covers a deliberate hand
+    upload — a patched build somebody is testing, which is exactly what
+    `needs_fetch` refuses to overwrite — AND every store filled before
+    provenance existed, which is all of them. Those two are indistinguishable
+    from here: the record that would tell them apart is the record that is
+    missing. So this reports the state and does not decide; deciding is the
+    user's, through `take_published`.
+
+    Reported even when there is no release to compare against, because
+    "we cannot see a release" and "the store is current" are different
+    answers and only one of them means nothing to do.
+    """
+    have = (store or {}).get(key)
+    if have is None:
+        return {"state": "empty", "stored_md5": None}
+    recorded = ((prov.get("kinds") or {}).get(key) or {}).get("md5")
+    if recorded != have.get("md5"):
+        return {"state": "unmanaged", "stored_md5": have.get("md5")}
+    if prov.get("tag") == tag:
+        return {"state": "published", "stored_md5": have.get("md5")}
+    return {"state": "outdated", "stored_md5": have.get("md5"),
+            "stored_tag": prov.get("tag")}
+
+
 def needs_fetch(tag: str, prov: dict, store: dict) -> list[str]:
     """
     Which kinds should be downloaded from `tag`, given the provenance record
