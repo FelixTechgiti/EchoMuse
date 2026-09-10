@@ -114,10 +114,15 @@ hardware to you.
 
 Nothing to do — the database migrates itself, and there is no manual step.
 
-**Some of this needs device firmware newer than v2.14.0, which is not published
-yet.** The jack fixes, the clock, and the echo reference are device changes;
-your Echoes will ignore those settings until a firmware release catches up.
-Everything else in this list is controller-side and works as soon as you update.
+**Some of this needs device firmware v2.15.0**, released alongside this. The
+jack fixes, the clock and the echo reference are device changes, so update the
+controller first and then your Echoes from the Updates tab — until you do,
+those settings are stored and ignored. Everything else here is controller-side
+and works as soon as you update.
+
+**emOS devices want emOS 0.4**, also released alongside this, which is what
+the wizard installs from now on. A device already on 0.3 keeps working; it
+just has no `/init recovery` and no console idle timeout.
 
 ## 2.23.0-ea.15 (Early Access)
 
