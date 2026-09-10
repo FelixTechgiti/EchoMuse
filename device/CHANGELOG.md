@@ -12,6 +12,37 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.19.0-fx.1
+
+The Echo comes back on its own after an update.
+
+### What's new
+
+**After an update the device stayed dark until it was unplugged.** The
+firmware restarted correctly every time — the supervisor log shows it — and
+then never came back online, with the ring not even showing the orange
+no-controller pulse.
+
+It never got that far. The speaker is opened before anything else starts, and
+Android's media service takes it for itself when a plug is in the jack. At a
+cold boot that service is still starting and lets go in a fifth of a second;
+after an update it is fully up, and the one request to release it had already
+been spent. The open then waits for ever, and mDNS, the controller connection,
+the buttons and the LEDs are all behind it. The device now asks again while it
+waits, which is what makes an update behave like a power cycle.
+
+**A volume press on a muted device turned the ring red.** A leftover of the
+rule that mute owns the ring, which went away when the ring became Home
+Assistant's — the microphone button's own LED is the mute indicator now. It
+painted over whatever colour Home Assistant had set, and Home Assistant was
+never told.
+
+### What is required of you
+
+Nothing. If an update still leaves the device dark, unplug the jack before
+starting the next one and tell us — that narrows it to the same cause rather
+than a new one.
+
 ## 2.18.0-fx.1
 
 Two fixes for the streaming endpoints, both found on a real device.

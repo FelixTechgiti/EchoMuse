@@ -530,6 +530,31 @@ buttons" report. `Init()` now runs `stop media` first (the same stock-service
 takeover as `stop mixer` beside it and `stop smarthomewifid` in `main`) and
 waits on the substream status before opening.
 
+**An OTA RESTART is the case a cold boot hides, and it cost a whole day**
+(2026-09-10). At boot mediaserver is still starting and lets go in ~200ms —
+the measured, ordinary path. After an in-place restart it is fully up, and
+with a plug in the jack it takes the speaker for itself; `stop media` was
+issued ONCE before the wait, so by the time the service had died and come back
+there was nothing left to ask it again. The open then blocked, and because
+`main()` initialises the speaker BEFORE mDNS, the control client, the buttons
+and the LEDs, **the whole device went dark** — no registration, no wake word,
+and not even the orange no-controller pulse, since the code that paints it is
+never reached. The supervisor log showed the restart working perfectly both
+times (`start` two seconds after each `exit`), which is what made it look like
+a network fault rather than an audio one. A power cycle was the only recovery.
+`waitForFreePcm` now takes a `nudge` and re-issues the stop every
+`nudgeInterval`, which makes the race one we win. **Not gating `main()` on the
+speaker at all remains the real fix** — the comment in `waitForFreePcm` has
+said so since it was written, and it is filed rather than done.
+
+`waitFree` is in `pcmwait.go` with **no build tag**, beside `pcmstatus.go` and
+for the same reason as `internal/outchain`: it is a timing loop over two
+injected functions, the property worth pinning is its cadence, and everything
+left in `pcm_speaker.go` carries `//go:build server` and is therefore compiled
+only inside the pinned compiler image and cannot be tested at all. Watch for
+that when changing this file — a host `go build` of this package reports
+success without having compiled the tagged half.
+
 **`stop media` does NOT stick, and the fix does not depend on it doing so.**
 Android restarts mediaserver — measured on hardware: `init.svc.media` reads
 `running` again, with a live pid, while our server still owns `pcm23p` in
