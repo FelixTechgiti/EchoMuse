@@ -463,6 +463,13 @@ async def create_app() -> web.Application:
     # nothing keeping it honest.
     app.router.add_get("/api/endpoint_binaries",           _get_endpoint_binaries)
     app.router.add_post("/api/endpoint_binaries/{kind}",   _post_endpoint_binary_upload)
+    # Take the published build, over anything already stored. The automatic
+    # fetch deliberately never does this (em_endpoint_release.needs_fetch),
+    # because it cannot tell a deliberate hand upload from a store filled
+    # before provenance existed — so the decision is the user's, and this is
+    # where they make it.
+    app.router.add_post("/api/endpoint_binaries/{kind}/use_published",
+                        _post_endpoint_use_published)
     app.router.add_get("/api/devices/{id}/endpoint_binaries",
                        _get_device_endpoint_bins)
     app.router.add_post("/api/devices/{id}/endpoint_binaries/{kind}",
@@ -4677,13 +4684,97 @@ async def _get_endpoint_binaries(request: web.Request) -> web.Response:
     the response names sizes and md5s of executables, and the POST beside it
     is the install path.
     """
+    store = em_endpoint_bins.scan()
+    # What a release publishes, and how the store compares — the question
+    # "is this the published build?" had no answer anywhere, which is how a
+    # store holding a binary superseded months ago looked identical to one
+    # holding the current one.
+    release = await _fetch_latest_endpoints_release()
+    prov = em_endpoint_release.read_provenance()
+    tag = (release or {}).get("tag")
     return _ok({
-        "store": em_endpoint_bins.scan(),
+        "store": store,
+        "release": {"tag": tag} if release else None,
         "kinds": [
             {"kind": k.key, "label": k.label, "filename": k.filename,
-             "dest": k.dest, "source": k.source}
+             "dest": k.dest, "source": k.source,
+             **em_endpoint_release.published_state(tag, prov, store, k.key)}
             for k in em_endpoint_bins.KINDS.values()
         ],
+    })
+
+
+@auth.require_admin
+async def _post_endpoint_use_published(request: web.Request) -> web.Response:
+    """
+    POST /api/endpoint_binaries/{kind}/use_published — replace the stored
+    binary with the one the latest release publishes, whatever is there now.
+
+    **This is the half `needs_fetch` deliberately does not have.** The
+    automatic fetch never overwrites a binary the controller cannot prove it
+    wrote, because replacing somebody's patched build on a timer is help
+    nobody asks for twice. The cost of that rule is that it also covers every
+    store filled before provenance existed — which is all of them — so
+    without this route the automatic install can never take over an existing
+    installation, and the one device that most needs the published build is
+    guaranteed not to get it.
+
+    The two cases are indistinguishable from the data: the record that would
+    separate a deliberate upload from a legacy one is the record that is
+    missing. So the decision goes to the person, and this is them making it.
+    Admin-only, like every route that can put a program on a device.
+
+    The bytes are checked exactly as an upload is — a release asset is not
+    more trustworthy than a person's file, and a host build that reached a
+    release would otherwise reach a fleet.
+    """
+    k = em_endpoint_bins.kind(request.match_info["kind"])
+    if k is None:
+        return _error("unknown_kind", "No such endpoint binary", 404)
+
+    release = await _fetch_latest_endpoints_release(force=True)
+    if release is None:
+        return _error(
+            "no_release",
+            "No published endpoints release was found. One is created by "
+            "tagging endpoints-v<version>; until then the only source is an "
+            "upload.", 409)
+
+    asset = release["assets"][k.key]
+    data = await _fetch_binary(asset["url"])
+    if not data:
+        return _error("download_failed",
+                      f"Could not download {k.filename} from {release['tag']}",
+                      502)
+    problem = em_endpoint_bins.elf_problem(data)
+    if problem:
+        return _error(
+            "bad_binary",
+            f"{release['tag']} publishes a {k.filename} that is {problem} — "
+            f"refusing to store it", 502)
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _write_endpoint_store, k, data)
+    except OSError as e:
+        return _error("store_failed", f"Could not write the store: {e}", 500)
+
+    # Record it as ours, so the automatic fetch keeps it current from here on
+    # — which is the whole point of taking it, and is what turns a one-way
+    # door back into a path.
+    prov = await loop.run_in_executor(None, em_endpoint_release.read_provenance)
+    kinds = dict(prov.get("kinds") or {})
+    kinds[k.key] = {"md5": em_endpoint_bins.md5_hex(data), "size": len(data)}
+    await loop.run_in_executor(
+        None, em_endpoint_release.write_provenance,
+        {"tag": release["tag"], "kinds": kinds})
+
+    log.info(f"[api] {k.filename} replaced with the published build from "
+             f"{release['tag']} ({len(data):,} bytes)")
+    return _ok({
+        "kind": k.key,
+        "tag": release["tag"],
+        "stored": em_endpoint_bins.stored(k),
     })
 
 
