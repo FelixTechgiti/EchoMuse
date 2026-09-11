@@ -345,6 +345,16 @@ DEFAULT_DEVICE_CONFIG = {
     # rest) while giving HA's light card a colour to offer on the first tap.
     "idleRing":           "#ffffff",
     "idleRingBrightness": 0,
+    # The resting ANIMATION, when one is selected — an effect name from
+    # em_ring_light.EFFECTS, or "None". Same STATE_KEY treatment as the two
+    # above and for the same reason; the default is "None" so the shipped
+    # behaviour is exactly the solid colour it was.
+    #
+    # Stored as the NAME rather than the resolved spec, because the spec is a
+    # function of the colour and the brightness, and both change under it.
+    # Storing what was rendered would freeze an effect at whatever the ring
+    # looked like when it was chosen.
+    "idleEffect":         "None",
     # Playback "meter" ring response curve — how hard the ring throbs with
     # the speaker level. Device-side defaults live in animator.go
     # (meterDefaults) and these mirror them; both are clamped independently.

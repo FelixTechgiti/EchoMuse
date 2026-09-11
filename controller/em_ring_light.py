@@ -39,6 +39,8 @@ brightness, and it costs one slider drag where the alternative cost a colour.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 # What the ring rests at when nothing has ever set a colour. White rather
 # than a hue nobody chose: the ring's own vocabulary is green (listening),
 # red (mute), orange (link down) and cyan (volume), so any coloured default
@@ -159,35 +161,161 @@ def apply_command(idle_ring, brightness, *,
     return color, level
 
 
-# ── Notifications, as light EFFECTS ───────────────────────────────────────
+# ── Light EFFECTS: one list, two lifetimes ────────────────────────────────
 #
-# A notification is not a state, so it must not be stored like one: it plays,
-# it ends, and the ring goes back to whatever it was resting at. Home
-# Assistant's light model already has exactly that shape in `effect`, so this
-# needs no second entity — `light.turn_on` with `effect:` is a one-liner in
-# any automation, and the effect list renders as a dropdown on the card.
+# Home Assistant gives a light exactly ONE effect field, and this ring wants
+# two different things from it:
 #
-# The specs below are the device's own `led_anim` vocabulary (em_scenes uses
-# the same patterns for turn outcomes). The device renders them on its own
-# ticker with a TTL as a dead-man switch, so a controller that dies mid-
-# notification leaves a ring that clears itself rather than one stuck on.
+#   a NOTIFICATION — plays, ends, and the ring goes back to whatever it was
+#   resting at. Three throbs and done.
+#
+#   a RESTING ANIMATION — the ring runs this until somebody changes it. The
+#   rotating dot, the rainbow, the slow breathe.
+#
+# Those are opposite lifetimes sharing one field, and the difference has to be
+# carried per effect rather than inferred, because each one gets the REPORTING
+# rule the other must not have. A persistent effect must report as active or
+# HA's card forgets what is running; a one-shot must report `None`, because
+# reporting an effect for something already finished leaves the card showing a
+# state the ring is not in. `persistent` is that flag, and it is the only
+# thing separating the two.
+#
+# They share one list rather than splitting the resting animation onto a
+# `select` entity, which was the alternative. It is cleaner in the data model
+# and worse everywhere a person stands: nobody looks in a select for a light
+# effect.
+#
+# The specs are the device's own `led_anim` vocabulary (em_scenes uses the
+# same patterns for turn outcomes) and every pattern used here — solid, spin,
+# rotate, pulse — is one FIELDED firmware already renders. Nothing new is
+# announced, and nothing needs a capability, which matters because
+# `StartAnim`'s default branch CLEARS THE RING on a pattern it does not know:
+# an effect name shipped ahead of the firmware would turn the ring off rather
+# than do nothing.
 
 EFFECT_NONE = "None"
 
-# name -> (pattern, periodMs, seconds). `seconds` is both the anim's TTL and
-# how long the controller waits before repainting the resting colour.
-_EFFECTS: dict[str, tuple[str, int, int]] = {
+NUM_LEDS = 12
+
+
+def _hsv(h: float, s: float, v: float) -> tuple:
+    """h in degrees; returns 8-bit RGB. Same helper em_scenes uses."""
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+# One hue per LED around the wheel. Value capped below full for _RAINBOW's
+# reason in em_scenes: white-ish hues otherwise swamp the saturated ones.
+_RAINBOW = [_hsv(i * 360 / NUM_LEDS, 1.0, 0.75) for i in range(NUM_LEDS)]
+
+
+class Effect(NamedTuple):
+    """
+    One entry in the effect list.
+
+    `palette` is a function of the resting colour rather than a fixed list,
+    because the effects divide into two kinds and both have to work: the ones
+    that ARE a colour scheme (Rainbow) ignore it, and the ones that are a
+    motion (Rotate, Breathe) have to run in the colour the user picked, or
+    selecting an effect would silently discard their choice.
+
+    `seconds` is 0 for a persistent effect, and that is not a placeholder: it
+    becomes `ttlSec: 0`, which fielded firmware already reads as "run until
+    replaced" — every deadline in `animator.go` is behind `spec.TTLSec > 0`.
+    So a resting animation needs no device change and no repaint timer, which
+    would otherwise be a message to every device every few seconds for ever.
+    """
+    pattern: str
+    period_ms: int
+    seconds: int          # TTL and how long the controller waits; 0 = forever
+    persistent: bool
+    palette: object       # fn(rgb tuple) -> list of rgb tuples
+
+
+def _one(rgb):
+    return [list(rgb)]
+
+
+def _ring(rgb):
+    return [list(rgb)] * NUM_LEDS
+
+
+def _rainbow(_rgb):
+    return [list(c) for c in _RAINBOW]
+
+
+def _gradient(rgb):
+    """
+    A static two-tone sweep: the resting colour fading to a dim version of
+    itself and back. One colour rather than two, because a second colour
+    would need somewhere to live and the light entity has one colour field.
+    """
+    r, g, b = rgb
+    out = []
+    for i in range(NUM_LEDS):
+        # Triangle wave over the ring so the two ends meet without a seam.
+        t = 1.0 - abs((i / NUM_LEDS) * 2.0 - 1.0)
+        f = 0.15 + 0.85 * t
+        out.append([int(r * f), int(g * f), int(b * f)])
+    return out
+
+
+def _wheel(_rgb):
+    """A single hue walking the wheel — the whole ring in step."""
+    return [list(_hsv(i * 360 / NUM_LEDS, 1.0, 0.75)) for i in range(NUM_LEDS)]
+
+
+_EFFECTS: dict[str, Effect] = {
+    # ── One-shots: a notification, three seconds, then back to rest ───────
+    #
     # Three unhurried throbs — "something wants you".
-    "Notify": ("pulse", 700, 3),
+    "Notify":  Effect("pulse",  700, 3, False, _one),
     # Agitated — "something is wrong". Deliberately the same rhythm as the
     # turn-outcome error cue, so the two read as one vocabulary.
-    "Alert":  ("pulse", 220, 3),
+    "Alert":   Effect("pulse",  220, 3, False, _one),
     # A sweep, for a notification that should catch the eye without the
     # urgency a fast blink carries.
-    "Sweep":  ("rotate", 80, 3),
+    "Sweep":   Effect("rotate",  80, 3, False, _one),
+
+    # ── Persistent: this IS the resting state until changed ───────────────
+    #
+    # A bright head with a fading trail, in the resting colour.
+    "Rotate":  Effect("spin",   110, 0, True,  _one),
+    # Longer trail, faster head.
+    "Comet":   Effect("spin",    55, 0, True,  _one),
+    # The rainbow palette turning — what the `pride` scene already does.
+    "Rainbow": Effect("rotate", 120, 0, True,  _rainbow),
+    # One hue walking the wheel, whole ring in step.
+    "Colour cycle": Effect("rotate", 200, 0, True, _wheel),
+    # A slow, even on/off.
+    "Blink":   Effect("pulse",  900, 0, True,  _ring),
+    # The calm version of Blink.
+    "Breathe": Effect("pulse", 2600, 0, True,  _ring),
+    # A static two-tone sweep — no motion, but still an effect rather than a
+    # colour, because it is twelve different LEDs.
+    "Gradient": Effect("solid",  0,  0, True,  _gradient),
 }
 
 EFFECTS: tuple[str, ...] = (EFFECT_NONE, *_EFFECTS)
+
+# The persistent ones, for anything that needs to ask without walking the
+# table — and for the test that pins that every one of them is in EFFECTS.
+PERSISTENT: tuple[str, ...] = tuple(
+    name for name, e in _EFFECTS.items() if e.persistent)
+
+
+def is_persistent(name) -> bool:
+    """
+    Does this effect become the resting state?
+
+    An unknown name is NOT persistent. The effect list is API surface HA
+    caches, so a name from a newer controller can arrive here after a
+    downgrade, and treating it as persistent would store a resting state
+    nothing can render.
+    """
+    e = _EFFECTS.get(name)
+    return bool(e and e.persistent)
 
 
 def effect_anim(name: str, idle_ring) -> dict | None:
@@ -196,25 +324,74 @@ def effect_anim(name: str, idle_ring) -> dict | None:
     unknown — an effect list is API surface HA caches, so a stale name from
     an older controller must read as "nothing to play" rather than raise.
 
-    Played at the stored colour but at FULL brightness, and the second half
-    of that is deliberate: a notification is meant to be noticed, and a ring
-    resting at 10% would deliver one nobody sees. It is also what lets a
-    notification work on a ring that is switched OFF — the colour is stored
-    independently of the brightness precisely so there is always one to use.
+    A ONE-SHOT is played at the stored colour but at FULL brightness, and the
+    second half of that is deliberate: a notification is meant to be noticed,
+    and a ring resting at 10% would deliver one nobody sees. It is also what
+    lets a notification work on a ring that is switched OFF — the colour is
+    stored independently of the brightness precisely so there is always one
+    to use.
+
+    A PERSISTENT effect is the resting state, so it is painted at the resting
+    BRIGHTNESS by `resting_anim` below. This function is still the one place
+    the spec is built, so the two cannot drift.
     """
-    spec = _EFFECTS.get(name)
-    if spec is None:
+    e = _EFFECTS.get(name)
+    if e is None:
         return None
-    pattern, period_ms, seconds = spec
     return {
-        "pattern":  pattern,
-        "colors":   [list(parse_color(idle_ring))],
-        "periodMs": period_ms,
-        "ttlSec":   seconds,
+        "pattern":  e.pattern,
+        "colors":   e.palette(parse_color(idle_ring)),
+        "periodMs": e.period_ms,
+        # 0 for a persistent effect: fielded firmware guards every expiry
+        # behind `ttlSec > 0`, so 0 already means "until replaced".
+        "ttlSec":   e.seconds,
     }
 
 
 def effect_seconds(name: str) -> float:
-    """How long an effect runs before the ring returns to rest. 0 if unknown."""
-    spec = _EFFECTS.get(name)
-    return float(spec[2]) if spec else 0.0
+    """How long an effect runs before the ring returns to rest. 0 if unknown,
+    and 0 for a persistent effect — which never returns to anything."""
+    e = _EFFECTS.get(name)
+    return float(e.seconds) if e else 0.0
+
+
+def resting_anim(effect, idle_ring, brightness) -> dict | None:
+    """
+    What `leds_idle` should paint, when the rest is an ANIMATION.
+
+    None means "there is no persistent effect" and the caller paints the solid
+    colour as it always did — so every existing path is untouched until
+    somebody selects one.
+
+    **Scaled by the resting brightness, and off at 0.** A resting animation is
+    the resting state, so the dimmer has to govern it exactly as it governs
+    the solid colour; an effect that ignored the dimmer would be the one thing
+    on the ring a user could not turn down. At brightness 0 this returns None
+    and the ring goes dark, because "off" has to mean off — an effect still
+    running on a light reporting itself off is the control-that-lies failure
+    this project names most often.
+    """
+    if not is_persistent(effect):
+        return None
+    level = clamp_brightness(brightness)
+    if level <= 0:
+        return None
+    spec = effect_anim(effect, idle_ring)
+    if spec is None:
+        return None
+    f = level / 255.0
+    spec["colors"] = [[int(c * f) for c in triple] for triple in spec["colors"]]
+    return spec
+
+
+def reported_effect(effect) -> str:
+    """
+    What the light's state message should say is running.
+
+    A persistent effect reports itself, or HA's card forgets what it is
+    showing the moment anything else pushes a state. A one-shot reports
+    `None` even while it is playing: it is already with the device, it
+    self-clears, and reporting it leaves HA showing an effect selected long
+    after the ring went quiet.
+    """
+    return effect if is_persistent(effect) else EFFECT_NONE

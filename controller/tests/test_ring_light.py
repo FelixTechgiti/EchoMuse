@@ -10,6 +10,8 @@ colour wheel that resets the dimmer, which nobody reports as a bug because
 it reads as the user's own mistake.
 """
 
+import pathlib
+
 import em_ring_light as R
 
 
@@ -233,13 +235,19 @@ def test_none_and_unknown_effects_play_nothing():
         "HA expects the no-effect entry first"
 
 
-def test_every_effect_carries_a_ttl_the_device_can_clear_itself_on():
+def test_every_one_shot_carries_a_ttl_the_device_can_clear_itself_on():
     """
     The TTL is a dead-man switch: a controller that dies mid-notification
     must leave a ring that clears itself, not one stuck pulsing. 1s is the
     floor the firmware supports (see em_scenes' ack_anim).
+
+    This asks it of ONE-SHOTS only. It used to ask it of every effect, which
+    was right while every effect was a notification — see the test below for
+    what changed and why a persistent effect is still covered.
     """
     for name in R.EFFECTS[1:]:
+        if R.is_persistent(name):
+            continue
         anim = R.effect_anim(name, "#00ff00")
         assert anim is not None, f"{name} is advertised but plays nothing"
         assert anim["ttlSec"] >= 1, f"{name} has no dead-man TTL"
@@ -248,6 +256,55 @@ def test_every_effect_carries_a_ttl_the_device_can_clear_itself_on():
             f"repainting but the device clears at {anim['ttlSec']}s — the "
             f"ring would be dark in the gap"
         )
+
+
+def test_a_persistent_effect_runs_until_replaced_and_is_still_dead_manned():
+    """
+    A resting animation must NOT expire, and the dead-man it gives up is
+    covered by something better.
+
+    `ttlSec: 0` is what fielded firmware already reads as "run until
+    replaced" — every deadline in `animator.go` sits behind `spec.TTLSec > 0`
+    — so this needs no device change and no repaint timer, which would
+    otherwise be a message to every device every few seconds for ever.
+
+    What replaces the TTL as the dead-man is the device's own link handling:
+    `OnDisconnected` starts `pulseOrange`, which takes the ring. So a
+    controller that dies does not leave a ring stuck running an effect — it
+    leaves one pulsing orange, which is both self-clearing and more
+    informative than dark. That is asserted against the firmware source
+    rather than described, because the whole argument for `ttlSec: 0` rests
+    on it.
+    """
+    for name in R.PERSISTENT:
+        anim = R.effect_anim(name, "#00ff00")
+        assert anim is not None, f"{name} is advertised but plays nothing"
+        assert anim["ttlSec"] == 0, (
+            f"{name} is persistent but carries a TTL — the ring would go "
+            f"dark mid-effect and nothing would bring it back"
+        )
+        assert R.effect_seconds(name) == 0.0, (
+            f"{name}: a persistent effect never returns to anything, so the "
+            f"controller must not wait to repaint over it"
+        )
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "device" / "cmd" / "server.go").read_text()
+    marker = "controlClient.OnDisconnected(func() {"
+    assert marker in src, (
+        "the firmware no longer has a disconnect handler — a persistent "
+        "effect's ttlSec:0 has no dead-man behind it any more"
+    )
+    body = src[src.index(marker):]
+    body = body[:body.index("\n\t})")]
+    assert "s.StopAnim()" in body, (
+        "the disconnect handler no longer stops the running animation, so a "
+        "persistent effect would outlive the controller that set it"
+    )
+    assert "pulseOrange" in body, (
+        "the disconnect handler no longer takes the ring, so a dead "
+        "controller would leave it dark rather than saying why"
+    )
 
 
 def test_a_notification_uses_the_stored_colour_at_full_brightness():
@@ -300,17 +357,40 @@ def test_an_effect_does_not_change_the_resting_ring():
         "an effect must RETURN, not fall through into the state folding"
 
 
-def test_the_light_state_never_reports_a_running_effect():
+def test_the_light_state_asks_which_kind_of_effect_it_is():
     """
-    A one-shot already handed to the device and self-clearing on its TTL.
-    Reporting it as active leaves HA showing an effect selected long after
-    the ring went quiet — a state someone then has to clear by hand.
+    The two lifetimes need OPPOSITE answers here, so the state message must
+    not hardcode either one.
+
+    A one-shot has already been handed to the device and self-clears on its
+    TTL, so reporting it leaves HA showing an effect selected long after the
+    ring went quiet — a state someone then has to clear by hand. A persistent
+    effect IS the resting state, so reporting `None` for it means HA's card
+    forgets what is running the moment anything else pushes a state.
+
+    `reported_effect` is the one place that decides; this pins that the state
+    message goes through it rather than answering for itself.
     """
     src = _strip_py_comments((CONTROLLER / "em_esphome.py").read_text())
     body = src[src.index("def _light_state_msg"):]
     body = body[:body.index("def ", body.index("LightStateResponse"))]
-    assert "effect=em_ring_light.EFFECT_NONE" in body, \
-        "the state must report no effect running"
+    assert "em_ring_light.reported_effect" in body, \
+        "the state message must ask reported_effect, not decide for itself"
+    assert "effect=em_ring_light.EFFECT_NONE" not in body, \
+        "a hardcoded None would forget every persistent effect"
+
+
+def test_reported_effect_gives_the_two_lifetimes_opposite_answers():
+    for name in R.PERSISTENT:
+        assert R.reported_effect(name) == name, \
+            f"{name} is the resting state and must report itself"
+    for name in R.EFFECTS[1:]:
+        if not R.is_persistent(name):
+            assert R.reported_effect(name) == R.EFFECT_NONE, \
+                f"{name} is a one-shot and must not linger in HA's card"
+    # An unknown name — a stale entry from HA's cached list after a
+    # downgrade — must not be reported as a running state nothing renders.
+    assert R.reported_effect("Disco Inferno") == R.EFFECT_NONE
 
 
 def test_a_notification_stands_down_while_a_turn_owns_the_ring():
@@ -328,3 +408,135 @@ def test_a_notification_stands_down_while_a_turn_owns_the_ring():
         "the turn check belongs both before the anim and after the wait"
     assert "_d.led_anim_capable" in body, \
         "firmware that cannot animate locally must be refused, not sent one"
+
+
+# ── Persistent effects: the ring's rest becomes an animation (#66) ─────────
+
+
+def test_a_persistent_effect_is_what_leds_idle_paints():
+    """
+    The whole cost of this feature is here: every path that returns the ring
+    to rest goes through `leds_idle`, so the effect has to be restarted from
+    exactly that one place. Get it wrong and the effect stops the first time
+    somebody speaks to the Echo and never comes back.
+    """
+    src  = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def leds_idle"):]
+    body = body[:body.index("\n\n\n")]
+    assert "em_ring_light.resting_anim" in body, (
+        "leds_idle no longer restarts the resting animation — a persistent "
+        "effect would survive until the first voice turn and then be gone"
+    )
+    assert "led_anim_capable" in body, (
+        "leds_idle must fall back to the solid colour on firmware that "
+        "cannot animate; an unannounced anim is ignored silently and leaves "
+        "a ring the user believes is running an effect and that is dark"
+    )
+
+
+def test_the_dimmer_governs_a_running_effect():
+    """
+    A resting animation IS the resting state, so the brightness slider has to
+    reach it. An effect that ignored the dimmer would be the one thing on the
+    ring a user could not turn down.
+    """
+    full = R.resting_anim("Rotate", "#00ff00", 255)
+    half = R.resting_anim("Rotate", "#00ff00", 128)
+    assert full is not None and half is not None
+    assert half["colors"][0][1] < full["colors"][0][1], \
+        "the dimmer did not reach the effect"
+
+
+def test_brightness_zero_means_off_even_with_an_effect_selected():
+    """
+    "Off" has to mean off. An effect still running on a light reporting
+    itself off is the control-that-lies failure this project names most.
+    """
+    assert R.resting_anim("Rainbow", "#00ff00", 0) is None
+    assert R.resting_anim("Blink", "#ff0000", 0) is None
+
+
+def test_a_one_shot_is_never_a_resting_state():
+    for name in R.EFFECTS[1:]:
+        if R.is_persistent(name):
+            continue
+        assert R.resting_anim(name, "#00ff00", 255) is None, \
+            f"{name} is a notification and must not become the rest"
+    assert R.resting_anim(R.EFFECT_NONE, "#00ff00", 255) is None
+
+
+def test_an_unknown_effect_is_not_persistent():
+    """
+    The effect list is API surface HA caches, so a name from a NEWER
+    controller can arrive here after a downgrade. Treating it as persistent
+    would store a resting state nothing can render.
+    """
+    assert R.is_persistent("Disco Inferno") is False
+    assert R.resting_anim("Disco Inferno", "#00ff00", 255) is None
+
+
+def test_a_motion_effect_runs_in_the_colour_the_user_picked():
+    """
+    Selecting an effect must not silently discard the colour. The ones that
+    ARE a colour scheme (Rainbow) are allowed to ignore it; the ones that are
+    a motion are not.
+    """
+    red  = R.effect_anim("Rotate", "#ff0000")["colors"]
+    blue = R.effect_anim("Rotate", "#0000ff")["colors"]
+    assert red != blue, "Rotate ignored the resting colour"
+    # Rainbow is a palette in its own right and is the same either way.
+    assert (R.effect_anim("Rainbow", "#ff0000")["colors"]
+            == R.effect_anim("Rainbow", "#0000ff")["colors"])
+
+
+def test_every_effect_uses_a_pattern_the_fielded_firmware_renders():
+    """
+    `StartAnim`'s default branch CLEARS THE RING on a pattern it does not
+    know, so an effect shipped ahead of the firmware turns the ring off
+    rather than doing nothing. That is the compatibility trap in this
+    feature, and it is why no new capability was needed: every pattern here
+    is one the firmware already renders.
+    """
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "device" / "internal" / "server" / "animator.go").read_text()
+    known = set()
+    for line in src.splitlines():
+        line = line.strip()
+        if line.startswith("case ") and line.endswith(":"):
+            for part in line[len("case "):-1].split(","):
+                part = part.strip()
+                if part.startswith('"'):
+                    known.add(part.strip('"'))
+    assert "spin" in known and "pulse" in known, \
+        "the pattern scrape found nothing — the guard is vacuous"
+    for name in R.EFFECTS[1:]:
+        pattern = R.effect_anim(name, "#00ff00")["pattern"]
+        assert pattern in known, (
+            f"{name} uses pattern {pattern!r}, which animator.go does not "
+            f"know — the ring would go dark rather than run the effect"
+        )
+
+
+def test_a_gradient_lights_the_whole_ring_and_a_motion_effect_does_not():
+    """
+    A `solid` spec paints the palette it is given, so a gradient needs one
+    triple per LED; `spin` takes a head colour and derives the trail.
+    """
+    grad = R.effect_anim("Gradient", "#ff0000")
+    assert grad["pattern"] == "solid"
+    assert len(grad["colors"]) == R.NUM_LEDS
+    assert len({tuple(c) for c in grad["colors"]}) > 1, "a flat gradient"
+    assert len(R.effect_anim("Rotate", "#ff0000")["colors"]) == 1
+
+
+def test_the_rainbow_fills_the_ring():
+    anim = R.effect_anim("Rainbow", "#ffffff")
+    assert anim["pattern"] == "rotate"
+    assert len(anim["colors"]) == R.NUM_LEDS, \
+        "rotate walks a palette around the ring and needs one entry per LED"
+
+
+def test_persistent_effects_are_all_advertised():
+    for name in R.PERSISTENT:
+        assert name in R.EFFECTS, f"{name} is persistent but not offered"
+    assert R.PERSISTENT, "the feature advertises no persistent effects at all"

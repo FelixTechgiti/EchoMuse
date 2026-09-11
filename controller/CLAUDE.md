@@ -574,6 +574,57 @@ DEVICE renders on its own ticker, so they are advertised only where
 controller's wait before repainting equals that TTL so the ring is never
 dark in a gap between the two.
 
+**ONE effect field carries TWO lifetimes, and `persistent` is the only thing
+separating them** (#66). Alongside the notifications the list offers resting
+animations — `Rotate`, `Comet`, `Rainbow`, `Colour cycle`, `Blink`,
+`Breathe`, `Gradient` — which are not played once but BECOME the rest until
+changed. They share one list rather than splitting onto a `select` entity,
+which was the alternative: cleaner in the data model, worse everywhere a
+person stands, because nobody looks in a select for a light effect.
+
+The two need **opposite** answers from the same code, which is why the flag
+is per effect rather than inferred:
+- **Reporting.** A persistent effect must report itself or HA's card forgets
+  what is running the moment anything else pushes a state; a one-shot must
+  report `None`, for the reason above. `em_ring_light.reported_effect` is the
+  single place that decides, and a test forbids the state message answering
+  for itself.
+- **Lifetime.** A persistent effect ships `ttlSec: 0`, which fielded firmware
+  already reads as "run until replaced" — every deadline in `animator.go` is
+  behind `spec.TTLSec > 0`. So this needed **no device change and no new
+  capability**, and no repaint timer, which would otherwise be a message to
+  every device every few seconds for ever.
+- **The dead-man it gives up is covered by something better.** The device's
+  `OnDisconnected` handler calls `s.StopAnim()` and starts `pulseOrange`, so
+  a controller that dies leaves a ring pulsing orange rather than stuck — 
+  self-clearing AND more informative than dark. `test_a_persistent_effect_
+  runs_until_replaced_and_is_still_dead_manned` asserts that against the
+  firmware source, because the whole argument for `ttlSec: 0` rests on it.
+
+**`leds_idle` is where the cost lands.** The rest is now sometimes an
+animation, so the one place that paints rest has to RESTART it — after a
+turn, a mute cue, the volume arc, an OTA. Every such path already funnels
+through there, which is what makes an effect survive them without any of
+them knowing; getting it wrong means the effect stops the first time
+somebody speaks to the Echo and never comes back. It falls back to the solid
+colour where `led_anim` is not announced, because an unannounced anim is
+ignored silently and would leave a ring the user believes is running an
+effect and that is simply dark.
+
+**The dimmer governs a running effect, and 0 still means off.** A resting
+animation is the resting state, so an effect that ignored the brightness
+would be the one thing on the ring a user could not turn down; and an effect
+still running on a light reporting itself off is the control-that-lies
+failure this file names most often. `idleEffect` is a **STATE_KEY** beside
+`idleRing`, stored as the NAME rather than the resolved spec — the spec is a
+function of the colour and the brightness, and both change under it.
+
+**The compatibility trap is `StartAnim`'s default branch, which CLEARS THE
+RING on a pattern it does not know** — so an effect name shipped ahead of
+the firmware turns the ring off rather than doing nothing. Every pattern
+used here is one fielded firmware already renders, and a test scrapes
+`animator.go`'s own `case` labels to keep it that way.
+
 **An effect must not change the resting ring, and the handler returns before
 the state folding to make sure of it.** HA sends `light.turn_on` with
 `effect:`, so `state=on` rides in the same message — folded in the ordinary

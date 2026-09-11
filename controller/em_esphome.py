@@ -630,13 +630,16 @@ class RevoiceSatellite(SatelliteServerProtocol):
             key=LIGHT_KEY,
             color_mode=api_pb2.COLOR_MODE_RGB,
             color_brightness=1.0,
-            # Always "None": an effect here is a one-shot notification that
-            # has already been handed to the device and self-clears on its
-            # TTL. Reporting it as active would leave HA showing an effect
-            # running seconds after the ring went quiet, and — worse —
-            # showing one still selected long afterwards, which is the state
-            # someone would then have to clear by hand.
-            effect=em_ring_light.EFFECT_NONE,
+            # A persistent effect reports itself; a one-shot reports "None"
+            # even while it is playing. The rule is in em_ring_light because
+            # the two need OPPOSITE answers and the difference is per effect:
+            # a notification has already been handed to the device and
+            # self-clears on its TTL, so reporting it would leave HA showing
+            # one selected long after the ring went quiet — while a resting
+            # animation that reported "None" would be forgotten by HA's card
+            # the moment anything else pushed a state.
+            effect=em_ring_light.reported_effect(
+                srv.idle_effect if srv else em_ring_light.EFFECT_NONE),
             **fields,
         )
 
@@ -1020,34 +1023,45 @@ class RevoiceSatellite(SatelliteServerProtocol):
             if srv is None or not self._leds_capable:
                 yield _HANDLED
                 return
-            # An effect is a NOTIFICATION, not a state, and must not leave
-            # the resting ring changed behind it.
+            # One effect field, two lifetimes — and they are handled on
+            # opposite sides of this branch.
             #
-            # That needs saying because HA sends `light.turn_on` with
-            # `effect:` — state=on rides along in the same message. Folding
-            # that in the ordinary way would mean every notification also
-            # switched the resting ring on permanently, so an automation
-            # that blinks the ring at sunset would leave it lit all night.
-            # An rgb in the same message IS honoured, as the colour to
-            # notify in, and still not stored.
+            # A NOTIFICATION is not a state and must not leave the resting
+            # ring changed behind it. That needs saying because HA sends
+            # `light.turn_on` with `effect:` — state=on rides along in the
+            # same message. Folding that in the ordinary way would mean
+            # every notification also switched the resting ring on
+            # permanently, so an automation that blinks the ring at sunset
+            # would leave it lit all night. An rgb in the same message IS
+            # honoured, as the colour to notify in, and still not stored.
+            #
+            # A PERSISTENT effect is the opposite: it IS the resting state,
+            # so it goes down the ordinary storing path below rather than
+            # being played once. `em_ring_light.is_persistent` is the only
+            # thing that separates them.
             effect = msg.effect if msg.has_effect else em_ring_light.EFFECT_NONE
-            anim   = em_ring_light.effect_anim(
-                effect,
-                "#{:02x}{:02x}{:02x}".format(
-                    *(max(0, min(255, int(round(c * 255.0))))
-                      for c in (msg.red, msg.green, msg.blue))
-                ) if msg.has_rgb else srv.idle_ring,
-            )
-            if anim is not None:
-                log.info(f"[{self._log_name}] Ring effect: {effect}")
-                if srv._play_ring_effect is not None:
-                    self._spawn(
-                        srv._play_ring_effect(
-                            anim, em_ring_light.effect_seconds(effect)),
-                        f"ring effect {effect}",
-                    )
-                yield self._light_state_msg()
-                return
+            if msg.has_effect and not em_ring_light.is_persistent(effect):
+                anim = em_ring_light.effect_anim(
+                    effect,
+                    "#{:02x}{:02x}{:02x}".format(
+                        *(max(0, min(255, int(round(c * 255.0))))
+                          for c in (msg.red, msg.green, msg.blue))
+                    ) if msg.has_rgb else srv.idle_ring,
+                )
+                if anim is not None:
+                    log.info(f"[{self._log_name}] Ring effect: {effect}")
+                    if srv._play_ring_effect is not None:
+                        self._spawn(
+                            srv._play_ring_effect(
+                                anim, em_ring_light.effect_seconds(effect)),
+                            f"ring effect {effect}",
+                        )
+                    yield self._light_state_msg()
+                    return
+                # An unknown name reaching here is a stale entry from HA's
+                # cached effect list. Fall through and treat the message as
+                # the plain turn_on it also is, rather than swallowing it —
+                # an ignored command is the failure this project names most.
 
             # Every field arrives behind its own has_* flag, so "on", "blue"
             # and "dimmer" are three messages each carrying a fraction of
@@ -1065,6 +1079,13 @@ class RevoiceSatellite(SatelliteServerProtocol):
                 f"[{self._log_name}] Ring light: {colour} @ {level} "
                 f"({'on' if level else 'off'})"
             )
+            # Selecting "None" clears a running effect; anything persistent
+            # replaces it; a message with no effect field at all leaves it
+            # alone, because a colour change must not silently cancel the
+            # animation the user is looking at.
+            if msg.has_effect:
+                srv.idle_effect = (effect if em_ring_light.is_persistent(effect)
+                                   else em_ring_light.EFFECT_NONE)
             srv.idle_ring            = colour
             srv.idle_ring_brightness = level
             # Persisting and repainting belong to the controller, which owns
@@ -1072,7 +1093,9 @@ class RevoiceSatellite(SatelliteServerProtocol):
             # (no device connected yet) still updates its own state, so HA
             # gets a coherent answer rather than a command that vanishes.
             if srv._set_idle_ring is not None:
-                self._spawn(srv._set_idle_ring(colour, level), "ring light set")
+                self._spawn(
+                    srv._set_idle_ring(colour, level, srv.idle_effect),
+                    "ring light set")
             yield self._light_state_msg()
             return
 
@@ -2553,6 +2576,7 @@ class DeviceESPhomeServer:
         # any single HA connection (em_ring_light).
         self.idle_ring: str            = em_ring_light.DEFAULT_COLOR
         self.idle_ring_brightness: int = 0
+        self.idle_effect: str          = em_ring_light.EFFECT_NONE
         # async callable(colour: str, level: int) — persists and repaints.
         # Provided by em_controller as a closure over the Device.
         self._set_idle_ring = None
@@ -3613,7 +3637,8 @@ def update_device_mute(device_id: str, muted: bool) -> None:
         log.debug(f"[esphome.{device_id[-8:]}] mute state push failed: {e}")
 
 
-def update_device_ring(device_id: str, idle_ring: str, brightness: int) -> None:
+def update_device_ring(device_id: str, idle_ring: str, brightness: int,
+                       idle_effect: str = em_ring_light.EFFECT_NONE) -> None:
     """
     Called by em_controller when the ring's resting colour is (re)loaded from
     the device row — on connect, and on any config save.
@@ -3629,6 +3654,7 @@ def update_device_ring(device_id: str, idle_ring: str, brightness: int) -> None:
         return
     server.idle_ring            = idle_ring
     server.idle_ring_brightness = brightness
+    server.idle_effect          = idle_effect
     satellite = server.get_satellite()
     if satellite is None or not satellite._leds_capable:
         return

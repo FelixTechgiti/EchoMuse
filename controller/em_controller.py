@@ -421,6 +421,10 @@ class Device:
         # defaults only cover the window before that arrives.
         self.idle_ring: str            = em_ring_light.DEFAULT_COLOR
         self.idle_ring_brightness: int = 0
+        # The resting ANIMATION, when HA has selected one (#66). "None" is
+        # the solid-colour behaviour this shipped with, so an unset device
+        # is byte-for-byte what it was.
+        self.idle_effect: str          = em_ring_light.EFFECT_NONE
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
         # Whether librespot is on the device, and why not when it is not.
@@ -1624,11 +1628,33 @@ async def leds_idle(device: Device):
     cues all outrank the light, so what the entity owns is only what is
     shown when none of them is claiming it.
 
-    A raw `leds` frame rather than an `led_anim`, on purpose and on both
-    firmwares: it is a static colour with nothing to animate, and a frame
-    supersedes a running animation spec on the device's own generation
-    counter, so this is also what stops a retired cue leaving the ring dark.
+    A raw `leds` frame rather than an `led_anim` for a SOLID rest, on purpose
+    and on both firmwares: it is a static colour with nothing to animate, and
+    a frame supersedes a running animation spec on the device's own
+    generation counter, so this is also what stops a retired cue leaving the
+    ring dark.
+
+    When Home Assistant has selected a persistent effect (#66) the rest is an
+    ANIMATION instead, and this is the one place that restarts it — which is
+    the whole cost of that feature. Every path that returns the ring to rest
+    comes through here, so an effect survives a turn, a mute cue, the volume
+    arc and an OTA without any of them knowing about it. Getting this wrong
+    means the effect stops the first time somebody speaks to the Echo and
+    never comes back.
+
+    A device that cannot animate falls back to the solid colour rather than
+    to nothing: `led_anim` is a capability, and an unannounced anim would be
+    ignored silently, leaving a ring the user believes is running an effect
+    and that is simply dark.
     """
+    anim = em_ring_light.resting_anim(
+        getattr(device, "idle_effect", em_ring_light.EFFECT_NONE),
+        getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+        getattr(device, "idle_ring_brightness", 0),
+    )
+    if anim is not None and device.led_anim_capable:
+        await device.send_led_anim(anim)
+        return
     rgb = em_ring_light.painted_rgb(
         getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
         getattr(device, "idle_ring_brightness", 0),
@@ -1705,10 +1731,16 @@ async def _leds_turn_end(device: Device):
             # turn happened to end badly, once rest is a colour. Repaint
             # after the TTL, and only when there is something to repaint, so
             # the common case still sends nothing at all.
-            if em_ring_light.painted_rgb(
-                getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
-                getattr(device, "idle_ring_brightness", 0),
-            ) is not None:
+            # A persistent effect counts as "something to repaint" just as a
+            # colour does — asking only about the colour would leave the ring
+            # dark after a bad turn on exactly the devices running one.
+            if (em_ring_light.painted_rgb(
+                    getattr(device, "idle_ring", em_ring_light.DEFAULT_COLOR),
+                    getattr(device, "idle_ring_brightness", 0),
+                ) is not None
+                    or em_ring_light.is_persistent(
+                        getattr(device, "idle_effect",
+                                em_ring_light.EFFECT_NONE))):
                 asyncio.create_task(
                     _restore_idle_ring_after_cue(device)
                 ).add_done_callback(_log_task_exception)
@@ -3979,6 +4011,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             "idleRing", em_ring_light.DEFAULT_COLOR)
         device.idle_ring_brightness = em_ring_light.clamp_brightness(
             config.get("idleRingBrightness", 0))
+        device.idle_effect          = config.get(
+            "idleEffect", em_ring_light.EFFECT_NONE)
         # #263: hand the device its current listening animation so a wake it
         # detected ITSELF can light the ring immediately, instead of waiting
         # for leds_listening to make the round trip (measured +522ms before
@@ -4050,7 +4084,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
-        async def _set_idle_ring(colour: str, level: int, _d=_device_ref) -> None:
+        async def _set_idle_ring(colour: str, level: int,
+                                 effect: str = em_ring_light.EFFECT_NONE,
+                                 _d=_device_ref) -> None:
             """
             HA set the ring's resting colour: apply, persist, repaint.
 
@@ -4065,12 +4101,14 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             """
             _d.idle_ring            = colour
             _d.idle_ring_brightness = level
+            _d.idle_effect          = effect
             _loop = asyncio.get_event_loop()
             try:
                 stored = await _loop.run_in_executor(
                     None, db.get_device_config, _d.device_id)
                 stored["idleRing"]           = colour
                 stored["idleRingBrightness"] = level
+                stored["idleEffect"]         = effect
                 await _loop.run_in_executor(
                     None, db.set_device_config, _d.device_id, stored)
             except Exception as e:
@@ -4191,7 +4229,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # Seed HA's light entity from the stored row, so it reads the colour
         # the ring is actually resting at rather than the default.
         esphome.update_device_ring(
-            device_id, device.idle_ring, device.idle_ring_brightness)
+            device_id, device.idle_ring, device.idle_ring_brightness,
+            device.idle_effect)
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller
