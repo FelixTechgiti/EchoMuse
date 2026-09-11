@@ -179,3 +179,54 @@ has started it on a Dot. The device's own `airplay_status` — read by the
 dashboard after every install — stays the authority on that, and the shim's
 signal-based cancellation is the first thing to suspect if a thread ever dies
 holding a lock.
+
+## The shared memory shim, for AirPlay 2 (not used by the classic build)
+
+`compat/android_shm.c` implements `shm_open` and `shm_unlink`, which bionic
+has at no API level. They are the **only** interface between nqptp and
+shairport-sync, and therefore the whole of the AirPlay 2 clock path — see #79,
+where this is the one blocker that turned out to be real.
+
+Everything else on that path bionic already has: `ftruncate`, `mmap`,
+`munmap`, `MAP_SHARED`. There is **no process-shared mutex and no semaphore**
+anywhere in it — nqptp writes the record twice and the reader `memcmp`s the
+two copies and retries until they agree. That is what makes this ninety lines
+rather than a port, and it is worth re-checking on an nqptp bump rather than
+assumed: if either side ever reaches for `pthread_mutexattr_setpshared` the
+answer changes completely.
+
+**The backing directory has to be a tmpfs, and the shim checks.** nqptp
+rewrites the struct at PTP rate, and a `MAP_SHARED` mapping of a file on flash
+has its dirty pages written back by the kernel on its own schedule, for the
+life of the daemon. Backing this with `/data/local/tmp` is not a slower
+version of the right answer, it is continuous writes to the eMMC of a 2015
+speaker — with nothing failing and nothing logged. `/dev` is a tmpfs on
+Android, so the default is `/dev/revoice-shm`; `REVOICE_SHM_DIR` overrides it,
+and a directory that `statfs` says is not tmpfs gets one loud line on stderr
+rather than a refusal.
+
+Names are flattened rather than nested (`/nqptp/client3` →
+`<dir>/nqptp_client3`), which also means a name can never escape the
+directory. That is a security property and not tidiness: the name reaches the
+shim from a config file.
+
+**It is in its own header**, not in `android_compat.h`, because nqptp needs it
+too — a different program with its own build — and handing a daemon that uses
+no threads a header full of pthread cancellation is the wrong shape.
+
+`compat/shmcheck.c` `#include`s the implementation whole and drives it on the
+host, the same trick `emos/init/pwcheck.c` uses and for the same reason: the
+alternative is a shim nobody can run until it is on a device, and the device
+is where a mistake here is expensive. It asserts the name mapping, the
+traversal containment, the POSIX error cases, and a full writer/reader round
+trip including the torn-write case the double-buffered retry exists to catch.
+CI runs it.
+
+```bash
+cc -O2 -Wall -Wextra -o /tmp/shmcheck compat/shmcheck.c && /tmp/shmcheck
+```
+
+**Nothing builds against it yet.** `build.sh` is the classic 4.3.7 build,
+which does not use PTP at all, so the shim is not linked into anything that
+ships today. It is the first item done on #79's list, not the last — nqptp
+still has to be cross-compiled, and ffmpeg and five more libraries with it.
