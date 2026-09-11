@@ -32,6 +32,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bootlog"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/hostname"
 	"github.com/wilbowes/EchoMuse/internal/logrelay"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
@@ -59,6 +60,23 @@ func main() {
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
+
+	// Before ANYTHING that publishes an mDNS record, which on this device is
+	// both streaming endpoints. A responder publishes its service with an SRV
+	// target of `<hostname>.local`, and the Echo boots reporting `localhost`
+	// — so the record says "connect to localhost", every client resolves that
+	// to its own 127.0.0.1, and the device is never listed. Measured
+	// 2026-09-11 on an Echo absent from Spotify Connect.
+	//
+	// Not fatal on failure: an unsettable hostname costs discoverability of
+	// the endpoints, while refusing to start costs the microphone, the ring
+	// and the OTA that would fix it.
+	if name, err := hostname.Set(deviceID); err != nil {
+		log.Printf("[cmd] could not set the hostname to %q: %v — the "+
+			"streaming endpoints may not be discoverable", name, err)
+	} else {
+		log.Printf("[cmd] hostname: %s", name)
+	}
 
 	// A WiFi change that never got committed (crash/power cycle mid-switch)
 	// is rolled back before anything tries to use the network — same
