@@ -26,6 +26,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/spotify"
+	"github.com/wilbowes/EchoMuse/internal/wifi"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -287,9 +288,9 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		}
 
 		if offline.Due(time.Since(offlineSince)) {
-			bootlog.Appendf("no controller session for %s — %s, %s",
+			bootlog.Appendf("no controller session for %s — %s, %s, %s",
 				time.Since(offlineSince).Round(time.Second),
-				discovery.DescribeLink(), lastProbe)
+				discovery.DescribeLink(), lastProbe, wifi.Describe())
 		}
 
 		// Show orange pulse while searching for server

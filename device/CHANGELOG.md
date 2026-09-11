@@ -12,6 +12,35 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.30.0-fx.1
+
+### The Echo now records what its radio was doing while it was unreachable
+
+**Nothing here changes behaviour.** It adds one measurement to a log that is
+only written when something is already wrong, and it exists because the last
+outage could not be explained afterwards.
+
+On 11 September an Echo was unreachable for 22 hours while still holding its
+network address. From the controller's side it was invisible — a scan heard
+seven other Spotify Connect devices and two other AirPlay devices on the same
+network, and not this one. From the Echo's side the controller did not answer
+either. So both halves of the network failed at once on an interface that
+still looked configured, and the log had nothing that could say why.
+
+The `no controller` lines in the Echo's own log now carry the WiFi state
+alongside the address: whether the radio is still associated, which access
+point to, and the signal strength. That separates the two explanations — a
+connection that is up and carrying nothing, or one that has dropped and is
+searching — which need opposite fixes.
+
+Nothing acts on it yet, on purpose: the repair for one of those cases is to
+drop and re-make the WiFi connection, and doing that to a device whose only
+remote access IS that connection is not something to attempt on a guess.
+
+To read it: **Devices → your Echo → Updates → Fetch supervisor log**, after
+the next outage. Requires controller 2.38.0-fx.1 or newer, which reads the
+whole file.
+
 ## 2.29.0-fx.1
 
 ### The Echo finds the controller again in seconds, not half an hour

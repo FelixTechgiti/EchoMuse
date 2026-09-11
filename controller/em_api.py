@@ -1554,7 +1554,7 @@ async def _post_fetch_supervisor_log(request: web.Request) -> web.Response:
     # boots either side of it.
     out = await _shell_run(
         live,
-        em_devicepaths.first_readable_command(
+        em_devicepaths.every_readable_command(
             SUPERVISOR_LOG_NAME, "busybox tail -c 8192"),
                            timeout=30.0)
     text = (out or "").strip()
@@ -6689,7 +6689,7 @@ async def _collect_supervisor_log(device_id: str) -> None:
         return
     out = await _shell_run(
         live,
-        em_devicepaths.first_readable_command(
+        em_devicepaths.every_readable_command(
             SUPERVISOR_LOG_NAME, "busybox tail -c 4096"),
         timeout=30.0)
     text = (out or "").strip()

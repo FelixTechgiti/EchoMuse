@@ -51,17 +51,36 @@ def read_paths(filename: str) -> tuple[str, ...]:
     return tuple(f"{d}/{filename}" for d in write_dirs())
 
 
-def first_readable_command(filename: str, reader: str) -> str:
+def every_readable_command(filename: str, reader: str) -> str:
     """
-    A shell one-liner that runs `reader` against the first path that exists.
+    A shell one-liner that runs `reader` against EVERY path that exists,
+    labelling each with the path it came from.
 
-    `reader` takes the path as its last argument, e.g.
-    `busybox tail -c 4096`. Each attempt's stderr is discarded so a missing
-    file falls through silently rather than landing in the output as an
-    error the caller would then have to recognise and strip.
+    It read only the FIRST one until 2026-09-11, and that is wrong for any
+    file with more than one writer — because the two writers cross the
+    rename on their own schedules. `supervisor.log` is written by BOTH
+    `start_server.sh`, which the controller pushes, and the firmware's own
+    `internal/bootlog`, which arrives by OTA. A controller that has been
+    updated and a device that has not therefore write to two different
+    directories, and "first readable" silently returns the half belonging to
+    whichever program moved first.
+
+    Measured on the fleet that day: a device on v2.27.0-fx.1 (bootlog still
+    on `/data/local/etc/echomuse`) with a current `start_server.sh` (writing
+    `/data/local/etc/revoice`). The fetch returned two lines — the boot and
+    the start — and the firmware's account of a 22-hour outage, which is the
+    entire reason the file exists, sat unread in the other directory while
+    the endpoint reported success.
+
+    Absence stays silent: a missing file contributes nothing rather than an
+    error the caller would have to recognise and strip, so "no log at all"
+    still comes back empty and the existing message for it still applies.
     """
-    attempts = [f"{reader} {p} 2>/dev/null" for p in read_paths(filename)]
-    return " || ".join(attempts)
+    parts = [
+        f'[ -f {p} ] && echo "--- {p} ---" && {reader} {p} 2>/dev/null'
+        for p in read_paths(filename)
+    ]
+    return "; ".join(parts)
 
 
 def mkdir_command() -> str:

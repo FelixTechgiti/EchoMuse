@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.38.0-fx.1
+
+### The device's supervisor log was being read half at a time
+
+**Fetch supervisor log** could return two lines while the answer sat in a
+second file it never opened.
+
+That file is written by two programs — the start script the controller
+pushes, and the firmware itself — and the rename from EchoMuse to Revoice
+moved the directory under both of them on their own schedules. A controller
+that has been updated and an Echo that has not therefore write to two
+different places, and the fetch stopped at the first one it found.
+
+Measured on a device on firmware v2.27.0-fx.1 with a current start script:
+the button returned the boot and start lines, and the firmware's own account
+of a 22-hour outage — the entire reason the file exists — was never read.
+Nothing reported it, because returning one of the two files looks exactly
+like success.
+
+Both files are now read, each labelled with the path it came from. No action
+is needed; the next fetch simply carries what was already on the device.
+
 ## 2.37.0-fx.1
 
 ### The network check has a button
