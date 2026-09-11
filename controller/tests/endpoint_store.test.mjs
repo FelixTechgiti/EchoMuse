@@ -120,4 +120,21 @@ check("a hand upload with no visible release says there is nothing to fetch", ()
     'a missing release must be named, not left as an absent button');
 });
 
+check("a build recognised by its hash says so, and is not called a hand upload", () => {
+  const st = publishedStoreState(
+    { kind: "shairport-sync", state: "outdated",
+      stored_tag: "endpoints-v1.0.0", adopted: true }, "endpoints-v1.1.0");
+  assert.match(st.text, /recognised/,
+    `a hash match is different evidence from a provenance record: ${st.text}`);
+  assert.match(st.text, /endpoints-v1\.0\.0/);
+  assert.ok(st.action, "a recognised older build must still offer the update");
+});
+
+check("a recorded build does not claim to have been recognised", () => {
+  const st = publishedStoreState(
+    { kind: "librespot", state: "outdated", stored_tag: "endpoints-v1.0.0" },
+    "endpoints-v1.1.0");
+  assert.ok(!/recognised/.test(st.text), `provenance is not a guess: ${st.text}`);
+});
+
 process.exit(failures === 0 ? 0 : 1);

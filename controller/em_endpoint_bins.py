@@ -210,6 +210,13 @@ def stored(k: Kind, db_path: str | None = None) -> dict | None:
     handful of milliseconds on 20MB and it cannot go stale, which a sidecar
     can — and a stale md5 here would report a device as up to date against
     a binary it is not running.
+
+    **The sha256 is here to answer a question md5 cannot**: whether this
+    binary is one a release published. GitHub reports an asset's sha256 as
+    its `digest`, so the comparison can be made without downloading anything
+    — see em_endpoint_release.digest_index. md5 stays because it is what
+    provenance, the install path and the dashboard already speak; the second
+    hash is one more pass over bytes that are already in memory.
     """
     path = store_path(k, db_path)
     try:
@@ -221,6 +228,7 @@ def stored(k: Kind, db_path: str | None = None) -> dict | None:
         "filename": k.filename,
         "size":     len(raw),
         "md5":      md5_hex(raw),
+        "sha256":   hashlib.sha256(raw).hexdigest(),
         "mtime":    int(st.st_mtime),
     }
 
