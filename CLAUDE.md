@@ -306,7 +306,7 @@ Configurable parameters: `consolePassword`, `consoleTimeoutMin`, `vadThreshold`,
 git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
 cd device && ./compile.sh            # needs the echomuse-compiler image
 cd device && go test ./...
-cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
+cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml (+ pyflakes, optional)
 cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check
 cd emos/init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
 ```

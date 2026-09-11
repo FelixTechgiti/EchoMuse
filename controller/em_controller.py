@@ -4261,7 +4261,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # happen, this says what did, and they come apart
                         # when an endpoint stops in between — which is
                         # exactly where a confident sentence would be wrong.
-                        em_api.notify_endpoint_restart_result(
+                        api.notify_endpoint_restart_result(
                             device.device_id,
                             str(msg.get("kind") or ""),
                             bool(msg.get("restarted")),
