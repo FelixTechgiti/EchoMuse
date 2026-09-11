@@ -44,7 +44,7 @@ import em_oww_models
 
 # Where the device expects everything. Must match shadow.DefaultDir in
 # device/internal/wakeword/shadow/open.go — there is a test.
-DEVICE_DIR = "/data/local/share/echomuse/oww"
+DEVICE_DIR = "/data/local/share/revoice/oww"
 
 RUNTIME_NAME = "libonnxruntime.so"
 

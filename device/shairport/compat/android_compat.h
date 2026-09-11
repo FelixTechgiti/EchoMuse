@@ -46,8 +46,8 @@
  * thread dying with a lock held, this is the first place to look.
  */
 
-#ifndef ECHOMUSE_ANDROID_COMPAT_H
-#define ECHOMUSE_ANDROID_COMPAT_H
+#ifndef REVOICE_ANDROID_COMPAT_H
+#define REVOICE_ANDROID_COMPAT_H
 
 #ifdef __ANDROID__
 
@@ -114,4 +114,4 @@ void em_pthread_testcancel(void);
 #define pthread_testcancel em_pthread_testcancel
 
 #endif /* __ANDROID__ */
-#endif /* ECHOMUSE_ANDROID_COMPAT_H */
+#endif /* REVOICE_ANDROID_COMPAT_H */

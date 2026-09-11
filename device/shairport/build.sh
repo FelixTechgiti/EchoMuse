@@ -14,7 +14,7 @@ set -euo pipefail
 REF="${1:-4.3.7}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
-IMAGE=echomuse-shairport
+IMAGE=revoice-shairport
 
 echo "Building shairport-sync $REF for armv7a/Android API 22..."
 docker build -t "$IMAGE" "$HERE"

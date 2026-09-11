@@ -9,7 +9,7 @@ if echo "$GIT_VERSION" | grep -q "dirty"; then
 else
     VERSION="$GIT_VERSION"
 fi
-echo "Building EchoMuse $VERSION..."
+echo "Building Revoice $VERSION..."
 
 # Suppress known harmless warnings from vendored C sources:
 #   -Wno-null-dereference: rnnoise/rnn.c assert-style null checks
@@ -36,7 +36,7 @@ if docker run --rm \
   -e CGO_CFLAGS="$SUPPRESS" \
   -v "$(pwd)":/sdk \
   -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-  echomuse-compiler \
+  revoice-compiler \
   -c "$BUILD_CMD" 2>/tmp/build_err.log; then
     echo ""
     echo "✓ Build succeeded → build/server  ($VERSION)"

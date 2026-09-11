@@ -104,7 +104,7 @@ def test_channel_has_its_own_slug():
 
 
 def test_channel_is_distinguishable_in_the_ui():
-    # Two add-ons called "EchoMuse" with two identical panels is a support
+    # Two add-ons called "Revoice" with two identical panels is a support
     # thread waiting to happen.
     ea = _ea()
     assert ea["name"] != GA["name"]

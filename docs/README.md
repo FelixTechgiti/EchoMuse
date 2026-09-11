@@ -1,38 +1,46 @@
-# EchoMuse Documentation
+# Revoice-Dokumentation
 
-User-facing documentation, written to be readable without an engineering
-background. Intended as the seed of a future wiki — screenshots and
-walkthroughs welcome.
+Dokumentation für Anwenderinnen und Anwender, geschrieben zum Lesen ohne
+Technikstudium. Gedacht als Keimzelle eines späteren Wikis — Screenshots und
+Durchläufe sind willkommen.
 
-| Document | What it covers |
+| Dokument | Worum es geht |
 |---|---|
-| [Quickstart](quickstart.md) | Zero to talking to your Dot: controller install, first-run setup, device approval, Home Assistant hookup, everyday use. |
-| [Configuration Guide](configuration.md) | Every dashboard setting explained in plain language — what it does, when to touch it, and how to tune it. Ends with [what leaves your network](configuration.md#what-leaves-your-network) — there is no telemetry, and the one outbound connection is named. |
-| [The Voice Pipeline, Explained](voice-pipeline.md) | How your voice travels from the microphones to Home Assistant and back, stage by stage, with the benefits and caveats of each design choice. |
-| [FAQ](faq.md) | Quick answers and workarounds for the things that come up most — rooting refusals, wizard failures, update problems, wake word tuning, privacy. Check here before filing. |
-| [User Acceptance Testing](uat.md) | A checklist for confirming EchoMuse does what it claims on your hardware, and how to report what doesn't. Includes the known faults not worth re-filing. |
-| [Moving to the Home Assistant add-on](migrate-to-addon.md) | Migrating an existing Docker install to the add-on without losing your devices, settings or Home Assistant entities. Read the part about `tls/` before you start. |
+| [Schnellstart](quickstart.md) | Von null bis zum Gespräch mit deinem Dot: Controller installieren, Ersteinrichtung, Gerät freigeben, Home Assistant anbinden, Alltag. |
+| [Konfigurationsleitfaden](configuration.md) | Jede Einstellung im Dashboard verständlich erklärt — was sie tut, wann man sie anfasst und wie man sie abstimmt. Am Ende steht [was dein Netzwerk verlässt](configuration.md#was-dein-netzwerk-verlässt) — es gibt keine Telemetrie, und die eine ausgehende Verbindung wird beim Namen genannt. |
+| [Die Sprachpipeline, erklärt](voice-pipeline.md) | Wie deine Stimme von den Mikrofonen zu Home Assistant und zurück reist, Stufe für Stufe, mit Nutzen und Haken jeder Entwurfsentscheidung. |
+| [FAQ](faq.md) | Kurze Antworten und Umgehungen für das, was am häufigsten aufkommt — verweigertes Rooting, gescheiterte Assistentenschritte, Update-Probleme, Wakeword-Abstimmung, Privatsphäre. Vor einem Issue hier nachsehen. |
+| [Abnahmetests](uat.md) | Eine Checkliste, um zu bestätigen, dass Revoice auf deiner Hardware tut, was es verspricht — und wie du meldest, was nicht funktioniert. Enthält die bekannten Fehler, die kein weiteres Issue brauchen. |
+| [Umzug auf das Home-Assistant-Add-on](migrate-to-addon.md) | Eine bestehende Docker-Installation aufs Add-on umziehen, ohne Geräte, Einstellungen oder Home-Assistant-Entitäten zu verlieren. Lies den Teil über `tls/`, bevor du anfängst. |
 
-Deeper technical references live elsewhere:
+Tiefere technische Referenzen liegen anderswo:
 
-- [support-bundle.md](support-bundle.md) — what a support bundle contains,
-  what it deliberately excludes, and how to check before you share one.
-- [rooting.md](rooting.md) — what a device needs before EchoMuse can use it.
-  The exploit itself is R0rt1z2's work on XDA Forums and that thread is canon;
-  this covers where EchoMuse picks up, and what the wizard does for you.
-- [device-controller-interface.md](device-controller-interface.md) — the wire
-  contract a device binary implements: the three WebSocket planes, capability
-  negotiation, `/control` messages, `/data` frames, config push, link auth, and
-  the `crown` board profile. Read this before building bindings for a new board.
-- [audio-states.md](audio-states.md) — who owns the speaker and what is on the
-  wire: the two audio planes, ducking, flush semantics, and the open questions
-  about how voice, music, announcements and alarms interact.
-- [led-ring-states.md](led-ring-states.md) — the ring's state model: owner
-  priority, link availability, and the button/audio event tables.
-- [SETUP.md](../SETUP.md) — architecture reference: how the mic array, the
-  audio pipeline and the device/controller protocol actually work, plus
-  troubleshooting. Not an onboarding guide.
-- [JOURNAL.md](../JOURNAL.md) — the engineering journal: a long-form,
-  chronological record of what was built, what broke, and what we got wrong.
-- [CLAUDE.md](../CLAUDE.md) — codebase orientation for developers (and AI
-  assistants).
+- [support-bundle.md](support-bundle.md) — was in einem Support-Bundle steckt,
+  was bewusst fehlt, und wie du es prüfst, bevor du es weitergibst.
+- [rooting.md](rooting.md) — was ein Gerät braucht, bevor Revoice es benutzen
+  kann. Der Exploit selbst ist R0rt1z2s Arbeit im XDA-Forum, und jener Thread
+  ist maßgeblich; hier steht, wo Revoice übernimmt und was der Assistent für
+  dich erledigt.
+- [agent-access.md](agent-access.md) — wie eine Automation den Controller
+  durch Home Assistant hindurch ansteuert: Ingress-Authentifizierung, was
+  Lesezugriff schon kann, was Adminrechte braucht, und der eine Schritt, den
+  ein Mensch von Hand machen muss.
+- [device-controller-interface.md](device-controller-interface.md) — der
+  Wire-Contract, den ein Geräte-Binary umsetzt: die drei WebSocket-Ebenen,
+  Fähigkeitsaushandlung, `/control`-Nachrichten, `/data`-Frames, Config-Push,
+  Link-Authentifizierung und das Board-Profil `crown`. Vor dem Bau von
+  Bindings für ein neues Board lesen.
+- [audio-states.md](audio-states.md) — wem der Lautsprecher gehört und was auf
+  der Leitung liegt: die zwei Audio-Ebenen, Ducking, Flush-Semantik und die
+  offenen Fragen, wie Sprache, Musik, Durchsagen und Wecker zusammenspielen.
+- [led-ring-states.md](led-ring-states.md) — das Zustandsmodell des Rings:
+  Besitzer-Priorität, Verbindungsverfügbarkeit und die Ereignistabellen für
+  Tasten und Audio.
+- [SETUP.md](../SETUP.md) — Architekturreferenz: wie das Mikrofonarray, die
+  Audiopipeline und das Geräte/Controller-Protokoll tatsächlich arbeiten,
+  dazu Fehlersuche. Keine Einstiegsanleitung.
+- [JOURNAL.md](../JOURNAL.md) — das Entwicklungstagebuch: eine lange,
+  chronologische Aufzeichnung dessen, was gebaut wurde, was kaputtging und was
+  wir falsch gemacht haben. Auf Englisch.
+- [CLAUDE.md](../CLAUDE.md) — Orientierung im Code für Entwickelnde (und
+  KI-Assistenten). Auf Englisch.

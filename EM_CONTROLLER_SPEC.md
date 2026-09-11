@@ -1,4 +1,4 @@
-# EchoMuse Controller — Backend & Management Console Spec
+# Revoice Controller — Backend & Management Console Spec
 
 **Status:** Implemented (v2.2.0)  
 **Last updated:** 2026-05-20
@@ -18,7 +18,7 @@
 
 ## Overview
 
-The EchoMuse controller (`em_controller.py`) gains three additions:
+The Revoice controller (`em_controller.py`) gains three additions:
 
 1. **Persistence layer** — SQLite database for device registry, config, logs, and users
 2. **HTTP/WebSocket API** — aiohttp web server running in the same asyncio event loop
@@ -116,7 +116,7 @@ The distinction matters — white means "server knows about me, waiting for appr
 
 ## Database Schema
 
-SQLite, single file `echomuse.db` in the controller working directory.
+SQLite, single file `revoice.db` in the controller working directory.
 
 ### `devices`
 
@@ -126,7 +126,7 @@ CREATE TABLE devices (
     label         TEXT,                      -- "Kitchen", "Bedroom", etc.
     approved      INTEGER NOT NULL DEFAULT 0,
     ip            TEXT,                      -- last seen IP
-    firmware_ver  TEXT,                      -- EchoMuse binary version
+    firmware_ver  TEXT,                      -- Revoice binary version
     first_seen    INTEGER,                   -- unix timestamp
     last_seen     INTEGER,                   -- unix timestamp
     config        TEXT NOT NULL DEFAULT '{}' -- JSON blob
@@ -524,7 +524,7 @@ jobs:
           submodules: true
 
       - name: Build compiler image
-        run: docker build -t echomuse-compiler compiler/
+        run: docker build -t revoice-compiler compiler/
 
       - name: Compile
         run: |
@@ -533,7 +533,7 @@ jobs:
             -e VERSION=${{ github.ref_name }} \
             -v "$(pwd)":/sdk \
             -v "$(pwd)/GoTinyAlsa":/GoTinyAlsa \
-            echomuse-compiler
+            revoice-compiler
 
       - name: Release
         uses: softprops/action-gh-release@v1
@@ -600,22 +600,22 @@ chmod 755 /data/local/bin/server
 rm /data/local/bin/server.new
 
 # 4. Restart service
-stop echomuse
-start echomuse
+stop revoice
+start revoice
 
 # 5. Wait up to 60s for service to be running
 i=0
 while [ $i -lt 60 ]; do
-    getprop init.svc.echomuse | grep -q running && { echo "OK"; exit 0; }
+    getprop init.svc.revoice | grep -q running && { echo "OK"; exit 0; }
     sleep 1
     i=$((i + 1))
 done
 
 # 6. Service not running after 60s — roll back
 echo "ERR: service failed to start — rolling back"
-stop echomuse
+stop revoice
 cp /data/local/bin/server.old /data/local/bin/server
-start echomuse
+start revoice
 exit 1
 ```
 
@@ -635,9 +635,9 @@ The script checks whether the service is running on-device. The controller indep
 While `server.old` exists on the device, the dashboard shows a "Roll back" button. Clicking it executes over the shell WebSocket:
 
 ```bash
-stop echomuse
+stop revoice
 cp /data/local/bin/server.old /data/local/bin/server
-start echomuse
+start revoice
 ```
 
 Controller monitors reconnection and updates `firmware_ver` / `firmware_previous` accordingly.
@@ -659,10 +659,10 @@ The Go binary exposes three outbound WebSocket connections to the controller:
 ---
 
 ### Current state
-EchoMuse logs to `/tmp/server.log` on device (tmpfs — survives until reboot, not flash).
+Revoice logs to `/tmp/server.log` on device (tmpfs — survives until reboot, not flash).
 
 ### Target state
-EchoMuse sends structured log messages over the control WebSocket (`log` message type). Controller persists to `device_logs` table. `/tmp/server.log` kept as fallback for direct ADB debugging.
+Revoice sends structured log messages over the control WebSocket (`log` message type). Controller persists to `device_logs` table. `/tmp/server.log` kept as fallback for direct ADB debugging.
 
 ### Log levels
 - `info` — normal operational events (connect, wake word, voice turn, config applied)
@@ -694,7 +694,7 @@ controller/
     dashboard.js          # compiled by esbuild at Docker build time (gitignored)
     vendor/               # vendored JS + fonts (gitignored, downloaded at build)
   data/
-    echomuse.db           # created on first run, persisted via volume mount
+    revoice.db           # created on first run, persisted via volume mount
 ```
 
 ---

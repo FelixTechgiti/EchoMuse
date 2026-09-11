@@ -1,8 +1,8 @@
 """Push a local file to a device over the controller shell proxy, resumably.
 
-    docker cp controller/tools/push_file.py echomuse-controller:/tmp/
-    docker cp device/build/oww_probe echomuse-controller:/tmp/
-    docker exec echomuse-controller python /tmp/push_file.py \
+    docker cp controller/tools/push_file.py revoice-controller:/tmp/
+    docker cp device/build/oww_probe revoice-controller:/tmp/
+    docker exec revoice-controller python /tmp/push_file.py \
         <device_id> /tmp/oww_probe /data/local/tmp/oww_probe [--chmod 755]
 
 Why this exists rather than `ota.py`: that pushes the firmware binary through
@@ -53,10 +53,10 @@ def _resolve_db() -> str:
     env = os.environ.get("EM_DB", "").strip()
     if env:
         return env
-    for c in ("/data/echomuse.db", "/app/data/echomuse.db"):
+    for c in ("/data/revoice.db", "/app/data/revoice.db"):
         if os.path.exists(c):
             return c
-    return "/app/data/echomuse.db"
+    return "/app/data/revoice.db"
 
 
 DB = _resolve_db()

@@ -124,7 +124,7 @@ class FakeDevice:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A DB_PATH whose neighbour dir is this test's own store."""
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "echomuse.db"))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "revoice.db"))
     return tmp_path / ebins.STORE_SUBDIR
 
 
@@ -353,7 +353,7 @@ class _Store:
         self.tmp_path = tmp_path
         (tmp_path / ebins.STORE_SUBDIR).mkdir(parents=True, exist_ok=True)
         (tmp_path / ebins.STORE_SUBDIR / "librespot").write_bytes(b"x" * size)
-        self.db = str(tmp_path / "echomuse.db")
+        self.db = str(tmp_path / "revoice.db")
 
 
 ON = {"spotifyEnabled": True}
@@ -406,4 +406,4 @@ def test_a_shell_that_said_nothing_is_not_evidence_of_absence(tmp_path):
 def test_an_empty_store_installs_nothing(tmp_path):
     (tmp_path / ebins.STORE_SUBDIR).mkdir(parents=True, exist_ok=True)
     assert ebins.install_needed(K, CAPS, ON, {"ok": False, "reason": "not_installed"},
-                               db_path=str(tmp_path / "echomuse.db")) is None
+                               db_path=str(tmp_path / "revoice.db")) is None

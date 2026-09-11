@@ -45,7 +45,7 @@ def test_filename_rejects_traversal_and_junk():
 # ─── models_dir / scan ───────────────────────────────────────────────────────
 
 def test_models_dir_sits_beside_db():
-    d = owm.models_dir("/app/data/echomuse.db")
+    d = owm.models_dir("/app/data/revoice.db")
     assert d == Path("/app/data/oww_models")
 
 

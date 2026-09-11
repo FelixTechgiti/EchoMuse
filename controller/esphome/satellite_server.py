@@ -35,7 +35,7 @@ import esphome.message_registry as registry
 from esphome.frame_protocol import FrameProtocolError, PlaintextFrameProtocol
 from esphome.vendor import api_pb2
 
-log = logging.getLogger("echomuse.esphome.satellite")
+log = logging.getLogger("revoice.esphome.satellite")
 
 # ESPHome native API protocol version this server implements / reports in
 # HelloResponse. linux-voice-assistant reports 1.10 — matching that rather

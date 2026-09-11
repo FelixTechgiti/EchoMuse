@@ -1,5 +1,5 @@
 """
-db.py — EchoMuse Controller persistence layer
+db.py — Revoice Controller persistence layer
 ==============================================
 
 SQLite-backed storage for device registry, per-device config, logs,
@@ -13,7 +13,7 @@ hot path, or directly for startup/shutdown operations.
 Usage:
     import db
 
-    db.init("echomuse.db")          # call once at startup
+    db.init("revoice.db")          # call once at startup
 
     device = db.get_device(device_id)
     db.upsert_device_seen(device_id, ip, version)
@@ -33,7 +33,7 @@ from typing import Optional
 import em_config_sections
 import em_recordings
 
-log = logging.getLogger("echomuse.db")
+log = logging.getLogger("revoice.db")
 
 # ─── Default device config ────────────────────────────────────────────────────
 
@@ -483,7 +483,7 @@ MIGRATIONS: list[str] = [
     -- because MIGRATIONS is byte-identical to upstream's and appending
     -- one here would make this database refuse to start on the upstream
     -- controller, turning a reversible switch into a one-way door.
-    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'FelixTechgiti/EchoMuse');
+    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'FelixTechgiti/Revoice');
     INSERT OR IGNORE INTO system_config VALUES ('latest_version',        NULL);
     INSERT OR IGNORE INTO system_config VALUES ('latest_binary_url',     NULL);
     INSERT OR IGNORE INTO system_config VALUES ('last_update_check',     NULL);
@@ -608,7 +608,7 @@ MIGRATIONS: list[str] = [
     # all three WebSocket planes (/control, /data, /shell). Minted by
     # ensure_device_token() when credentials are first pushed (provisioning
     # wizard or the dashboard "Secure link" action) and stored on the device
-    # at /data/local/etc/echomuse/token. NULL = no credentials issued yet —
+    # at /data/local/etc/revoice/token. NULL = no credentials issued yet —
     # such devices connect unauthenticated (legacy posture) until
     # REQUIRE_DEVICE_TLS=1 flips the controller to enforcing.
     """
@@ -1112,7 +1112,7 @@ _conn: Optional[sqlite3.Connection] = None
 _db_lock = threading.Lock()
 
 
-def init(path: str = "echomuse.db") -> None:
+def init(path: str = "revoice.db") -> None:
     """
     Initialise the database. Must be called once at startup before any
     other db function is used.
@@ -1239,7 +1239,7 @@ def _backup_before_migrating(conn: sqlite3.Connection, current: int) -> None:
 # somebody who genuinely wants to track upstream's firmware must be able to
 # say so and have it stick.
 UPSTREAM_REPO = "wilbowes/EchoMuse"
-FORK_REPO     = "FelixTechgiti/EchoMuse"
+FORK_REPO     = "FelixTechgiti/Revoice"
 
 # Release information cached from whichever repository was configured before.
 # It describes the other project's releases, so it is dropped along with the

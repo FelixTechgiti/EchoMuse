@@ -1,7 +1,7 @@
 # oww_forge — custom wake-word trainer
 
 Trains custom [openWakeWord](https://github.com/dscripka/openWakeWord) models
-("hey biscuit", "computer", …) for EchoMuse, entirely from synthetic speech —
+("hey biscuit", "computer", …) for Revoice, entirely from synthetic speech —
 no recording sessions needed. Deliberately **separate from the controller**:
 training is a heavy, occasional batch job with ~25GB of assets and a fat
 PyTorch image, none of which belongs in the always-on controller container.
@@ -251,7 +251,7 @@ always-free tier covers ~1M premium-voice characters/month and a 2,000-clip
 wake-word run is ~25k characters (~2% of it). Past the free tier it's ~$16/1M
 chars; the command prints an estimate and asks before running.
 
-## Installing a model into EchoMuse
+## Installing a model into Revoice
 
 Use the dashboard: **Config tab → Wake word → “+ Custom model”** and pick
 the `.onnx` from `data/models/`. The upload lands in the controller's

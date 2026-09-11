@@ -43,7 +43,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/echomuse-forge
+  IMAGE: ghcr.io/${{ github.repository_owner }}/revoice-forge
 
 jobs:
   # ── CUDA, amd64 ──────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ jobs:
       # build dies at the push with `invalid tag ...: repository name must be
       # lowercase`, after every layer has been built.
       - name: Registry owner, lowercased
-        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/revoice-forge" >> "$GITHUB_ENV"
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -118,7 +118,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.v.outputs.version }}
-            org.opencontainers.image.description=EchoMuse wake-word trainer (CUDA)
+            org.opencontainers.image.description=Revoice wake-word trainer (CUDA)
 
   # ── CPU, one job per architecture on its OWN runner ──────────────────────
   #
@@ -152,7 +152,7 @@ jobs:
       # build dies at the push with `invalid tag ...: repository name must be
       # lowercase`, after every layer has been built.
       - name: Registry owner, lowercased
-        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/revoice-forge" >> "$GITHUB_ENV"
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -194,7 +194,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.v.outputs.version }}
-            org.opencontainers.image.description=EchoMuse wake-word trainer (CPU)
+            org.opencontainers.image.description=Revoice wake-word trainer (CPU)
 
       # The BARE hex, with the sha256: prefix stripped. upload-artifact
       # rejects a colon in a filename, and it rejects it at UPLOAD — after
@@ -236,7 +236,7 @@ jobs:
       # build dies at the push with `invalid tag ...: repository name must be
       # lowercase`, after every layer has been built.
       - name: Registry owner, lowercased
-        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-forge" >> "$GITHUB_ENV"
+        run: echo "IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/revoice-forge" >> "$GITHUB_ENV"
 
       - name: Download the digests
         uses: actions/download-artifact@v8

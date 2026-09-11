@@ -204,7 +204,7 @@ func (p *PcmSpeaker) Init() error {
 	// no timeout — stranding the whole device, since everything else in
 	// main() is initialised after the speaker (issue #80). Same stock-service
 	// takeover as `stop mixer` above and `stop smarthomewifid` in main: on a
-	// device where EchoMuse drives the codec directly, mediaserver has no
+	// device where Revoice drives the codec directly, mediaserver has no
 	// work to do and is only ever in the way.
 	// Re-issued INSIDE the wait, not only here: `stop media` does not stick.
 	// Android brings mediaserver back — measured, with init.svc.media reading

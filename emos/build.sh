@@ -31,8 +31,8 @@ CC=${CC:-$NDK/aarch64-linux-android21-clang}
 if [ -x "$CC" ]; then
     "$CC" -static -O2 -Wall -o "$WORK/init" "$HERE/init/init.c"
 else
-    echo "building init in the echomuse-compiler image ($CC not found)"
-    docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos echomuse-compiler \
+    echo "building init in the revoice-compiler image ($CC not found)"
+    docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos revoice-compiler \
         bash -lc "$NDK/aarch64-linux-android21-clang -static -O2 -Wall -o /out/init init/init.c"
 fi
 

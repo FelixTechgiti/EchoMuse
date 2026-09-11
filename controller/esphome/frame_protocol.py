@@ -39,7 +39,7 @@ import logging
 import socket
 from typing import Callable, Optional
 
-log = logging.getLogger("echomuse.esphome.frame")
+log = logging.getLogger("revoice.esphome.frame")
 
 # DoS bound: caps decoded varuint value so it can never overflow / wrap.
 # A 4-byte varuint maxes out at 2**28-1, comfortably above anything this

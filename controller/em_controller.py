@@ -1,5 +1,5 @@
 """
-EchoMuse Controller
+Revoice Controller
 ===================
 
 WebSocket server. Echo Dot devices connect via mDNS discovery.
@@ -111,7 +111,7 @@ logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     format=_LOG_FORMAT,
 )
-log = logging.getLogger("echomuse")
+log = logging.getLogger("revoice")
 
 # Keep the last few hundred lines in memory so a support bundle can carry the
 # controller's own log, not just the relayed per-device one.
@@ -195,8 +195,8 @@ API_PORT     = int(os.environ.get("API_PORT", "8768"))
 # unset — never a literal, which used to send every unconfigured deployment
 # to a developer's own machine. See em_hostip.
 SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
-MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
-DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
+MDNS_NAME    = os.environ.get("MDNS_NAME", "revoice")
+DB_PATH      = os.environ.get("DB_PATH", "revoice.db")
 
 # Device approval mode — overridden by system_config after db.init()
 DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
@@ -5161,7 +5161,7 @@ async def _notify_media_state(device_id: str, state: str) -> None:
 
 
 async def main():
-    log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
+    log.info(f"Revoice Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
@@ -5237,7 +5237,7 @@ async def main():
             # After the voice satellites — BT proxies reuse their zeroconf.
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
-            log.info("EchoMuse Controller ready — waiting for devices")
+            log.info("Revoice Controller ready — waiting for devices")
             await asyncio.Future()
 
     finally:
@@ -5251,7 +5251,7 @@ async def main():
         await azc.async_unregister_service(info)
         await azc.async_close()
         await runner.cleanup()
-        log.info("EchoMuse Controller stopped")
+        log.info("Revoice Controller stopped")
 
 
 if __name__ == "__main__":

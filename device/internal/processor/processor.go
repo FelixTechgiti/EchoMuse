@@ -1,5 +1,5 @@
 // Package processor implements the per-period audio processing pipeline
-// for the EchoMuse mic stream.
+// for the Revoice mic stream.
 //
 // Pipeline:
 //

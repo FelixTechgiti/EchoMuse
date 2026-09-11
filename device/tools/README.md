@@ -25,13 +25,13 @@ with the mics because they arrive in the same TDM frame.**
 
 ## Build
 
-Inside the `echomuse-compiler` Docker container:
+Inside the `revoice-compiler` Docker container:
 
 ```bash
 docker run --rm \
   -v "$(pwd)":/capture \
   -v "$(pwd)/../GoTinyAlsa":/GoTinyAlsa \
-  echomuse-compiler \
+  revoice-compiler \
   bash -c "cd /capture && go build -tags server -o capture_mics ."
 ```
 
@@ -42,12 +42,12 @@ adb push capture_mics /sdcard/capture_mics
 adb shell "su -c 'cp /sdcard/capture_mics /data/local/bin/capture_mics && chmod 755 /data/local/bin/capture_mics'"
 ```
 
-**Note:** Stop EchoMuse first — both tools need exclusive access to ALSA device 24:
+**Note:** Stop Revoice first — both tools need exclusive access to ALSA device 24:
 
 ```bash
-adb shell "su -c 'stop echomuse'"
+adb shell "su -c 'stop revoice'"
 # ... run capture ...
-adb shell "su -c 'start echomuse'"
+adb shell "su -c 'start revoice'"
 ```
 
 ## Test procedure
@@ -143,9 +143,9 @@ armeabi-v7a `libonnxruntime.so` (12.3MB, from the Maven
 Without adb, push over the controller shell plane:
 
 ```bash
-docker cp controller/tools/push_file.py echomuse-controller:/tmp/
-docker cp device/build/oww_probe echomuse-controller:/tmp/
-docker exec echomuse-controller python /tmp/push_file.py \
+docker cp controller/tools/push_file.py revoice-controller:/tmp/
+docker cp device/build/oww_probe revoice-controller:/tmp/
+docker exec revoice-controller python /tmp/push_file.py \
     <device_id> /tmp/oww_probe /data/local/tmp/oww_probe --chmod 755
 ```
 

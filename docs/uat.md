@@ -1,475 +1,503 @@
-# User Acceptance Testing
+# Abnahmetests
 
-**A checklist for confirming EchoMuse actually does what it claims on your
-hardware, in your house, with your Home Assistant.** Work through as much of it
-as applies to you and tell us what failed. Partial results are useful — one
-section done properly beats a whole pass skimmed.
+**Eine Checkliste, um zu bestätigen, dass Revoice auf deiner Hardware, in
+deinem Haus, mit deinem Home Assistant tatsächlich tut, was es verspricht.**
+Arbeite so viel davon durch, wie auf dich zutrifft, und sag uns, was
+gescheitert ist. Teilergebnisse sind nützlich — ein ordentlich erledigter
+Abschnitt schlägt einen überflogenen Gesamtdurchlauf.
 
-Nothing here needs a developer. Every test is a thing you can do from the
-dashboard, the device, or Home Assistant.
+Nichts hier braucht Entwicklungskenntnisse. Jeder Test ist etwas, das du im
+Dashboard, am Gerät oder in Home Assistant tun kannst.
 
 ---
 
-## Before you start
+## Bevor du anfängst
 
-**Record these four numbers.** Every report needs them, and half of the
-questions we ask back are one of these.
+**Notiere diese vier Angaben.** Jede Meldung braucht sie, und die Hälfte
+unserer Rückfragen ist eine davon.
 
-| | Where |
+| | Wo |
 |---|---|
-| Controller version | Dashboard header |
-| Firmware version | Device → **Status** tab |
-| Home Assistant version | HA → Settings → About |
-| Hardware | Echo Dot Gen 2, or which board |
+| Controller-Version | Kopfzeile des Dashboards |
+| Firmware-Version | Gerät → Reiter **Status** |
+| Home-Assistant-Version | HA → Einstellungen → Über |
+| Hardware | Echo Dot Gen 2, oder welches Board |
 
-**Use a copy of your setup if you can.** Some of these tests delete a device
-or push credentials. Where a test is destructive it says so in bold.
+**Nimm nach Möglichkeit eine Kopie deines Aufbaus.** Manche dieser Tests
+löschen ein Gerät oder spielen Zugangsdaten auf. Wo ein Test destruktiv ist,
+steht es fett dabei.
 
-### How to report a failure
+### Wie man einen Fehler meldet
 
-1. Open an issue: <https://github.com/wilbowes/EchoMuse/issues>
-2. Give the **test ID** (e.g. `D3`), what you expected, what happened.
-3. Attach a support bundle — **Settings → Support → Collect bundle**, then
-   Download. It contains no transcripts, no SSIDs, no device labels, no
-   credentials; see [support-bundle.md](support-bundle.md) for exactly what is
-   and isn't in it. Open it before you send it.
-4. Note the **wall-clock time** the failure happened. The bundle's logs are
-   timestamped and that is how we find it.
+1. Öffne ein Issue: <https://github.com/wilbowes/EchoMuse/issues>
+2. Gib die **Test-Kennung** an (z. B. `D3`), was du erwartet hast und was
+   passiert ist.
+3. Häng ein Support-Bundle an — **Settings → Support → Collect bundle**, dann
+   Herunterladen. Es enthält keine Transkripte, keine SSIDs, keine
+   Gerätebezeichnungen, keine Zugangsdaten; siehe
+   [support-bundle.md](support-bundle.md) für die genaue Liste. Öffne es,
+   bevor du es verschickst.
+4. Notiere die **Uhrzeit**, zu der der Fehler auftrat. Die Logs im Bundle
+   haben Zeitstempel, und so finden wir ihn.
 
-### Two things that are not bugs
+### Zwei Dinge, die keine Fehler sind
 
-- **A control shown greyed out with a reason under it.** The controller asks
-  each device what it can do and disables what your firmware doesn't
-  implement. That is working as designed. A control that is *enabled* and
-  silently does nothing is a bug — report that.
-- **A setting that reads differently on one device than the fleet.** Config is
-  scoped per section. Device → Status → `Config` row says `Fleet` or
-  `Local override (n of 6)`.
+- **Ein ausgegrautes Bedienelement mit einer Begründung darunter.** Der
+  Controller fragt jedes Gerät, was es kann, und deaktiviert, was deine
+  Firmware nicht umsetzt. Das ist so gewollt. Ein Bedienelement, das
+  *aktiviert* ist und stillschweigend nichts tut, ist ein Fehler — den melde.
+- **Eine Einstellung, die auf einem Gerät anders steht als in der Flotte.**
+  Die Konfiguration ist je Abschnitt zugeordnet. Gerät → Status → Zeile
+  `Config` sagt `Fleet` oder `Local override (n of 6)`.
 
-### Already known — please don't re-file
+### Schon bekannt — bitte nicht erneut melden
 
-Check these before opening anything. If your symptom matches, add your
-version numbers to the existing issue instead.
+Sieh das hier durch, bevor du etwas öffnest. Passt dein Symptom, ergänze
+lieber deine Versionsnummern im bestehenden Issue.
 
 | Symptom | Issue |
 |---|---|
-| HA's "Set up voice satellite" dialog times out and needs Retry, after the jingle plays | [#219](https://github.com/wilbowes/EchoMuse/issues/219) |
-| Playback cuts off part-way through a long spoken response | [#324](https://github.com/wilbowes/EchoMuse/issues/324) |
-| Radio / stream playback is interrupted | [#325](https://github.com/wilbowes/EchoMuse/issues/325) |
-| Unplugging the headphone jack stalls the mic and drops the device | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
-| Odd behaviour with something plugged into the aux jack | [#141](https://github.com/wilbowes/EchoMuse/issues/141) |
-| Ambient light sensor missing on a device with a `G090LF` serial | [#90](https://github.com/wilbowes/EchoMuse/issues/90) |
-| WiFi never reconnects after a reboot on a network with no internet | [#317](https://github.com/wilbowes/EchoMuse/issues/317) |
-| Music started elsewhere stays silent until a voice turn finishes | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
-| Double/triple tap detected unreliably | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
-| High CPU on the device | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
+| HAs Dialog „Sprachsatellit einrichten" läuft in einen Timeout und braucht „Wiederholen", nachdem der Klang gespielt hat | [#219](https://github.com/wilbowes/EchoMuse/issues/219) |
+| Die Wiedergabe bricht mitten in einer langen gesprochenen Antwort ab | [#324](https://github.com/wilbowes/EchoMuse/issues/324) |
+| Radio- oder Stream-Wiedergabe wird unterbrochen | [#325](https://github.com/wilbowes/EchoMuse/issues/325) |
+| Das Abziehen des Kopfhörersteckers blockiert das Mikrofon und wirft das Gerät ab | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
+| Seltsames Verhalten mit etwas an der Klinkenbuchse | [#141](https://github.com/wilbowes/EchoMuse/issues/141) |
+| Helligkeitssensor fehlt auf einem Gerät mit Seriennummer `G090LF` | [#90](https://github.com/wilbowes/EchoMuse/issues/90) |
+| WLAN verbindet sich nach einem Neustart nie wieder, in einem Netz ohne Internet | [#317](https://github.com/wilbowes/EchoMuse/issues/317) |
+| Anderswo gestartete Musik bleibt stumm, bis ein Sprachgespräch endet | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
+| Doppel- und Dreifachtippen wird unzuverlässig erkannt | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
+| Hohe CPU-Last auf dem Gerät | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
 
 ---
 
-## A — Getting a device on
+## A — Ein Gerät in Betrieb nehmen
 
-### A1 · Root and provision a device
-**Do:** Run the provisioning wizard end to end on a device that has never been
-rooted. Follow [rooting.md](rooting.md).
-**Expect:** Every step reports success, and the device reboots into a state
-where the dashboard sees it.
-**Flag:** Any step that says it succeeded but left the device wrong. Include
-the wizard's diagnostics — it offers them on a failed step.
+### A1 · Ein Gerät rooten und einrichten
+**Tu:** Lass den Einrichtungsassistenten von Anfang bis Ende auf einem Gerät
+laufen, das nie gerootet war. Folge [rooting.md](rooting.md).
+**Erwarte:** Jeder Schritt meldet Erfolg, und das Gerät startet in einen
+Zustand, in dem das Dashboard es sieht.
+**Melde:** Jeden Schritt, der Erfolg meldet, das Gerät aber falsch
+zurücklässt. Leg die Diagnose des Assistenten bei — er bietet sie bei einem
+gescheiterten Schritt an.
 
-### A2 · The device appears and can be approved
-**Do:** Open the dashboard. Find the new device.
-**Expect:** It appears as pending with an **Approve** tab and nothing else.
-After approving, the full tab set appears: Status, Activity, Config, Console,
-Updates, Logs.
-**Flag:** A device that never appears, or appears already approved.
+### A2 · Das Gerät erscheint und lässt sich freigeben
+**Tu:** Öffne das Dashboard. Finde das neue Gerät.
+**Erwarte:** Es erscheint als ausstehend mit einem Reiter **Approve** und
+sonst nichts. Nach der Freigabe erscheint der volle Satz Reiter: Status,
+Activity, Config, Console, Updates, Logs.
+**Melde:** Ein Gerät, das nie erscheint, oder eines, das bereits freigegeben
+erscheint.
 
-### A3 · Status reads true
-**Do:** Device → **Status**.
-**Expect:** Serial, firmware version, WiFi network, volume, Link, Config
-scope, Voice assistant row — all populated, none showing `—` for something
-that plainly exists.
-**Flag:** Any row reading `—` while the thing it describes is working.
+### A3 · Der Status stimmt
+**Tu:** Gerät → **Status**.
+**Erwarte:** Seriennummer, Firmware-Version, WLAN, Lautstärke, Link,
+Config-Bereich, Zeile „Voice assistant" — alle gefüllt, keine zeigt `—` für
+etwas, das offensichtlich existiert.
+**Melde:** Jede Zeile mit `—`, während das Beschriebene funktioniert.
 
-### A4 · Reboot survival
-**Do:** Pull power from the device. Wait for it to boot.
-**Expect:** It rejoins on its own within a couple of minutes, no dashboard
-action needed, and keeps its volume and mute state from before.
-**Flag:** A device that needs re-approving, or comes back at a different
-volume.
+### A4 · Neustart überstehen
+**Tu:** Zieh dem Gerät den Strom. Warte, bis es hochfährt.
+**Erwarte:** Es kommt innerhalb von ein bis zwei Minuten von allein zurück,
+ohne Aktion im Dashboard, und behält Lautstärke und Mute-Zustand von vorher.
+**Melde:** Ein Gerät, das erneut freigegeben werden muss, oder mit anderer
+Lautstärke zurückkommt.
 
-### A5 · Controller restart survival
-**Do:** Restart the controller (add-on restart, or `docker compose restart`).
-**Expect:** Devices reconnect on their own. Settings, users, and history are
-all still there.
-**Flag:** Anything that had to be set up again.
+### A5 · Controller-Neustart überstehen
+**Tu:** Starte den Controller neu (Add-on neu starten oder
+`docker compose restart`).
+**Erwarte:** Geräte verbinden sich von allein wieder. Einstellungen, Benutzer
+und Verlauf sind noch da.
+**Melde:** Alles, was neu eingerichtet werden musste.
 
 ---
 
 ## B — Home Assistant
 
-### B1 · The satellite is discovered
-**Do:** HA → Settings → Devices & Services. Look for an ESPHome discovery for
-your device.
-**Expect:** It offers to add. After adding, the device page shows an
-**Assist satellite** entity.
-**Flag:** No discovery at all; or discovery pointing at the wrong device.
+### B1 · Der Satellit wird gefunden
+**Tu:** HA → Einstellungen → Geräte & Dienste. Halte nach einem ESPHome-Fund
+für dein Gerät Ausschau.
+**Erwarte:** Er bietet das Hinzufügen an. Danach zeigt die Geräteseite eine
+Entität **Assist satellite**.
+**Melde:** Gar keinen Fund; oder einen Fund, der auf das falsche Gerät zeigt.
 
-### B2 · Voice assistant status is honest
-**Do:** Device → **Status** → **Voice assistant** row.
-**Expect:** `HA connected · port NNNNN` while HA is connected. Stop HA — it
-should change to `Waiting for HA`.
-**Flag:** A row that says HA is connected when it isn't, or vice versa.
+### B2 · Der Status des Sprachassistenten ist ehrlich
+**Tu:** Gerät → **Status** → Zeile **Voice assistant**.
+**Erwarte:** `HA connected · port NNNNN`, solange HA verbunden ist. Stoppe HA
+— es sollte auf `Waiting for HA` wechseln.
+**Melde:** Eine Zeile, die HA als verbunden ausweist, obwohl es das nicht ist,
+oder umgekehrt.
 
-### B3 · A full voice turn
-**Do:** Say the wake word, then ask something with a spoken answer.
-**Expect:** Ring lights on wake → response spoken from the device speaker →
-ring returns to idle. Device → **Activity** shows the turn with an `ok`
-outcome.
-**Flag:** Any turn that ends in something other than `ok` when you spoke
-normally. Give the outcome string from Activity.
+### B3 · Ein vollständiges Sprachgespräch
+**Tu:** Sag das Wakeword und frage etwas mit gesprochener Antwort.
+**Erwarte:** Ring leuchtet beim Aufwachen → Antwort kommt aus dem
+Gerätelautsprecher → Ring geht in Ruhe. Gerät → **Activity** zeigt das
+Gespräch mit dem Ausgang `ok`.
+**Melde:** Jedes Gespräch, das mit etwas anderem als `ok` endet, obwohl du
+normal gesprochen hast. Gib den Ausgangstext aus „Activity" an.
 
-### B4 · Announcements
-**Do:** Call `assist_satellite.announce` from HA Developer Tools against your
-device.
-**Expect:** It plays, and the service call returns without error.
-**Flag:** Errors in HA's log, or an announcement that plays but never
-completes.
+### B4 · Durchsagen
+**Tu:** Rufe `assist_satellite.announce` aus den HA-Entwicklerwerkzeugen
+gegen dein Gerät auf.
+**Erwarte:** Sie spielt, und der Dienstaufruf kehrt fehlerfrei zurück.
+**Melde:** Fehler im HA-Log oder eine Durchsage, die spielt, aber nie endet.
 
-### B5 · Action button entity
-**Do:** Hold the action (dot) button ~1s. Watch HA → the device's **Action
-Button** event entity.
-**Expect:** A `long` event fires. A short tap starts a voice turn instead
-(unless you enabled "tap is an event").
-**Flag:** No event entity present on a device whose firmware supports holds;
-or a hold that starts a turn.
+### B5 · Entität der Aktionstaste
+**Tu:** Halte die Aktionstaste (Punkt) ~1 s. Beobachte in HA die
+Ereignis-Entität **Action Button** des Geräts.
+**Erwarte:** Ein `long`-Ereignis feuert. Ein kurzes Tippen startet
+stattdessen ein Sprachgespräch (außer du hast „Tippen ist ein Ereignis"
+aktiviert).
+**Melde:** Keine Ereignis-Entität auf einem Gerät, dessen Firmware Halten
+unterstützt; oder ein Halten, das ein Gespräch startet.
 
-### B6 · Ambient light sensor
-**Do:** Cover the device, then shine a light at it. Watch the **Ambient
-Light** sensor in HA.
-**Expect:** Lux moves. On hardware with no readable sensor there should be
-**no entity at all** — not an entity stuck at 0.
-**Flag:** An entity permanently reading 0 or unavailable.
-
----
-
-## C — Wake word
-
-### C1 · The default wake word
-**Do:** Say it from a normal seated distance, ten times, in a quiet room.
-**Expect:** At least 8 of 10 wake the device.
-**Flag:** Fewer than 8. Say the distance and the model.
-
-### C2 · False wakes
-**Do:** Leave the device in a room with TV or conversation for an hour.
-**Expect:** Zero or one spurious wakes.
-**Flag:** More than that. Note what was playing.
-
-### C3 · Sensitivity moves the needle
-**Do:** Config → Wake word → move Sensitivity toward Eager. Repeat C1.
-**Expect:** More wakes, and more false wakes. The change takes effect without
-restarting anything.
-**Flag:** A setting that saves but changes nothing.
-
-### C4 · A custom model installs and works
-**Do:** Train one with [oww_forge](../oww_forge/README.md), then Config → Wake
-word → **+ Custom model** → upload.
-**Expect:** It appears in the list, can be selected, and the device wakes on
-it.
-**Flag:** A model that uploads and is selectable but never triggers — that is
-a specific known class of bug and worth a report.
-
-### C5 · On-device wake word
-**Do:** Config → Wake word → turn on on-device detection.
-**Expect:** Wakes still work. Device → Activity still records turns.
-**Flag:** Wakes that stop entirely, or wake latency that gets noticeably
-worse.
-
-### C6 · Multiple devices don't both answer
-**Do:** With two devices in earshot, say the wake word once.
-**Expect:** One device answers. The other doesn't.
-**Flag:** Both answering, or neither.
+### B6 · Helligkeitssensor
+**Tu:** Deck das Gerät ab, dann leuchte es an. Beobachte den Sensor **Ambient
+Light** in HA.
+**Erwarte:** Der Lux-Wert bewegt sich. Auf Hardware ohne lesbaren Sensor
+sollte es **gar keine Entität** geben — keine, die bei 0 festhängt.
+**Melde:** Eine Entität, die dauerhaft 0 oder „nicht verfügbar" liest.
 
 ---
 
-## D — Audio out
+## C — Wakeword
 
-### D1 · Volume
-**Do:** Change volume from the dashboard, from HA, and with the device's own
-volume buttons.
-**Expect:** All three agree, and the level survives a reboot.
-**Flag:** Any of the three disagreeing with the others.
+### C1 · Das Standard-Wakeword
+**Tu:** Sag es aus normaler Sitzentfernung, zehnmal, in einem ruhigen Raum.
+**Erwarte:** Mindestens 8 von 10 wecken das Gerät.
+**Melde:** Weniger als 8. Nenne Entfernung und Modell.
 
-### D2 · Speech is intelligible at low volume
-**Do:** Set volume to ~20%, ask something with a long answer.
-**Expect:** Clear speech, no distortion.
-**Flag:** Distortion, clipping, or crackle. Say the volume level.
+### C2 · Fehlauslöser
+**Tu:** Lass das Gerät eine Stunde in einem Raum mit Fernseher oder
+Gesprächen.
+**Erwarte:** Null oder ein unerwünschtes Aufwachen.
+**Melde:** Mehr davon. Notiere, was lief.
 
-### D3 · Speech is clean at high volume
-**Do:** Set volume to 100%, ask the same question.
-**Expect:** Loud, but not buzzing or breaking up.
-**Flag:** Distortion at a specific percentage — the number matters.
+### C3 · Die Empfindlichkeit bewirkt etwas
+**Tu:** Config → Wake word → Sensitivity Richtung „Eager" schieben. C1
+wiederholen.
+**Erwarte:** Mehr Aufwachen, und mehr Fehlauslöser. Die Änderung wirkt, ohne
+dass etwas neu gestartet wird.
+**Melde:** Eine Einstellung, die gespeichert wird, aber nichts ändert.
 
-### D4 · EQ does something
-**Do:** Config → Playback → move the EQ faders, or pick a preset.
-**Expect:** An audible change on the next thing spoken, no restart.
-**Flag:** No audible difference, or a change that needs a reboot.
+### C4 · Ein eigenes Modell installiert sich und funktioniert
+**Tu:** Trainiere eines mit [oww_forge](../oww_forge/README.md), dann Config →
+Wake word → **+ Custom model** → hochladen.
+**Erwarte:** Es erscheint in der Liste, lässt sich wählen, und das Gerät wacht
+darauf auf.
+**Melde:** Ein Modell, das hochlädt und wählbar ist, aber nie auslöst — das
+ist eine bestimmte bekannte Fehlerklasse und eine Meldung wert.
 
-### D5 · Speaker protection
-**Do:** Config → Playback → confirm limiter and bass guard are on. Play
-something bass-heavy loud.
-**Expect:** It stays controlled. Turn the limiter off and it should get
-noticeably worse.
-**Flag:** No difference with them on or off.
+### C5 · Wakeword auf dem Gerät
+**Tu:** Config → Wake word → Erkennung auf dem Gerät einschalten.
+**Erwarte:** Aufwachen funktioniert weiterhin. Gerät → Activity zeichnet
+weiterhin Gespräche auf.
+**Melde:** Aufwachen, das ganz aufhört, oder eine merklich schlechtere
+Reaktionszeit.
 
-### D6 · The headphone jack
-**Do:** Plug into the 3.5mm jack.
-**Expect:** Audio moves to the jack.
-**Flag:** Anything beyond the known jack faults in the table above.
+### C6 · Mehrere Geräte antworten nicht beide
+**Tu:** Sag mit zwei Geräten in Hörweite einmal das Wakeword.
+**Erwarte:** Ein Gerät antwortet. Das andere nicht.
+**Melde:** Beide antworten, oder keines.
 
 ---
 
-## E — Music and ducking
+## D — Tonausgabe
 
-### E1 · Music plays
-**Do:** Send music to the device from HA (Music Assistant or a media_player
-call).
-**Expect:** It plays.
-**Flag:** Silence, stutter, or a stream that stops after a fixed interval.
+### D1 · Lautstärke
+**Tu:** Ändere die Lautstärke im Dashboard, in HA und mit den Tasten am Gerät.
+**Erwarte:** Alle drei stimmen überein, und der Pegel übersteht einen
+Neustart.
+**Melde:** Wenn eines der drei den anderen widerspricht.
 
-### E2 · Music ducks under a voice turn
-**Do:** With music playing, say the wake word and ask something.
-**Expect:** Music drops in volume, the answer is spoken over it, music returns
-to level. It should **duck**, not pause, on firmware that supports mixing.
-**Flag:** A full pause on a device whose Status shows it can mix; music that
-never comes back up; or a duck that leaves music permanently quiet.
+### D2 · Sprache ist bei niedriger Lautstärke verständlich
+**Tu:** Stelle auf ~20 %, frage etwas mit langer Antwort.
+**Erwarte:** Klare Sprache, keine Verzerrung.
+**Melde:** Verzerrung, Übersteuern oder Knistern. Nenne den Pegel.
 
-### E3 · Duck depth is adjustable
-**Do:** Config → Playback → change duck depth. Repeat E2.
-**Expect:** Audibly different depth.
-**Flag:** No change.
+### D3 · Sprache ist bei hoher Lautstärke sauber
+**Tu:** Stelle auf 100 %, frage dasselbe.
+**Erwarte:** Laut, aber ohne Brummen oder Aufbrechen.
+**Melde:** Verzerrung bei einem bestimmten Prozentwert — die Zahl zählt.
+
+### D4 · Der EQ bewirkt etwas
+**Tu:** Config → Playback → EQ-Regler bewegen oder eine Voreinstellung wählen.
+**Erwarte:** Hörbare Änderung beim nächsten Gesprochenen, ohne Neustart.
+**Melde:** Kein hörbarer Unterschied, oder eine Änderung, die einen Neustart
+braucht.
+
+### D5 · Lautsprecherschutz
+**Tu:** Config → Playback → prüfen, dass Limiter und Bass-Schutz an sind.
+Spiel etwas Bassbetontes laut.
+**Erwarte:** Es bleibt kontrolliert. Schaltest du den Limiter aus, sollte es
+merklich schlechter werden.
+**Melde:** Kein Unterschied zwischen an und aus.
+
+### D6 · Die Kopfhörerbuchse
+**Tu:** Steck etwas in die 3,5-mm-Buchse.
+**Erwarte:** Der Ton wechselt auf die Buchse.
+**Melde:** Alles, was über die bekannten Buchsenfehler in der Tabelle oben
+hinausgeht.
+
+---
+
+## E — Musik und Ducking
+
+### E1 · Musik spielt
+**Tu:** Schick Musik aus HA an das Gerät (Music Assistant oder ein
+`media_player`-Aufruf).
+**Erwarte:** Sie spielt.
+**Melde:** Stille, Stottern oder einen Stream, der nach fester Zeit abbricht.
+
+### E2 · Musik wird unter einem Sprachgespräch leiser
+**Tu:** Sag bei laufender Musik das Wakeword und frage etwas.
+**Erwarte:** Die Musik wird leiser, die Antwort wird darüber gesprochen, die
+Musik kommt wieder auf Pegel. Auf Firmware, die Mischen unterstützt, soll sie
+**leiser werden**, nicht pausieren.
+**Melde:** Eine vollständige Pause auf einem Gerät, dessen Status Mischen
+ausweist; Musik, die nie wieder hochkommt; oder ein Absenken, das die Musik
+dauerhaft leise lässt.
+
+### E3 · Die Absenktiefe ist einstellbar
+**Tu:** Config → Playback → Absenktiefe ändern. E2 wiederholen.
+**Erwarte:** Hörbar andere Tiefe.
+**Melde:** Keine Änderung.
 
 ### E4 · Barge-in
-**Do:** During a long spoken answer, say the wake word again.
-**Expect:** The answer stops and the device listens to you.
-**Flag:** The answer continuing to the end; or the new turn being refused.
-Give the Activity outcome for the second turn.
+**Tu:** Sag während einer langen gesprochenen Antwort erneut das Wakeword.
+**Erwarte:** Die Antwort bricht ab und das Gerät hört dir zu.
+**Melde:** Eine Antwort, die bis zum Ende weiterläuft; oder ein abgelehntes
+neues Gespräch. Gib den Activity-Ausgang des zweiten Gesprächs an.
 
 ---
 
-## F — Timers and alarms
+## F — Timer und Wecker
 
-*Recently changed — this is the area most worth testing carefully.*
+*Kürzlich geändert — der Bereich, dessen sorgfältiger Test sich am meisten
+lohnt.*
 
-### F1 · A timer rings
-**Do:** "Set a timer for one minute."
-**Expect:** The device rings at one minute.
-**Flag:** No ring, or a ring on the wrong device.
+### F1 · Ein Timer klingelt
+**Tu:** „Stell einen Timer auf eine Minute."
+**Erwarte:** Das Gerät klingelt nach einer Minute.
+**Melde:** Kein Klingeln, oder Klingeln auf dem falschen Gerät.
 
-### F2 · Stopping the ring
-**Do:** While it rings, tell it to stop.
-**Expect:** It stops.
-**Flag:** A ring that won't stop by voice. Note whether the button stops it.
+### F2 · Das Klingeln stoppen
+**Tu:** Sag ihm während des Klingelns, es soll aufhören.
+**Erwarte:** Es hört auf.
+**Melde:** Ein Klingeln, das sich per Sprache nicht stoppen lässt. Notiere, ob
+die Taste es stoppt.
 
-### F3 · A timer firing during a voice turn
-**Do:** Set a short timer, then start another voice turn so the timer fires
-mid-answer.
-**Expect:** Both are handled sensibly — you hear both, neither is lost, and
-the device returns to idle afterwards.
-**Flag:** Audio that stops dead, a device stuck ringing, or a turn that never
-completes. **This combination is new and is exactly what we want tested.**
+### F3 · Ein Timer, der während eines Sprachgesprächs feuert
+**Tu:** Stell einen kurzen Timer, starte dann ein weiteres Sprachgespräch, so
+dass der Timer mitten in der Antwort feuert.
+**Erwarte:** Beides wird vernünftig gehandhabt — du hörst beides, nichts geht
+verloren, und das Gerät kehrt danach in Ruhe zurück.
+**Melde:** Ton, der abrupt abbricht, ein Gerät, das im Klingeln hängt, oder
+ein Gespräch, das nie endet. **Diese Kombination ist neu und genau das, was
+wir getestet haben wollen.**
 
-### F4 · A timer firing under ducked music
-**Do:** Music playing, timer fires.
-**Expect:** The alarm is heard over the music, then music returns to full
-level.
-**Flag:** Music that stays ducked, or an alarm you can't hear.
-
----
-
-## G — Buttons and LEDs
-
-### G1 · Action button starts a turn
-**Do:** Tap the dot button.
-**Expect:** Same behaviour as a wake word.
-**Flag:** No response, or a delayed one.
-
-### G2 · Mute is real
-**Do:** Press mute. Try the wake word. Try the action button.
-**Expect:** Red ring, and no voice turn happens by either route. The mic is
-off in hardware, not just ignored.
-**Flag:** A turn starting while muted.
-
-### G3 · Unmute restores
-**Do:** Press mute again.
-**Expect:** Ring returns to idle, wake works immediately.
-**Flag:** Needing a reboot to get the mic back.
-
-### G4 · Ring states match what's happening
-**Do:** Watch the ring through a full turn.
-**Expect:** Distinct listening / thinking / speaking states, back to idle at
-the end. See [led-ring-states.md](led-ring-states.md).
-**Flag:** A ring left lit after a turn ends, or stuck on one colour.
-
-### G5 · Ring colours are configurable
-**Do:** Config → Ring → change listen and think colours.
-**Expect:** Next turn uses them.
-**Flag:** No change, or a change needing a restart.
+### F4 · Ein Timer, der unter abgesenkter Musik feuert
+**Tu:** Musik läuft, Timer feuert.
+**Erwarte:** Der Alarm ist über der Musik zu hören, danach kommt die Musik
+auf vollen Pegel zurück.
+**Melde:** Musik, die abgesenkt bleibt, oder einen Alarm, den du nicht hörst.
 
 ---
 
-## H — Bluetooth proxy
+## G — Tasten und LEDs
 
-### H1 · The proxy is offered
-**Do:** Config → Bluetooth → enable. Check HA → Settings → Devices & Services.
-**Expect:** The device appears as a Bluetooth proxy.
-**Flag:** Enabled in the dashboard but absent in HA.
+### G1 · Die Aktionstaste startet ein Gespräch
+**Tu:** Tippe die Punkt-Taste an.
+**Erwarte:** Dasselbe Verhalten wie beim Wakeword.
+**Melde:** Keine Reaktion, oder eine verzögerte.
 
-### H2 · It finds something
-**Do:** Bring a BLE device (a thermometer, a tracker) near it.
-**Expect:** HA sees it via this proxy.
-**Flag:** No discoveries at all after 10 minutes.
+### G2 · Mute ist echt
+**Tu:** Drücke Mute. Probier das Wakeword. Probier die Aktionstaste.
+**Erwarte:** Roter Ring, und über keinen der beiden Wege beginnt ein
+Sprachgespräch. Das Mikrofon ist in der Hardware aus, nicht bloß ignoriert.
+**Melde:** Ein Gespräch, das trotz Mute beginnt.
 
-### H3 · It survives a reboot
-**Do:** Reboot the device.
-**Expect:** Proxy comes back on its own.
-**Flag:** Needing to toggle it off and on.
+### G3 · Unmute stellt wieder her
+**Tu:** Drücke Mute noch einmal.
+**Erwarte:** Der Ring geht in Ruhe, das Wakeword funktioniert sofort.
+**Melde:** Wenn du neu starten musst, um das Mikrofon zurückzubekommen.
+
+### G4 · Ringzustände passen zum Geschehen
+**Tu:** Beobachte den Ring durch ein ganzes Gespräch.
+**Erwarte:** Unterscheidbare Zustände für Zuhören / Nachdenken / Sprechen, am
+Ende zurück in Ruhe. Siehe [led-ring-states.md](led-ring-states.md).
+**Melde:** Einen Ring, der nach dem Gespräch leuchten bleibt, oder in einer
+Farbe hängt.
+
+### G5 · Ringfarben sind einstellbar
+**Tu:** Config → Ring → Farben für Zuhören und Nachdenken ändern.
+**Erwarte:** Das nächste Gespräch benutzt sie.
+**Melde:** Keine Änderung, oder eine, die einen Neustart braucht.
 
 ---
 
-## I — Security and the device link
+## H — Bluetooth-Proxy
 
-### I1 · Secure link
-**Do:** Device → Status. If Link reads `plain ws`, press **Secure link**.
-**Expect:** The device reconnects within a few seconds and Link reads
-`wss (TLS)`.
-**Flag:** A device that goes offline and stays there. (It should redial.)
+### H1 · Der Proxy wird angeboten
+**Tu:** Config → Bluetooth → aktivieren. Sieh in HA → Einstellungen → Geräte &
+Dienste nach.
+**Erwarte:** Das Gerät erscheint als Bluetooth-Proxy.
+**Melde:** Im Dashboard aktiviert, in HA aber nicht vorhanden.
 
-### I2 · Credentials survive a reboot
-**Do:** Reboot a TLS device.
-**Expect:** Comes back on `wss (TLS)`.
-**Flag:** Falling back to plain.
+### H2 · Er findet etwas
+**Tu:** Bring ein BLE-Gerät (ein Thermometer, einen Tracker) in seine Nähe.
+**Erwarte:** HA sieht es über diesen Proxy.
+**Melde:** Nach 10 Minuten gar keine Funde.
 
-### I3 · Login is enforced
-**Do:** Log out. Try to open the dashboard, and try an API URL directly.
-**Expect:** Both refuse.
-**Flag:** Anything reachable logged out.
+### H3 · Er übersteht einen Neustart
+**Tu:** Starte das Gerät neu.
+**Erwarte:** Der Proxy kommt von allein zurück.
+**Melde:** Wenn du ihn aus- und wieder einschalten musst.
 
-### I4 · Non-admin accounts are limited
-**Do:** Create a non-admin user. Log in as them.
-**Expect:** No Console tab, no Updates tab, no Support tab, no user
-management.
-**Flag:** Any admin action a non-admin can reach.
+---
+
+## I — Sicherheit und die Geräteverbindung
+
+### I1 · Sichere Verbindung
+**Tu:** Gerät → Status. Steht bei „Link" `plain ws`, drücke **Secure link**.
+**Erwarte:** Das Gerät verbindet sich innerhalb weniger Sekunden neu, und
+„Link" liest `wss (TLS)`.
+**Melde:** Ein Gerät, das offline geht und offline bleibt. (Es sollte neu
+wählen.)
+
+### I2 · Zugangsdaten überstehen einen Neustart
+**Tu:** Starte ein TLS-Gerät neu.
+**Erwarte:** Es kommt auf `wss (TLS)` zurück.
+**Melde:** Einen Rückfall auf unverschlüsselt.
+
+### I3 · Die Anmeldung wird durchgesetzt
+**Tu:** Melde dich ab. Versuche, das Dashboard zu öffnen, und rufe eine
+API-URL direkt auf.
+**Erwarte:** Beides wird abgewiesen.
+**Melde:** Alles, was abgemeldet erreichbar ist.
+
+### I4 · Nicht-Admin-Konten sind eingeschränkt
+**Tu:** Lege einen Nicht-Admin-Benutzer an. Melde dich als dieser an.
+**Erwarte:** Kein Reiter „Console", kein „Updates", kein „Support", keine
+Benutzerverwaltung.
+**Melde:** Jede Admin-Aktion, die ein Nicht-Admin erreichen kann.
 
 ---
 
 ## J — Updates
 
-### J1 · Firmware update is offered
-**Do:** Device → **Updates**.
-**Expect:** It shows the installed version and the latest release, and offers
-the update only when there is one.
-**Flag:** An update offered when you're already current, or none offered when
-you're behind.
+### J1 · Ein Firmware-Update wird angeboten
+**Tu:** Gerät → **Updates**.
+**Erwarte:** Es zeigt die installierte Version und die neueste Veröffentlichung
+und bietet das Update nur an, wenn es eines gibt.
+**Melde:** Ein Update, das angeboten wird, obwohl du aktuell bist, oder keines,
+obwohl du zurückliegst.
 
-### J2 · **Destructive** — apply a firmware update
-**Do:** Run the update. Watch it through.
-**Expect:** It transfers, the device reboots, and comes back on the new
-version, keeping its settings.
-**Flag:** A device that doesn't come back, or comes back on the old version
-while claiming success. **Do not power-cycle it mid-update.** If it does not
-return after five minutes, say so in the report before doing anything else —
-the state it is in is the diagnostic.
+### J2 · **Destruktiv** — ein Firmware-Update anwenden
+**Tu:** Führ das Update aus. Beobachte es bis zum Ende.
+**Erwarte:** Es überträgt, das Gerät startet neu und kommt auf der neuen
+Version zurück, mit erhaltenen Einstellungen.
+**Melde:** Ein Gerät, das nicht zurückkommt, oder auf der alten Version
+zurückkommt und trotzdem Erfolg meldet. **Trenne es nicht mitten im Update vom
+Strom.** Kommt es nach fünf Minuten nicht zurück, schreib das in die Meldung,
+bevor du irgendetwas anderes tust — der Zustand, in dem es ist, ist die
+Diagnose.
 
-### J3 · Controller update notice
-**Do:** When a controller release exists that is newer than yours.
-**Expect:** A notice in the dashboard, with readable release notes. It should
-tell you to update — it must never update itself.
-**Flag:** A notice with empty notes; or any button that claims to perform the
-update.
-
----
-
-## K — The dashboard
-
-### K1 · Activity is accurate
-**Do:** Do five turns. Open Device → **Activity**.
-**Expect:** Five turns, with sensible outcomes and timings.
-**Flag:** Missing turns, or timings that are obviously wrong.
-
-### K2 · Logs load
-**Do:** Device → **Logs**.
-**Expect:** Recent lines, from both device and controller.
-**Flag:** An empty view on a device that has been running.
-
-### K3 · Config scoping
-**Do:** Change one section (say Ring) on one device only.
-**Expect:** Status → Config reads `Local override (1 of 6)`. Change a fleet
-setting in a *different* section — this device should follow it.
-**Flag:** An override that leaks into other sections, or a device that stops
-tracking the fleet entirely.
-
-### K4 · It works on a phone
-**Do:** Open the dashboard on a phone.
-**Expect:** Usable. Nothing cut off, no horizontal scrolling.
-**Flag:** Anything unreachable at that width. Screenshot helps.
-
-### K5 · Contrast and readability
-**Do:** Look at it in both light and dark.
-**Expect:** Everything readable.
-**Flag:** Low-contrast text — with a screenshot.
-
-### K6 · Support bundle
-**Do:** Settings → Support → Collect bundle → Download. Open the file.
-**Expect:** Valid JSON. **No transcripts, no WiFi SSID, no IP addresses, no
-device labels you wrote, no tokens.**
-**Flag:** Anything private in it. Report that privately rather than in a
-public issue, and don't attach the bundle.
+### J3 · Hinweis auf ein Controller-Update
+**Tu:** Wenn es eine Controller-Veröffentlichung gibt, die neuer ist als deine.
+**Erwarte:** Einen Hinweis im Dashboard mit lesbaren Versionshinweisen. Er
+soll dir sagen, dass du aktualisieren sollst — er darf sich niemals selbst
+aktualisieren.
+**Melde:** Einen Hinweis mit leeren Notizen; oder jede Schaltfläche, die
+behauptet, das Update auszuführen.
 
 ---
 
-## L — Failure handling
+## K — Das Dashboard
 
-### L1 · Losing the controller
-**Do:** Stop the controller while a device is idle.
-**Expect:** The device notices, indicates it, and reconnects on its own when
-the controller returns — no reboot, no re-approval.
-**Flag:** A device that never comes back, or comes back only after a power
-cycle.
+### K1 · „Activity" stimmt
+**Tu:** Führ fünf Gespräche. Öffne Gerät → **Activity**.
+**Erwarte:** Fünf Gespräche, mit sinnvollen Ausgängen und Zeiten.
+**Melde:** Fehlende Gespräche oder offensichtlich falsche Zeiten.
 
-### L2 · Losing WiFi
-**Do:** Take the AP down for a minute, then bring it back.
-**Expect:** The device rejoins on its own.
-**Flag:** A device that stays off the network. (Note the known issue #317 for
-networks with no internet.)
+### K2 · Logs laden
+**Tu:** Gerät → **Logs**.
+**Erwarte:** Aktuelle Zeilen, sowohl vom Gerät als auch vom Controller.
+**Melde:** Eine leere Ansicht auf einem Gerät, das schon eine Weile läuft.
 
-### L3 · Losing Home Assistant
-**Do:** Stop HA. Say the wake word.
-**Expect:** The failure is visible — the Voice assistant row should not read
-healthy. When HA returns, turns work again without touching anything.
-**Flag:** A dashboard that reads healthy with HA down.
+### K3 · Config-Bereiche
+**Tu:** Ändere einen Abschnitt (sagen wir „Ring") auf nur einem Gerät.
+**Erwarte:** Status → Config liest `Local override (1 of 6)`. Ändere eine
+Flotteneinstellung in einem *anderen* Abschnitt — dieses Gerät sollte ihr
+folgen.
+**Melde:** Eine Überschreibung, die in andere Abschnitte übergreift, oder ein
+Gerät, das der Flotte ganz aufhört zu folgen.
 
-### L4 · **Destructive** — deleting a device
-**Do:** Delete a device from the dashboard.
-**Expect:** It disconnects, disappears, and comes back as *pending* rather
-than silently continuing to serve. Re-approve it.
-**Flag:** A deleted device that keeps working; or a re-added device whose
-Status shows no voice port.
+### K4 · Es funktioniert auf dem Handy
+**Tu:** Öffne das Dashboard auf einem Handy.
+**Erwarte:** Benutzbar. Nichts abgeschnitten, kein waagerechtes Scrollen.
+**Melde:** Alles, was bei dieser Breite unerreichbar ist. Ein Screenshot hilft.
+
+### K5 · Kontrast und Lesbarkeit
+**Tu:** Sieh es dir hell und dunkel an.
+**Erwarte:** Alles lesbar.
+**Melde:** Text mit zu wenig Kontrast — mit Screenshot.
+
+### K6 · Support-Bundle
+**Tu:** Settings → Support → Collect bundle → Herunterladen. Öffne die Datei.
+**Erwarte:** Gültiges JSON. **Keine Transkripte, keine WLAN-SSID, keine
+IP-Adressen, keine von dir vergebenen Gerätebezeichnungen, keine Token.**
+**Melde:** Alles Private darin. Melde das privat statt in einem öffentlichen
+Issue, und häng das Bundle nicht an.
 
 ---
 
-## Reporting a whole pass
+## L — Umgang mit Störungen
 
-If you run a full pass, one issue with a table is more useful than one issue
-per test:
+### L1 · Der Controller fällt aus
+**Tu:** Stoppe den Controller, während ein Gerät im Leerlauf ist.
+**Erwarte:** Das Gerät merkt es, zeigt es an und verbindet sich von allein
+wieder, wenn der Controller zurück ist — kein Neustart, keine erneute
+Freigabe.
+**Melde:** Ein Gerät, das nie zurückkommt, oder erst nach einem
+Stromtrennen.
+
+### L2 · Das WLAN fällt aus
+**Tu:** Nimm den Access Point für eine Minute vom Netz, dann zurück.
+**Erwarte:** Das Gerät verbindet sich von allein wieder.
+**Melde:** Ein Gerät, das draußen bleibt. (Beachte das bekannte Issue #317 für
+Netze ohne Internet.)
+
+### L3 · Home Assistant fällt aus
+**Tu:** Stoppe HA. Sag das Wakeword.
+**Erwarte:** Der Ausfall ist sichtbar — die Zeile „Voice assistant" sollte
+nicht gesund aussehen. Kommt HA zurück, funktionieren Gespräche wieder, ohne
+dass du etwas anfasst.
+**Melde:** Ein Dashboard, das bei gestopptem HA gesund aussieht.
+
+### L4 · **Destruktiv** — ein Gerät löschen
+**Tu:** Lösche ein Gerät im Dashboard.
+**Erwarte:** Es trennt sich, verschwindet und kommt als *ausstehend* zurück,
+statt still weiterzuarbeiten. Gib es erneut frei.
+**Melde:** Ein gelöschtes Gerät, das weiterläuft; oder ein neu hinzugefügtes
+Gerät, dessen Status keinen Sprach-Port zeigt.
+
+---
+
+## Einen ganzen Durchlauf melden
+
+Wenn du einen vollständigen Durchlauf machst, ist ein Issue mit einer Tabelle
+nützlicher als ein Issue pro Test:
 
 ```
 Controller: 2.21.0    Firmware: v2.13.0    HA: 2026.8.3    Hardware: Echo Dot Gen 2
 
 A1 pass   A2 pass   A3 pass   A4 pass   A5 pass
 B1 pass   B2 pass   B3 pass   B4 FAIL   B5 pass   B6 n/a
-C1 pass (9/10)  C2 FAIL (4 false wakes in an hour, TV on)  ...
+C1 pass (9/10)  C2 FAIL (4 Fehlauslöser in einer Stunde, Fernseher an)  ...
 ```
 
-`pass` / `fail` / `n/a` / `skipped`. For each fail, a paragraph and a support
-bundle. Anything you couldn't test is as useful to know as a failure — it
-tells us which parts of this guide nobody can actually follow.
+`pass` / `fail` / `n/a` / `skipped`. Zu jedem `fail` ein Absatz und ein
+Support-Bundle. Was du nicht testen konntest, ist genauso nützlich zu wissen
+wie ein Fehler — es sagt uns, welchen Teilen dieser Anleitung niemand folgen
+kann.

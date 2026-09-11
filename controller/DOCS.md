@@ -1,6 +1,6 @@
-# EchoMuse
+# Revoice
 
-Runs the EchoMuse controller — wake word detection, fleet dashboard, and
+Runs the Revoice controller — wake word detection, fleet dashboard, and
 Home Assistant integration for rooted Echo Dot 2nd Gen devices — as a Home
 Assistant add-on instead of a separate docker-compose deployment.
 
@@ -12,7 +12,7 @@ Assistant add-on instead of a separate docker-compose deployment.
    this machine has more than one network interface.
 2. Open the dashboard from **Open Web UI**. You are signed in as your Home
    Assistant user; there is no separate account or setup token. The first
-   person to open it becomes the EchoMuse admin, and anyone after that gets
+   person to open it becomes the Revoice admin, and anyone after that gets
    read-only access until an admin promotes them.
 3. Use the dashboard's **provisioning wizard** (USB, Chrome) to set up a
    rooted Echo Dot. It finds this controller automatically — no manual IP
@@ -45,8 +45,8 @@ Every option is explained inline in the add-on's Configuration tab. For the
 full picture — rooting a device, the voice pipeline, every configuration
 knob — see the project's own docs:
 
-- [Quickstart](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/quickstart.md)
-- [Configuration reference](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/configuration.md)
-- [Rooting a device](https://github.com/FelixTechgiti/EchoMuse/blob/main/docs/rooting.md)
+- [Quickstart](https://github.com/FelixTechgiti/Revoice/blob/main/docs/quickstart.md)
+- [Configuration reference](https://github.com/FelixTechgiti/Revoice/blob/main/docs/configuration.md)
+- [Rooting a device](https://github.com/FelixTechgiti/Revoice/blob/main/docs/rooting.md)
 
 **Note**: restart the add-on after changing configuration.

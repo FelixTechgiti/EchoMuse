@@ -40,7 +40,7 @@ from pathlib import Path
 import em_endpoint_bins as bins
 import version
 
-log = logging.getLogger("echomuse.endpoint_release")
+log = logging.getLogger("revoice.endpoint_release")
 
 TAG_PREFIX = "endpoints-v"
 

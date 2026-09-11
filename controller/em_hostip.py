@@ -33,7 +33,7 @@ import logging
 import socket
 from functools import lru_cache
 
-log = logging.getLogger("echomuse.hostip")
+log = logging.getLogger("revoice.hostip")
 
 # RFC 5737 TEST-NET-1. Never routed; no packet is sent. See module docstring.
 _ROUTE_PROBE = ("192.0.2.1", 9)
