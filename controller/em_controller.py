@@ -67,6 +67,7 @@ import websockets
 from websockets.asyncio.server import ServerConnection as WebSocketServerProtocol
 
 import em_db as db
+import em_dbadopt
 import em_auth as auth
 import em_api as api
 import em_pki
@@ -5162,6 +5163,11 @@ async def _notify_media_state(device_id: str, state: str) -> None:
 
 async def main():
     log.info(f"Revoice Controller {api.CONTROLLER_VERSION}")
+    # The project was renamed and DB_PATH moved with it, onto a filename
+    # that did not exist — so SQLite created it and every device sat in the
+    # file beside it. Runs BEFORE init, because init is what creates the
+    # empty one that would otherwise be adopted-over next start.
+    em_dbadopt.adopt_if_needed(DB_PATH)
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(

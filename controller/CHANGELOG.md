@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.34.0-fx.1
+
+### Your devices come back after the rename
+
+**The rename pointed the database at a filename that did not exist.** The
+add-on's storage did not move and nothing was deleted — but `DB_PATH` went
+from `/data/echomuse.db` to `/data/revoice.db`, so SQLite created the new
+file, and every device, user, token and setting stayed in the one beside it.
+The controller came up perfectly and knew nothing. Reported from a live
+instance as "jetzt habe ich eine leere Instanz".
+
+It now adopts the old file on startup, and the rest of the data directory was
+never affected — the certificate authority, the streaming binaries, the wake
+word models and the recordings all sit beside the database rather than inside
+it, so they survived the rename without noticing it.
+
+**It refuses to do this if the current database already has devices in it.**
+Somebody who set up fresh under the new name is not reverted to a stale file;
+in that case both are left exactly as they are. And the displaced empty
+database is renamed aside with a timestamp rather than deleted, so a wrong
+call is recoverable by hand.
+
+### What is required of you
+
+Nothing. Restarting the add-on is enough, and updating to this version does
+that for you.
+
 ## 2.33.0-fx.1
 
 ### The published Spotify and AirPlay binaries now install themselves

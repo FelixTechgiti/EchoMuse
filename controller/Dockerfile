@@ -76,6 +76,7 @@ ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 COPY em_controller.py .
 COPY em_api.py .
 COPY em_db.py .
+COPY em_dbadopt.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
