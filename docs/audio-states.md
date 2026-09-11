@@ -1,669 +1,723 @@
-# Audio State Model
+# Zustandsmodell für Audio
 
-Who owns the speaker, what is on the wire, and what happens when two things
-want it at once.
+Wem der Lautsprecher gehört, was auf der Leitung liegt, und was passiert, wenn
+zwei Dinge ihn gleichzeitig wollen.
 
-This exists for the same reason `led-ring-states.md` does. Four things can now
-put audio on a device — a voice response, music, an HA announcement, and (since
-#167) a timer alarm — and each was added on its own, correct in isolation. The
-interactions between them are where the bugs live.
+Das gibt es aus demselben Grund wie `led-ring-states.md`. Vier Dinge können
+inzwischen Ton auf ein Gerät bringen — eine Sprachantwort, Musik, eine
+HA-Durchsage und (seit #167) ein Timer-Alarm —, und jedes wurde für sich
+ergänzt, für sich genommen korrekt. Die Fehler stecken in ihrem
+Zusammenspiel.
 
-Two of those are now fixed, and the fix is the same shape both times: **owners
-are COUNTED, not flagged.** #261 lifted the duck mid-response because `ducked`
-was one boolean and the first of two overlapping owners to finish popped it;
-#314 released the turn's speaker ownership for the same reason. `duck_depth`
-and `owner_depth` are separate counters on purpose — the duck only increments
-on the mixing path, so a device that pauses instead of ducking has overlapping
-owners with no duck depth, and collapsing them would be correct everywhere
-except on exactly those devices.
+Zwei davon sind inzwischen behoben, und die Behebung hat beide Male dieselbe
+Form: **Besitzer werden GEZÄHLT, nicht markiert.** #261 hob das Absenken
+mitten in der Antwort auf, weil `ducked` ein einzelner Wahrheitswert war und
+der erste von zwei überlappenden Besitzern es beim Beenden zurücknahm; #314
+gab die Lautsprecherhoheit des Gesprächs aus demselben Grund frei.
+`duck_depth` und `owner_depth` sind bewusst getrennte Zähler — das Absenken
+zählt nur auf dem Mischpfad hoch, ein Gerät, das pausiert statt abzusenken,
+hat also überlappende Besitzer ohne Absenktiefe, und die beiden
+zusammenzufassen wäre überall richtig außer genau auf diesen Geräten.
 
-Still open: #262 (music deferred until a turn ends), #243 (whether the output
-chain belongs device-side at all), and the state map the alarm is owed as a
-fourth owner.
+Noch offen: #262 (Musik wird bis zum Gesprächsende verschoben), #243 (ob die
+Klangkette überhaupt aufs Gerät gehört) und die Zustandskarte, die dem Alarm
+als viertem Besitzer noch geschuldet wird.
 
-Status markers match the LED doc: **[today]** is shipped behaviour verified in
-code, **[proposed]** is designed or in review and not merged.
-
----
-
-## 1. Design principles
-
-These are settled and the rest follows from them.
-
-- **The device mixes; the controller decides.** Two independent PCM streams
-  reach the device and are summed at the ALSA write
-  (`speaker/pcm_speaker.go:277`). The controller never mixes.
-- **Voice is never attenuated.** Ducking lowers the bed under it, never the
-  response itself.
-- **Audio that has left the controller cannot be un-sent.** `LEAD_S` = 4.0s of
-  music is already in the device's buffer when a wake word fires, against a
-  device depth of `audioChanDepth` = 128 × 42.7ms ≈ **5.46s**
-  (`pcm_speaker.go:37`). Anything the controller wants to change about audio
-  already in flight needs a control message, not a change of what it sends.
-- **A voice turn ducks music; it does not pause it.** Pausing needs a seek to
-  resume and a Music Assistant flow stream cannot seek, so a 28s turn cost 28s
-  of the song.
-- **The end of audio is what the device says it is.** Playback completion waits
-  for the device's `playback_stats`, never an estimate from the socket write —
-  which completes near-instantly however slow the link is (measured 2026-07-24:
-  the ring cleared 6.1s early on one device, 3.2s on another).
+Die Statusmarken entsprechen dem LED-Dokument: **[heute]** ist ausgeliefertes,
+im Code geprüftes Verhalten, **[vorgeschlagen]** ist entworfen oder in Review
+und nicht gemergt.
 
 ---
 
-## 2. Speaker owners — priority ladder
+## 1. Entwurfsprinzipien
 
-Highest first. Only one owner drives the **voice plane** at a time; music runs
-underneath on its own plane and is ducked rather than displaced.
+Die stehen fest, alles Weitere folgt daraus.
 
-| # | Owner | Plane | Takes ownership by | Releases on |
+- **Das Gerät mischt; der Controller entscheidet.** Zwei unabhängige
+  PCM-Ströme erreichen das Gerät und werden am ALSA-Schreibvorgang summiert
+  (`speaker/pcm_speaker.go:277`). Der Controller mischt nie.
+- **Sprache wird nie abgesenkt.** Ducking senkt das Bett darunter, nie die
+  Antwort selbst.
+- **Ton, der den Controller verlassen hat, lässt sich nicht zurückholen.**
+  `LEAD_S` = 4,0 s Musik liegen bereits im Puffer des Geräts, wenn ein
+  Wakeword feuert, bei einer Gerätetiefe von `audioChanDepth` = 128 × 42,7 ms
+  ≈ **5,46 s** (`pcm_speaker.go:37`). Alles, was der Controller an bereits
+  unterwegs befindlichem Ton ändern will, braucht eine Kontrollnachricht und
+  nicht eine Änderung dessen, was er sendet.
+- **Ein Sprachgespräch senkt Musik ab; es pausiert sie nicht.** Pausieren
+  braucht zum Fortsetzen ein Spulen, und ein Flow-Stream von Music Assistant
+  lässt sich nicht spulen — ein Gespräch von 28 s kostete also 28 s des
+  Liedes.
+- **Das Ende des Tons ist, was das Gerät sagt.** Der Abschluss der Wiedergabe
+  wartet auf die `playback_stats` des Geräts, nie auf eine Schätzung aus dem
+  Socket-Schreibvorgang — der praktisch sofort fertig ist, egal wie langsam
+  die Strecke ist (gemessen am 2026-07-24: Der Ring erlosch auf einem Gerät
+  6,1 s zu früh, auf einem anderen 3,2 s).
+
+---
+
+## 2. Lautsprecher-Besitzer — die Prioritätsleiter
+
+Höchste zuerst. Nur ein Besitzer treibt zu einer Zeit die **Sprachebene**;
+Musik läuft darunter auf einer eigenen Ebene und wird abgesenkt statt
+verdrängt.
+
+| # | Besitzer | Ebene | Übernimmt durch | Gibt frei bei |
 |---|---|---|---|---|
-| 1 | Voice turn (wake word or button) | voice | `em_player.interrupt()` — **unconditional**, even with nothing playing | `resume_interrupted()` at turn end |
-| 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
-| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[today]** |
-| 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
+| 1 | Sprachgespräch (Wakeword oder Taste) | Sprache | `em_player.interrupt()` — **bedingungslos**, auch wenn nichts spielt | `resume_interrupted()` am Gesprächsende |
+| 2 | HA-Durchsage | Sprache | derselbe `interrupt()`-Pfad | Ende der Durchsagenwiedergabe |
+| 3 | Timer-Alarmklingeln | Sprache | `start_timer_alarm()`, Salven abhängig von `speaker_busy` | Abweisen (Taste / gesprochen / CANCELLED) oder `MAX_RING_S` = 120 s | **[heute]** |
+| 4 | Medien / Musik | Musik | `em_player.play()` | `stop()` / `pause()` / Gerät weg |
 
-**Ownership is taken unconditionally, and that is deliberate** — not an
-optimisation to remove. "Play some jazz" runs the intent *before* HA generates
-the spoken reply, so `play_media` can arrive while the TTS is still coming. If
-ownership were conditional on something already playing, the music would land
-on the same plane as the response and talk over it. This is also the direct
-cause of #262, and the fix there is to let music start on its own plane rather
-than to weaken this rule.
+**Der Besitz wird bedingungslos genommen, und das ist Absicht** — keine
+Optimierung zum Entfernen. „Spiel etwas Jazz" führt die Absicht aus, *bevor*
+HA die gesprochene Antwort erzeugt, `play_media` kann also eintreffen, während
+das TTS noch kommt. Wäre der Besitz davon abhängig, dass schon etwas spielt,
+landete die Musik auf derselben Ebene wie die Antwort und redete darüber. Das
+ist zugleich die direkte Ursache von #262, und die Behebung dort besteht
+darin, Musik auf ihrer eigenen Ebene starten zu lassen, nicht darin, diese
+Regel aufzuweichen.
 
 ---
 
-## 3. The two planes
+## 3. Die zwei Ebenen
 
-| Byte | Direction | Meaning | Constant |
+| Byte | Richtung | Bedeutung | Konstante |
 |---|---|---|---|
-| `0x01` | device → controller | Mic PCM | — |
-| `0x02` | controller → device | Voice PCM (48kHz mono S16_LE) | `frameTypeSpeaker` |
-| `0x03` | controller → device | Voice end-of-stream | `frameTypeEOS` |
-| `0x04` | controller → device | **Music PCM** | `frameTypeMusic` |
-| `0x05` | controller → device | **Music end-of-stream** | `frameTypeMusicEOS` |
-| `0x04` | device → controller | **VAD end-of-speech** | `frameTypeVADEnd` |
-| `0x05` | device → controller | **No-speech timeout** | `frameTypeNoSpeechTimeout` |
+| `0x01` | Gerät → Controller | Mikrofon-PCM | — |
+| `0x02` | Controller → Gerät | Sprach-PCM (48 kHz mono S16_LE) | `frameTypeSpeaker` |
+| `0x03` | Controller → Gerät | Ende des Sprachstroms | `frameTypeEOS` |
+| `0x04` | Controller → Gerät | **Musik-PCM** | `frameTypeMusic` |
+| `0x05` | Controller → Gerät | **Ende des Musikstroms** | `frameTypeMusicEOS` |
+| `0x04` | Gerät → Controller | **VAD-Ende der Sprache** | `frameTypeVADEnd` |
+| `0x05` | Gerät → Controller | **Keine-Sprache-Timeout** | `frameTypeNoSpeechTimeout` |
 
-**`0x04` and `0x05` mean different things in each direction** and are
-disambiguated only by which way the frame is travelling
-(`device/internal/client/data.go:27-45`). Nothing enforces that beyond the
-reader being on one end of the socket. Worth knowing before adding a frame
-type.
+**`0x04` und `0x05` bedeuten in jeder Richtung etwas anderes** und werden
+allein dadurch unterschieden, wohin das Frame reist
+(`device/internal/client/data.go:27-45`). Erzwungen wird das nur dadurch, dass
+der Lesende an einem Ende des Sockets sitzt. Gut zu wissen, bevor man einen
+Frame-Typ ergänzt.
 
-The device holds one `audioStream` per plane, each `audioChanDepth` deep, and
-mixes them at the write with the current duck gain applied to music only
-(`pcm_speaker.go:123-125`, `:277`). The sum **saturates rather than wraps** — a
-wrap turns a loud peak into a full-scale opposite-polarity one, far worse than
-clipping.
+Das Gerät hält je Ebene einen `audioStream`, jeweils `audioChanDepth` tief,
+und mischt sie beim Schreiben, wobei die aktuelle Absenkverstärkung nur auf
+die Musik wirkt (`pcm_speaker.go:123-125`, `:277`). Die Summe **sättigt,
+statt überzulaufen** — ein Überlauf macht aus einer lauten Spitze eine mit
+voller Amplitude und umgekehrter Polarität, weit schlimmer als Übersteuern.
 
 ---
 
-## 4. Capability degradation — `audio_mix`
+## 4. Abstufung nach Fähigkeit — `audio_mix`
 
-`em_player._frame_types()` picks the plane from the device's announced
-capability (`em_player.py:70`):
+`em_player._frame_types()` wählt die Ebene anhand der angekündigten Fähigkeit
+des Geräts (`em_player.py:70`):
 
-| Firmware | Music plane | Voice turn does | Consequence |
+| Firmware | Musikebene | Sprachgespräch tut | Folge |
 |---|---|---|---|
-| announces `audio_mix` | `0x04`/`0x05` | **ducks** (`duck on`) | music continues quietly under the response | **[today]** |
-| does not | `0x02`/`0x03` | **pauses**, `resume_after` set | old behaviour, seek needed to resume | **[today]** |
+| kündigt `audio_mix` an | `0x04`/`0x05` | **senkt ab** (`duck on`) | Musik läuft leise unter der Antwort weiter | **[heute]** |
+| tut es nicht | `0x02`/`0x03` | **pausiert**, `resume_after` gesetzt | altes Verhalten, zum Fortsetzen ist Spulen nötig | **[heute]** |
 
-Degrading to the old path rather than to a wrong answer is the rule from
-`CLAUDE.md`: a device that cannot mix would never play `0x04` at all, which is
-silence, not degraded behaviour.
+Auf den alten Pfad zurückzufallen statt auf eine falsche Antwort ist die Regel
+aus `CLAUDE.md`: Ein Gerät, das nicht mischen kann, würde `0x04` überhaupt nie
+abspielen, und das ist Stille, kein abgestuftes Verhalten.
 
 ---
 
-## 5. Transitions
+## 5. Übergänge
 
-### 5.1 Voice turn over music
+### 5.1 Sprachgespräch über Musik
 
-| # | Precondition | Action | Music | Voice | Status |
+| # | Voraussetzung | Aktion | Musik | Sprache | Status |
 |---|---|---|---|---|---|
-| V1 | music playing, `audio_mix` | `interrupt()` sets `ducked`, sends `duck on`, feed lead drops `LEAD_S` 4.0s → `TURN_LEAD_S` 1.0s to yield the shared data plane | continues, attenuated by `duckDb` (default −18dB) | response on `0x02` | [today] |
-| V2 | music playing, no `audio_mix` | `interrupt()` → `pause()`, `resume_after = True` | stops, bookmarked | response on `0x02` | [today] |
-| V3 | turn ends | `resume_interrupted()` releases ownership, `duck off` | back to unity | — | [today] |
-| V4 | user command during the turn | recorded as `pending`; **overrides** our auto-resume | last write wins | — | [today] |
-| V5 | duck released before the response finishes | — | **lifts early, competes with the tail** | — | **bug, #261** |
+| V1 | Musik läuft, `audio_mix` | `interrupt()` setzt `ducked`, sendet `duck on`, der Vorlauf sinkt von `LEAD_S` 4,0 s auf `TURN_LEAD_S` 1,0 s, um die gemeinsame Datenebene freizugeben | läuft weiter, um `duckDb` abgesenkt (Standard −18 dB) | Antwort auf `0x02` | [heute] |
+| V2 | Musik läuft, kein `audio_mix` | `interrupt()` → `pause()`, `resume_after = True` | hält an, mit Lesezeichen | Antwort auf `0x02` | [heute] |
+| V3 | Gespräch endet | `resume_interrupted()` gibt den Besitz frei, `duck off` | zurück auf volle Lautstärke | — | [heute] |
+| V4 | Nutzerbefehl während des Gesprächs | als `pending` vermerkt; **überstimmt** unser automatisches Fortsetzen | der letzte Schreibvorgang gewinnt | — | [heute] |
+| V5 | Absenkung endet vor der Antwort | — | **hebt sich zu früh, konkurriert mit dem Ausklang** | — | **Fehler, #261** |
 
-**V5 is #261 and is unexplained.** `em_player` logs only the failure paths
-(`duck failed` / `unduck failed`), so a duck that is sent, applied, and then
-released early is completely silent in the log. Add the log line before
-theorising: "the duck never went out" and "the duck went out and something
-released it" want opposite investigations.
+**V5 ist #261 und ist ungeklärt.** `em_player` protokolliert nur die
+Fehlerpfade (`duck failed` / `unduck failed`), eine Absenkung, die gesendet,
+angewandt und dann zu früh gelöst wird, ist im Log also völlig still. Erst die
+Logzeile ergänzen, dann Theorien bilden: „Die Absenkung ging nie hinaus" und
+„die Absenkung ging hinaus, und etwas hat sie gelöst" verlangen
+gegensätzliche Untersuchungen.
 
-### 5.2 Stop and flush
+### 5.2 Stoppen und Leeren
 
-| # | Situation | Message | Why | Status |
+| # | Situation | Nachricht | Warum | Status |
 |---|---|---|---|---|
-| F1 | user stops/pauses music, `audio_mix` | `music_flush` | discards the buffered *music* only | [today] |
-| F2 | user stops/pauses music, no `audio_mix` | `speaker_flush` | music is on the voice plane there | [today] |
-| F3 | barge-in during a response | `speaker_flush` | cuts the buffered response; the rest is usually still in TCP, so the device discards until it sees the stream's `0x03` | [today] |
-| F4 | voice turn starts over music | **neither** | flushing would discard the buffered audio that makes ducking instant, and on a non-seekable stream it is gone for good | [today] |
-| F5 | alarm dismissed | `speaker_flush` | otherwise the ring plays out of ~5.5s of device buffer | **[today]** |
+| F1 | Nutzer stoppt/pausiert Musik, `audio_mix` | `music_flush` | verwirft nur die gepufferte *Musik* | [heute] |
+| F2 | Nutzer stoppt/pausiert Musik, kein `audio_mix` | `speaker_flush` | Musik liegt dort auf der Sprachebene | [heute] |
+| F3 | Barge-in während einer Antwort | `speaker_flush` | schneidet die gepufferte Antwort; der Rest steckt meist noch im TCP, das Gerät verwirft also, bis es das `0x03` des Stroms sieht | [heute] |
+| F4 | Sprachgespräch beginnt über Musik | **keine von beiden** | Leeren würde den gepufferten Ton verwerfen, der das Absenken sofort wirken lässt — und auf einem nicht spulbaren Strom ist er dann endgültig weg | [heute] |
+| F5 | Alarm abgewiesen | `speaker_flush` | sonst klingelt es aus ~5,5 s Gerätepuffer aus | **[heute]** |
 
-The gate for F1/F2 is `em_player.py:481`. **A voice turn must never send
-`music_flush`** — the device's own handler says so (`control.go:520`) and it is
-the whole reason the second plane exists.
+Das Gatter für F1/F2 ist `em_player.py:481`. **Ein Sprachgespräch darf
+niemals `music_flush` senden** — der Handler des Geräts sagt das selbst
+(`control.go:520`), und genau dafür existiert die zweite Ebene.
 
-### 5.3 Timer alarm **[today — #167]**
+### 5.3 Timer-Alarm **[heute — #167]**
 
-| # | Precondition | Action | Status |
+| # | Voraussetzung | Aktion | Status |
 |---|---|---|---|
-| T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [today] |
-| T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
-| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |
-| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [today] |
-| T5 | nobody answers | stops at `MAX_RING_S` = 120s | [today] |
+| T1 | HA sendet `TIMER_FINISHED` | Klingeln beginnt: Salven in Schleife plus bernsteinfarbenes LED-Pulsieren, falls `led_anim_capable` | [heute] |
+| T2 | Ein Gespräch oder eine Durchsage spielt | Salve wird zurückgehalten, solange `device.speaker_busy` ungleich null ist | [heute] |
+| T3 | Wakeword über dem Klingeln gehört | Alarm um `DUCK_DB` abgesenkt für `DUCK_HOLD_S` = 12 s, damit der Befehl bei der Spracherkennung ankommt | [heute] |
+| T4 | Abweisen (Taste, Transkript oder `CANCELLED`) | Klingeln hört auf, `speaker_flush` | [heute] |
+| T5 | Niemand reagiert | endet bei `MAX_RING_S` = 120 s | [heute] |
 
-`speaker_busy` is a counter rather than a flag because an announcement can
-overlap a turn's playback, and it is held in a `try/finally` because a
-cancelled turn that leaked it would block every future ring for the life of the
-process.
+`speaker_busy` ist ein Zähler und kein Schalter, weil eine Durchsage die
+Wiedergabe eines Gesprächs überlappen kann, und er wird in einem
+`try/finally` gehalten, weil ein abgebrochenes Gespräch, das ihn lecken ließe,
+für die gesamte Prozesslaufzeit jedes künftige Klingeln blockieren würde.
 
 ---
 
-## 6. Sendspin **[in progress — #89]**
+## 6. Sendspin **[in Arbeit — #89]**
 
-**Read the specification, not this section, for wire detail.** It is published
-at `github.com/Sendspin/spec` and it settled several things this design got
-from second-hand sources. The corrections, because each would have been found
-the expensive way:
+**Lies für Details auf der Leitung die Spezifikation, nicht diesen
+Abschnitt.** Sie ist unter `github.com/Sendspin/spec` veröffentlicht und hat
+mehrere Dinge geklärt, die dieser Entwurf aus zweiter Hand hatte. Die
+Korrekturen, weil jede sonst auf die teure Tour gefunden worden wäre:
 
-- **The handshake is longer than "client/hello first".** It is `client/init`
-  (cleartext) → `server/init` + Noise message 1 → Noise message 2 →
-  transport mode → `server/hello` → `client/hello` → `server/activate`. So
-  `client/hello` — the message carrying the format list, and the one-shot
-  that cannot be revised — is sent **after** encryption is up and after the
-  server has introduced itself, not as the opening move.
-- **The server is the Noise INITIATOR and the client the responder**, which
-  is backwards from the usual reading of "client connects".
-- **Unpaired access has a published constant.** The Sentinel PSK is
-  `SHA-256("sendspin-sentinel-psk-v1")`, so a plaintext-equivalent path
-  exists inside the encrypted transport rather than beside it. The August
-  finding that Music Assistant implemented no encryption at all does not mean
-  the handshake can be skipped; it means the PSK on that path is public.
-- **Fragmentation exists and audio can use it.** Any message over 65518 bytes
-  splits across type-1 frames, first-flag and last-flag in a byte of flags
-  whose remaining bits MUST be zero. The threshold is 16 bytes below 64KiB
-  because fragmenting happens BEFORE encryption and the tag has to fit.
-- **The audio chunk header is fixed and small**: type byte, big-endian int64
-  timestamp in µs, big-endian uint32 `send_ahead`. The timestamp is when the
-  first sample must LEAVE THE SPEAKER, not when the chunk should be decoded.
+- **Der Handschlag ist länger als „erst client/hello".** Er lautet
+  `client/init` (im Klartext) → `server/init` + Noise-Nachricht 1 →
+  Noise-Nachricht 2 → Transportmodus → `server/hello` → `client/hello` →
+  `server/activate`. `client/hello` — die Nachricht mit der Formatliste und
+  der einzige Schuss, der sich nicht korrigieren lässt — geht also **nach**
+  dem Aufbau der Verschlüsselung und nachdem der Server sich vorgestellt hat,
+  nicht als Eröffnungszug.
+- **Der Server ist der Noise-INITIATOR und der Client der Antwortende**, was
+  der üblichen Lesart von „der Client verbindet sich" zuwiderläuft.
+- **Ungekoppelter Zugang hat eine veröffentlichte Konstante.** Der
+  Sentinel-PSK ist `SHA-256("sendspin-sentinel-psk-v1")`, es existiert also
+  ein klartextäquivalenter Pfad *innerhalb* des verschlüsselten Transports und
+  nicht daneben. Der Befund vom August, dass Music Assistant gar keine
+  Verschlüsselung umgesetzt hat, heißt nicht, dass der Handschlag entfallen
+  kann; es heißt, dass der PSK auf diesem Pfad öffentlich ist.
+- **Fragmentierung existiert, und Audio darf sie nutzen.** Jede Nachricht über
+  65518 Byte wird auf Frames vom Typ 1 aufgeteilt, mit First- und Last-Flag in
+  einem Flag-Byte, dessen übrige Bits null sein MÜSSEN. Die Schwelle liegt
+  16 Byte unter 64 KiB, weil vor der Verschlüsselung fragmentiert wird und der
+  Tag noch hineinpassen muss.
+- **Der Kopf eines Audiostücks ist fest und klein**: Typbyte, 64-Bit-Zeitstempel
+  in µs (Big Endian), 32-Bit-`send_ahead` (Big Endian). Der Zeitstempel sagt,
+  wann das erste Sample DEN LAUTSPRECHER VERLASSEN muss, nicht wann das Stück
+  dekodiert werden soll.
 
-**Built and tested on the host, not yet heard:** the time filter
-(`device/internal/sendspin/timefilter.go`), the framing (`frame.go`), the
-player-role shapes (`player.go`), the message shapes (`messages.go`), the
-connection state machine (`conn.go`) driven by a scripted server over an
-in-memory transport, the drift-correction policy (`sync.go`), and the
-music-plane arbitration every one of these protocols needs
-(`device/internal/musicplane`). **Deliberately not built: the Noise handshake.** The `Crypto` interface is
-there and `Plaintext` implements it; `KKpsk2` does not exist and is not a
-gap being hidden. Three reasons, in the order they carry weight:
+**Auf dem Host gebaut und getestet, aber noch nicht gehört:** der Zeitfilter
+(`device/internal/sendspin/timefilter.go`), das Framing (`frame.go`), die
+Formen der Player-Rolle (`player.go`), die Nachrichtenformen (`messages.go`),
+der Verbindungsautomat (`conn.go`), angetrieben von einem gescripteten Server
+über einen Transport im Speicher, die Driftkorrekturregel (`sync.go`) und die
+Schlichtung der Musikebene, die jedes dieser Protokolle braucht
+(`device/internal/musicplane`). **Bewusst nicht gebaut: der Noise-Handschlag.**
+Die Schnittstelle `Crypto` ist da, und `Plaintext` setzt sie um; `KKpsk2`
+existiert nicht und ist keine versteckte Lücke. Drei Gründe, nach Gewicht
+geordnet:
 
-- **Nothing on the other side implements it.** Music Assistant's server has
-  no encryption at all — no Noise anywhere in `aiosendspin`, and no crypto
-  library in its dependencies. So the plaintext path is the one that works
-  against a real server today, and a Noise implementation could not be
-  tested against anything.
-- **`KKpsk2` is not the whole job.** `KK` means both parties already hold
-  each other's static keys, so it needs a keypair, its persistence, and the
-  server's public key — which arrives through pairing: `CPACE-X25519-SHA512`,
-  pairing tokens, a failure counter that gesture-gates after five bad
-  attempts. That is a sub-project, and every part of it is unverifiable for
-  the same reason as above.
-- **The two `init` message shapes are still unverified** (see above), and
-  they are the ones the handshake opens with.
+- **Auf der Gegenseite setzt es niemand um.** Der Server von Music Assistant
+  hat gar keine Verschlüsselung — kein Noise irgendwo in `aiosendspin`, und
+  keine Krypto-Bibliothek in seinen Abhängigkeiten. Der Klartextpfad ist also
+  der, der heute gegen einen echten Server funktioniert, und eine
+  Noise-Umsetzung ließe sich gegen nichts testen.
+- **`KKpsk2` ist nicht die ganze Arbeit.** `KK` heißt, dass beide Seiten die
+  statischen Schlüssel der anderen bereits halten — es braucht also ein
+  Schlüsselpaar, dessen Persistenz und den öffentlichen Schlüssel des Servers,
+  der über das Koppeln kommt: `CPACE-X25519-SHA512`, Kopplungstoken, ein
+  Fehlerzähler, der nach fünf Fehlversuchen eine Geste verlangt. Das ist ein
+  Teilprojekt, und jeder Teil davon ist aus demselben Grund wie oben nicht
+  überprüfbar.
+- **Die beiden `init`-Nachrichtenformen sind weiterhin unbestätigt** (siehe
+  oben), und mit ihnen beginnt der Handschlag.
 
-The design instruction this follows is the one already written down: build
-the client so the handshake is a LAYER that can be switched on, not an
-assumption baked through the transport. That is done. Writing the layer
-before anything can answer it is the part to leave alone.
+Die Entwurfsanweisung, der das folgt, steht bereits geschrieben: Baue den
+Client so, dass der Handschlag eine SCHICHT ist, die man einschalten kann,
+keine durch den Transport hindurch eingebackene Annahme. Das ist erledigt.
+Die Schicht zu schreiben, bevor irgendetwas darauf antworten kann, ist der
+Teil, den man lassen soll.
 
-**What is still owed, and needs hardware:** the handshake has never completed
-against a live Music Assistant. Until it has, `client/init` / `server/init`
-are the two shapes taken from prose rather than from the reference, and the
-whole connect path is unproven.
+**Was noch aussteht und Hardware braucht:** Der Handschlag ist nie gegen ein
+laufendes Music Assistant zu Ende gegangen. Bis dahin sind `client/init` und
+`server/init` zwei Formen aus Prosa statt aus der Referenz, und der gesamte
+Verbindungspfad ist unbewiesen.
 
-**Alignment is by silence at the start and by sample-level correction
-afterwards, and both halves are needed.** Nothing on the device controls when
-the prime gate releases, so without padding the first sample plays at whatever
-moment the buffer happened to fill; the music plane plays what it is given in
-order, so N frames of silence in front of the audio delay it by exactly N
-frames. Afterwards the hardware runs at its own rate, and `delay` is what
-makes that visible. The correction is **spread across the chunk and offset by
-half a step** so no adjustment lands on a chunk boundary — two chunks joined
-at a repeated or missing frame put the whole correction at the seam, which is
-the one place a discontinuity is most likely to be heard.
+**Die Ausrichtung erfolgt durch Stille am Anfang und danach durch Korrektur
+auf Sample-Ebene, und beide Hälften werden gebraucht.** Nichts auf dem Gerät
+steuert, wann das Vorlaufgatter öffnet; ohne Auffüllen spielt das erste Sample
+also in dem Moment, in dem der Puffer zufällig voll wurde. Die Musikebene
+spielt der Reihe nach, was sie bekommt, also verzögern N Bilder Stille vor dem
+Ton ihn um genau N Bilder. Danach läuft die Hardware in ihrem eigenen Takt,
+und `delay` macht das sichtbar. Die Korrektur wird **über das Stück verteilt
+und um einen halben Schritt versetzt**, damit keine Anpassung auf eine
+Stückgrenze fällt — zwei an einem wiederholten oder fehlenden Bild
+zusammengefügte Stücke legen die ganze Korrektur auf die Naht, und genau dort
+ist ein Sprung am ehesten hörbar.
 
-**The advertised format list is ordered decodable-first, and that ordering is
-a safety property rather than a preference.** The server picks the client's
-highest priority it can encode, and the spec requires it to encode all three —
-so the first entry *is* the one chosen. FLAC is worth having on measurement
-(3.68% of a core against 0.97%, saving 929 kbps on a link measured at 4.6–7.1%
-loss) and is advertised *behind* PCM until its decoder exists: advertising it
-first would guarantee a stream this device turns into noise, with no error
-anywhere — the frames arrive, something interprets them, and the speaker plays
-the result. It stays in the list because `client/hello` is a one-shot and
-dropping it would make adding the decoder need a reconnect to take effect.
+**Die angekündigte Formatliste ist nach Dekodierbarkeit geordnet, und diese
+Reihenfolge ist eine Sicherheitseigenschaft, keine Vorliebe.** Der Server
+nimmt die höchste Priorität des Clients, die er kodieren kann, und die Spec
+verlangt, dass er alle drei kodiert — der erste Eintrag *ist* also der
+gewählte. FLAC ist der Messung nach lohnend (3,68 % eines Kerns gegen 0,97 %,
+spart 929 kbit/s auf einer Strecke mit gemessenen 4,6–7,1 % Verlust) und wird
+*hinter* PCM angekündigt, bis sein Dekoder existiert: Es zuerst anzukündigen
+würde einen Strom garantieren, den dieses Gerät in Rauschen verwandelt, ohne
+dass irgendwo ein Fehler auftaucht — die Frames kommen an, etwas legt sie aus,
+und der Lautsprecher spielt das Ergebnis. Es bleibt in der Liste, weil
+`client/hello` ein einziger Schuss ist und ein Weglassen bedeuten würde, dass
+das Hinzufügen des Dekoders erst nach einem Neuverbinden wirkt.
 
-**Landing the first sample is the easy half.** The speaker's crystal runs at
-47973 fps against 48000 — 560ppm — so a stream that starts perfectly is 0.56ms
-out after a second and 34ms out after a minute, against a ±1ms spec floor.
-Correction is by dropping and duplicating whole samples rather than
-resampling: a variable-rate resampler is inaudible and costs CPU this device
-does not have spare, while at one sample in 1786, spread rather than applied
-in a lump, dropping is inaudible for a different reason. Two numbers carry the
-policy — a **deadband**, without which the corrector hunts around zero forever
-and modulates pitch continuously, and a correction **rate that must exceed the
-crystal's own error**. The first version was capped at 500ppm against the
-crystal's 560 and could never catch up; it presents identically to no
-corrector at all, and the test comparing the two rates is what found it.
+**Das erste Sample zu platzieren ist die leichte Hälfte.** Der Quarz des
+Lautsprechers läuft mit 47973 fps gegen 48000 — 560 ppm —, ein perfekt
+gestarteter Strom liegt also nach einer Sekunde 0,56 ms daneben und nach einer
+Minute 34 ms, gegen eine Spec-Untergrenze von ±1 ms. Korrigiert wird durch
+Weglassen und Verdoppeln ganzer Samples statt durch Resampling: Ein Resampler
+mit variabler Rate ist unhörbar und kostet CPU, die dieses Gerät nicht übrig
+hat, während bei einem Sample von 1786, verteilt statt am Stück angewandt, das
+Weglassen aus einem anderen Grund unhörbar ist. Zwei Zahlen tragen die Regel —
+ein **Totband**, ohne das der Korrektor ewig um die Null jagt und die Tonhöhe
+dauernd moduliert, und eine **Korrekturrate, die den Fehler des Quarzes
+übersteigen muss**. Die erste Fassung war auf 500 ppm gedeckelt, gegen die 560
+des Quarzes, und konnte nie aufholen; das sieht genauso aus wie gar kein
+Korrektor, und gefunden hat es der Test, der die beiden Raten vergleicht.
 
-**`client/init` and `server/init` are the only shapes taken from prose.**
-Everything else was read off `aiosendspin`, the implementation Music Assistant
-runs, because prose does not say which fields are optional and a field sent as
-`null` where the server expects it absent is a different message. Those two
-belong to the pre-encryption exchange and are unverified until the handshake
-has completed against a live server once; the rest of the protocol is not the
-risk.
+**`client/init` und `server/init` sind die einzigen Formen aus Prosa.** Alles
+andere wurde aus `aiosendspin` abgelesen, der Umsetzung, die Music Assistant
+betreibt, denn Prosa sagt nicht, welche Felder optional sind, und ein als
+`null` gesendetes Feld, wo der Server es abwesend erwartet, ist eine andere
+Nachricht. Die beiden gehören zum Austausch vor der Verschlüsselung und sind
+unbestätigt, bis der Handschlag einmal gegen einen echten Server durchgelaufen
+ist; der Rest des Protokolls ist nicht das Risiko.
 
 
-Synchronised multi-room playback via the Open Home Foundation's Sendspin
-protocol, which Music Assistant speaks natively (WebSocket, port 8927,
-`/sendspin`). Placement decided 2026-08-22: **the client runs on the device
-and talks to Music Assistant directly**, not in the controller.
+Synchronisierte Multiroom-Wiedergabe über das Sendspin-Protokoll der Open
+Home Foundation, das Music Assistant nativ spricht (WebSocket, Port 8927,
+`/sendspin`). Platzierung entschieden am 2026-08-22: **Der Client läuft auf
+dem Gerät und spricht direkt mit Music Assistant**, nicht im Controller.
 
-**This section is expected to take several passes before it settles**, and is
-written to be edited rather than to look finished. What carries a date and a
-name is decided; everything else is open, and a decision recorded here can be
-revisited — the point of writing them down as they are made is that the next
-pass starts from the current position instead of re-deriving it. Nothing here
-has been built yet.
+**Dieser Abschnitt wird voraussichtlich mehrere Durchgänge brauchen, bis er
+sich setzt**, und ist zum Bearbeiten geschrieben, nicht um fertig auszusehen.
+Was ein Datum und einen Namen trägt, ist entschieden; alles andere ist offen,
+und eine hier festgehaltene Entscheidung darf neu aufgerollt werden — der Sinn
+des Aufschreibens ist, dass der nächste Durchgang von der aktuellen Position
+startet, statt sie neu herzuleiten. Gebaut ist davon noch nichts.
 
-### 6.1 It is a second producer, not a third plane
+### 6.1 Es ist ein zweiter Erzeuger, keine dritte Ebene
 
-This is the part to get right before any code. Sendspin carries the same
-thing the music plane already carries — Music Assistant audio — by a
-different route:
+Das ist der Teil, den man vor jedem Code richtig haben muss. Sendspin trägt
+dasselbe, was die Musikebene schon trägt — Audio von Music Assistant — nur auf
+einem anderen Weg:
 
 ```
-today      MA → HA → controller (em_player) → 0x04 → device music stream
-sendspin   MA ─────────────────────────────────────→ device music stream
+heute      MA → HA → Controller (em_player) → 0x04 → Musikstrom des Geräts
+sendspin   MA ─────────────────────────────────────→ Musikstrom des Geräts
 ```
 
-So **no new frame type, no new mixer input, no new row in the ownership
-ladder**. The music `audioStream` gains a second thing that can fill it, and
-everything worked out for the first producer — the duck, `music_flush`,
-saturating mix, prime gate, underrun accounting — applies unmodified. The
-work is a client and a clock, not an audio path.
+Also **kein neuer Frame-Typ, kein neuer Mischereingang, keine neue Zeile in
+der Besitzleiter**. Der `audioStream` für Musik bekommt eine zweite Sache, die
+ihn füllen kann, und alles, was für den ersten Erzeuger durchdacht wurde — das
+Absenken, `music_flush`, sättigendes Mischen, das Vorlaufgatter, die
+Aussetzerbuchhaltung — gilt unverändert. Die Arbeit ist ein Client und eine
+Uhr, kein Audiopfad.
 
-The alternative (controller runs the client, re-streams over `0x04`) was
-rejected: our plane carries no timestamps, so playback would land whenever
-the ~5.5s device buffer happened to drain it. Sample-accurate sync is the
-entire point of the protocol, and it cannot survive that hop.
+Die Alternative (der Controller betreibt den Client und streamt über `0x04`
+weiter) wurde verworfen: Unsere Ebene trägt keine Zeitstempel, die Wiedergabe
+landete also dann, wann der ~5,5-s-Gerätepuffer sie zufällig leerte.
+Sample-genaue Synchronität ist der ganze Zweck des Protokolls, und sie
+überlebt diesen Zwischenschritt nicht.
 
-### 6.2 What the device has to implement
+### 6.2 Was das Gerät umsetzen muss
 
-| Piece | Requirement | Cost | Verified |
+| Teil | Anforderung | Kosten | Belegt durch |
 |---|---|---|---|
-| Discovery | mDNS — server advertises `_sendspin-server._tcp.local`, client advertises `_sendspin._tcp.local` | we already run mDNS for `_emcontroller._tcp` | spec |
-| Encryption | Spec says **mandatory** (Noise `KKpsk2`, server initiator, client responder, over plain `ws://`) — **but MA implements none of it**, see 6.5 | `flynn/noise`, pure Go | spec + MA source |
-| Cipher suite | `25519_ChaChaPoly_SHA256` or `25519_AESGCM_SHA256`; servers support both, clients need one | pick ChaCha — the A53 has no AES instructions | spec |
-| Codec | Servers MUST support `pcm`, `flac` and `opus`; the client advertises what it wants in `client/hello`'s `player@v1` support object | see below | spec |
-| Clock | Client MUST use the time-filter algorithm (2-D Kalman) to map server timestamps onto its local clock | needs a local playback clock — we have one | spec |
+| Auffinden | mDNS — der Server kündigt `_sendspin-server._tcp.local` an, der Client `_sendspin._tcp.local` | wir betreiben ohnehin mDNS für `_emcontroller._tcp` | Spec |
+| Verschlüsselung | Die Spec sagt **verpflichtend** (Noise `KKpsk2`, Server als Initiator, Client als Antwortender, über einfaches `ws://`) — **aber MA setzt nichts davon um**, siehe 6.5 | `flynn/noise`, reines Go | Spec + MA-Quelltext |
+| Chiffrensuite | `25519_ChaChaPoly_SHA256` oder `25519_AESGCM_SHA256`; Server unterstützen beide, Clients brauchen eine | ChaCha nehmen — der A53 hat keine AES-Befehle | Spec |
+| Codec | Server MÜSSEN `pcm`, `flac` und `opus` unterstützen; der Client kündigt im `player@v1`-Objekt von `client/hello` an, was er will | siehe unten | Spec |
+| Uhr | Der Client MUSS den Zeitfilter-Algorithmus (2-D-Kalman) nutzen, um Serverzeitstempel auf seine lokale Uhr abzubilden | braucht eine lokale Wiedergabeuhr — die haben wir | Spec |
 
-**Codec: FLAC first, and Opus is not an entry cost.** The August assessment
-had Opus-via-cgo (armv7a/API 22) as a blocker. It is not one — because the
-server must support all three, the client may advertise FLAC only, and there
-are pure-Go FLAC decoders. That is roughly half of PCM's bitrate, lossless,
-and no cgo. **Settled by measurement 2026-08-22 — advertise FLAC**; 6.4 has
-the numbers and the trade against PCM. Opus becomes a bandwidth optimisation
-to take later, deliberately.
+**Codec: FLAC zuerst, und Opus ist keine Eintrittshürde.** Die Einschätzung
+vom August hatte Opus über cgo (armv7a/API 22) als Blocker. Es ist keiner —
+weil der Server alle drei unterstützen muss, darf der Client nur FLAC
+ankündigen, und es gibt FLAC-Dekoder in reinem Go. Das ist etwa die halbe
+Bitrate von PCM, verlustfrei, und ohne cgo. **Per Messung am 2026-08-22
+entschieden — FLAC ankündigen**; 6.4 hat die Zahlen und den Vergleich mit PCM.
+Opus wird bewusst zu einer später mitzunehmenden Bandbreitenoptimierung.
 
-**The clock is the reason this is possible at all.** Measured 2026-08-10 off
-`/proc/asound/card0/pcm23p/sub0/status`: `hw_ptr` advances in 112–144 frame
-steps every ~2.4ms — sub-period by ~15×, and 47973 fps against 48000 nominal
-(−0.056%). The driver reports a real DMA position rather than software
-bookkeeping, so scheduled playback to ±0.5ms is plausible. Software
-bookkeeping would have advanced in 2048-frame jumps every 42.7ms, and this
-whole section would be impossible.
+**Die Uhr ist der Grund, warum das überhaupt möglich ist.** Gemessen am
+2026-08-10 an `/proc/asound/card0/pcm23p/sub0/status`: `hw_ptr` rückt alle
+~2,4 ms in Schritten von 112–144 Bildern vor — rund 15× feiner als eine
+Periode, und 47973 fps gegen 48000 nominal (−0,056 %). Der Treiber meldet eine
+echte DMA-Position statt Software-Buchhaltung, geplante Wiedergabe auf ±0,5 ms
+ist also plausibel. Software-Buchhaltung wäre alle 42,7 ms in Sprüngen von
+2048 Bildern vorgerückt, und dieser ganze Abschnitt wäre unmöglich.
 
-### 6.3 Ownership and arbitration
+### 6.3 Besitz und Schlichtung
 
-| # | Precondition | Action | Status |
+| # | Voraussetzung | Aktion | Status |
 |---|---|---|---|
-| S1 | Sendspin session starts | device becomes the music plane's producer; controller told, so the `media_player` entity reports correctly | [proposed] |
-| S2 | voice turn during Sendspin playback | unchanged — `duck on`, music attenuated by `duckDb`, response on `0x02` | [proposed] |
-| S3 | controller sends `0x04` while a Sendspin session owns the plane | **HA wins** — device leaves the group cleanly, then plays `0x04`. Never interleaved (invariant 7) | [proposed] |
-| S4 | Sendspin session ends | producer released, `music_flush` semantics unchanged | [proposed] |
+| S1 | Sendspin-Sitzung beginnt | das Gerät wird Erzeuger der Musikebene; der Controller wird informiert, damit die `media_player`-Entität korrekt meldet | [vorgeschlagen] |
+| S2 | Sprachgespräch während Sendspin-Wiedergabe | unverändert — `duck on`, Musik um `duckDb` abgesenkt, Antwort auf `0x02` | [vorgeschlagen] |
+| S3 | Der Controller sendet `0x04`, während eine Sendspin-Sitzung die Ebene besitzt | **HA gewinnt** — das Gerät verlässt die Gruppe sauber und spielt dann `0x04`. Nie verschachtelt (Invariante 7) | [vorgeschlagen] |
+| S4 | Sendspin-Sitzung endet | Erzeuger freigegeben, `music_flush`-Semantik unverändert | [vorgeschlagen] |
 
-S3 is the genuinely new failure mode. "Play some jazz" spoken to the device
-runs through HA and arrives on `0x04`; a Sendspin group started from the MA
-app arrives on the socket. Both are Music Assistant, both are legitimate, and
-summing them is noise.
+S3 ist der wirklich neue Fehlermodus. „Spiel etwas Jazz", zum Gerät gesagt,
+läuft über HA und kommt auf `0x04` an; eine aus der MA-App gestartete
+Sendspin-Gruppe kommt über den Socket. Beides ist Music Assistant, beides ist
+legitim, und beides zu summieren ist Rauschen.
 
-**Decided 2026-08-22 (Wil): HA wins — it is the direct user request.** A
-device asked for music through HA leaves the Sendspin group and plays what it
-was asked for.
+**Entschieden am 2026-08-22 (Wil): HA gewinnt — es ist die direkte Bitte der
+Nutzerin.** Ein Gerät, das über HA um Musik gebeten wird, verlässt die
+Sendspin-Gruppe und spielt, worum es gebeten wurde.
 
-Three things that rule does *not* mean, each of which would be a
-misreading with real consequences:
+Drei Dinge, die diese Regel *nicht* bedeutet, deren Fehldeutung jeweils echte
+Folgen hätte:
 
-- **It does not apply to voice.** A voice turn or an announcement never
-  contends for the music plane at all — it ducks (V1, S2). This rule governs
-  the two MUSIC producers only, and the whole point of the second plane is
-  that the highest-priority audio on the device does not need to win this
-  argument.
-- **Leaving is not ignoring.** The device must end the Sendspin session
-  properly rather than stop reading the socket: a server still streaming to a
-  client that has silently stopped playing keeps filling a buffer nobody
-  hears, and the group's view of the device stays wrong. Whatever the spec's
-  clean-leave path is, that is the one to take.
-- **It is not a priority ordering.** Sendspin does not sit at a fixed rung
-  under HA — it owns the music plane whenever HA is not asking for it. Last
-  direct request wins, which is the same shape as V4, where a user command
-  during a turn overrides our auto-resume.
+- **Sie gilt nicht für Sprache.** Ein Sprachgespräch oder eine Durchsage
+  konkurriert überhaupt nicht um die Musikebene — es senkt ab (V1, S2). Diese
+  Regel betrifft nur die beiden MUSIK-Erzeuger, und der ganze Sinn der zweiten
+  Ebene ist, dass der höchstpriorisierte Ton auf dem Gerät diesen Streit nicht
+  gewinnen muss.
+- **Verlassen ist nicht Ignorieren.** Das Gerät muss die Sendspin-Sitzung
+  ordentlich beenden, statt aufzuhören, den Socket zu lesen: Ein Server, der
+  weiter zu einem Client streamt, der still nicht mehr abspielt, füllt einen
+  Puffer, den niemand hört, und die Sicht der Gruppe auf das Gerät bleibt
+  falsch. Was auch immer der saubere Austrittspfad der Spec ist — den nehmen.
+- **Es ist keine Prioritätsordnung.** Sendspin sitzt nicht auf einer festen
+  Sprosse unter HA — es besitzt die Musikebene, wann immer HA sie nicht
+  verlangt. Die letzte direkte Bitte gewinnt, dieselbe Form wie bei V4, wo ein
+  Nutzerbefehl während eines Gesprächs unser automatisches Fortsetzen
+  überstimmt.
 
-**No rejoin when the HA-routed music ends** (Wil, 2026-08-22). A silent
-rejoin puts audio in the room nobody asked for at that moment, and the person
-who started the group can start it again. Revisit if it annoys in practice —
-the cost of being wrong here is an extra tap, which is the cheap direction to
-be wrong in.
+**Kein Wiedereintritt, wenn die über HA geroutete Musik endet** (Wil,
+2026-08-22). Ein stiller Wiedereintritt bringt Ton in den Raum, um den in
+diesem Moment niemand gebeten hat, und wer die Gruppe gestartet hat, kann sie
+erneut starten. Neu aufrollen, falls es in der Praxis stört — der Preis, hier
+falsch zu liegen, ist ein zusätzlicher Fingertipp, und das ist die billige
+Richtung, falsch zu liegen.
 
-### 6.4 What is not yet known
+### 6.4 Was noch nicht bekannt ist
 
-- ~~**CPU.**~~ **Measured 2026-08-22 on EA Test Device 01 (v2.12.0), and it
-  fits.** `device/tools/sendspin_bench` against 30s of pink noise at 607 kbps
-  (40% of PCM), wall time with `GOMAXPROCS=1` on a live device, so scheduler
-  contention is included rather than hidden:
+- ~~**CPU.**~~ **Am 2026-08-22 auf EA-Testgerät 01 (v2.12.0) gemessen, und es
+  passt.** `device/tools/sendspin_bench` gegen 30 s rosa Rauschen bei
+  607 kbit/s (40 % von PCM), Wanduhrzeit mit `GOMAXPROCS=1` auf einem echten
+  Gerät, Scheduler-Konkurrenz also enthalten statt versteckt:
 
-  | Per second of audio | % of one core |
+  | Pro Sekunde Audio | % eines Kerns |
   |---|---|
-  | FLAC decode | 3.28 |
-  | ChaCha20-Poly1305 @ FLAC rate | 0.40 |
-  | ChaCha20-Poly1305 @ PCM rate | 0.97 |
-  | **total, advertise `flac`** | **3.68** |
-  | **total, advertise `pcm`** | **0.97** (+929 kbps on the wire) |
+  | FLAC-Dekodierung | 3,28 |
+  | ChaCha20-Poly1305 bei FLAC-Rate | 0,40 |
+  | ChaCha20-Poly1305 bei PCM-Rate | 0,97 |
+  | **gesamt, `flac` ankündigen** | **3,68** |
+  | **gesamt, `pcm` ankündigen** | **0,97** (+929 kbit/s auf der Leitung) |
 
-  X25519 is 7.74ms, so the KKpsk2 handshake is ~23ms once per connection —
-  irrelevant. **Advertise FLAC**: it costs 2.7 points of CPU over PCM and
-  saves 929 kbps on links this fleet is already known to stutter on (4.6–7.1%
-  loss measured, #139/#140). Trading a link we know is marginal against a core
-  we have 3.68% of room on is not a close call.
+  X25519 braucht 7,74 ms, der KKpsk2-Handschlag also ~23 ms einmal pro
+  Verbindung — unerheblich. **FLAC ankündigen**: Es kostet 2,7 Punkte CPU
+  gegenüber PCM und spart 929 kbit/s auf Strecken, von denen bekannt ist, dass
+  diese Flotte darauf stottert (4,6–7,1 % Verlust gemessen, #139/#140). Eine
+  Strecke, die wir als grenzwertig kennen, gegen einen Kern zu tauschen, von
+  dem wir 3,68 % Luft haben, ist keine knappe Entscheidung.
 
-  What this does **not** cover: WebSocket framing, the buffer scheduler, and
-  the time filter itself. All small, none zero — treat 3.68% as a floor, not
-  a budget.
-- **32-bit.** Every tested Sendspin platform is 64-bit (Pi 3/4/5, Zero 2 W).
-  We are 32-bit ARM. Nothing in the spec depends on word size, but nobody has
-  run it there.
-- **`sendspin-go` is a reference, not a dependency.** v1.2.0 dropped the oto
-  backend to unify on malgo/miniaudio, so its output path is hardcoded to a
-  cgo audio library we have no use for — we own tinyalsa and the mixer.
+  Was das **nicht** abdeckt: WebSocket-Framing, den Pufferplaner und den
+  Zeitfilter selbst. Alles klein, nichts null — behandle 3,68 % als Untergrenze,
+  nicht als Budget.
+- **32 Bit.** Jede getestete Sendspin-Plattform ist 64-bittig (Pi 3/4/5,
+  Zero 2 W). Wir sind 32-bit-ARM. Nichts in der Spec hängt an der Wortbreite,
+  aber niemand hat es dort laufen lassen.
+- **`sendspin-go` ist eine Referenz, keine Abhängigkeit.** v1.2.0 hat das
+  oto-Backend fallen lassen, um auf malgo/miniaudio zu vereinheitlichen — sein
+  Ausgabepfad ist damit fest auf eine cgo-Audiobibliothek verdrahtet, die wir
+  nicht brauchen: Uns gehören tinyalsa und der Mischer.
 
-### 6.5 Read off Music Assistant's actual implementation
+### 6.5 Von Music Assistants tatsächlicher Umsetzung abgelesen
 
-Settled 2026-08-22 by reading `aiosendspin` **6.0.5** as deployed in the live
-add-on, rather than the published spec or GitHub's main — that is the code our
-devices would actually talk to. Three questions closed and one constraint
-found.
+Am 2026-08-22 geklärt, indem `aiosendspin` **6.0.5** gelesen wurde, so wie es
+im laufenden Add-on ausgeliefert ist — nicht die veröffentlichte Spec und
+nicht der main-Zweig auf GitHub, denn das ist der Code, mit dem unsere Geräte
+tatsächlich sprechen würden. Drei Fragen geschlossen und eine Einschränkung
+gefunden.
 
-**MA's server implements NO encryption.** There is no Noise anywhere in
-`aiosendspin` (every "noise" match is Kalman process noise in
-`client/time_sync.py`), and its dependencies are `aiohttp`, `mashumaro`,
-`orjson`, `zeroconf` plus `av`/`numpy`/`pillow` for the server extra — no
-crypto library at all. So a plaintext `ws://` client works against MA today,
-and the spec's "mandatory" is aspirational as far as this server is concerned.
+**MAs Server setzt KEINE Verschlüsselung um.** Es gibt nirgends in
+`aiosendspin` Noise (jeder Treffer auf „noise" ist Kalman-Prozessrauschen in
+`client/time_sync.py`), und seine Abhängigkeiten sind `aiohttp`, `mashumaro`,
+`orjson`, `zeroconf` plus `av`/`numpy`/`pillow` für das Server-Extra — gar
+keine Krypto-Bibliothek. Ein Klartext-`ws://`-Client funktioniert heute also
+gegen MA, und das „verpflichtend" der Spec ist für diesen Server ein Wunsch.
 
-**Do not architect Noise out on the strength of that.** The spec does require
-it, MA may implement it later, and at 0.40% of a core it is cheap to carry.
-Build the client so the handshake is a layer that can be switched on, not an
-assumption baked through the transport.
+**Noise deshalb nicht wegarchitektieren.** Die Spec verlangt es, MA setzt es
+vielleicht später um, und bei 0,40 % eines Kerns ist es billig mitzuführen.
+Baue den Client so, dass der Handschlag eine zuschaltbare Schicht ist und
+keine durch den Transport hindurch eingebackene Annahme.
 
-**Mid-stream format renegotiation IS implemented** (`player/v1.py:696`,
-`on_stream_request_format`). An active stream takes an explicit branch that
-rebuilds the audio requirements and defers `stream/start` until the next audio
-chunk, so the codec header rides with it. So the jack-insert plan in 6.2 —
-`channels: 1` normally, `channels: 2` when a plug appears — is supported by
-the server rather than merely permitted by the spec.
+**Format-Neuverhandlung mitten im Strom IST umgesetzt** (`player/v1.py:696`,
+`on_stream_request_format`). Ein aktiver Strom nimmt einen ausdrücklichen
+Zweig, der die Audioanforderungen neu aufbaut und `stream/start` bis zum
+nächsten Audiostück verschiebt, damit der Codec-Kopf mitreist. Der Plan aus
+6.2 für das Einstecken der Klinke — `channels: 1` normalerweise, `channels: 2`
+bei gestecktem Stecker — wird also vom Server unterstützt und nicht bloß von
+der Spec erlaubt.
 
-**⚠ The constraint that will bite: a request must EXACTLY match a format the
-client advertised, and the failure is silent.** The server filters the
-client's `supported_formats` from `client/hello` through
-`filter_encodable_formats`, then requires the full
-`(codec, sample_rate, bit_depth, channels)` tuple to be present in that list.
-If it is not, it logs a warning **on the server** and silently falls back to
-the base format. The client is told nothing, and simply keeps receiving what
-it had.
+**⚠ Die Einschränkung, die beißen wird: Eine Anfrage muss GENAU zu einem vom
+Client angekündigten Format passen, und das Scheitern ist still.** Der Server
+filtert die `supported_formats` aus `client/hello` durch
+`filter_encodable_formats` und verlangt dann, dass das vollständige Tupel
+`(codec, sample_rate, bit_depth, channels)` in dieser Liste steht. Steht es
+nicht drin, protokolliert er eine Warnung **auf dem Server** und fällt still
+auf das Grundformat zurück. Dem Client wird nichts gesagt, und er bekommt
+einfach weiter, was er hatte.
 
-So the device must enumerate **every** combination it might later ask for —
-mono *and* stereo, and any PCM fallback — in its first `client/hello`.
-Advertising only mono and later requesting stereo on jack insert would appear
-to work, change nothing, and leave no trace on the device.
+Das Gerät muss also in seinem ersten `client/hello` **jede** Kombination
+aufzählen, um die es später bitten könnte — mono *und* stereo, und jeden
+PCM-Rückfall. Nur mono anzukündigen und später beim Einstecken der Klinke
+stereo zu verlangen sähe aus, als funktioniere es, änderte nichts und hinterließe
+auf dem Gerät keine Spur.
 
-**`client/goodbye` carries a `reason` and is the clean-leave path** that S3
-requires (`models/core.py:295`, handled at `server/connection.py:737`). The
-S3 rule — HA wins, the device leaves the group cleanly — has a message to send
-rather than a gap.
+**`client/goodbye` trägt einen `reason` und ist der saubere Austrittspfad**,
+den S3 verlangt (`models/core.py:295`, behandelt in
+`server/connection.py:737`). Die S3-Regel — HA gewinnt, das Gerät verlässt die
+Gruppe sauber — hat damit eine Nachricht zum Senden statt einer Lücke.
 
-**One parameter to derive, not guess:** `client/hello` carries
-`buffer_capacity`, "max size in bytes of compressed audio messages in the
-buffer that are yet to be played". That is a statement about *our* buffer
-(`audioChanDepth` ≈ 5.46s), expressed in compressed bytes, and the server's
-`BufferTracker` paces against it. Getting it wrong means the server either
-starves us or overruns us.
-
----
-
-## 7. Open questions
-
-- **Q1 — should music be allowed to start during a turn, on its own plane?**
-  Today `play/resume/pause/stop` record intent and do not touch the wire while
-  a turn owns the speaker, so a stream started from a phone sits silent until
-  the answer finishes (#262). Now that music has its own plane, the reason for
-  the blanket rule is weaker than when it was written. Undecided.
-- ~~**Q2 — where does the output chain belong?**~~ **Settled — on the device.**
-  See §8. Sendspin is what turned it from a preference into a decision: a
-  Sendspin session goes MA → device and never crosses the controller, so a
-  controller-side chain would shape voice and HA-routed music while silently
-  not shaping synchronised music — the same speaker sounding different
-  depending on which app started the track.
-- **Q4 — DECIDED 2026-09-07: the alarm never waits, the announcement does
-  (#373).** Both write `0x02` today and only `_ring_timer_alarm` asks first,
-  which is backwards: a timer must go off exactly when it ends, so the writer
-  whose timing is the whole point is the one currently deferring. Measured
-  2026-08-28: an announcement landing between chime bursts plays, one landing
-  during a burst is inaudible.
-
-  The rule is **silence the music in favour of the alarm, duck the alarm in
-  favour of the response**. That resolves the three-way case — music playing,
-  turn active, timer fires — without new firmware: `Mixer.Mix(voice, music,
-  target)` takes exactly two inputs and attenuates only the music side, so the
-  alarm rides the music plane, music is suspended while it rings, and the
-  device's existing duck does the rest. Gated on `audio_mix`, since firmware
-  without it never plays `0x04` and a silent timer is the worst available
-  failure; those devices keep `0x02` with the alarm taking the plane.
-
-  The announcement waits for a response to finish and queues behind other
-  announcements, with a cap. Blocking it for the whole ring is still wrong —
-  HA holds `_is_announcing` and 120s of `MAX_RING_S` would fail every other
-  announcement — but that is the UNBOUNDED wait. Waiting for the burst in
-  flight is under two seconds, and reading the warning as forbidding both is
-  why this sat open.
-
-  Open: the alarm's duck depth wants its own value rather than `duckDb`, which
-  was tuned for a music bed under speech; and music resumption after dismissal
-  rejoins the live edge on a non-seekable stream, so a 30s alarm costs 30s of
-  the track.
-
-  **The shared `playback_done` Event is fixed** (#481): it is now a FIFO queue
-  of per-playback waiters, so one device report no longer satisfies two.
-
-- **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
-  degrades the whole audio subsystem (#117/#141) and, with a music session
-  live, can silence everything including voice. That is a hardware/HAL fault
-  rather than an ownership one, but it presents as an ownership bug and should
-  be named here so it is not re-diagnosed as one.
+**Ein Parameter zum Herleiten, nicht zum Raten:** `client/hello` trägt
+`buffer_capacity`, „maximale Größe in Byte an komprimiertem Audio im Puffer,
+das noch nicht gespielt wurde". Das ist eine Aussage über *unseren* Puffer
+(`audioChanDepth` ≈ 5,46 s), ausgedrückt in komprimierten Bytes, und der
+`BufferTracker` des Servers taktet danach. Es falsch zu setzen heißt, dass der
+Server uns entweder aushungert oder überfährt.
 
 ---
 
-## 8. The output chain moves to the device **[built — 3.0.0]**
+## 7. Offene Fragen
 
-Decided AND BUILT 2026-08-22 (Wil): **the whole output path runs on the
-device, and the controller provides the config knobs to drive it.** Ported in
-`device/internal/outchain`, wired in at `pcm_speaker.silenceLoop`, gated on the
-`output_chain` capability. **Not yet heard on hardware** — every claim below is
-verified against the reference implementation or by test, not by ear. Scope is the OUTPUT path
-only — EQ, limiter, bass guard and the mix. Input-side processing
-(`em_ns.py`/DTLN on the ASR-bound mic stream) stays controller-side and is a
-separate workstream: it is a neural net on the path to speech recognition
-rather than to the speaker, and nothing here needs it moved.
+- **Q1 — soll Musik während eines Gesprächs starten dürfen, auf ihrer eigenen
+  Ebene?** Heute halten `play/resume/pause/stop` nur die Absicht fest und
+  rühren die Leitung nicht an, solange ein Gespräch den Lautsprecher besitzt —
+  ein vom Handy gestarteter Strom bleibt also still, bis die Antwort fertig
+  ist (#262). Jetzt, wo Musik eine eigene Ebene hat, ist der Grund für die
+  pauschale Regel schwächer als zu ihrer Entstehungszeit. Unentschieden.
+- ~~**Q2 — wohin gehört die Klangkette?**~~ **Geklärt — auf das Gerät.** Siehe
+  §8. Sendspin hat daraus eine Entscheidung statt einer Vorliebe gemacht: Eine
+  Sendspin-Sitzung geht MA → Gerät und kreuzt den Controller nie, eine Kette im
+  Controller würde also Sprache und über HA geroutete Musik formen und
+  synchronisierte Musik stillschweigend nicht — derselbe Lautsprecher klänge
+  unterschiedlich, je nachdem, welche App das Stück gestartet hat.
+- **Q4 — ENTSCHIEDEN am 2026-09-07: Der Alarm wartet nie, die Durchsage schon
+  (#373).** Beide schreiben heute `0x02`, und nur `_ring_timer_alarm` fragt
+  vorher — was verkehrt herum ist: Ein Timer muss genau dann losgehen, wenn er
+  abläuft, also stellt sich ausgerechnet der Schreiber zurück, dessen Timing
+  der ganze Punkt ist. Gemessen am 2026-08-28: Eine Durchsage, die zwischen
+  zwei Klingelsalven landet, ist hörbar; eine, die während einer Salve landet,
+  nicht.
 
-### 8.1 Why — three reasons, in the order they carry weight
+  Die Regel lautet: **die Musik zugunsten des Alarms verstummen lassen, den
+  Alarm zugunsten der Antwort absenken**. Das löst den Dreierfall — Musik
+  läuft, Gespräch aktiv, Timer feuert — ohne neue Firmware:
+  `Mixer.Mix(voice, music, target)` nimmt genau zwei Eingänge und senkt nur die
+  Musikseite ab, der Alarm reitet also auf der Musikebene, die Musik ruht,
+  solange er klingelt, und das vorhandene Absenken des Geräts erledigt den
+  Rest. Gekoppelt an `audio_mix`, denn Firmware ohne diese Fähigkeit spielt
+  `0x04` nie, und ein stummer Timer ist der schlimmste verfügbare Fehler;
+  diese Geräte behalten `0x02`, wobei der Alarm die Ebene übernimmt.
 
-- **Tuning latency collapses, from seconds to one period.** Controller-side,
-  a parameter change reaches only samples not yet sent, and the music feed
-  runs `LEAD_S` = 4.0s ahead into a buffer up to 5.46s deep — so a change is
-  heard **at least ~4s later**, and a voice response never hears it at all,
-  since the chain is built per stream. Device-side the chain sits at the ALSA
-  write, so a config push lands within RTT + one period (~43ms). These are
-  taste parameters tuned by ear, and four seconds of the old setting is long
-  enough to blur the comparison being made.
+  Die Durchsage wartet, bis eine Antwort fertig ist, und stellt sich hinter
+  andere Durchsagen an, mit einer Obergrenze. Sie für das gesamte Klingeln zu
+  blockieren ist weiterhin falsch — HA hält `_is_announcing`, und 120 s
+  `MAX_RING_S` ließen jede zweite Durchsage scheitern —, aber das ist das
+  UNBEGRENZTE Warten. Auf die gerade laufende Salve zu warten dauert unter zwei
+  Sekunden, und die Warnung so zu lesen, als verbiete sie beides, ist der
+  Grund, warum das so lange offen lag.
 
-  This is the SAME argument that forced ducking device-side (principle 3:
-  audio that has left the controller cannot be un-sent). EQ tuning has the
-  identical shape.
-- **One chain post-mix is the correct topology, and today's cannot be
-  reached.** The controller runs **two independent** chains —
-  `em_controller.py:1402` for the response, `em_player.py:544` for the media
-  feed — so **neither limiter ever sees voice and music summed**. Only the
-  mixer's saturation stands behind that today.
-- **Sendspin makes it forced rather than preferred.** A Sendspin session goes
-  MA → device and never crosses the controller, so a controller-side chain
-  would shape voice and HA-routed music while silently not shaping
-  synchronised music — the same speaker sounding different depending on which
-  app started the track.
+  Offen: Die Absenktiefe des Alarms will einen eigenen Wert statt `duckDb`, das
+  für ein Musikbett unter Sprache abgestimmt wurde; und das Fortsetzen der
+  Musik nach dem Abweisen setzt bei einem nicht spulbaren Strom an der
+  Live-Kante wieder ein, ein 30-s-Alarm kostet also 30 s des Stücks.
 
-No protocol or GUI work is implied: all seven keys (`eqBands`, `eqLoudness`,
-`limiter*`, `bassGuard*`) already ride the config push and are currently
-ignored by the device.
+  **Das gemeinsame `playback_done`-Event ist behoben** (#481): Es ist jetzt eine
+  FIFO-Warteschlange von Wartenden je Wiedergabe, eine Gerätemeldung befriedigt
+  also nicht mehr zwei.
 
-### 8.2 Requirements — all met, none heard
+- **Q3 — wem gehört der Lautsprecher, wenn die Klinke belegt ist?** Ein
+  Stecker in der Buchse verschlechtert das gesamte Audio-Teilsystem
+  (#117/#141) und kann bei laufender Musiksitzung alles verstummen lassen,
+  auch Sprache. Das ist ein Hardware- bzw. HAL-Fehler und kein Besitzproblem,
+  aber es präsentiert sich als Besitzfehler und soll hier benannt sein, damit
+  es nicht erneut als solcher diagnostiziert wird.
 
-R1–R7 below were the acceptance criteria. What they cost, recorded because the
-next port will want to know:
+---
 
-- **R5 (fixture agreement) came out EXACT** — all fifteen cases, error −Inf dB,
-  peak difference 0 LSB, including every parameter transition and the flush
-  tail. Achievable rather than lucky: keep float64, keep scipy's transposed
-  direct form II, keep each expression in the reference's algebraic *shape*,
-  and write the shared gain law in its arithmetic ORDER.
-- **R7 (fixed point vs float) is answered: float64.** Nine biquads plus a
-  crossover at 48kHz is a few Mflop/s. There was never a reason to reach for
-  something narrower, and float64 is what makes the agreement provable.
-- **R4 (no click) needed a measurement before a mechanism** — see 8.3.
-- **R2 was written down and not built, and that is the expensive half.** The
-  device half of this port shipped with the capability announced and the
-  controller still shaping every device that announced it — two limiters in
-  series on exactly the firmware the port was for, with the documentation
-  saying otherwise. It fails no test, raises nothing, and presents as "the
-  new firmware sounds worse", which is the same shape as the DAC clipping in
-  8.4. The gate now lives in `controller/em_outchain.py`: one pure function
-  with unit tests, plus a source guard that fails when a function in
-  `em_controller.py` or `em_player.py` builds a chain without consulting it.
-  A `Bypass` rather than a disabled chain, because a disabled `BassGuard`
-  still sums the crossover halves and that sum is an **allpass** — flat in
-  magnitude, not the caller's own bytes.
+## 8. Die Klangkette wandert auf das Gerät **[gebaut — 3.0.0]**
 
-#### The criteria
+Am 2026-08-22 entschieden UND GEBAUT (Wil): **Der gesamte Ausgabepfad läuft
+auf dem Gerät, und der Controller liefert die Stellschrauben dafür.** Portiert
+in `device/internal/outchain`, eingehängt bei `pcm_speaker.silenceLoop`,
+gekoppelt an die Fähigkeit `output_chain`. **Auf Hardware noch nicht gehört**
+— jede Aussage unten ist gegen die Referenzumsetzung oder per Test belegt,
+nicht per Ohr. Der Umfang ist ausschließlich der AUSGABE-Pfad — EQ, Limiter,
+Bass-Schutz und der Mix. Die Verarbeitung auf der Eingangsseite (`em_ns.py` /
+DTLN auf dem zur Spracherkennung gehenden Mikrofonstrom) bleibt beim
+Controller und ist ein eigener Arbeitsstrang: Sie ist ein neuronales Netz auf
+dem Weg zur Spracherkennung und nicht zum Lautsprecher, und nichts hier
+verlangt ihre Verlagerung.
 
-| # | Requirement | Why |
+### 8.1 Warum — drei Gründe, nach Gewicht geordnet
+
+- **Die Abstimmungsverzögerung bricht von Sekunden auf eine Periode
+  zusammen.** Im Controller erreicht eine Parameteränderung nur Samples, die
+  noch nicht gesendet sind, und der Musikvorlauf läuft `LEAD_S` = 4,0 s voraus
+  in einen bis zu 5,46 s tiefen Puffer — eine Änderung ist also **frühestens
+  ~4 s später** zu hören, und eine Sprachantwort hört sie nie, weil die Kette
+  pro Strom gebaut wird. Auf dem Gerät sitzt die Kette am ALSA-Schreibvorgang,
+  ein Config-Push landet also innerhalb einer Umlaufzeit plus einer Periode
+  (~43 ms). Das sind nach Gehör abgestimmte Geschmacksparameter, und vier
+  Sekunden der alten Einstellung reichen, um den Vergleich zu verwischen.
+
+  Das ist DASSELBE Argument, das das Ducking auf das Gerät gezwungen hat
+  (Prinzip 3: Ton, der den Controller verlassen hat, lässt sich nicht
+  zurückholen). Die EQ-Abstimmung hat dieselbe Form.
+- **Eine Kette nach dem Mischen ist die richtige Topologie, und die heutige
+  ist nicht erreichbar.** Der Controller betreibt **zwei unabhängige** Ketten
+  — `em_controller.py:1402` für die Antwort, `em_player.py:544` für den
+  Medienstrom —, also sieht **kein Limiter jemals Sprache und Musik
+  summiert**. Dahinter steht heute nur die Sättigung des Mischers.
+- **Sendspin macht daraus einen Zwang statt einer Vorliebe.** Eine
+  Sendspin-Sitzung geht MA → Gerät und kreuzt den Controller nie; eine Kette im
+  Controller würde Sprache und über HA geroutete Musik formen und
+  synchronisierte Musik stillschweigend nicht — derselbe Lautsprecher klänge
+  unterschiedlich, je nachdem, welche App das Stück gestartet hat.
+
+Es folgt daraus keine Protokoll- oder Oberflächenarbeit: Alle sieben Schlüssel
+(`eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`) reiten bereits auf dem
+Config-Push mit und werden vom Gerät derzeit ignoriert.
+
+### 8.2 Anforderungen — alle erfüllt, keine gehört
+
+R1–R7 unten waren die Abnahmekriterien. Was sie gekostet haben, festgehalten,
+weil die nächste Portierung es wissen will:
+
+- **R5 (Übereinstimmung mit den Fixtures) kam EXAKT heraus** — alle fünfzehn
+  Fälle, Fehler −Inf dB, Spitzenunterschied 0 LSB, einschließlich jedes
+  Parameterübergangs und des Flush-Ausklangs. Erreichbar statt Glück: float64
+  behalten, scipys transponierte Direktform II behalten, jeden Ausdruck in der
+  algebraischen *Gestalt* der Referenz belassen und das gemeinsame
+  Verstärkungsgesetz in seiner arithmetischen REIHENFOLGE schreiben.
+- **R7 (Festkomma gegen Fließkomma) ist beantwortet: float64.** Neun Biquads
+  plus eine Frequenzweiche bei 48 kHz sind ein paar Mflop/s. Es gab nie einen
+  Grund, zu etwas Schmalerem zu greifen, und float64 ist das, was die
+  Übereinstimmung beweisbar macht.
+- **R4 (kein Klicken) brauchte erst eine Messung, dann einen Mechanismus** —
+  siehe 8.3.
+- **R2 wurde aufgeschrieben und nicht gebaut, und das ist die teure Hälfte.**
+  Die Gerätehälfte dieser Portierung ging mit angekündigter Fähigkeit in
+  Betrieb, während der Controller weiterhin jedes Gerät formte, das sie
+  ankündigte — zwei Limiter hintereinander auf genau der Firmware, für die die
+  Portierung gedacht war, mit einer Dokumentation, die etwas anderes sagte. Es
+  lässt keinen Test scheitern, wirft nichts, und präsentiert sich als „die neue
+  Firmware klingt schlechter" — dieselbe Form wie das DAC-Übersteuern in 8.4.
+  Das Gatter lebt jetzt in `controller/em_outchain.py`: eine reine Funktion mit
+  Unit-Tests, dazu ein Quelltextwächter, der scheitert, wenn eine Funktion in
+  `em_controller.py` oder `em_player.py` eine Kette baut, ohne ihn zu fragen.
+  Ein `Bypass` statt einer deaktivierten Kette, denn ein deaktivierter
+  `BassGuard` summiert die Hälften der Frequenzweiche weiterhin, und diese
+  Summe ist ein **Allpass** — im Betrag flach, aber nicht die eigenen Bytes des
+  Aufrufers.
+
+#### Die Kriterien
+
+| # | Anforderung | Warum |
 |---|---|---|
-| R1 | Gate on an **`output_chain` capability**, independent of any Sendspin capability | A device could speak Sendspin without a local chain; standing the controller down for it ships unshaped audio. Same split as `oww_shadow` vs `oww_trigger` |
-| R2 | Controller stands down **only** on announce; otherwise it shapes as today | Degrade to old behaviour, never to a wrong answer. Two chains in series is two limiters in series, which is audibly wrong |
-| R3 | Chain sits **after the mix**, once | 8.1 |
-| R4 | **No click on any parameter change** | Deal-breaker (Wil, 2026-08-22). See 8.3 |
-| R5 | Port validated against **golden fixtures** generated from the Python chain | Precedent: `internal/wakeword/fixture` — the reason on-device wake word was trustworthy on arrival |
-| R6 | Python chain **kept**, as reference implementation and old-firmware fallback | Not scaffolding to delete |
-| R7 | Fixed point vs float **measured, not assumed** | The mixer's Q15 precedent covers a gain multiply; a limiter and a multiband guard are more precision-sensitive. The A53 has VFP, so float32 is on the table |
+| R1 | An eine **Fähigkeit `output_chain`** koppeln, unabhängig von jeder Sendspin-Fähigkeit | Ein Gerät könnte Sendspin sprechen, ohne eine lokale Kette zu haben; den Controller dafür zurückzustellen liefert unbearbeitetes Audio aus. Dieselbe Trennung wie `oww_shadow` gegen `oww_trigger` |
+| R2 | Der Controller tritt **nur** bei Ankündigung zurück; sonst formt er wie heute | Auf altes Verhalten zurückfallen, nie auf eine falsche Antwort. Zwei Ketten hintereinander sind zwei Limiter hintereinander, und das ist hörbar falsch |
+| R3 | Die Kette sitzt **nach dem Mischen**, einmal | 8.1 |
+| R4 | **Kein Klicken bei irgendeiner Parameteränderung** | Ausschlusskriterium (Wil, 2026-08-22). Siehe 8.3 |
+| R5 | Portierung gegen **goldene Fixtures** validiert, erzeugt aus der Python-Kette | Präzedenzfall: `internal/wakeword/fixture` — der Grund, warum das Wakeword auf dem Gerät bei seiner Ankunft vertrauenswürdig war |
+| R6 | Python-Kette **behalten**, als Referenzumsetzung und Rückfall für alte Firmware | Kein Gerüst zum Abreißen |
+| R7 | Festkomma gegen Fließkomma **messen, nicht annehmen** | Der Q15-Präzedenzfall des Mischers deckt eine Verstärkungsmultiplikation ab; ein Limiter und ein Mehrband-Schutz sind präzisionsempfindlicher. Der A53 hat VFP, float32 steht also zur Debatte |
 
-### 8.3 R4 — how "no click" is actually achieved
+### 8.3 R4 — wie „kein Klicken" tatsächlich erreicht wird
 
-**Updating in place is necessary and NOT sufficient.** Preserving filter state
-avoids the rebuild transient (the bug `em_player`'s comment describes), but it
-does not avoid the transient from coefficients changing under a running
-filter. And the obvious fix is a trap: **interpolating raw biquad coefficients
-between two stable filters can pass through unstable intermediate states**, so
-naive smoothing blows up rather than clicking.
+**In-Place zu aktualisieren ist notwendig und NICHT hinreichend.** Den
+Filterzustand zu bewahren vermeidet den Neuaufbau-Einschwinger (den Fehler,
+den der Kommentar in `em_player` beschreibt), aber nicht den Einschwinger
+dadurch, dass sich Koeffizienten unter einem laufenden Filter ändern. Und die
+naheliegende Lösung ist eine Falle: **rohe Biquad-Koeffizienten zwischen zwei
+stabilen Filtern zu interpolieren kann durch instabile Zwischenzustände
+laufen**, naives Glätten fliegt also auseinander, statt zu klicken.
 
-- **Constant-slew parameter ramping**, exactly as `duckRampPeriods` already
-  does for the duck — deliberately a constant slew and not a proportional one,
-  so it is a duration rather than a time constant that crawls the last few
-  percent.
-- **Dual-instance crossfade for the biquads**: run old and new in parallel,
-  equal-power crossfade over ~50–100ms, drop the old. Unconditionally stable
-  because neither instance is ever interpolated. Costs one extra chain's CPU
-  during the crossfade window only.
-- **Limiter and bass guard are easier** — threshold and release changes are
-  gain-domain and smooth naturally provided detector state carries over.
+- **Parameterrampen mit konstanter Steigung**, genau wie `duckRampPeriods` es
+  bereits fürs Absenken tut — bewusst konstante Steigung und nicht
+  proportional, damit es eine Dauer ist und keine Zeitkonstante, die sich an
+  die letzten paar Prozent heranschleicht.
+- **Überblendung mit zwei Instanzen für die Biquads**: alte und neue parallel
+  laufen lassen, über ~50–100 ms überblenden, die alte fallen lassen.
+  Bedingungslos stabil, weil keine der Instanzen je interpoliert wird. Kostet
+  die CPU einer zusätzlichen Kette, und das nur während des Überblendfensters.
+- **Limiter und Bass-Schutz sind leichter** — Änderungen an Schwelle und
+  Release liegen im Verstärkungsbereich und glätten sich von selbst, sofern
+  der Detektorzustand übernommen wird.
 
-**Pinned by test, not by ear:** a step change in any parameter must produce no
-sample-to-sample discontinuity above a threshold. Host-testable in Go, no
-hardware required.
+**Per Test festgenagelt, nicht per Ohr:** Eine sprunghafte Änderung eines
+beliebigen Parameters darf keinen Sprung von Sample zu Sample über einer
+Schwelle erzeugen. Auf dem Host in Go testbar, ohne Hardware.
 
-**MEASURED 2026-08-22, and the obvious probe detects nothing.** A parameter
-change is only audible as a discontinuity when the FILTER STATE holds real
-energy — a low frequency at level. On a 1kHz tone, none of these changes
-produce a step above the signal's own slope:
+**GEMESSEN am 2026-08-22, und die naheliegende Sonde erkennt nichts.** Eine
+Parameteränderung ist nur dann als Sprung hörbar, wenn der FILTERZUSTAND
+echte Energie hält — eine tiefe Frequenz mit Pegel. Bei einem 1-kHz-Ton
+erzeugt keine dieser Änderungen einen Sprung über der eigenen Steilheit des
+Signals:
 
-| signal | change | raw step | crossfaded | peak |
+| Signal | Änderung | roher Sprung | überblendet | Spitze |
 |---|---|---|---|---|
-| 60Hz @20000 | loudness on (state reset) | 53351 | 6144 | 72863 |
-| 60Hz @20000 | all bands 0 → +12 | 61469 | 7759 | 113938 |
-| 60Hz @20000 | low shelf +12 → −12 | 1065 | 578 | 80607 |
-| 1kHz @8000 | any of the above | at or below the signal's own slope | | |
+| 60 Hz @20000 | Loudness an (Zustandsreset) | 53351 | 6144 | 72863 |
+| 60 Hz @20000 | alle Bänder 0 → +12 | 61469 | 7759 | 113938 |
+| 60 Hz @20000 | Low-Shelf +12 → −12 | 1065 | 578 | 80607 |
+| 1 kHz @8000 | irgendeine der obigen | auf oder unter der eigenen Steilheit des Signals | | |
 
-The top row is a step of **73% of the signal**, and it is the state-reset case
-— so the quirk the port deliberately reproduces from `em_eq` is the single
-worst offender, and the crossfade is what makes reproducing it safe rather than
-merely faithful. Measured reduction: **8.7×**.
+Die oberste Zeile ist ein Sprung von **73 % des Signals**, und es ist der
+Fall mit Zustandsreset — die Eigenheit also, die die Portierung bewusst aus
+`em_eq` nachbildet, ist der schlimmste Übeltäter, und die Überblendung ist
+das, was das Nachbilden sicher statt nur getreu macht. Gemessene Reduktion:
+**8,7×**.
 
-**Linear crossfade, not equal-power.** Equal-power is the reflexive choice and
-is wrong here: it holds level for UNCORRELATED sources, whose powers add. These
-two are the same signal through similar filters, so their amplitudes add and a
-cos/sin fade would bulge by up to 3dB mid-transition — an audible swell on
-every parameter change.
+**Lineare Überblendung, nicht leistungsgleich.** Leistungsgleich ist die
+reflexhafte Wahl und hier falsch: Sie hält den Pegel für UNKORRELIERTE
+Quellen, deren Leistungen sich addieren. Diese beiden sind dasselbe Signal
+durch ähnliche Filter, ihre Amplituden addieren sich also, und eine
+Cos/Sin-Blende würde in der Mitte um bis zu 3 dB anschwellen — ein hörbares
+Aufblähen bei jeder Parameteränderung.
 
-### 8.4 Known risk
+### 8.4 Bekanntes Risiko
 
-The fixed-point (or float) port sounding **audibly different** from the Python
-chain is the one item here without a known method — everything else is
-engineering. It is also the failure mode this project has previous on: the DAC
-clipping above unity gain read for weeks as "Piper sounds worse than stock".
-Measure it early rather than last, and R5 is what makes "different" detectable
-before it is a listening test.
+Dass die Festkomma- (oder Fließkomma-)Portierung **hörbar anders** klingt als
+die Python-Kette, ist der einzige Punkt hier ohne bekannte Methode — alles
+andere ist Ingenieursarbeit. Es ist zugleich der Fehlermodus, mit dem dieses
+Projekt Vorgeschichte hat: Das DAC-Übersteuern oberhalb von Unity Gain las
+sich wochenlang als „Piper klingt schlechter als das Original". Miss es früh
+statt zuletzt, und R5 ist das, was „anders" erkennbar macht, bevor es ein
+Hörtest ist.
 
 ---
 
-## 9. Invariants — do not break
+## 9. Invarianten — nicht brechen
 
-1. **Voice is never attenuated by the duck.** Only the music plane carries
+1. **Sprache wird vom Ducking nie abgesenkt.** Nur die Musikebene trägt
    `duckTarget`.
-2. **A voice turn never flushes the music plane** (F4 above).
-3. **The mixer saturates, never wraps** (`mix_test.go:149` pins this).
-4. **Playback completion comes from the device**, not from a duration estimate.
-5. **`speaker_busy` is released in a `finally`.** [today]
-6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
-7. **The music plane has exactly one producer at a time, and HA wins.**
-   [proposed #89] Interleaving controller `0x04` with a Sendspin session sums
-   two unrelated streams; a direct request through HA ends the Sendspin
-   session rather than mixing with it, and the device leaves the group
-   **cleanly** rather than going quiet on it (S3). Invariant 2 gains a second
-   reason here: flushing music for a voice turn would drop audio a
-   synchronised group is counting on and force a resync.
-8. **The output chain runs exactly once.** [built] Either the controller
-   shapes or the device does, decided by the `output_chain` capability in
-   `em_outchain.controller_shapes` and nowhere else. Both is two limiters in
-   series and is audibly wrong; neither ships audio in front of ±12dB faders
-   with nothing catching what they boost (#231).
+2. **Ein Sprachgespräch leert nie die Musikebene** (F4 oben).
+3. **Der Mischer sättigt, er läuft nie über** (`mix_test.go:149` nagelt das
+   fest).
+4. **Der Abschluss der Wiedergabe kommt vom Gerät**, nicht aus einer
+   Dauerschätzung.
+5. **`speaker_busy` wird in einem `finally` freigegeben.** [heute]
+6. **Frame-Typen gelten je Richtung.** `0x04`/`0x05` sind nicht frei
+   wiederverwendbar.
+7. **Die Musikebene hat zu jeder Zeit genau einen Erzeuger, und HA gewinnt.**
+   [vorgeschlagen #89] Controller-`0x04` mit einer Sendspin-Sitzung zu
+   verschachteln summiert zwei unabhängige Ströme; eine direkte Bitte über HA
+   beendet die Sendspin-Sitzung, statt sich mit ihr zu mischen, und das Gerät
+   verlässt die Gruppe **sauber**, statt bei ihr zu verstummen (S3). Invariante
+   2 bekommt hier einen zweiten Grund: Musik für ein Sprachgespräch zu leeren
+   würde Ton verwerfen, mit dem eine synchronisierte Gruppe rechnet, und eine
+   Neusynchronisation erzwingen.
+8. **Die Klangkette läuft genau einmal.** [gebaut] Entweder formt der
+   Controller oder das Gerät, entschieden von der Fähigkeit `output_chain` in
+   `em_outchain.controller_shapes` und nirgends sonst. Beides sind zwei
+   Limiter hintereinander und ist hörbar falsch; keines von beiden liefert
+   Audio vor ±12-dB-Reglern aus, ohne dass etwas auffängt, was sie anheben
+   (#231).

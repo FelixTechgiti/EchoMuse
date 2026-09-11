@@ -2,7 +2,7 @@
 em_ingressauth.py — whether a request may be authenticated by Home Assistant.
 
 Under the add-on, Home Assistant has already authenticated the person before
-the request reaches us, so a second EchoMuse password is a lock on a door
+the request reaches us, so a second Revoice password is a lock on a door
 that is already locked. Supervisor forwards the authenticated user as
 X-Remote-User-Id (plus optional name headers) and, importantly, **strips any
 incoming headers of those names** before proxying — so the values cannot be

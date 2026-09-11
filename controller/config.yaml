@@ -1,9 +1,9 @@
-name: "EchoMuse"
+name: "Revoice"
 # Tracks the published controller image tag, which controller-release.yml
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.31.0-fx.1"
+version: "2.32.0-fx.1"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -19,10 +19,10 @@ version: "2.31.0-fx.1"
 # add-on changes before they reach main (Supervisor clones the default
 # branch), and "it compiles onnxruntime" made that loop look far more
 # expensive than it is. tools/make_dev_addon.sh packages one.
-image: "ghcr.io/felixtechgiti/echomuse-controller"
+image: "ghcr.io/felixtechgiti/revoice-controller"
 slug: "controller"
 description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
-url: "https://github.com/FelixTechgiti/EchoMuse"
+url: "https://github.com/FelixTechgiti/Revoice"
 init: false
 arch:
   - aarch64
@@ -38,18 +38,18 @@ ingress_port: 8768
 # because the dashboard authenticates whoever Home Assistant forwards
 # (em_ingressauth) and proxies a root shell to every device — so a change to
 # that default must not quietly widen who can reach it. Note it governs the
-# menu entry; EchoMuse does not assume it gates the ingress URL, which is
+# menu entry; Revoice does not assume it gates the ingress URL, which is
 # why only the FIRST Home Assistant user becomes admin and the rest are
 # read-only until promoted.
 panel_admin: true
 panel_icon: mdi:microphone-message
-panel_title: EchoMuse
+panel_title: Revoice
 environment:
-  ECHOMUSE_HOME_ASSISTANT_INGRESS: "true"
+  REVOICE_HOME_ASSISTANT_INGRESS: "true"
   # /data is the add-on's own persistent storage, provided automatically by
   # Supervisor — fixed rather than a user option so the database can't be
   # pointed somewhere that doesn't survive a restart.
-  DB_PATH: "/data/echomuse.db"
+  DB_PATH: "/data/revoice.db"
 # Read-only access to Home Assistant's /ssl folder, so a private CA
 # certificate can be pointed at with extra_ca_cert. Read-only by default,
 # which is all this needs — we copy the file, never write it.
@@ -59,7 +59,7 @@ map:
 options:
   server_host: "0.0.0.0"
   server_ip: ""
-  mdns_name: "echomuse"
+  mdns_name: "revoice"
   esphome_project_version: "2.0.0"
   # Base for the per-device ESPHome satellite ports. Differs per release
   # channel so the two add-ons hand out disjoint ranges — see em_db's

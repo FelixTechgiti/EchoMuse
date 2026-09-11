@@ -68,7 +68,7 @@ const BinaryPath = "/data/local/bin/shairport-sync"
 // It was declared and never written for the whole life of this package, which
 // is why `audio_backend_latency_offset_in_seconds` — the one setting that can
 // take latency out of an AirPlay stream — was unreachable.
-const ConfigPath = "/data/local/etc/echomuse/shairport-sync.conf"
+const ConfigPath = "/data/local/etc/revoice/shairport-sync.conf"
 
 const (
 	// SourceRate is what classic AirPlay delivers, by definition. AirPlay 2
@@ -159,7 +159,7 @@ type Options struct {
 // itself has to exist before shairport-sync opens it and /data is where every
 // other path this firmware owns already lives. It is a named pipe, so it
 // stores nothing and costs no flash writes.
-const MetadataPipePath = "/data/local/etc/echomuse/airplay-metadata"
+const MetadataPipePath = "/data/local/etc/revoice/airplay-metadata"
 
 // Client supervises one shairport-sync process.
 type Client struct {
@@ -504,7 +504,7 @@ func (c *Client) name() string {
 	if c.opts.Name != "" {
 		return c.opts.Name
 	}
-	return "EchoMuse"
+	return "Revoice"
 }
 
 // args builds shairport-sync's command line.

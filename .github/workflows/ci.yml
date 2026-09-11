@@ -327,7 +327,7 @@ jobs:
           docker pull "$BASE"
           printf 'FROM %s\nCOPY controller/*.py /app/\n' "$BASE" \
             > /tmp/ci-overlay.Dockerfile
-          docker build -f /tmp/ci-overlay.Dockerfile -t echomuse-controller:ci .
+          docker build -f /tmp/ci-overlay.Dockerfile -t revoice-controller:ci .
       # Every module, not a hand-picked list: a new file added to the
       # controller must import cleanly on the day it lands, and naming them
       # individually means the next em_*.py is silently exempt.
@@ -338,7 +338,7 @@ jobs:
       - name: Import every controller module
         run: |
           docker run --rm -w /app --entrypoint python3 \
-            echomuse-controller:ci -c '
+            revoice-controller:ci -c '
           import importlib, pathlib, sys, traceback
           mods = sorted(p.stem for p in pathlib.Path(".").glob("*.py"))
           mods = [m for m in mods if m not in ("em_start",)]
@@ -367,10 +367,10 @@ jobs:
           mkdir -p /tmp/em-ci-data
           docker run -d --name em-ci \
             -e SERVER_IP=127.0.0.1 \
-            -e DB_PATH=/app/data/echomuse.db \
+            -e DB_PATH=/app/data/revoice.db \
             -e DEVICE_APPROVAL=strict \
             -v /tmp/em-ci-data:/app/data \
-            echomuse-controller:ci
+            revoice-controller:ci
           # 90s: a first start generates the CA and runs every migration on
           # an empty database, which is the slowest legitimate boot there is.
           for i in $(seq 1 90); do
@@ -423,7 +423,7 @@ jobs:
       # It builds only; it does not verify the binary runs. Moving the
       # compiler pin still needs a real device in the loop.
       - name: Build compiler image
-        run: docker build -t echomuse-compiler device/compiler/
+        run: docker build -t revoice-compiler device/compiler/
       - name: Build firmware
         run: |
           docker run --rm --entrypoint bash \
@@ -431,7 +431,7 @@ jobs:
             -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
             -v "$PWD/device":/sdk \
             -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
-            echomuse-compiler \
+            revoice-compiler \
             -c "cd /sdk && go build -tags server -o build/server ./cmd/"
       - name: Check it is an ARM binary
         # A build that silently produced a host binary would pass the step
@@ -460,7 +460,7 @@ jobs:
       - name: Build the emOS init (aarch64, static)
         run: |
           mkdir -p emos/build
-          docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
+          docker run --rm -v "$PWD/emos":/emos -w /emos revoice-compiler bash -lc \
             '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
                -static -O2 -Wall -o build/init init/init.c'
       - name: Check it is a static aarch64 binary

@@ -1,5 +1,5 @@
 """
-em_eq.py — Output EQ for EchoMuse Controller
+em_eq.py — Output EQ for Revoice Controller
 =============================================
 
 Applies a biquad filter chain to mono S16_LE PCM (Piper TTS output) before
@@ -34,7 +34,7 @@ from scipy.signal import sosfilt
 import em_limiter
 import em_mbc  # noqa: F401  (type reference in signatures)
 
-log = logging.getLogger("echomuse.eq")
+log = logging.getLogger("revoice.eq")
 
 EQ_FREQUENCIES = [125, 250, 500, 1000, 2000, 3500, 5500, 8000]
 NUM_BANDS       = len(EQ_FREQUENCIES)

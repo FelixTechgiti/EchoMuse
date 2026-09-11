@@ -26,8 +26,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 restore() {
     echo ""
     echo "--- restoring device ---"
-    adb shell "su -c 'start echomuse'" >/dev/null 2>&1
-    echo "echomuse started (it re-seeds volume from startupVolume)"
+    adb shell "su -c 'start revoice'" >/dev/null 2>&1
+    echo "revoice started (it re-seeds volume from startupVolume)"
 }
 trap restore EXIT INT TERM
 
@@ -54,7 +54,7 @@ for w in left_only right_only sweep; do
     adb push "$HERE/$w.wav" /data/local/tmp/$w.wav >/dev/null || exit 1
 done
 
-adb shell "su -c 'stop echomuse'"
+adb shell "su -c 'stop revoice'"
 sleep 2
 adb shell "su -c 'tinymix -D 0 5 On; tinymix -D 0 56 On; tinymix -D 0 64 1 1'" >/dev/null
 # Unity gain: loud enough to sit well above the room, and the highest setting

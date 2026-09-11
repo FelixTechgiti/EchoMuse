@@ -9,7 +9,7 @@
 //
 // What is under test is the only partition write the wizard performs. The
 // layers below FireOS on this device (preloader, LK, and amonet's unlock
-// payload) are ones EchoMuse does not write. A kernel written over the payload
+// payload) are ones Revoice does not write. A kernel written over the payload
 // costs the unlock and means running amonet again, which is not a state
 // anyone can be talked out of over an issue thread.
 //

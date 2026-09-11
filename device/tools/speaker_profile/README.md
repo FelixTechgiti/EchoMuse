@@ -27,8 +27,8 @@ device/tools/speaker_profile/profile.sh [output_dir]
 Signals are generated on first run (`generate_signals.py`) rather than
 committed. Needs `adb`, and `numpy` on the host.
 
-It stops EchoMuse for exclusive ALSA and restarts it on every exit path,
-Ctrl-C included. Volume is restored by EchoMuse itself, which re-seeds from
+It stops Revoice for exclusive ALSA and restarts it on every exit path,
+Ctrl-C included. Volume is restored by Revoice itself, which re-seeds from
 `startupVolume` on its first config push.
 
 **Part A** — 440Hz left with right silent, then the reverse. Establishes which

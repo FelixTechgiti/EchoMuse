@@ -1133,7 +1133,7 @@ static int run_wait(char *const argv[])
  * properties rather than a file, there is no /system/etc/resolv.conf at all,
  * and dhcpcd's "could not set property" lines are it failing to publish them
  * to a property service we do not run. Nothing noticed for a long time because
- * EchoMuse finds its controller over mDNS and connects by IP.
+ * Revoice finds its controller over mDNS and connects by IP.
  *
  * The gateway is an ASSUMPTION, not a lease value: parsing dhcpcd's binary
  * lease would be the correct source, and on the overwhelming majority of home
@@ -1717,7 +1717,7 @@ int main(int argc, char **argv)
      * device in preloader or FireOS mode, so the operator picking a serial
      * port in the provisioning wizard has nothing to aim at. Stock sets all
      * three (Amazon / AEOBC / serial); we were setting none. */
-    usbwr("iManufacturer", "EchoMuse");
+    usbwr("iManufacturer", "Revoice");
     usbwr("iProduct", "emOS console");
     if (*serialno())
         usbwr("iSerial", serialno());
@@ -1778,29 +1778,29 @@ int main(int argc, char **argv)
                         "-O", "/run/messages", "-s", "256", "-b", "2", NULL };
     char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
 
-    /* EchoMuse itself, via its OWN supervisor rather than directly.
+    /* Revoice itself, via its OWN supervisor rather than directly.
      *
      * start_server.sh owns the A/B slot symlink, the fast-exit backoff and the
      * log trimming that the OTA system depends on, so init starting the binary
      * would quietly bypass firmware rollback. Android's init launched the same
      * script; emOS does the job it used to. It is absent on a device where
-     * EchoMuse has not been installed, which is an ordinary state, not a fault.
+     * Revoice has not been installed, which is an ordinary state, not a fault.
      */
-    char *echomuse[] = { "/system/bin/sh", "/data/local/bin/start_server.sh",
-                         NULL };
+    char *revoice[] = { "/system/bin/sh", "/data/local/bin/start_server.sh",
+                        NULL };
 
     svc_add("net", NULL, NULL, NULL);       /* forked in-process, see below */
     svc_add("syslogd", syslogd, NULL, NULL);
     svc_add("klogd", klogd, NULL, NULL);
-    /* EchoMuse waits for the network stage to finish, and the wait is about
+    /* Revoice waits for the network stage to finish, and the wait is about
      * the LED RING as much as connectivity. The firmware claims the ring the
      * moment it starts, so a server starting mid-boot drives the same twelve
      * LEDs as the boot progress bar and the two fight — the identical
      * two-writer conflict, over the same i2C device, that the kernel's
      * boot_animation caused. Waiting for /run/net-up means the ring has
-     * finished and faded before the firmware touches it, and EchoMuse has a
+     * finished and faded before the firmware touches it, and Revoice has a
      * controller to reach when it does start. */
-    svc_add("echomuse", echomuse, "/data/local/bin/start_server.sh",
+    svc_add("revoice", revoice, "/data/local/bin/start_server.sh",
             "/run/net-up");
     svc_add("console", NULL, NULL, NULL);   /* needs the tty as its stdio */
 
@@ -1903,7 +1903,7 @@ static int svc_backoff(int fails)
  * with nothing to type, and the file is the only thing standing between them
  * and a device they own.
  */
-#define CONSOLE_PW "/data/local/etc/echomuse/console.pw"
+#define CONSOLE_PW "/data/local/etc/revoice/console.pw"
 
 struct sha256 {
     unsigned int  h[8];
@@ -2082,12 +2082,12 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
  */
 /* Where the firmware writes the console idle timeout, in MINUTES. Beside the
  * password record and for the same reason: the firmware writes it and init
- * reads it, because the console has to work when EchoMuse is not running. */
+ * reads it, because the console has to work when Revoice is not running. */
 /* Overridable like LEDDIR, so the off-target check can point it at a path it
  * is allowed to write. The CI runner is not root and /data does not exist
  * there, which the first version of tmoutcheck.c discovered the hard way. */
 #ifndef CONSOLE_TMOUT
-#define CONSOLE_TMOUT "/data/local/etc/echomuse/console.timeout"
+#define CONSOLE_TMOUT "/data/local/etc/revoice/console.timeout"
 #endif
 
 /* Console idle timeout in SECONDS for the shell's TMOUT, or 0 for none.
@@ -2294,7 +2294,7 @@ static void console_banner(void)
     dprintf(1,
         "\r\n"
         "   ___  _ __ ___     ___  ___\r\n"
-        "  / _ \\| '_ ` _ \\   / _ \\/ __|   EchoMuse\r\n"
+        "  / _ \\| '_ ` _ \\   / _ \\/ __|   Revoice\r\n"
         " |  __/| | | | | | | (_) \\__ \\   %s\r\n"
         "  \\___||_| |_| |_|  \\___/|___/   an Echo with no Amazon on it\r\n"
         "\r\n"
@@ -2432,7 +2432,7 @@ static void supervise(void)
              * it and keeps waiting, where a missing `req` means give up. */
             if (s->after && access(s->after, F_OK) != 0)
                 continue;
-            /* Not installed is not a failure to retry: EchoMuse may simply not
+            /* Not installed is not a failure to retry: Revoice may simply not
              * be on this device yet. Say so once and leave it alone. */
             const char *need = s->req ? s->req : (s->argv ? s->argv[0] : NULL);
             if (need && access(need, F_OK) != 0) {

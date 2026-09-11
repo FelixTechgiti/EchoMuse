@@ -1,253 +1,270 @@
-# EchoMuse Quickstart
+# Revoice-Schnellstart
 
-EchoMuse turns an Amazon Echo Dot (2nd generation) into a **fully local voice
-assistant** — no Amazon account, no cloud, no audio leaving your house. The
-Dot becomes a "satellite": its microphones and speaker are driven by a small
-server (the **controller**) running on a computer on your network, which in
-turn talks to Home Assistant for the actual "turn on the lights" part.
+Revoice macht aus einem Amazon Echo Dot (2. Generation) einen **vollständig
+lokalen Sprachassistenten** — ohne Amazon-Konto, ohne Cloud, ohne Ton, der
+dein Haus verlässt. Der Dot wird zum „Satelliten": Seine Mikrofone und sein
+Lautsprecher werden von einem kleinen Server gesteuert (dem **Controller**),
+der auf einem Rechner in deinem Netzwerk läuft und seinerseits mit Home
+Assistant spricht — dort passiert das eigentliche „Mach das Licht an".
 
-This guide gets you from zero to talking to your Dot. No programming
-knowledge needed — where something genuinely technical is unavoidable (the
-one-time rooting of the Dot), we point you at the detailed guide instead of
-pretending it's easy.
+Diese Anleitung bringt dich von null bis zum Gespräch mit deinem Dot.
+Programmierkenntnisse brauchst du nicht — wo etwas wirklich Technisches
+unvermeidlich ist (das einmalige Rooten des Dots), verweisen wir auf die
+ausführliche Anleitung, statt so zu tun, als sei es einfach.
 
 ---
 
-## What you need
+## Was du brauchst
 
-| Thing | Why |
+| Ding | Wofür |
 |---|---|
-| Amazon Echo Dot 2nd gen ("biscuit") | The hardware being repurposed. Second-hand ones are cheap. |
-| A computer that's always on (a home server, NAS, Raspberry-Pi-class box or better) | Runs the controller. Docker recommended. |
-| Home Assistant | Does the actual assistant work: speech-to-text, understanding, text-to-speech. You need a working [Assist pipeline](https://www.home-assistant.io/voice_control/) already set up. |
-| A USB cable + a laptop, once | For the one-time unlock/flash of the Dot. |
+| Amazon Echo Dot 2. Generation („biscuit") | Die Hardware, die umgewidmet wird. Gebraucht ist sie günstig. |
+| Ein Rechner, der durchläuft (Heimserver, NAS, Raspberry-Pi-Klasse oder besser) | Betreibt den Controller. Docker empfohlen. |
+| Home Assistant | Erledigt die eigentliche Assistenzarbeit: Spracherkennung, Verstehen, Sprachausgabe. Eine funktionierende [Assist-Pipeline](https://www.home-assistant.io/voice_control/) muss bereits eingerichtet sein. |
+| Einmalig ein USB-Kabel und ein Laptop | Zum einmaligen Entsperren und Flashen des Dots. |
 
-## Step 1 — Root the Dot (one time, per device)
+## Schritt 1 — Den Dot rooten (einmalig, pro Gerät)
 
-The Dot ships locked to Amazon's software. Unlocking it involves flashing
-modified firmware over USB — it's the only genuinely fiddly part of the
-project, it takes an hour or so the first time, and it's fully documented
-step-by-step in [rooting](rooting.md), which points at R0rt1z2's XDA Forums
-thread for the exploit itself.
+Der Dot kommt fest an Amazons Software gebunden. Ihn zu entsperren heißt,
+veränderte Firmware über USB zu flashen — das ist der einzige wirklich
+fummelige Teil des Projekts, dauert beim ersten Mal etwa eine Stunde und ist
+Schritt für Schritt in [rooting.md](rooting.md) dokumentiert, das für den
+Exploit selbst auf R0rt1z2s Thread im XDA-Forum verweist.
 
-The good news: the dashboard has a **provisioning wizard** (plug the Dot into
-your laptop's USB port, open the dashboard in Chrome, follow the steps) that
-automates most of the process after the initial unlock.
+Die gute Nachricht: Das Dashboard hat einen **Einrichtungsassistenten** (Dot
+in den USB-Port des Laptops stecken, Dashboard in Chrome öffnen, den
+Schritten folgen), der nach dem ersten Entsperren fast alles automatisiert.
 
-If a step fails, the wizard offers a **Download diagnostics** file to attach
-to an issue. It captures the device's state at the moment it failed, which
-saves a round trip of being asked to run things by hand. If you unplug the
-device at any point you can carry on, because **Reconnect** is on every step.
-Note that the cable is the Dot's only power, so unplugging reboots it and it
-comes back in Android. The wizard will say so if the step you are on needed
-recovery mode.
+Scheitert ein Schritt, bietet der Assistent **Diagnose herunterladen** an —
+eine Datei zum Anhängen an ein Issue. Sie hält den Gerätezustand genau im
+Moment des Fehlers fest und spart die Rückfragerunde, in der du sonst Dinge
+von Hand ausführen sollst. Wenn du das Gerät zwischendurch abziehst, kannst
+du weitermachen: **Neu verbinden** steht auf jedem Schritt zur Verfügung.
+Beachte, dass das Kabel die einzige Stromquelle des Dots ist — Abziehen
+startet ihn also neu, und er kommt in Android zurück. Der Assistent sagt es
+dir, wenn der Schritt, auf dem du bist, den Recovery-Modus brauchte.
 
-You only ever do this once per device. Everything afterwards — updates,
-configuration, even a remote terminal — happens over WiFi from the dashboard.
+Das machst du pro Gerät genau einmal. Alles danach — Updates, Konfiguration,
+sogar ein Terminal — läuft per WLAN über das Dashboard.
 
-## Step 2 — Start the controller
+## Schritt 2 — Den Controller starten
 
-Two ways, and they run the same software. If you already have Home
-Assistant, the add-on is less work; otherwise use Docker on any
-always-on machine.
+Zwei Wege, beide mit derselben Software. Wenn du Home Assistant schon hast,
+ist das Add-on weniger Arbeit; sonst nimm Docker auf einem Rechner, der
+durchläuft.
 
 <details open>
-<summary><b>As a Home Assistant add-on</b></summary>
+<summary><b>Als Home-Assistant-Add-on</b></summary>
 
-Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
-`https://github.com/FelixTechgiti/EchoMuse`, then install **EchoMuse** from the
-store. The README has a one-click badge for adding the repository.
+Einstellungen → Add-ons → Add-on-Store → ⋮ → **Repositories**,
+`https://github.com/FelixTechgiti/Revoice` einfügen, dann **Revoice** aus dem
+Store installieren. Die README hat ein Badge, das das Repository mit einem
+Klick hinzufügt.
 
-The dashboard appears as a **sidebar panel** — it is reached through Home
-Assistant, so there is no extra port to open and no second address to
-remember. It is *only* reachable that way: the add-on refuses connections
-that do not arrive through Home Assistant.
+Das Dashboard erscheint als **Panel in der Seitenleiste** — es wird durch
+Home Assistant hindurch erreicht, also gibt es keinen zusätzlichen Port zu
+öffnen und keine zweite Adresse zu merken. Es ist *ausschließlich* so
+erreichbar: Das Add-on weist Verbindungen ab, die nicht über Home Assistant
+kommen.
 
-Settings that would go in `.env` are add-on options instead (Configuration
-tab). Leave `server_ip` empty unless the controller picks the wrong
-address — see [When something doesn't work](#when-something-doesnt-work).
+Einstellungen, die sonst in `.env` stünden, sind stattdessen Add-on-Optionen
+(Reiter „Konfiguration"). Lass `server_ip` leer, außer der Controller wählt
+die falsche Adresse — siehe [Wenn etwas nicht funktioniert](#wenn-etwas-nicht-funktioniert).
 
-Your data lives in the add-on's own storage and survives updates.
+Deine Daten liegen im eigenen Speicher des Add-ons und überstehen Updates.
 
-**If you have devices from a previous controller**, they hold that
-controller's certificate authority and will refuse to trust a new one.
-Copy the old `data/tls/` directory (all four files) into the add-on's
-data directory before connecting them, or they cannot connect at all.
+**Wenn du Geräte von einem früheren Controller hast**, tragen sie dessen
+Zertifizierungsstelle und weigern sich, einer neuen zu vertrauen. Kopiere das
+alte Verzeichnis `data/tls/` (alle vier Dateien) in das Datenverzeichnis des
+Add-ons, bevor du sie verbindest — sonst kommen sie überhaupt nicht durch.
 
 </details>
 
 <details>
-<summary><b>With Docker, on any always-on computer</b></summary>
+<summary><b>Mit Docker, auf einem beliebigen durchlaufenden Rechner</b></summary>
 
-Using the prebuilt image (nothing to compile):
+Mit dem fertigen Image (nichts zu kompilieren):
 
 ```bash
-mkdir echomuse && cd echomuse
-curl -O https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/docker-compose.deploy.yml
-curl -o .env https://raw.githubusercontent.com/FelixTechgiti/EchoMuse/main/controller/.env.example
-# Optional: set SERVER_IP in .env to this computer's LAN IP. Left empty it is
-# detected, and the address in use is printed at startup.
+mkdir revoice && cd revoice
+curl -O https://raw.githubusercontent.com/FelixTechgiti/Revoice/main/controller/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/FelixTechgiti/Revoice/main/controller/.env.example
+# Optional: SERVER_IP in .env auf die LAN-IP dieses Rechners setzen. Leer
+# gelassen wird sie erkannt, und die benutzte Adresse steht im Startlog.
 docker compose -f docker-compose.deploy.yml up -d
 ```
 
-To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker compose -f docker-compose.deploy.yml up -d`. Your devices, users, and settings live in `./data` and survive upgrades.
+Später aktualisieren: `docker compose -f docker-compose.deploy.yml pull && docker compose -f docker-compose.deploy.yml up -d`. Deine Geräte, Benutzer und Einstellungen liegen in `./data` und überstehen Updates.
 
 <details>
-<summary>Alternative: build from source (needed for NVIDIA GPU wake-word inference)</summary>
+<summary>Alternative: aus dem Quelltext bauen (nötig für Wakeword-Inferenz auf NVIDIA-GPU)</summary>
 
 ```bash
-git clone https://github.com/FelixTechgiti/EchoMuse.git
-cd EchoMuse/controller
+git clone https://github.com/FelixTechgiti/Revoice.git
+cd Revoice/controller
 cp .env.example .env
-# Optional: set SERVER_IP to this computer's LAN IP. Left empty it is detected.
+# Optional: SERVER_IP auf die LAN-IP dieses Rechners setzen. Leer gelassen wird sie erkannt.
 docker compose up -d --build
 ```
 
-Note: `docker-compose.yml` requests an NVIDIA GPU (for onnxruntime-gpu).
-On a machine without one, remove the `deploy:` block and the `GPU: "1"`
-build arg — or just use the prebuilt image above, which is CPU-only.
+Hinweis: `docker-compose.yml` fordert eine NVIDIA-GPU an (für
+onnxruntime-gpu). Auf einem Rechner ohne GPU entferne den `deploy:`-Block und
+das Build-Argument `GPU: "1"` — oder nimm einfach das fertige Image oben, das
+reine CPU-Version ist.
 
 </details>
 
 </details>
 
-That's it. The controller is now running two things:
+Das war's. Der Controller betreibt jetzt zwei Dinge:
 
-- a **dashboard** at `http://<SERVER_IP>:8768` — your control panel
-- a listener that the Dots find automatically on your network (no IP
-  configuration needed on the device side)
+- ein **Dashboard** unter `http://<SERVER_IP>:8768` — deine Schaltzentrale
+- einen Dienst, den die Dots in deinem Netzwerk von allein finden (auf der
+  Geräteseite ist keine IP zu konfigurieren)
 
-## Step 3 — Create your admin account
+## Schritt 3 — Dein Administratorkonto anlegen
 
-**On the Home Assistant add-on** there is nothing to create. Open the
-**EchoMuse panel** in the sidebar and you are already signed in as your Home
-Assistant user — it has authenticated you, so a second password would be a
-lock on a door that is already locked. The first person to open the panel
-becomes the EchoMuse admin; anyone after that gets read-only access until an
-admin promotes them under **Settings → Users**.
+**Beim Home-Assistant-Add-on** gibt es nichts anzulegen. Öffne das
+**Revoice-Panel** in der Seitenleiste, und du bist bereits als dein
+Home-Assistant-Benutzer angemeldet — Home Assistant hat dich authentifiziert,
+ein zweites Passwort wäre ein Schloss an einer bereits verschlossenen Tür.
+Wer das Panel als Erstes öffnet, wird Revoice-Administrator; alle danach
+bekommen Lesezugriff, bis ein Administrator sie unter **Einstellungen →
+Benutzer** hochstuft.
 
-Roles are EchoMuse's own and are **not** copied from Home Assistant — being an
-HA administrator does not make you an EchoMuse one. Read-only is a real
-restriction rather than a formality: recordings and the transcript text of a
-turn are admin-only, because reaching this dashboard is not the same as being
-trusted with speech from inside the house.
+Die Rollen gehören Revoice und werden **nicht** aus Home Assistant übernommen
+— HA-Administrator zu sein macht dich nicht zum Revoice-Administrator.
+Lesezugriff ist eine echte Einschränkung und keine Formalie: Aufnahmen und
+der Transkripttext eines Gesprächs sind Administratoren vorbehalten, denn
+dieses Dashboard zu erreichen ist nicht dasselbe, wie Sprache aus dem Inneren
+des Hauses anvertraut zu bekommen.
 
-**With Docker**, open `http://<SERVER_IP>:8768`. On a fresh install you'll
-see the Echo graphic with a **pulsing amber ring** and a setup form.
+**Mit Docker** öffnest du `http://<SERVER_IP>:8768`. Bei einer frischen
+Installation siehst du die Echo-Grafik mit einem **pulsierenden bernsteinfarbenen
+Ring** und ein Einrichtungsformular.
 
-It asks for a **setup token** — a one-time code printed in the controller's
-logs, so that only you (the person who can read the server's logs) can claim
-the controller:
+Es fragt nach einem **Setup-Token** — einem Einmalcode, der in den Logs des
+Controllers steht, damit nur du (die Person, die die Serverlogs lesen kann)
+den Controller übernehmen kannst:
 
 ```bash
-docker logs echomuse-controller
+docker logs revoice-controller
 ```
 
-Look for the boxed token near the top, paste it in, pick a username and
-password, and you're in. From then on the page shows a **green ring** and a
-normal login.
+Suche den umrahmten Token nahe dem Anfang, füge ihn ein, wähle Benutzername
+und Passwort — fertig. Ab da zeigt die Seite einen **grünen Ring** und eine
+normale Anmeldung.
 
-## Step 4 — Approve your device
+## Schritt 4 — Dein Gerät freigeben
 
-When a rooted Dot powers up, it finds the controller by itself and asks to
-join. New devices appear in the dashboard as **pending** — nothing works
-until you give it a name and click **Approve & Add to Fleet**. (This is
-deliberate: nothing joins your voice network without you saying so.)
+Wenn ein gerooteter Dot startet, findet er den Controller selbst und bittet
+um Aufnahme. Neue Geräte erscheinen im Dashboard als **ausstehend** — nichts
+funktioniert, bis du ihnen einen Namen gibst und auf **Freigeben & zur Flotte
+hinzufügen** klickst. (Das ist Absicht: Nichts tritt deinem Sprachnetzwerk
+bei, ohne dass du es sagst.)
 
-Once approved, the Dot connects fully: you'll see it as **online**, with its
-volume, settings, and a live status.
+Nach der Freigabe verbindet sich der Dot vollständig: Du siehst ihn als
+**online**, mit Lautstärke, Einstellungen und Live-Status.
 
-## Step 5 — Connect it to Home Assistant
+## Schritt 5 — Mit Home Assistant verbinden
 
-The controller makes each Dot look like an **ESPHome voice satellite** —
-something Home Assistant already knows how to talk to, with no custom
-add-ons:
+Der Controller lässt jeden Dot wie einen **ESPHome-Sprachsatelliten**
+aussehen — etwas, mit dem Home Assistant von Haus aus umgehen kann, ohne
+Zusatz-Integrationen:
 
-1. In Home Assistant: **Settings → Devices & Services → Add Integration →
-   ESPHome**, then enter the **controller's IP** and the device's **port**:
-   16001 for the first device, 16002 for the second, and so on (each
-   device's port is shown on its dashboard page). One integration entry per
-   device.
-2. Assign the new device to your Assist pipeline (Settings → Voice
-   assistants).
+1. In Home Assistant: **Einstellungen → Geräte & Dienste → Integration
+   hinzufügen → ESPHome**, dann die **IP des Controllers** und den **Port**
+   des Geräts eintragen: 16001 für das erste Gerät, 16002 für das zweite und
+   so weiter (der Port jedes Geräts steht auf seiner Dashboard-Seite). Ein
+   Integrationseintrag pro Gerät.
+2. Weise das neue Gerät deiner Assist-Pipeline zu (Einstellungen →
+   Sprachassistenten).
 
-The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
-Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
-proxy, if enabled, shows up separately as `<name> BT Proxy`.
+Das Gerät erscheint in HA als **`<Name> Voice Assistant`** (z. B. „Wohnzimmer
+Voice Assistant") mit dem Modell „Echo Dot Gen 2 (biscuit)" — der
+Bluetooth-Proxy taucht, falls aktiviert, getrennt als `<Name> BT Proxy` auf.
 
-> **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
-> controller, devices should also pop up automatically as discovered
-> "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
-> incompletely and HA silently ignored them, so manual entry was the only
-> way). Devices you've already added manually won't re-appear as
-> discoveries — HA knows it has them. If HA lives on a **different subnet
-> or VLAN**, discovery can't cross that boundary (it uses local-only
-> multicast) and manual entry remains the normal path — still a one-time,
-> 30-second job per device.
+> **Automatische Erkennung:** Läuft Home Assistant im **selben Subnetz** wie
+> der Controller, sollten die Geräte auch von allein als erkannte
+> „revoice-…"-Einträge auftauchen (behoben in v2.7.5 — frühere Versionen
+> haben sich unvollständig angekündigt, und HA hat sie stillschweigend
+> ignoriert, sodass nur die manuelle Eingabe blieb). Bereits von Hand
+> hinzugefügte Geräte erscheinen nicht noch einmal als Fund — HA weiß, dass
+> es sie hat. Liegt HA in einem **anderen Subnetz oder VLAN**, kann die
+> Erkennung diese Grenze nicht überschreiten (sie nutzt rein lokales
+> Multicast), und die manuelle Eingabe bleibt der normale Weg — immer noch
+> eine einmalige Sache von 30 Sekunden pro Gerät.
 
-## Step 6 — Talk to it
+## Schritt 6 — Mit ihm sprechen
 
-Say the wake word — **"Hey Rhasspy"** by default (changeable in the
-dashboard, see [configuration.md](configuration.md)) — then speak normally:
+Sag das Wakeword — standardmäßig **„Hey Rhasspy"**, im Dashboard änderbar,
+siehe [configuration.md](configuration.md) — und sprich dann normal weiter:
 
-> "Hey Rhasspy … turn off the kitchen lights."
+> „Hey Rhasspy … mach das Küchenlicht aus."
 
-The LED ring tells you what's happening:
+Der LED-Ring sagt dir, was gerade passiert:
 
-| Ring | Meaning |
+| Ring | Bedeutung |
 |---|---|
-| Off | Idle, listening for the wake word |
-| Green | Heard the wake word, recording your command |
-| Light-green segment | Which direction it thinks you're speaking from |
-| Spinning | Thinking (Home Assistant is processing) |
-| Cyan arc | Volume level, shown for 2 seconds after a volume press (even mid-response) |
-| Solid red | Microphones muted (the physical mute button — hardware-level since v2.7.4). Pressing mute mid-conversation also cancels whatever the assistant was doing |
+| Aus | Ruhe, wartet auf das Wakeword |
+| Grün | Wakeword gehört, nimmt deinen Befehl auf |
+| Hellgrünes Segment | Aus welcher Richtung du seiner Meinung nach sprichst |
+| Drehend | Denkt nach (Home Assistant verarbeitet) |
+| Cyanfarbener Bogen | Lautstärke, 2 Sekunden lang nach einem Lautstärkedruck (auch mitten in einer Antwort) |
+| Dauerhaft rot | Mikrofone stumm (die physische Mute-Taste — seit v2.7.4 auf Hardwareebene). Mute mitten im Gespräch bricht außerdem ab, was der Assistent gerade tat |
 
-## Everyday things
+## Alltägliches
 
-- **Updates**: when a new EchoMuse release is out, the dashboard shows an
-  update badge — one click updates the device over WiFi. The release notes
-  appear alongside it, so you can read what changed before deciding, rather
-  than judging by version number. If an update ever
-  goes wrong, the device automatically rolls back to its previous version.
-  **Deploy all** updates the whole fleet at once; it runs in the background,
-  so you can close the dialog and reopen it from the header pill to check
-  progress (the button itself steps aside until the fleet is done).
-- **Settings**: everything tunable lives in the dashboard, either fleet-wide
-  (the gear icon) or per device. See [configuration.md](configuration.md).
-- **Terminal**: each device page has a full remote terminal (for the
-  curious; you never *need* it).
-- **Volume**: buttons on the Dot, the dashboard slider, or Home Assistant's
-  media player card — they all stay in sync.
-- **Interrupting**: with barge-in enabled, say the wake word while it's
-  talking and it stops and listens. The mute button also cuts it off
-  instantly (and mutes).
-- **Bluetooth proxy** (optional): each Dot can double as a Home Assistant
-  Bluetooth proxy — passively picking up BLE advertisements (presence
-  beacons, BLE sensors) and feeding them to HA as a *separate* ESPHome
-  device, independent of the voice assistant. Enable it per device in the
-  Config tab (Bluetooth section); it appears in HA as "<name> BT Proxy". See
+- **Updates**: Erscheint eine neue Revoice-Version, zeigt das Dashboard ein
+  Update-Abzeichen — ein Klick aktualisiert das Gerät über WLAN. Die
+  Versionshinweise stehen daneben, du kannst also lesen, was sich geändert
+  hat, statt nach der Versionsnummer zu urteilen. Geht ein Update schief,
+  fällt das Gerät automatisch auf seine vorherige Version zurück. **Alle
+  ausrollen** aktualisiert die ganze Flotte auf einmal; das läuft im
+  Hintergrund, du kannst den Dialog also schließen und ihn über die Pille in
+  der Kopfzeile wieder öffnen, um den Fortschritt zu sehen (die Schaltfläche
+  selbst tritt zur Seite, bis die Flotte durch ist).
+- **Einstellungen**: Alles Einstellbare liegt im Dashboard, entweder
+  flottenweit (Zahnradsymbol) oder pro Gerät. Siehe
+  [configuration.md](configuration.md).
+- **Terminal**: Jede Geräteseite hat ein vollwertiges Fernterminal (für
+  Neugierige; du *brauchst* es nie).
+- **Lautstärke**: Tasten am Dot, Schieberegler im Dashboard oder die
+  Media-Player-Karte in Home Assistant — alle bleiben synchron.
+- **Unterbrechen**: Mit aktiviertem Barge-in sagst du das Wakeword, während
+  er spricht, und er hält an und hört zu. Die Mute-Taste schneidet ihn
+  ebenfalls sofort ab (und schaltet stumm).
+- **Bluetooth-Proxy** (optional): Jeder Dot kann zusätzlich als
+  Home-Assistant-Bluetooth-Proxy dienen — er nimmt passiv
+  BLE-Advertisements auf (Anwesenheits-Beacons, BLE-Sensoren) und reicht sie
+  als *eigenes* ESPHome-Gerät an HA weiter, unabhängig vom Sprachassistenten.
+  Aktivierbar pro Gerät im Reiter „Config" (Abschnitt Bluetooth); in HA
+  erscheint er als „<Name> BT Proxy". Siehe
   [configuration.md](configuration.md).
 
-## When something doesn't work
+## Wenn etwas nicht funktioniert
 
-1. Is the device **online** in the dashboard?
-2. Does the wake word register? The Activity tab shows recent wake detections
-   and "near-misses" (times it almost triggered) — if you're getting
-   near-misses, nudge the sensitivity up a step (see configuration.md).
-3. Bad transcriptions? See the microphone section of
-   [voice-pipeline.md](voice-pipeline.md) — room noise and speaker distance
-   are the usual suspects. To stop guessing, turn on **Save utterances**
-   (Config → Microphones → Advanced) and *listen* to what the Dot heard —
-   the Activity tab gains a play button on each turn. It's off by default
-   because it stores speech on your server; see
-   [configuration.md](configuration.md) for exactly what's kept.
-4. The troubleshooting section of [SETUP.md](../SETUP.md) covers the deeper
-   stuff.
-5. Still stuck, and want to ask? The dashboard's **Support** tab downloads a
-   single diagnostic file to attach to a GitHub issue — versions, device
-   state, recent logs and the delivery statistics that make audio problems
-   diagnosable at a distance. It is built as an allowlist: no transcripts, no
-   recordings, no network names, no account names, and device labels are
-   replaced with pseudonyms. [support-bundle.md](support-bundle.md) lists
-   exactly what's in one so you can check before you share it.
+1. Ist das Gerät im Dashboard **online**?
+2. Kommt das Wakeword an? Der Reiter „Activity" zeigt die letzten
+   Wakeword-Treffer und „Beinahe-Treffer" (Momente, in denen es fast
+   ausgelöst hätte) — wenn du Beinahe-Treffer siehst, schiebe die
+   Empfindlichkeit eine Stufe hoch (siehe configuration.md).
+3. Schlechte Transkriptionen? Siehe den Mikrofonabschnitt in
+   [voice-pipeline.md](voice-pipeline.md) — Raumgeräusche und Abstand zum
+   Sprecher sind die üblichen Verdächtigen. Um das Raten zu beenden, schalte
+   **Save utterances** ein (Config → Microphones → Advanced) und *hör dir an*,
+   was der Dot gehört hat — der Reiter „Activity" bekommt dann eine
+   Wiedergabetaste an jedem Gespräch. Standardmäßig aus, weil dabei Sprache
+   auf deinem Server gespeichert wird; was genau aufbewahrt wird, steht in
+   [configuration.md](configuration.md).
+4. Der Abschnitt zur Fehlersuche in [SETUP.md](../SETUP.md) deckt die
+   tieferen Dinge ab.
+5. Immer noch fest, und du möchtest fragen? Der Reiter **Support** im
+   Dashboard lädt eine einzelne Diagnosedatei herunter, die du an ein
+   GitHub-Issue hängen kannst — Versionen, Gerätezustand, jüngste Logs und
+   die Zustellstatistiken, die Audioprobleme aus der Ferne diagnostizierbar
+   machen. Sie ist als Positivliste gebaut: keine Transkripte, keine
+   Aufnahmen, keine Netzwerknamen, keine Kontonamen, und Gerätebezeichnungen
+   werden durch Pseudonyme ersetzt. [support-bundle.md](support-bundle.md)
+   listet genau auf, was darin steht, damit du vor dem Teilen nachsehen
+   kannst.

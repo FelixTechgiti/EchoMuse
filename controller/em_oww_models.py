@@ -71,7 +71,7 @@ def models_dir(db_path: str | None = None) -> Path:
     stored owwModel path stays valid regardless of the process cwd.
     """
     if db_path is None:
-        db_path = os.environ.get("DB_PATH", "echomuse.db")
+        db_path = os.environ.get("DB_PATH", "revoice.db")
     return (Path(db_path).resolve().parent / MODELS_SUBDIR)
 
 

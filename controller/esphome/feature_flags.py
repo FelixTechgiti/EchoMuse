@@ -35,7 +35,7 @@ class BluetoothProxyFeature(enum.IntFlag):
     Source: aioesphomeapi/model.py, class BluetoothProxyFeature(enum.IntFlag).
     Advertised via DeviceInfoResponse.bluetooth_proxy_feature_flags.
 
-    EchoMuse advertises PASSIVE_SCAN | RAW_ADVERTISEMENTS only — passive
+    Revoice advertises PASSIVE_SCAN | RAW_ADVERTISEMENTS only — passive
     advertisement forwarding (Bermuda, advert-based sensors). Active GATT
     connections are a future lift (the raw HCI transport supports it, the
     Go side doesn't).
@@ -55,7 +55,7 @@ class MediaPlayerEntityFeature(enum.IntFlag):
     Source: aioesphomeapi/model.py, class MediaPlayerEntityFeature(enum.IntFlag).
 
     Added when we found (empirically, against a real HA Core instance —
-    see EchoMuse session notes) that HA's ESPHome integration does not
+    see Revoice session notes) that HA's ESPHome integration does not
     surface a device in Devices & Services at all if it reports zero
     entities via ListEntitiesRequest, even with voice_assistant_feature_flags
     set on DeviceInfoResponse. linux-voice-assistant's satellite.py always

@@ -15,8 +15,8 @@ import (
 //
 // The FIRMWARE writes it and INIT reads it, which is the whole reason it is a
 // file rather than something held in memory: the console has to work when
-// EchoMuse is not running, since that is exactly when someone needs it.
-const ConsolePasswordPath = "/data/local/etc/echomuse/console.pw"
+// Revoice is not running, since that is exactly when someone needs it.
+const ConsolePasswordPath = "/data/local/etc/revoice/console.pw"
 
 // WriteConsolePassword stores the record emOS's init checks against, or
 // removes it when the record is empty.
@@ -68,9 +68,9 @@ func WriteConsolePassword(record string) (changed bool, err error) {
 
 // ConsoleTimeoutPath is where emOS's init looks for the console idle timeout,
 // beside the password record and for the same reasons: the FIRMWARE writes it
-// and INIT reads it, because the console has to work when EchoMuse is not
+// and INIT reads it, because the console has to work when Revoice is not
 // running.
-const ConsoleTimeoutPath = "/data/local/etc/echomuse/console.timeout"
+const ConsoleTimeoutPath = "/data/local/etc/revoice/console.timeout"
 
 // The path actually written, so tests can point it somewhere harmless. A var
 // rather than passing the path in: every caller in the firmware wants the one

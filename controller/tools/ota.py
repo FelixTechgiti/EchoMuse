@@ -13,10 +13,10 @@ def _resolve_db() -> str:
     env = os.environ.get("EM_DB", "").strip()
     if env:
         return env
-    for c in ("/data/echomuse.db", "/app/data/echomuse.db"):
+    for c in ("/data/revoice.db", "/app/data/revoice.db"):
         if os.path.exists(c):
             return c
-    return "/app/data/echomuse.db"
+    return "/app/data/revoice.db"
 
 
 DB = _resolve_db()

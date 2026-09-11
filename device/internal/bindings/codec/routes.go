@@ -4,7 +4,7 @@
 // Until 2026-09-04 nothing here existed, because nothing had to: on FireOS the
 // HAL configures the codec long before our process opens a PCM, so both the
 // microphone array and the speaker worked and we never learned we were relying
-// on it. Running EchoMuse on a device with no Android userspace made the
+// on it. Running Revoice on a device with no Android userspace made the
 // dependency visible in the least helpful way available — capture returned a
 // steady rms≈0.00035 with a perfectly healthy ALSA clock (300.6s of audio over
 // 300.3s of wall, zero stalls), and playback reported

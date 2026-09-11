@@ -24,13 +24,13 @@ import (
 // Credentials are re-read on every dial attempt, so a push takes effect
 // on the next reconnect without a process restart.
 const (
-	credCAPath    = "/data/local/etc/echomuse/ca.pem"
-	credTokenPath = "/data/local/etc/echomuse/token"
+	credCAPath    = "/data/local/etc/revoice/ca.pem"
+	credTokenPath = "/data/local/etc/revoice/token"
 
 	// Must match the DNS SAN in the controller's server cert
 	// (controller/em_pki.py TLS_SERVER_NAME). It is an identity label,
 	// not a resolvable name — mDNS supplies the actual address.
-	tlsServerName = "echomuse-controller"
+	tlsServerName = "revoice-controller"
 )
 
 // BuildUnix is the firmware build timestamp (seconds since epoch), set at

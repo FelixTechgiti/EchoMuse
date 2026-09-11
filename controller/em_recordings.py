@@ -36,7 +36,7 @@ import re
 import wave
 from pathlib import Path
 
-log = logging.getLogger("echomuse.recordings")
+log = logging.getLogger("revoice.recordings")
 
 RECORDINGS_SUBDIR = "recordings"
 
@@ -70,7 +70,7 @@ def recordings_dir(db_path: str | None = None) -> Path:
     valid regardless of the process cwd.
     """
     if db_path is None:
-        db_path = os.environ.get("DB_PATH", "echomuse.db")
+        db_path = os.environ.get("DB_PATH", "revoice.db")
     return (Path(db_path).resolve().parent / RECORDINGS_SUBDIR)
 
 

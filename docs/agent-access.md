@@ -1,37 +1,40 @@
-# Driving the controller from an automation
+# Den Controller aus einer Automation heraus steuern
 
-**The short version:** under the Home Assistant add-on, anything that can
-reach Home Assistant's Supervisor API can reach the EchoMuse API through
-Ingress, authenticate as the Home Assistant user it belongs to, and — if that
-user is an EchoMuse admin — read a device's logs and run commands on it.
-No password, no port to open, no token to copy.
+**Die Kurzfassung:** Unter dem Home-Assistant-Add-on kann alles, was die
+Supervisor-API von Home Assistant erreicht, über Ingress auch die
+Revoice-API erreichen, sich als der Home-Assistant-Benutzer authentifizieren,
+zu dem es gehört, und — wenn dieser Benutzer Revoice-Administrator ist — die
+Logs eines Geräts lesen und Befehle darauf ausführen. Kein Passwort, kein zu
+öffnender Port, kein zu kopierender Token.
 
-This exists because the person who owns the hardware was the only path between
-what a device knew and anyone who could act on it. Diagnosing a fault meant
-that person opening a terminal, running commands somebody else suggested, and
-pasting the output back. That works exactly as long as they are awake and
-willing.
+Das gibt es, weil die Person, der die Hardware gehört, der einzige Weg war
+zwischen dem, was ein Gerät wusste, und irgendjemandem, der handeln konnte.
+Einen Fehler zu diagnostizieren hieß, dass diese Person ein Terminal öffnet,
+von jemand anderem vorgeschlagene Befehle ausführt und die Ausgabe
+zurückkopiert. Das funktioniert genau so lange, wie sie wach und willens ist.
 
 ---
 
-## The path
+## Der Weg
 
-Ingress requests arrive from Supervisor's gateway (`172.30.32.2`) carrying
-`X-Remote-User-Id`, which Supervisor **strips from anything a client sends**
-and re-adds itself. `em_ingressauth` treats that as proof of an authenticated
-Home Assistant session, and only under the add-on — on the standalone
-container the same header is attacker-supplied and is ignored. That is the
-whole security content, and it is why the check is a tested pure function
-rather than an `if` in a handler.
+Ingress-Anfragen kommen vom Gateway des Supervisors (`172.30.32.2`) und
+tragen `X-Remote-User-Id`, das der Supervisor **aus allem entfernt, was ein
+Client sendet**, und selbst wieder hinzufügt. `em_ingressauth` behandelt das
+als Nachweis einer authentifizierten Home-Assistant-Sitzung, und das nur unter
+dem Add-on — im eigenständigen Container ist derselbe Header von Angreifern
+setzbar und wird ignoriert. Das ist der gesamte sicherheitsrelevante Inhalt,
+und deshalb ist die Prüfung eine getestete reine Funktion und kein `if` in
+einem Handler.
 
-So:
+Also:
 
-1. `POST /api/auth/ingress` → `{token, role}`. No body. The identity comes
-   from the headers Supervisor added.
-2. Send that token as `Authorization: Bearer <token>` on every later call.
+1. `POST /api/auth/ingress` → `{token, role}`. Kein Body. Die Identität kommt
+   aus den Headern, die der Supervisor gesetzt hat.
+2. Diesen Token bei jedem weiteren Aufruf als
+   `Authorization: Bearer <token>` mitsenden.
 
-From Claude Code, the Home Assistant MCP server's add-on proxy is the
-transport:
+Aus Claude Code heraus ist der Add-on-Proxy des Home-Assistant-MCP-Servers der
+Transportweg:
 
 ```
 ha_manage_app(slug="<prefix>_controller", path="/api/auth/ingress", method="POST")
@@ -39,66 +42,73 @@ ha_manage_app(slug="<prefix>_controller", path="/api/devices", method="GET",
               request_headers={"Authorization": "Bearer <token>"})
 ```
 
-The slug differs per installation — `ha_get_app(source="installed")` lists it.
+Der Slug unterscheidet sich je Installation — `ha_get_app(source="installed")`
+listet ihn auf.
 
-## The one manual step
+## Der eine Schritt von Hand
 
-**A new Home Assistant user reaching EchoMuse for the first time gets
-`readonly`.** `role_for` grants admin only when nobody can already administer
-the controller through Ingress; the second person through the door is
-read-only, because reaching this dashboard is not by itself evidence of being
-trusted with a root shell on every device.
+**Ein neuer Home-Assistant-Benutzer, der Revoice zum ersten Mal erreicht,
+bekommt `readonly`.** `role_for` vergibt Adminrechte nur, wenn noch niemand
+den Controller über Ingress verwalten kann; die zweite Person durch die Tür
+hat Lesezugriff, denn dieses Dashboard zu erreichen ist für sich genommen kein
+Beleg dafür, dass man mit einer Root-Shell auf jedem Gerät betraut ist.
 
-That rule is correct and should not be loosened for automations. Promote the
-automation's user by hand, once:
+Diese Regel ist richtig und sollte für Automationen nicht gelockert werden.
+Stufe den Benutzer der Automation einmal von Hand hoch:
 
-> **Settings → Users →** find the entry (the Home Assistant MCP server appears
-> as `HA-MCP Server`) **→ set the role to admin.**
+> **Einstellungen → Benutzer →** den Eintrag suchen (der
+> Home-Assistant-MCP-Server erscheint als `HA-MCP Server`) **→ die Rolle auf
+> Administrator setzen.**
 
-Visible in a list the owner can read, revocable in the same place, and it
-happens because a human decided it rather than because a program asked
-nicely. If the promotion is never made, everything under *Read* below still
-works and nothing under *Act* does.
+Sichtbar in einer Liste, die der Besitzer lesen kann, an derselben Stelle
+widerrufbar, und es passiert, weil ein Mensch sich dafür entschieden hat, und
+nicht, weil ein Programm nett gefragt hat. Wird die Hochstufung nie gemacht,
+funktioniert alles unter *Lesen* weiterhin und nichts unter *Handeln*.
 
-## Read (`readonly` is enough)
+## Lesen (`readonly` genügt)
 
-| Call | What it answers |
+| Aufruf | Was er beantwortet |
 |------|-----------------|
-| `GET /api/devices` | The whole fleet: connectivity, firmware, capabilities, link state, last error |
-| `GET /api/devices/{id}/logs?limit=N` | The device's log events, including everything the firmware relayed and every supervisor log the controller collected |
-| `GET /api/devices/{id}/activity` | Turn statistics |
-| `GET /api/system/status` | Controller version, update notice, deployment mode |
+| `GET /api/devices` | Die ganze Flotte: Erreichbarkeit, Firmware, Fähigkeiten, Verbindungszustand, letzter Fehler |
+| `GET /api/devices/{id}/logs?limit=N` | Die Log-Ereignisse des Geräts, einschließlich alles von der Firmware Weitergereichten und jedes vom Controller eingesammelten Supervisor-Logs |
+| `GET /api/devices/{id}/activity` | Gesprächsstatistiken |
+| `GET /api/system/status` | Controller-Version, Update-Hinweis, Betriebsart |
 
-That covers most diagnosis. A device's own persistent log — the one that
-survives a power cycle — arrives here without anyone touching the device,
-because the controller fetches it whenever an update does not confirm.
+Das deckt die meiste Diagnose ab. Das eigene dauerhafte Log eines Geräts — das,
+welches einen Stromausfall übersteht — kommt hier an, ohne dass jemand das
+Gerät anfassen muss, denn der Controller holt es, sobald ein Update nicht
+bestätigt.
 
-## Act (`admin`)
+## Handeln (`admin`)
 
-| Call | Notes |
+| Aufruf | Anmerkungen |
 |------|-------|
-| `POST /api/devices/{id}/exec` `{"cmd": "..."}` | One shell command, run to completion, output returned. Root, on the device. |
-| `POST /api/devices/{id}/supervisor_log` | Fetch the persistent log on demand |
+| `POST /api/devices/{id}/exec` `{"cmd": "..."}` | Ein Shell-Befehl, bis zum Ende ausgeführt, Ausgabe wird zurückgegeben. Als Root, auf dem Gerät. |
+| `POST /api/devices/{id}/supervisor_log` | Das dauerhafte Log auf Anforderung holen |
 | `POST /api/devices/{id}/update` | OTA |
-| `POST /api/devices/{id}/config` | Per-device configuration |
+| `POST /api/devices/{id}/config` | Konfiguration je Gerät |
 
-`exec` grants nothing the dashboard's console tab did not: that is already an
-interactive root shell for an admin. It is the same capability in a shape a
-program can call, which is why it sits at the same bar and not a lesser one.
+`exec` gewährt nichts, was der Konsolen-Reiter des Dashboards nicht schon
+gewährte: Der ist für Administratoren bereits eine interaktive Root-Shell. Es
+ist dieselbe Fähigkeit in einer Form, die ein Programm aufrufen kann, und
+deshalb liegt sie auf derselben Hürde und nicht auf einer niedrigeren.
 
-**Every command is logged with the user that ran it**, in the device's own log
-events, alongside `Shell session opened by <user>`. An interactive session at
-least announces itself; a scriptable one that did not would be the quieter of
-the two, which is the wrong way round for whoever owns the device.
+**Jeder Befehl wird mit dem ausführenden Benutzer protokolliert**, in den
+Log-Ereignissen des Geräts, neben `Shell session opened by <user>`. Eine
+interaktive Sitzung kündigt sich immerhin an; eine skriptfähige, die das nicht
+täte, wäre die leisere der beiden — und das wäre für den Besitzer des Geräts
+herum falsch.
 
-## What this does not do
+## Was das nicht tut
 
-- **It does not reach a device that is offline.** Everything here is proxied
-  by the controller, so the one fault where you most want a shell — a device
-  that cannot find its controller — is the one where there is none. That is
-  what the persistent supervisor log on `/data` is for; see `device/CLAUDE.md`.
-- **It does not work on the standalone container**, by design. There is no
-  Supervisor to vouch for the caller, so `POST /api/auth/ingress` answers 401
-  and the ordinary password login is the way in.
-- **It is not a tunnel into the LAN.** The only thing reachable is the
-  controller's own HTTP API, through Home Assistant, as a Home Assistant user.
+- **Es erreicht kein Gerät, das offline ist.** Alles hier läuft über den
+  Controller — ausgerechnet der Fehlerfall, in dem man sich eine Shell am
+  meisten wünscht (ein Gerät, das seinen Controller nicht findet), ist also
+  der, in dem es keine gibt. Dafür ist das dauerhafte Supervisor-Log auf
+  `/data` da; siehe `device/CLAUDE.md`.
+- **Es funktioniert nicht im eigenständigen Container**, und das ist Absicht.
+  Es gibt keinen Supervisor, der für die aufrufende Seite bürgt, also
+  antwortet `POST /api/auth/ingress` mit 401, und die gewöhnliche
+  Passwortanmeldung ist der Weg hinein.
+- **Es ist kein Tunnel ins LAN.** Erreichbar ist einzig die eigene HTTP-API des
+  Controllers, durch Home Assistant hindurch, als Home-Assistant-Benutzer.

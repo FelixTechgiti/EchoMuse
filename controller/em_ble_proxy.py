@@ -47,7 +47,7 @@ from esphome.vendor import api_pb2
 
 import em_ble_health
 
-log = logging.getLogger("echomuse.bleproxy")
+log = logging.getLogger("revoice.bleproxy")
 
 BT_PROXY_FLAGS = int(
     BluetoothProxyFeature.PASSIVE_SCAN
@@ -65,7 +65,7 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
     def __init__(self, device_id: str, label: str, mac_address: str,
                  on_disconnected_cb, owning_server) -> None:
         super().__init__(
-            server_name=f"echomuse-{device_id[-12:].lower()}-bt",
+            server_name=f"revoice-{device_id[-12:].lower()}-bt",
             log_name=f"bleproxy.{device_id[-8:]}",
         )
         self.device_id     = device_id
@@ -85,12 +85,12 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
                 name=self.server_name,
                 friendly_name=f"{self.label} BT Proxy",
                 mac_address=self.mac_address,
-                manufacturer="EchoMuse",
+                manufacturer="Revoice",
                 model=_device_model(),
                 # Dot required — HA splits project_name on "." (see
-                # em_esphome.EchoMuseSatellite.handle_message), and shows
+                # em_esphome.RevoiceSatellite.handle_message), and shows
                 # the part after it as the device Model.
-                project_name=f"EchoMuse.{_device_model()}",
+                project_name=f"Revoice.{_device_model()}",
                 project_version=_project_version(),
                 bluetooth_proxy_feature_flags=BT_PROXY_FLAGS,
             )
@@ -249,7 +249,7 @@ def _proxy_mac(device_id: str) -> str:
 def _make_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo:
     from em_esphome import SERVER_IP
     import socket
-    svc_name = f"echomuse-{device_id[-12:].lower()}-bt"
+    svc_name = f"revoice-{device_id[-12:].lower()}-bt"
     return ServiceInfo(
         "_esphomelib._tcp.local.",
         f"{svc_name}._esphomelib._tcp.local.",
@@ -263,7 +263,7 @@ def _make_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo:
             # em_esphome._make_device_mdns_info.
             "mac": _proxy_mac(device_id).replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{_device_model()}",
+            "project_name": f"Revoice.{_device_model()}",
             "project_version": _project_version(),
         },
         server=f"{svc_name}.local.",
@@ -290,7 +290,7 @@ async def reconcile(device_id: str) -> None:
     enabled = False
     label = device_id[-8:]
     if row is not None and row["approved"]:
-        label = row["label"] or f"EchoMuse {device_id[-8:]}"
+        label = row["label"] or f"Revoice {device_id[-8:]}"
         cfg = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
         enabled = bool(cfg.get("bleProxyEnabled", False))
 
@@ -317,7 +317,7 @@ async def reconcile(device_id: str) -> None:
                 await azc.async_register_service(mdns_info, allow_name_change=True)
                 proxy._mdns_info = mdns_info
                 log.info(f"[{device_id}] BT proxy mDNS registered: "
-                         f"echomuse-{device_id[-12:].lower()}-bt → port {port}")
+                         f"revoice-{device_id[-12:].lower()}-bt → port {port}")
             except Exception as e:
                 log.warning(f"[{device_id}] BT proxy mDNS registration failed: {e}")
 

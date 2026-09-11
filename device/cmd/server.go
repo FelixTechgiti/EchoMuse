@@ -46,7 +46,7 @@ import (
 
 func main() {
 	log.SetOutput(os.Stdout)
-	log.Printf("EchoMuse %s starting", client.Version)
+	log.Printf("Revoice %s starting", client.Version)
 
 	// One line per process start on /data, and it is the version rather than
 	// anything else because that is the field the supervisor cannot supply.
@@ -268,8 +268,8 @@ func main() {
 			Name:     deviceID,
 			ClientID: deviceID,
 			DeviceInfo: sendspin.DeviceInfo{
-				ProductName:     "EchoMuse",
-				Manufacturer:    "EchoMuse",
+				ProductName:     "Revoice",
+				Manufacturer:    "Revoice",
 				SoftwareVersion: client.Version,
 			},
 		},

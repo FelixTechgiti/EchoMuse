@@ -24,7 +24,7 @@ target, or the x86 shairport-sync that `./configure` produces when it finds
 the host compiler — both are plausible files with plausible names that the
 device cannot exec. An ARM32 ELF check catches that at the dashboard, where
 there is somebody to tell. It cannot go further: these are upstream programs
-with no EchoMuse version string in them, and there is no manifest to compare
+with no Revoice version string in them, and there is no manifest to compare
 against, so `md5` is the only identity either end can agree on.
 
 This module is pure path, planning and header logic — no aiohttp, no db, no
@@ -123,7 +123,7 @@ def store_dir(db_path: str | None = None) -> Path:
     process cwd.
     """
     if db_path is None:
-        db_path = os.environ.get("DB_PATH", "echomuse.db")
+        db_path = os.environ.get("DB_PATH", "revoice.db")
     return (Path(db_path).resolve().parent / STORE_SUBDIR)
 
 

@@ -67,8 +67,8 @@ import (
 
 const (
 	confPath   = "/data/misc/wifi/wpa_supplicant.conf"
-	backupPath = "/data/misc/wifi/wpa_supplicant.conf.echomuse-bak"
-	markerPath = "/data/local/tmp/echomuse_wifi_pending"
+	backupPath = "/data/misc/wifi/wpa_supplicant.conf.revoice-bak"
+	markerPath = "/data/local/tmp/revoice_wifi_pending"
 
 	wpaSockDir = "/data/misc/wifi/sockets"
 	iface      = "wlan0"
@@ -260,7 +260,7 @@ func composeConf(ssid, psk string) string {
 		"ctrl_interface=" + wpaSockDir,
 		"driver_param=use_p2p_group_interface=1",
 		"update_config=1",
-		"device_name=" + getprop("ro.product.name", "echomuse"),
+		"device_name=" + getprop("ro.product.name", "revoice"),
 		"manufacturer=" + getprop("ro.product.manufacturer", "Amazon"),
 		"model_name=" + getprop("ro.product.model", "AEOBC"),
 		"model_number=" + getprop("ro.product.model", "AEOBC"),

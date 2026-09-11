@@ -32,7 +32,7 @@ import em_firmware
 @pytest.fixture
 def cache(tmp_path, monkeypatch):
     """A data directory of the shape the controller actually has."""
-    db = tmp_path / "echomuse.db"
+    db = tmp_path / "revoice.db"
     db.write_bytes(b"")
     monkeypatch.setenv("DB_PATH", str(db))
     return tmp_path / "firmware"
@@ -198,5 +198,5 @@ def test_a_digest_goes_with_the_payload_it_belongs_to(cache):
 
 
 def test_pruning_an_absent_directory_is_quiet(tmp_path, monkeypatch):
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "nope" / "echomuse.db"))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "nope" / "revoice.db"))
     assert em_firmware.prune() == []

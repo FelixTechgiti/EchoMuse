@@ -136,11 +136,11 @@ func TestNoMetadataBlockWithoutAReader(t *testing.T) {
 	if got := renderConfig(0, ""); strings.Contains(got, "metadata") {
 		t.Fatalf("metadata asked for with no reader:\n%s", got)
 	}
-	got := renderConfig(0, "/data/local/etc/echomuse/airplay-metadata")
+	got := renderConfig(0, "/data/local/etc/revoice/airplay-metadata")
 	if !strings.Contains(got, `enabled = "yes"`) {
 		t.Fatalf("metadata not enabled:\n%s", got)
 	}
-	if !strings.Contains(got, "/data/local/etc/echomuse/airplay-metadata") {
+	if !strings.Contains(got, "/data/local/etc/revoice/airplay-metadata") {
 		t.Fatalf("the pipe path is not in the config:\n%s", got)
 	}
 }

@@ -30,7 +30,7 @@ import wave
 
 import numpy as np
 
-log = logging.getLogger("echomuse")
+log = logging.getLogger("revoice")
 
 BLOCK_LEN   = 512   # FFT window (samples at 16kHz)
 BLOCK_SHIFT = 128   # hop

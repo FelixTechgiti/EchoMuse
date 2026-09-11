@@ -3,8 +3,8 @@ name: Controller Release (Docker image)
 # Controller releases are tagged controller-vX.Y.Z (device firmware keeps
 # plain vX.Y.Z — see release.yml). This builds the controller image and
 # pushes it to GHCR as:
-#   ghcr.io/<owner>/echomuse-controller:X.Y.Z
-#   ghcr.io/<owner>/echomuse-controller:latest
+#   ghcr.io/<owner>/revoice-controller:X.Y.Z
+#   ghcr.io/<owner>/revoice-controller:latest
 #
 # Deliberately no GitHub Release is created here: the controller's OTA
 # system polls the repo's releases for device firmware (v* tags with a
@@ -111,7 +111,7 @@ jobs:
           got="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$dir/config.yaml")"
           if [ "$want" != "$got" ]; then
             echo "::error::$dir/config.yaml pins version '$got' but this release is '$want'."
-            echo "The add-on would pull ghcr.io/.../echomuse-controller:$got — not what is being released here."
+            echo "The add-on would pull ghcr.io/.../revoice-controller:$got — not what is being released here."
             exit 1
           fi
           echo "$dir pins $got, matching the tag"
@@ -143,7 +143,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller
+          images: ghcr.io/${{ steps.owner.outputs.lc }}/revoice-controller
           tags: |
             type=raw,value=${{ steps.channel.outputs.image_tag }}
             type=raw,value=latest,enable=${{ steps.channel.outputs.latest }}
@@ -164,7 +164,7 @@ jobs:
       # published layers takes seconds.
       - name: Check the image exists for this commit
         run: |
-          src="ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller:${{ steps.version.outputs.sha }}"
+          src="ghcr.io/${{ steps.owner.outputs.lc }}/revoice-controller:${{ steps.version.outputs.sha }}"
           if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
             echo "::error::No image published for this commit ($src)."
             echo "The main build has not run or did not finish for the commit being tagged."
@@ -197,7 +197,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BASE=ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller:${{ steps.version.outputs.sha }}
+            BASE=ghcr.io/${{ steps.owner.outputs.lc }}/revoice-controller:${{ steps.version.outputs.sha }}
             EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -234,7 +234,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/revoice-controller@${{ steps.build.outputs.digest }}
           format: cyclonedx
           output: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json
 
@@ -272,7 +272,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ghcr.io/${{ steps.owner.outputs.lc }}/revoice-controller@${{ steps.build.outputs.digest }}
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true

@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# EchoMuse start script — A/B slot aware with auto-rollback.
+# Revoice start script — A/B slot aware with auto-rollback.
 #
 # Retry policy: if the server exits in under MIN_RUNTIME seconds,
 # it counts as a failed start. After MAX_ATTEMPTS consecutive fast
@@ -44,7 +44,7 @@ fi
 ip link set p2p0 down
 
 # Prevent WiFi suspension
-echo "EchoMuse" > /sys/power/wake_lock
+echo "Revoice" > /sys/power/wake_lock
 
 # Speaker mixer init
 tinymix -D 0 56 On
@@ -100,11 +100,11 @@ TRIM_PID=$!
 # clocks before NTP — the same reason TLS verification clamps to the firmware
 # build time — and a boot-time log is precisely where the wall clock is least
 # trustworthy. The wall clock is recorded alongside as a hint only.
-SUP_LOG=/data/local/etc/echomuse/supervisor.log
+SUP_LOG=/data/local/etc/revoice/supervisor.log
 SUP_MAX=65536      # 64KB cap — this must never be able to fill /data
 SUP_KEEP=32768     # bytes retained when trimming
 
-mkdir -p /data/local/etc/echomuse 2>/dev/null
+mkdir -p /data/local/etc/revoice 2>/dev/null
 
 sup_log() {
     # Trim BEFORE appending, so a crash-loop writing every few seconds can

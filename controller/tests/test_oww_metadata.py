@@ -23,7 +23,7 @@ def test_custom_identity_does_not_change_prediction_key():
 
 
 @pytest.mark.parametrize(
-    "class_name", ["EchoMuseSatellite", "DeviceESPhomeServer"]
+    "class_name", ["RevoiceSatellite", "DeviceESPhomeServer"]
 )
 def test_esphome_constructors_require_resolved_model_metadata(class_name):
     source = Path(__file__).resolve().parents[1] / "em_esphome.py"

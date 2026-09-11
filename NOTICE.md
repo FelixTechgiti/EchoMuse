@@ -1,6 +1,6 @@
 # Third-party components
 
-EchoMuse is MIT licensed (see `LICENSE`). It vendors and links the components
+Revoice is MIT licensed (see `LICENSE`). It vendors and links the components
 below, each of which keeps its own licence. All are permissive and compatible
 with redistribution under MIT, and each requires that its copyright notice
 travels with the software — which is what this file is for.
