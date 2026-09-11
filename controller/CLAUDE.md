@@ -2112,6 +2112,45 @@ to be told no. Every start, finish and halt is a log event on the device
 itself — an update that happened while nobody watched has to be findable
 afterwards, or the first sign of it is a version number nobody recognises.
 
+### A byte-for-byte match is proof, not a heuristic (endpoint adoption)
+
+**The provenance rule protects the wrong set.** `needs_fetch` refuses to
+overwrite a binary the controller cannot prove it wrote, so that a patched
+build somebody is testing survives the next poll. Correct — but it cannot
+tell that build apart from a file downloaded off the releases page and
+uploaded through the dashboard, because the record that would distinguish
+them is the record that is missing. Every store filled before provenance
+existed, and every store filled by hand since, was therefore frozen: the
+published build never arrived, and the panel said only "uploaded by hand".
+
+`digest_index(releases)` closes it. GitHub reports each asset's sha256 as its
+`digest`, and `em_endpoint_bins.stored()` now records the store's sha256 on
+the same pass that computes its md5 — so "is this file one a release
+published?" is answerable with no download at all. A match is not evidence
+about the file; identical bytes ARE that build.
+
+Four properties worth keeping:
+
+- **Every release is indexed, not just the newest.** The case that matters is
+  a store holding an OLDER published build — which is precisely what needs
+  updating, and is invisible if only the selected release is compared. Live
+  example: a fleet holding `endpoints-v1.0.0`'s shairport-sync while
+  `v1.1.0` was published.
+- **Absence never matches.** No `digest` on the asset (older releases, other
+  hosts), no `sha256` in the store (a scan by an older controller), or no
+  release list at all — each resolves to "cannot tell", which is the existing
+  behaviour exactly. Adoption is additive: without evidence nothing changes.
+- **Provenance still wins where it exists.** A recorded write is a stronger
+  statement than a hash match and keeps deciding, so an adopted answer is
+  only ever reached where the old code said `unmanaged`.
+- **The panel says which.** `adopted: True` renders as "recognised as
+  <tag>'s build" rather than "uploaded by hand" — somebody who really did
+  upload that file deserves to know why it is now going to be replaced.
+
+The cost, stated plainly: a deliberately held OLDER PUBLISHED build is now
+updated. A build compiled locally is not, because it matches nothing. Pinning
+a published version is a separate feature and does not exist.
+
 ### The releases page size is a visibility rule, not a performance knob
 
 **Three selectors read ONE releases list** — firmware `v*`, `emos-v*`,

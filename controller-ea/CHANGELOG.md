@@ -2,6 +2,34 @@
 
 ## 2.33.0-fx.1
 
+### The published Spotify and AirPlay binaries now install themselves
+
+The controller never replaces a binary it cannot prove it wrote — that rule
+protects a patched build somebody is testing, and it stays. But it could not
+tell such a build apart from a file downloaded off the releases page and
+uploaded through the dashboard: the record that would distinguish them is the
+record that is missing. So every store filled by hand was frozen for ever, and
+the published build never arrived.
+
+It can tell now, and not by guessing. GitHub reports each published file's
+hash, so a stored binary that is **byte-for-byte identical** to something a
+release published is that build — identical bytes are not evidence, they are
+the thing itself. Those are updated automatically like any other. A build that
+matches nothing is still never touched.
+
+On the fleet this was written against, that is exactly the split you would
+want: a hand-compiled librespot left alone, and a shairport-sync that came
+from the previous release updated to the current one.
+
+The panel says which it is, because it previously called both "uploaded by
+hand" — a recognised build now reads *"recognised as endpoints-v1.0.0's
+build"*, and only a genuine hand upload keeps the old wording.
+
+### What is required of you
+
+Nothing. If you deliberately hold an older *published* build, note that it
+will now be updated; a build you compiled yourself is unaffected.
+
 ### Spotify and AirPlay binaries can be fetched again
 
 **The controller had stopped seeing the published streaming binaries, and said

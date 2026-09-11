@@ -5105,7 +5105,8 @@ async def _get_endpoint_binaries(request: web.Request) -> web.Response:
         "kinds": [
             {"kind": k.key, "label": k.label, "filename": k.filename,
              "dest": k.dest, "source": k.source,
-             **em_endpoint_release.published_state(tag, prov, store, k.key)}
+             **em_endpoint_release.published_state(tag, prov, store, k.key,
+                                                   _endpoint_digests)}
             for k in em_endpoint_bins.KINDS.values()
         ],
     })
@@ -5465,6 +5466,12 @@ async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
 
 _endpoint_release_cache: Optional[dict] = None
 _endpoint_release_ts: float = 0.0
+# {kind: {sha256: tag}} over every endpoints release seen, so a stored binary
+# can be recognised as a published build without provenance and without
+# downloading anything. Cached beside the selected release because both
+# readers — the panel and the refresh — need it, and it is built from the
+# FULL list that only the poll sees.
+_endpoint_digests: dict = {}
 
 # The store refresh is a ~10MB download and is serialised, so two devices
 # connecting at once cannot both start it. TTL is generous: these binaries
@@ -5492,7 +5499,7 @@ async def _fetch_latest_endpoints_release(force: bool = False) -> Optional[dict]
     every direction — `endpoints-v1.0.0` does not `startswith("v")`, so the
     firmware poller cannot see it either.
     """
-    global _endpoint_release_cache, _endpoint_release_ts
+    global _endpoint_release_cache, _endpoint_release_ts, _endpoint_digests
     if (not force and _endpoint_release_cache is not None
             and (time.monotonic() - _endpoint_release_ts) < ENDPOINT_POLL_TTL):
         return _endpoint_release_cache
@@ -5505,6 +5512,10 @@ async def _fetch_latest_endpoints_release(force: bool = False) -> Optional[dict]
         # blip look like "no binaries are published" to everything downstream.
         return _endpoint_release_cache
 
+    # Built from the whole list rather than the selection: the case worth
+    # recognising is a store holding an OLDER published build, which is
+    # invisible if only the newest release is indexed.
+    _endpoint_digests = em_endpoint_release.digest_index(releases)
     picked = em_endpoint_release.select(releases)
     if picked is not None:
         _endpoint_release_cache = picked
@@ -5542,7 +5553,8 @@ async def _refresh_endpoint_store(force: bool = False) -> None:
         loop = asyncio.get_event_loop()
         prov = await loop.run_in_executor(None, em_endpoint_release.read_provenance)
         store = await loop.run_in_executor(None, em_endpoint_bins.scan)
-        wanted = em_endpoint_release.needs_fetch(release["tag"], prov, store)
+        wanted = em_endpoint_release.needs_fetch(release["tag"], prov, store,
+                                                 _endpoint_digests)
         if not wanted:
             return
 

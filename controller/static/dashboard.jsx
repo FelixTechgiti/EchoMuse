@@ -3691,8 +3691,16 @@ function publishedStoreState(kind, releaseTag) {
     case 'outdated':
       // The automatic fetch handles this one on its own, so the button is
       // offered rather than urged: it only makes the next poll happen now.
+      //
+      // `adopted` means there is no provenance record and the binary was
+      // recognised by its hash instead. Worth saying, because the panel
+      // previously called exactly this file "uploaded by hand" — and a
+      // reader who uploaded it by hand deserves to know why it is now going
+      // to be replaced.
       return {
-        text: `from ${kind.stored_tag || 'an older release'}${tag ? ` — ${tag} is published` : ''}`,
+        text: `${kind.adopted ? 'recognised as ' : ''}`
+              + `${kind.stored_tag || 'an older release'}'s build`
+              + `${tag ? ` — ${tag} is published` : ''}`,
         action: tag ? 'Update from the release' : null,
       };
 

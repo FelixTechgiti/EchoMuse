@@ -136,7 +136,8 @@ def select(releases: list) -> dict | None:
                 break
             assets[key] = {"name": name,
                            "url": a["browser_download_url"],
-                           "size": a.get("size", 0)}
+                           "size": a.get("size", 0),
+                           "sha256": _digest_sha256(a)}
         if not assets:
             log.info(f"[endpoints] {tag} does not carry both binaries — skipping")
             continue
@@ -155,7 +156,89 @@ def select(releases: list) -> dict | None:
     return best
 
 
-def published_state(tag: str, prov: dict, store: dict, key: str) -> dict:
+def _digest_sha256(asset: dict) -> str:
+    """
+    An asset's sha256, from GitHub's `digest` field, or "".
+
+    Verified against a real asset before this was built on: the digest
+    GitHub reports for endpoints-v1.1.0's shairport-sync is the sha256 of
+    the downloaded bytes, and its md5 is the one in the release notes.
+
+    Absent on older releases and on hosts that do not report it, and the
+    empty string is what that has to mean — never a match, so a release that
+    cannot prove what it published simply cannot adopt anything.
+    """
+    d = asset.get("digest") or ""
+    if isinstance(d, str) and d.startswith("sha256:"):
+        return d[len("sha256:"):]
+    return ""
+
+
+def digest_index(releases: list) -> dict[str, dict[str, str]]:
+    """
+    {kind: {sha256: tag}} over EVERY release, not just the newest.
+
+    This is what lets the controller tell a hand-patched build from a copy of
+    a published one without provenance and without downloading anything.
+
+    **The provenance rule is right and this does not weaken it.** It refuses
+    to overwrite a binary it cannot prove it wrote, to protect a patched
+    build somebody is testing. But it cannot tell that apart from a file
+    downloaded off the releases page and uploaded through the dashboard —
+    the record that would distinguish them is the record that is missing —
+    so every store filled before provenance existed was frozen for ever.
+
+    A byte-for-byte match against something a release published is proof of
+    the second case. It is not a heuristic: identical bytes ARE that build.
+
+    Every release is indexed rather than only the newest, because the
+    interesting case is a store holding an OLDER published build — which is
+    exactly what needs updating, and is invisible if only the newest is
+    compared.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for data in releases or []:
+        if not isinstance(data, dict):
+            continue
+        if data.get("draft") or data.get("prerelease"):
+            continue
+        tag = data.get("tag_name") or ""
+        if not tag.startswith(TAG_PREFIX):
+            continue
+        by_name = {a.get("name"): a for a in (data.get("assets") or [])
+                   if isinstance(a, dict)}
+        for key, name in asset_names().items():
+            a = by_name.get(name)
+            if a is None:
+                continue
+            sha = _digest_sha256(a)
+            if not sha:
+                continue
+            # First writer wins, and the list is newest-first, so a binary
+            # republished unchanged under a newer tag adopts the NEWER one —
+            # which is the honest answer about what it is.
+            out.setdefault(key, {}).setdefault(sha, tag)
+    return out
+
+
+def adopted_tag(digests: dict, store: dict, key: str) -> str | None:
+    """
+    The tag whose published binary this store's file IS, or None.
+
+    None covers every uninteresting case: nothing stored, no sha256 recorded
+    (an older controller's scan), no release digests available, no match.
+    """
+    have = (store or {}).get(key)
+    if not have:
+        return None
+    sha = have.get("sha256") or ""
+    if not sha:
+        return None
+    return ((digests or {}).get(key) or {}).get(sha)
+
+
+def published_state(tag: str, prov: dict, store: dict, key: str,
+                    digests: dict | None = None) -> dict:
     """
     What the store holds for one kind, against what `tag` publishes.
 
@@ -186,6 +269,18 @@ def published_state(tag: str, prov: dict, store: dict, key: str) -> dict:
         return {"state": "empty", "stored_md5": None}
     recorded = ((prov.get("kinds") or {}).get(key) or {}).get("md5")
     if recorded != have.get("md5"):
+        # No provenance for these bytes — but if they ARE a published build,
+        # say so rather than calling them somebody's hand build. `adopted`
+        # marks it, because "we recorded writing this" and "we can see this
+        # is release output" are different grounds for the same conclusion
+        # and only the first is a record.
+        adopted = adopted_tag(digests, store, key)
+        if adopted:
+            if adopted == tag:
+                return {"state": "published", "stored_md5": have.get("md5"),
+                        "adopted": True}
+            return {"state": "outdated", "stored_md5": have.get("md5"),
+                    "stored_tag": adopted, "adopted": True}
         return {"state": "unmanaged", "stored_md5": have.get("md5")}
     if prov.get("tag") == tag:
         return {"state": "published", "stored_md5": have.get("md5")}
@@ -193,7 +288,8 @@ def published_state(tag: str, prov: dict, store: dict, key: str) -> dict:
             "stored_tag": prov.get("tag")}
 
 
-def needs_fetch(tag: str, prov: dict, store: dict) -> list[str]:
+def needs_fetch(tag: str, prov: dict, store: dict,
+                digests: dict | None = None) -> list[str]:
     """
     Which kinds should be downloaded from `tag`, given the provenance record
     and what `bins.scan()` found in the store.
@@ -222,7 +318,14 @@ def needs_fetch(tag: str, prov: dict, store: dict) -> list[str]:
             continue
         recorded = ((prov.get("kinds") or {}).get(key) or {}).get("md5")
         if recorded != have.get("md5"):
-            continue  # not ours
+            # Not ours by record — but identical to something a release
+            # published means it IS that build, and updating release output
+            # is the whole job. A hand-patched build matches nothing and is
+            # still never touched.
+            adopted = adopted_tag(digests, store, key)
+            if adopted and adopted != tag:
+                out.append(key)
+            continue
         if not same_tag:
             out.append(key)
     return out
