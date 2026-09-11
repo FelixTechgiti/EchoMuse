@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.37.0-fx.1
+
+### The network check has a button
+
+The check added in 2.35.0-fx.1 could only be reached by calling the API by
+hand. It is now on each device's Status panel, as **Network visibility**: it
+reports whether this Echo's Spotify Connect and AirPlay announcements are
+actually visible from the controller — a different machine on the same
+network — which is the one thing the Echo cannot answer about itself.
+
+**It works while the Echo is offline, deliberately.** The controller listens
+to the network and never contacts the device, so the check still answers when
+the Echo has dropped off the dashboard — and that is when it is worth the
+most, because "the Echo is gone" and "the Echo is there and the streaming is
+broken" look identical from everywhere else.
+
+The result keeps the three answers apart: your device was seen, your device
+was not seen while other devices were, or nothing answered at all — the last
+being a statement about the check rather than about your Echo.
+
 ## 2.36.0-fx.1
 
 ### Running light effects on the ring

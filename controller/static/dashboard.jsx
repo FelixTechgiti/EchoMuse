@@ -1378,6 +1378,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [securing, setSecuring] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scan, setScan] = useState(null);
   const [fetchingSup, setFetchingSup] = useState(false);
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
@@ -1554,6 +1556,28 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     } catch(e) { alert(e.error || 'Secure link failed'); }
     // Leave the button disabled briefly — transfer + reconnect takes ~10s.
     setTimeout(() => setSecuring(false), 15000);
+  }
+
+  async function doMdnsScan() {
+    // Ask the CONTROLLER what the network can see of this Echo's streaming
+    // endpoints. It is a second vantage point, and that is the whole point:
+    // every measurement taken ON a device can say the announcements go out
+    // and none of them can say anybody hears them.
+    //
+    // Deliberately NOT gated on device.connected. The browse is passive and
+    // never touches the device, so it still answers while the control link
+    // is down — and that is exactly when it is worth the most, because
+    // "librespot and shairport-sync are still advertising" and "the Echo is
+    // gone" are the two halves of a diagnosis nothing else here separates.
+    setScanning(true);
+    setScan(null);
+    try {
+      setScan(await API.get(
+        `/api/devices/${device.device_id}/mdns_scan?seconds=8`));
+    } catch(e) {
+      setScan({ error: e.error || 'Scan failed' });
+    }
+    setScanning(false);
   }
 
   async function doSupervisorLog() {
@@ -2128,11 +2152,68 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       const total = Object.keys(CONFIG_SECTIONS).length;
                       return n === 0 ? 'Fleet' : `Local override (${n} of ${total})`;
                     })())}
-                    {isAdmin && device.connected && !device.linkTls && (
-                      <div style={{ marginTop: 8 }}>
-                        <Pill small accent disabled={securing} onClick={doSecureLink}>
-                          {securing ? 'Securing…' : 'Secure link'}
+                    {isAdmin && (
+                      <div style={{ marginTop: 8, display:'flex', gap:6,
+                                    flexWrap:'wrap' }}>
+                        {device.connected && !device.linkTls && (
+                          <Pill small accent disabled={securing} onClick={doSecureLink}>
+                            {securing ? 'Securing…' : 'Secure link'}
+                          </Pill>
+                        )}
+                        {/* No `device.connected` guard, and that is the
+                            point: the controller browses the network, it
+                            does not ask the Echo anything. So this still
+                            answers while the control link is down — which
+                            is when it matters most, because "the endpoints
+                            are still advertising" and "the Echo is gone"
+                            look identical from every other panel here. */}
+                        <Pill small disabled={scanning} onClick={doMdnsScan}>
+                          {scanning ? 'Scanning…' : 'Network visibility'}
                         </Pill>
+                      </div>
+                    )}
+                    {scan && (
+                      <div className="em-inset" style={{ marginTop: 8, padding: 8,
+                                                         fontSize: 12 }}>
+                        {scan.error ? (
+                          <div style={{ color:'var(--error)' }}>
+                            {scan.error}
+                          </div>
+                        ) : (<>
+                          <div style={{ marginBottom: 6 }}>{scan.summary}</div>
+                          {(scan.services || []).map(v => {
+                            const label = v.service === 'spotify'
+                              ? 'Spotify Connect' : 'AirPlay';
+                            // Three states, three colours, because two of
+                            // them are opposite conclusions that used to read
+                            // the same. Amber is "the scan found nothing at
+                            // all", which is a statement about the scan.
+                            const colour = !v.enabled ? 'var(--muted)'
+                              : v.visible ? 'var(--ok)'
+                              : v.reachable ? 'var(--error)' : 'var(--warn)';
+                            const others = (scan.others_seen || {})[v.service];
+                            return (
+                              <div key={v.service} style={{ marginBottom: 4 }}>
+                                <span style={{ color: colour }}>● </span>
+                                <strong>{label}</strong> — {v.detail}
+                                {others != null && (
+                                  <span style={{ color:'var(--muted)' }}>
+                                    {' '}({others} other host{others === 1 ? '' : 's'}
+                                    {' '}answered)
+                                  </span>
+                                )}
+                                {v.note && (
+                                  <div style={{ color:'var(--warn)' }}>{v.note}</div>
+                                )}
+                                {(v.advertised || []).map(a => (
+                                  <div key={a.name} style={{ color:'var(--muted)' }}>
+                                    {a.name} → {a.target}:{a.port}
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
+                        </>)}
                       </div>
                     )}
                   </Panel>
