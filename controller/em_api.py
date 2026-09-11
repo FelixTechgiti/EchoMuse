@@ -131,7 +131,39 @@ INGRESS_GATEWAY_IP = "172.30.32.2"
 # tags, GHCR image only). /releases/latest returns whichever was published
 # most recently — _fetch_latest_release filters the list for the newest
 # release that is actually a device firmware release.
-GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases?per_page=10"
+# Releases are read a page at a time, and THE PAGE SIZE IS NOT A PERFORMANCE
+# KNOB — it decides which tag NAMESPACES are visible at all.
+#
+# Three selectors read this one list: firmware `v*`, `emos-v*` and
+# `endpoints-v*`. With a fixed first page, the release CADENCE of one
+# namespace decides whether another can be seen. Measured 2026-09-11 on this
+# fork: ten firmware releases had accumulated in front of `endpoints-v1.1.0`,
+# which sat at position 12 of a 10-item page — so the controller reported "no
+# published endpoint build" while the release existed, was two days old, and
+# carried both assets. Nothing failed and nothing logged; the only symptom was
+# a button that never appeared, and an AirPlay feature that could not work
+# because the binary it needs was never fetched.
+#
+# So: a page big enough that one request is the normal case, and pagination
+# behind it so that running out of page is not a silent cliff.
+GITHUB_RELEASES_URL = (
+    "https://api.github.com/repos/{repo}/releases?per_page={per_page}&page={page}")
+RELEASES_PER_PAGE = 100
+
+# The repository every release poll reads, when nothing is configured.
+#
+# ONE default, because there were three and they disagreed: firmware
+# defaulted to this fork while the endpoint and emOS polls defaulted to
+# `wilbowes/EchoMuse`. Upstream publishes no `endpoints-v*` release at all, so
+# a fresh install with no `github_repo` set would have reported "nothing is
+# published" for ever — correctly, about the wrong repository, with nothing
+# to suggest it was answering a different question than the one asked.
+DEFAULT_GITHUB_REPO = "FelixTechgiti/Revoice"
+
+# Bounded, because a repository with thousands of releases must not turn one
+# poll into a hundred requests. Three pages is far past any plausible fork's
+# history and is still one request in practice.
+MAX_RELEASE_PAGES = 3
 
 # How long to cache GitHub release info in memory (seconds).
 # DB is the persistent cache; this avoids hitting the DB on every
@@ -4215,6 +4247,55 @@ async def _get_cached_release() -> Optional[dict]:
     return await _fetch_latest_release()
 
 
+async def _github_releases(repo: str, what: str) -> Optional[list]:
+    """
+    Every release the repository has, newest first, up to MAX_RELEASE_PAGES.
+
+    The ONE place a releases URL is built. Three selectors pick opposite
+    things out of this list and each keeps its own cache — that separation is
+    deliberate and documented elsewhere — but they must not each decide how
+    much of the list they can see, because that is how one namespace's release
+    cadence silently hid another's (see GITHUB_RELEASES_URL).
+
+    Returns None when the poll FAILED, and a list (possibly empty) when it
+    succeeded and there is nothing there. Callers rely on that difference: a
+    failed poll is not evidence that a release went away, and collapsing the
+    two is how a network blip reads as "nothing is published".
+
+    Stops at the first short page — GitHub returns fewer than `per_page` only
+    on the last one — so the normal case is exactly one request.
+    """
+    out: list = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            for page in range(1, MAX_RELEASE_PAGES + 1):
+                url = GITHUB_RELEASES_URL.format(
+                    repo=repo, per_page=RELEASES_PER_PAGE, page=page)
+                async with session.get(
+                    url,
+                    headers={"Accept": "application/vnd.github.v3+json"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning(f"[api] GitHub returned {resp.status} for "
+                                    f"{what} (page {page})")
+                        # A later page failing is not a reason to discard the
+                        # earlier ones: the newest releases are on page 1, and
+                        # every selector here wants the newest match.
+                        return out or None
+                    batch = await resp.json()
+                if not isinstance(batch, list):
+                    log.warning(f"[api] GitHub returned a non-list for {what}")
+                    return out or None
+                out.extend(batch)
+                if len(batch) < RELEASES_PER_PAGE:
+                    break
+    except Exception as e:
+        log.warning(f"[api] Could not poll GitHub for {what}: {e}")
+        return out or None
+    return out
+
+
 async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     Poll the GitHub releases API and update the DB cache.
@@ -4223,22 +4304,17 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     global _release_cache, _release_cache_ts
 
-    repo = db.get_config("github_repo", "FelixTechgiti/Revoice")
-    url  = GITHUB_API_URL.format(repo=repo)
+    repo = db.get_config("github_repo", DEFAULT_GITHUB_REPO)
 
-    log.info(f"[api] Polling GitHub releases: {url}")
+    log.info(f"[api] Polling GitHub releases for {repo}")
+    releases = await _github_releases(repo, "firmware releases")
+    if releases is None:
+        return None
+
+    # Selection and the DB write stay inside a try: the poll itself is now
+    # handled by _github_releases, but parsing a release and caching it can
+    # still fail, and that must not kill the poll loop.
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Accept": "application/vnd.github.v3+json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    log.warning(f"[api] GitHub API returned {resp.status}")
-                    return None
-                releases = await resp.json()
-
         # Newest device firmware release: plain v* tag (controller releases
         # use controller-v* and ship no binary), published, with the compiled
         # `server` asset attached. The list is newest-first.
@@ -4337,7 +4413,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
             and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
         return _controller_cache
 
-    repo = db.get_config("github_repo", "FelixTechgiti/Revoice")
+    repo = db.get_config("github_repo", DEFAULT_GITHUB_REPO)
     headers = {"Accept": "application/vnd.github+json"}
     timeout = aiohttp.ClientTimeout(total=10)
 
@@ -5421,22 +5497,9 @@ async def _fetch_latest_endpoints_release(force: bool = False) -> Optional[dict]
             and (time.monotonic() - _endpoint_release_ts) < ENDPOINT_POLL_TTL):
         return _endpoint_release_cache
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
-    url = GITHUB_API_URL.format(repo=repo)
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Accept": "application/vnd.github.v3+json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    log.warning(f"[api] GitHub returned {resp.status} for "
-                                f"endpoint releases")
-                    return _endpoint_release_cache
-                releases = await resp.json()
-    except Exception as e:
-        log.warning(f"[api] Could not poll GitHub for endpoint releases: {e}")
+    repo = db.get_config("github_repo", DEFAULT_GITHUB_REPO)
+    releases = await _github_releases(repo, "endpoint releases")
+    if releases is None:
         # The PREVIOUS answer, not None. A failed poll is not evidence that the
         # release went away, and returning None here would make every network
         # blip look like "no binaries are published" to everything downstream.
@@ -5881,21 +5944,9 @@ async def _fetch_latest_emos_release() -> Optional[dict]:
     does not `startswith("v")`, so the firmware poll can never select an emOS
     release, and this one cannot select a firmware release.
     """
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
-    url = GITHUB_API_URL.format(repo=repo)
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Accept": "application/vnd.github.v3+json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    log.warning(f"[api] GitHub API returned {resp.status} for emOS releases")
-                    return None
-                releases = await resp.json()
-    except Exception as e:
-        log.warning(f"[api] Could not poll GitHub for emOS releases: {e}")
+    repo = db.get_config("github_repo", DEFAULT_GITHUB_REPO)
+    releases = await _github_releases(repo, "emOS releases")
+    if releases is None:
         return None
 
     for data in releases:

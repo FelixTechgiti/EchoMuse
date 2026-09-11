@@ -2641,6 +2641,20 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                             build" are different questions, and only the first
                             had an answer anywhere. */}
                         {(() => {
+                          // A fleet store that did not load is reported, not
+                          // skipped. `.catch(() => setEndpointStore(null))`
+                          // above turns any failure into silence, and silence
+                          // here is indistinguishable from "nothing to say" —
+                          // which is how a controller that could not see the
+                          // published release looked for two days.
+                          if (endpointStore === null) {
+                            return (
+                              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9,
+                                            color:'var(--muted)', marginBottom:10 }}>
+                                Fleet store: could not be read — reopen this tab to retry
+                              </div>
+                            );
+                          }
                           const k = (endpointStore?.kinds || []).find(x => x.kind === ep.kind);
                           const st = publishedStoreState(k, endpointStore?.release?.tag);
                           if (!st.text) return null;
@@ -3693,12 +3707,24 @@ function publishedStoreState(kind, releaseTag) {
       // Never overwritten automatically, by design. Say so plainly: the cost
       // of not saying it is somebody wondering for weeks why the published
       // build never arrives.
+      //
+      // And when there is no release to offer, say THAT too. A line reading
+      // "automatic updates leave this alone" with no button is indistinguishable
+      // from a button that failed to render — which is exactly how a
+      // controller that could not see `endpoints-v1.1.0` looked for two days.
       return {
-        text: 'uploaded by hand — automatic updates leave this alone',
+        text: tag
+          ? 'uploaded by hand — automatic updates leave this alone'
+          : 'uploaded by hand, and no published release is visible to fetch',
         action: tag ? 'Use the published build' : null,
       };
 
     default:
+      // An unknown state cannot happen — this page is served by the same
+      // controller that produced it — so inventing a sentence for it would
+      // be noise. The case that DID hide this whole feature is the fleet
+      // store failing to load at all, and that is the caller's to report:
+      // it knows the difference between "no answer" and "this kind".
       return { text: null, action: null };
   }
 }
