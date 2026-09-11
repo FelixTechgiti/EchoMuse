@@ -16,11 +16,13 @@ never affected — the certificate authority, the streaming binaries, the wake
 word models and the recordings all sit beside the database rather than inside
 it, so they survived the rename without noticing it.
 
-**It refuses to do this if the current database already has devices in it.**
-Somebody who set up fresh under the new name is not reverted to a stale file;
-in that case both are left exactly as they are. And the displaced empty
-database is renamed aside with a timestamp rather than deleted, so a wrong
-call is recoverable by hand.
+**It refuses to do this if the current database has ever answered you.**
+Somebody who set up fresh under the new name is not reverted to a stale file.
+The measure is a served voice turn rather than a device being listed: an Echo
+appears in the list the moment it reconnects and you approve it, so approving
+one to see whether it works must not cost you the rest of your setup. And the
+displaced database is renamed aside with a timestamp rather than deleted, so
+a wrong call is recoverable by hand.
 
 ### Echos on older firmware keep working after the rename
 

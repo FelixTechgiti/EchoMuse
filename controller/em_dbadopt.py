@@ -48,7 +48,8 @@ class Decision(NamedTuple):
 
 
 def decide(*, legacy_exists: bool, legacy_devices: int,
-           target_exists: bool, target_devices: int) -> Decision:
+           target_exists: bool, target_devices: int,
+           target_turns: int = 0) -> Decision:
     """
     Whether the legacy database should become the live one.
 
@@ -76,13 +77,25 @@ def decide(*, legacy_exists: bool, legacy_devices: int,
         return Decision(
             False, "the database under the previous name has no devices — "
                    "nothing to carry over")
+    if target_turns > 0:
+        # TURNS are the measure of "somebody is using this", and devices are
+        # not. A controller that came up empty has its fleet reconnect, and
+        # an operator who approves one of them to see whether it works has
+        # created a database with a device in it and nothing else — which an
+        # approved-device guard would read as in-use and refuse, on exactly
+        # the installation that needed the migration. A served turn cannot
+        # happen by accident.
+        return Decision(
+            False, f"the current database has served {target_turns} turn(s) — "
+                   f"it is in use, leaving both alone")
     if not target_exists:
         return Decision(True, f"adopting {legacy_devices} device(s) from the "
                               f"database under the previous name")
     if target_devices > 0:
         return Decision(
-            False, f"the current database already has {target_devices} "
-                   f"device(s) — leaving both alone")
+            True, f"the current database has {target_devices} device(s) but "
+                  f"has never served a turn; adopting {legacy_devices} "
+                  f"device(s) from the previous name")
     return Decision(True, f"the current database is empty; adopting "
                           f"{legacy_devices} device(s) from the previous name")
 
@@ -137,6 +150,29 @@ def count_devices(path: Path) -> int:
             conn.close()
 
 
+def count_turns(path: Path) -> int:
+    """
+    How many voice turns a database has recorded, or 0 when unreadable.
+
+    The evidence that a controller is IN USE, as opposed to merely populated.
+    A device row appears the moment hardware connects and an operator clicks
+    approve; a served turn requires somebody to have spoken to it and got an
+    answer. Only the second is worth refusing a migration over.
+    """
+    if not path.is_file():
+        return 0
+    conn = None
+    try:
+        conn = sqlite3.connect(str(path))
+        row = conn.execute("SELECT COUNT(*) FROM turns").fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def legacy_path(db_path: str) -> Path | None:
     """The first previous-name database sitting beside `db_path`, or None."""
     target = Path(db_path).resolve()
@@ -177,6 +213,7 @@ def adopt_if_needed(db_path: str) -> str | None:
             legacy_devices=count_devices(legacy) if legacy else 0,
             target_exists=target.is_file(),
             target_devices=count_devices(target),
+            target_turns=count_turns(target),
         )
         if not d.adopt:
             if legacy is not None:

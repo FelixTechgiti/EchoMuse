@@ -18,14 +18,18 @@ import pytest
 import em_dbadopt as a
 
 
-def _db(path, devices=0, pending=0):
+def _db(path, devices=0, pending=0, turns=0):
     conn = sqlite3.connect(str(path))
     conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY, "
                  "approved INTEGER NOT NULL DEFAULT 0)")
+    conn.execute("CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                 "device_id TEXT NOT NULL)")
     for i in range(devices):
         conn.execute("INSERT INTO devices VALUES (?, 1)", (f"dev{i}",))
     for i in range(pending):
         conn.execute("INSERT INTO devices VALUES (?, 0)", (f"pending{i}",))
+    for i in range(turns):
+        conn.execute("INSERT INTO turns (device_id) VALUES ('dev0')")
     conn.commit()
     conn.close()
     return path
@@ -61,11 +65,30 @@ def test_the_live_case_an_empty_new_file_beside_a_full_old_one():
 
 def test_a_database_in_use_is_never_replaced():
     # The failure this guard exists for: somebody who set up fresh under the
-    # new name and would otherwise be reverted to a stale file.
+    # new name and would otherwise be reverted to a stale file. "In use" is
+    # a SERVED TURN, not a device row.
     d = a.decide(legacy_exists=True, legacy_devices=9,
-                 target_exists=True, target_devices=1)
+                 target_exists=True, target_devices=1, target_turns=42)
     assert not d.adopt
-    assert "already has 1 device" in d.reason
+    assert "42 turn(s)" in d.reason
+
+
+def test_approving_a_device_in_the_empty_instance_does_not_block_the_rescue():
+    """
+    The trap this replaced an approved-device guard for.
+
+    A controller that came up empty has its fleet reconnect as pending. An
+    operator who approves one to see whether it works has then created a
+    database with a device in it — and a guard keyed on approved devices
+    would read that as "in use" and refuse the migration, on exactly the
+    installation that needed it, with no error anywhere.
+
+    A served turn cannot happen by accident. A device row can.
+    """
+    d = a.decide(legacy_exists=True, legacy_devices=1,
+                 target_exists=True, target_devices=1, target_turns=0)
+    assert d.adopt, "approving a device must not cost somebody their database"
+    assert "never served a turn" in d.reason
 
 
 def test_an_unreadable_count_fails_safe_in_both_directions():
@@ -113,8 +136,10 @@ def test_end_to_end_the_old_database_becomes_the_live_one(tmp_path):
 
 
 def test_end_to_end_a_database_in_use_is_left_exactly_as_it_was(tmp_path):
+    # "In use" is a SERVED TURN. Devices alone are not enough: a fleet
+    # reconnecting to an empty controller puts them there by itself.
     legacy = _db(tmp_path / "echomuse.db", devices=3)
-    target = _db(tmp_path / "revoice.db", devices=2)
+    target = _db(tmp_path / "revoice.db", devices=2, turns=11)
     assert a.adopt_if_needed(str(target)) is None
     assert a.count_devices(target) == 2
     assert a.count_devices(legacy) == 3
@@ -192,3 +217,18 @@ def test_a_schema_without_the_approved_column_still_counts(tmp_path):
     conn.commit()
     conn.close()
     assert a.count_devices(legacy) == 1
+
+
+def test_counting_turns_reads_a_real_database(tmp_path):
+    assert a.count_turns(_db(tmp_path / "t.db", devices=1, turns=7)) == 7
+    assert a.count_turns(_db(tmp_path / "u.db", devices=1)) == 0
+    assert a.count_turns(tmp_path / "missing.db") == 0
+
+
+def test_end_to_end_a_controller_that_has_served_turns_is_left_alone(tmp_path):
+    legacy = _db(tmp_path / "echomuse.db", devices=3)
+    target = _db(tmp_path / "revoice.db", devices=1, turns=5)
+    assert a.adopt_if_needed(str(target)) is None
+    assert a.count_devices(target) == 1
+    assert a.count_devices(legacy) == 3
+    assert not list(tmp_path.glob("*.replaced-*"))
