@@ -2045,6 +2045,73 @@ the judgement and the device gets only the verb.
   is playing" as "leave everything alone" would make the install a no-op
   whenever the Echo happened to be in use at all.
 
+### Firmware auto-update, and why the window IS the feature (#21)
+
+Home Assistant updates the add-on by itself; firmware had no equivalent, so a
+fleet stayed behind until somebody remembered. `auto_update_loop` closes that,
+and every decision it makes lives in **`em_autoupdate.py`, which is pure** —
+the cost of a wrong answer is a reboot in somebody's evening, and that is
+worth enumerating rather than reading out of an `if` chain inside a coroutine.
+
+**"Install whenever a release appears" would have been a worse product than
+nothing.** An OTA here is not a background download: the device reboots, and
+on the way it can roll back. Anyone standing in the kitchen at the time
+experiences that as the assistant being dead. The window is what turns a
+chore into a scheduled maintenance minute instead of an ambush, so it is
+required rather than optional — `enabled` with no window installs nothing.
+
+Six things it gets right that are easy to get wrong:
+
+- **An unparseable window is REFUSED at the PATCH, not stored.**
+  `parse_window` returns None for anything it cannot read, and None disables
+  the feature — so a stored-but-unreadable window is a switch reading "on"
+  over a feature doing nothing, which is the worst available outcome because
+  the operator believes their fleet is updating itself. Empty is still
+  allowed and still means off; that is how it is turned off without clearing
+  the switch.
+- **A window whose ends are equal is refused too.** "No time at all" and
+  "every time" are both defensible readings, and that is exactly the problem:
+  whichever one this picked, the other is somebody's fleet rebooting at a
+  moment they thought they had excluded.
+- **Half-open at the end, and it may cross midnight.** 03:00–05:00 includes
+  03:00 and excludes 05:00. Overnight is what most people mean by a
+  maintenance window, so the wrap is handled in the comparison rather than
+  rejected at parse time.
+- **Cannot report is not silent.** A device whose firmware predates
+  `audio_state` has not told us it is idle. Rather than refusing all older
+  firmware — useless for exactly the fleet most behind, and the way out of old
+  firmware is an update — the question narrows: if no local endpoint is
+  switched on there is nothing an unknown could hide, and it proceeds. If one
+  is, it waits for a device that can say. A device that IS capable but has not
+  reported yet gets the same treatment, because the capability says it can
+  say, not that it has.
+- **One device per tick, through `_run_update` and `_ota_lock`.** Three
+  concurrent OTAs stalled the event loop for 11.1 seconds (measured
+  2026-09-02), and that loop is what sends speaker periods and LED frames — so
+  a device answering somebody pays for a device being updated. Unattended, at
+  03:00, across a fleet, that is the failure nobody is awake to see.
+- **A failure halts the rest until the window closes.** The first device that
+  does not come back is evidence about the BINARY, not about that device.
+  `_auto_update_halted` is surfaced on `/api/system/status` and in the panel,
+  because a stop visible only in a log is a stop nobody finds until they
+  wonder why nothing updated. It clears when the window closes: a halt is one
+  night's evidence, not a permanent verdict.
+
+**The window is local time, and the container's TZ decides what that means.**
+`time.localtime()` reads the container clock, which is UTC unless something
+set `TZ` — so an unset TZ silently turns "03:00-05:00" into 3am UTC, the
+middle of the evening in half the world. Supervisor sets it under the add-on;
+`docker-compose.deploy.yml` and `.env.example` carry it for the standalone
+container. It is also not left to trust: `/api/system/status` reports
+`local_time` and the panel prints it beside the field, because a window is
+only as good as agreement about what time it is.
+
+It bypasses nothing. `_post_device_update`'s own refusals still apply; the
+duplicate check in `decide` exists so the common case does not spend a request
+to be told no. Every start, finish and halt is a log event on the device
+itself — an update that happened while nobody watched has to be findable
+afterwards, or the first sign of it is a version number nobody recognises.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,

@@ -24,15 +24,33 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _extract(name: str) -> str:
-    """The source of one top-level function in em_api.py."""
+    """
+    The source of one top-level function in em_api.py.
+
+    It stops at the first line back at column 0, NOT at the next `def`, and
+    the difference is not cosmetic. Stopping at the next def swallows
+    everything between the two — comments, module constants, annotated
+    globals — and then exec()s it in a namespace that has none of em_api's
+    imports. A `_thing: Optional[str] = None` added between two functions
+    therefore broke a test about the release poll interval with
+    `NameError: Optional`, naming neither the line nor the file that caused
+    it. Which is exactly the class of failure this file exists to avoid: the
+    point is to run the code that actually ships, and that means extracting
+    the function and nothing else.
+    """
     src = (CONTROLLER / "em_api.py").read_text()
     start = src.index(f"def {name}")
     if src[max(0, start - 6):start] == "async ":
         start -= 6                       # keep the async keyword
-    body = src[start:]
-    ends = [i for i in (body.find("\ndef "), body.find("\nasync def "))
-            if i != -1]
-    return body[:min(ends)]
+    lines = src[start:].splitlines(keepends=True)
+    out = [lines[0]]
+    for line in lines[1:]:
+        # Blank lines and anything indented belong to the function; a
+        # non-empty line starting at column 0 is the next thing in the file.
+        if line.strip() and not line[0].isspace():
+            break
+        out.append(line)
+    return "".join(out)
 
 
 def _ns(interval_value: str) -> dict:
