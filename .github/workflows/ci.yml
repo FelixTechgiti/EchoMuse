@@ -584,3 +584,29 @@ jobs:
       - name: Run go vet
         working-directory: device
         run: go vet ./internal/... ./pkg/...
+
+  shairport-compat-checks:
+    name: shairport compat shim checks (shared memory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # WHY THIS EXISTS: device/shairport/compat/ supplies the POSIX that
+      # bionic does not have, and it is the code with the worst feedback loop
+      # in the repository — its only other consumer is a cross-compile that
+      # needs Docker, and its only real verdict is a rooted Echo.
+      #
+      # The shared memory shim is the interface between nqptp and
+      # shairport-sync (#79), so every way it can be subtly wrong reads as a
+      # clock that never ticks rather than as anything to do with memory: a
+      # name that maps two processes onto DIFFERENT files gives the reader a
+      # record of zeroes for ever, with nothing failing at either end.
+      #
+      # Host cc, not the NDK, for the reason the emOS tools use one: what is
+      # checked here is behaviour, not code generation. shmcheck.c #includes
+      # android_shm.c whole, so it drives the real functions and cannot drift
+      # from what ships.
+      - name: The shared memory shim behaves like shm_open
+        run: |
+          cc -O2 -Wall -Wextra -o /tmp/shmcheck \
+            device/shairport/compat/shmcheck.c
+          REVOICE_SHM_DIR=/tmp/revoice-shmcheck /tmp/shmcheck
