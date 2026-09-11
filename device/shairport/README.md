@@ -8,34 +8,90 @@ and pushed to each device — the same situation as librespot.
 ./build.sh
 ```
 
-## This targets CLASSIC AirPlay, and that is a decision with reasons
+## This targets CLASSIC AirPlay, and the reasons are cost rather than a wall
 
-AirPlay 2 remains the goal. What stands between here and there was read off
-shairport-sync's own build documentation rather than assumed, and it is more
-than a configure flag:
+AirPlay 2 remains the goal. This section used to name three things that were
+"hard on this hardware rather than merely laborious". All three were checked
+against the sources on 2026-09-11 and **none of them survived** (#79). They
+are kept here with their corrections, because a wrong reason not to do
+something is worse than no reason: it stops the next person from looking.
 
 | | classic | AirPlay 2 |
 |---|---|---|
-| native libraries | libssl (or mbedtls), libpopt, libconfig | **+ libplist, libsodium, libgcrypt, uuid, libsoxr, libavutil, libavcodec, libavformat** |
-| audio codec | ALAC, decoded in-tree | AAC-ELD, via ffmpeg |
-| mDNS | bundled `tinysvcmdns` | **Avahi**, which is a D-Bus daemon |
+| native libraries | libssl (or mbedtls), libpopt, libconfig | **+ libplist, libsodium, libgcrypt, uuid, libsoxr, libavutil, libavcodec, libavformat, libswresample** |
+| audio codec | ALAC, decoded in-tree | ALAC for Realtime streams, **AAC-LC via ffmpeg** for Buffered |
+| mDNS | bundled `tinysvcmdns` | a backend that advertises a SECOND service and refreshes its TXT |
 | timing | NTP-ish, in-process | **nqptp**, a second daemon doing PTP on UDP 319/320 |
-| stated minimum | runs on far less | "2018 onwards Linux", "a Raspberry Pi B or better" |
+| stated minimum | runs on far less | "2018 onwards Linux", "a Raspberry Pi 2 or a Raspberry Pi Zero 2 W, or better" |
 
-Three of those are hard on this hardware rather than merely laborious:
+### The three that were wrong
 
-- **Android has no D-Bus and no Avahi.** AirPlay 2's discovery is built on it.
-- **nqptp wants timestamps a 2015 MediaTek kernel does not provide** in
-  hardware. Software PTP may be good enough; nobody has tried it here.
-- **This device is under the stated minimum** — a 2015 MT8163 on Android 5.1,
-  where the floor is a 2018 Linux. Under the minimum is not the same as
-  impossible, and it is not a footing to plan from either.
+- **"nqptp wants timestamps this kernel does not provide in hardware."**
+  nqptp's own README says the opposite in one sentence: *"nqptp does not take
+  advantage of hardware timestamping."* What it needs is exclusive use of UDP
+  319 and 320 and the privilege to bind them. The device is rooted and Android
+  runs no PTP service, so both are free. The MediaTek kernel never entered
+  into it.
 
-**The device-side code does not care which one it gets.** Both put PCM on
-stdout, and the only difference that reaches the firmware is the sample rate:
-AirPlay 2 is 48kHz and passes through untouched, classic is 44.1kHz and goes
-through `internal/resample`. When an AirPlay 2 build lands, it is a config
-value and a binary, not a rewrite.
+- **"Android has no D-Bus and no Avahi, and AirPlay 2's discovery is built on
+  it."** `configure.ac` couples `--with-airplay-2` to no mDNS backend at all,
+  and `CONFIG_AIRPLAY_2` appears zero times across all four `mdns_*.c` files.
+  What is true is narrower: of the four backends **only `mdns_avahi.c`
+  implements the second service** — `mdns_dns_sd.c`, `mdns_external.c` and
+  `mdns_tinysvcmdns.c` all take `ap2name` and `secondary_txt_records` and
+  declare them `__attribute__((unused))`, and none of the three sets
+  `mdns_update`, which `rtsp.c` calls four times to keep `_airplay._tcp`'s TXT
+  records current. So with the bundled responder that service is never
+  advertised — a real gap, and one of about a hundred lines in one file:
+  `mdnsd_register_svc` registers one service per call and can be called twice.
+  Not a port of Avahi to a platform with no D-Bus.
+
+- **"This device is under the stated minimum."** The floor was misquoted. It
+  is not "a Raspberry Pi B" but *"a Raspberry Pi 2 or a Raspberry Pi Zero 2 W,
+  or better"* — a Pi Zero 2 W is a quad Cortex-A53 at 1GHz with 512MB, and the
+  MT8163 is a quad Cortex-A53 at 1.3GHz with 512MB. The device is at or above
+  the floor, not under it. "2018 onwards Linux" is about library vintage, and
+  every dependency here is cross-compiled from a pinned source anyway — which
+  is what this whole recipe is.
+
+### What is actually in the way
+
+- **`shm_open` does not exist in bionic**, and it is how nqptp hands the clock
+  to shairport-sync: `nqptp.c`, `nqptp-clock-sources.c` and shairport's
+  `ptp-utilities.c`, three call sites in total. The shape of the interface is
+  what makes this tractable: a double-buffered struct read with a `memcmp`
+  retry until two reads agree — **no process-shared mutex, no semaphore**,
+  nothing else bionic lacks — so a file under `/data` opened and `mmap`ed is a
+  faithful substitute, injected with the same `-include` shim `compat/`
+  already uses.
+- **ffmpeg for armv7a/API 22**, trimmed to the decoders actually used rather
+  than built by default. The largest new dependency, and routine rather than
+  novel.
+- **Five more cross-builds**: libplist, libsodium, libgcrypt (and
+  libgpg-error), libuuid, libsoxr. Each ordinary — and popt below is the
+  standing warning about what "ordinary" costs here.
+- **512MB shared with Android.** AirPlay 2 wants "more memory for bigger
+  buffers and larger libraries"; a Pi Zero 2 W has the same 512MB and does not
+  also run Android. This is the one item that cannot be answered by reading.
+
+The mDNS half is **the same work as #77**, where librespot's and
+shairport-sync's two responders cancel each other out and the leading fix is
+one responder owned by the firmware. Whoever publishes the device's services
+can publish `_airplay._tcp` beside `_raop._tcp`. Do not solve it twice — and
+note `mdns_external` does not get the second service for free either.
+
+**The device-side code still does not care which one it gets.** Both put PCM
+on stdout — but the sample-rate reason given here was also wrong. AirPlay 2 is
+**not** 48kHz: `AIRPLAY2.md` says Buffered Audio is "AAC stereo at 44,100
+frames per second" and requires an output device "capable of running at 44,100
+frames per second", and Realtime streams are ALAC exactly as in classic. So
+`internal/resample` stays in the path either way, and an AirPlay 2 build is
+still a binary and a config value rather than a rewrite.
+
+**The sequencing is the real reason this is still classic**, and it has not
+changed: nobody has started the classic binary on a Dot (see the end of this
+file). An AirPlay 2 build before that point means debugging two unknowns at
+once.
 
 ## First run: 2026-09-06. Seven corrections, and two of them were the platform
 

@@ -269,17 +269,20 @@ DEFAULT_DEVICE_CONFIG = {
     # binary is actually installed.
     #
     # ⚠ CLASSIC AirPlay, not AirPlay 2, and the difference is not a setting.
-    # AirPlay 2 needs twelve native libraries (the ffmpeg trio for AAC-ELD,
-    # plus libplist, libsodium, libgcrypt, uuid, libsoxr), it needs Avahi —
-    # which is a D-Bus daemon Android does not have — and it needs nqptp
-    # doing PTP against a 2015 MediaTek kernel with no hardware timestamps.
-    # shairport-sync's own stated minimum is a 2018 Linux and "a Raspberry Pi
-    # B or better"; this is a 2015 MT8163 on Android 5.1. Classic needs three
-    # or four libraries, decodes ALAC in-tree, and can use the bundled
-    # tinysvcmdns instead of Avahi.
+    # The three blockers recorded here were all wrong, checked 2026-09-11
+    # (#79): Avahi is not required (configure.ac ties AirPlay 2 to no mDNS
+    # backend — the gap is ~100 lines in mdns_tinysvcmdns.c, which declares
+    # ap2name and secondary_txt_records unused), nqptp does not use hardware
+    # timestamping and says so in its own README, and the stated floor is a
+    # Pi 2 / Pi Zero 2 W rather than a Pi B — which a 1.3GHz quad-A53 meets.
+    # What is real: shm_open is absent from bionic and is the nqptp<->
+    # shairport clock interface, ffmpeg has to be cross-built, and 512MB is
+    # shared with Android. Classic ships first because it has not yet been
+    # proven to RUN on a Dot (#16), not because AirPlay 2 is out of reach.
     #
-    # The device side does not care which it gets: both put PCM on stdout and
-    # the only difference that reaches the firmware is the sample rate.
+    # The device side does not care which it gets: both put PCM on stdout.
+    # Not the sample rate, though — AirPlay 2's Buffered Audio is AAC-LC at
+    # 44.1kHz, not 48kHz, so internal/resample stays in the path either way.
     "airplayEnabled":   False,
     "airplayName":      "",
     # airplayVolumeControl: whether the AirPlay slider on a phone moves THIS
