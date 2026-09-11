@@ -15,7 +15,23 @@ required of them.
 ## 2.28.0-fx.1
 
 The AirPlay volume slider moves the Echo's volume — which it could not do
-before, on any device.
+before, on any device — and the Echo stops telling the network its name is
+`localhost`.
+
+### The Echo has a name of its own
+
+It booted reporting `localhost`. Both streaming endpoints publish their
+service with a record saying "reach me at `<hostname>`", so what went out was
+`localhost` — and any device that looked the name up got its own `127.0.0.1`
+back, connected to itself, and never listed the Echo at all.
+
+It is now named after its serial (`revoice-<serial>`), set before either
+endpoint starts. Nothing else on the device used the old name.
+
+**This is a fix, not the fix**, for an Echo missing from AirPlay or Spotify
+Connect. Running both endpoints at once is a second, separate problem — each
+brings its own discovery service and two on one device interfere — tracked in
+issue #77. Until that is resolved, one at a time is reliable.
 
 ### AirPlay volume control works at all
 
