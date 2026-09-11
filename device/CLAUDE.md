@@ -1062,6 +1062,59 @@ Four things not to undo:
   that answers, points at multicast. Those want opposite fixes and read
   identically until 2026-09-10.
 
+### And ONE failed probe used to retire that fast path for the whole outage
+
+**The cache above is only as good as how often it is consulted, and it was
+consulted once.** `control.go` probed the remembered address, and on failure
+called `discovery.FindServer` — which browses and does nothing else until
+multicast answers, backing off to 60s, with no return. So a single 3s probe
+decided the whole recovery, and **the one moment that probe is guaranteed to
+fail is a CONTROLLER restart**: its listener is down for the length of a
+container restart and back seconds later. The failure that cost the most was
+also the most recoverable one.
+
+Measured on the live fleet 2026-09-11, four times in one day, each beginning
+within a minute of an add-on restart:
+
+| outage | browse rounds |
+|---|---|
+| 4m16s | 7 |
+| 33m26s | 32 |
+| 38m5s | 36 |
+| 36m56s | 35 |
+
+plus one `no controller session` gap of **2h17m9s**. Throughout the last of
+them the device held its address, its firmware never restarted (both endpoints
+reported `uptimeS: 8340` across it, so the process and its Spotify and AirPlay
+receivers were alive the whole time), the controller was listening — proved
+against the live add-on, an HTTP GET to the device WebSocket port answering
+`426 Upgrade Required` from `websockets/17.1` — and once reconnected the ping
+to it measured **1.189/1.619/1.885 ms at 0% loss**.
+
+`FindServerWith` re-tests the remembered address before every browse round.
+Three things are load-bearing:
+
+- **Before the browse, not after.** When both would work the cheap test should
+  win, and a browse round costs the full 10s mDNS timeout.
+- **`probeRecheckTimeout` is 1s, against the first probe's 3s.** That one
+  decides whether to skip mDNS entirely and is worth waiting on; this one only
+  has to notice the controller came back, against a LAN round trip measured in
+  milliseconds. Wrong costs one more browse round, not a missed reconnect.
+- **The guard is on the CALL SITE as well as the behaviour.** Reverting
+  `control.go` to `discovery.FindServer` leaves every other test green while
+  restoring the entire fault, so `TestTheReconnectLoopRetestsTheRemembered
+  Address` reads the source — comments stripped first, or it matches the
+  paragraph explaining the rule rather than the code obeying it, which is this
+  tree's recurring source-guard trap.
+
+**The two failures above are now separable, and only one of them is fixed.**
+The 2026-09-10 log in #51 is NOT this case: that device ran `v2.24.0-fx.1`,
+which predates the endpoint cache, so it was genuinely mDNS-only. Tonight's
+had a remembered address and lost it to one probe. Why a browse then goes
+unanswered for 30-40 minutes is still open — and note the same device
+received 34,052 mDNS packets from 37 distinct hosts in another window that
+day, so multicast receive is not permanently dead, it comes and goes.
+
 ## The endpoints are children, and a restart does not take them with it
 
 **This is what "AirPlay disappears after every update and comes back after a
