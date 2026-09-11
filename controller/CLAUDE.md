@@ -2112,6 +2112,45 @@ to be told no. Every start, finish and halt is a log event on the device
 itself — an update that happened while nobody watched has to be findable
 afterwards, or the first sign of it is a version number nobody recognises.
 
+### The releases page size is a visibility rule, not a performance knob
+
+**Three selectors read ONE releases list** — firmware `v*`, `emos-v*`,
+`endpoints-v*` — and for a long time they shared `per_page=10`. That makes the
+release CADENCE of one namespace decide whether another can be seen at all.
+
+Measured on the live controller 2026-09-11: ten firmware releases had
+accumulated in front of `endpoints-v1.1.0`, putting it at position 12 of a
+10-item page. `/api/endpoint_binaries` answered `"release": null` about a
+release that existed, was two days old and carried both assets. Nothing failed,
+nothing logged, and the visible consequence was two steps removed from the
+cause — the "Use the published build" button never rendered, so the store kept
+`endpoints-v1.0.0`'s shairport-sync, so the AirPlay volume feature shipped in
+firmware 2.26.0-fx.1 could not work on any device.
+
+`_github_releases(repo, what)` is now the only place a releases URL is built:
+`RELEASES_PER_PAGE = 100` with `MAX_RELEASE_PAGES = 3` behind it, stopping at
+the first short page so the normal case is one request. Bounded rather than
+unbounded because a repository with thousands of releases must not turn one
+poll into a hundred requests.
+
+**It returns None for a FAILED poll and a list for a real empty answer**, and
+the difference is load-bearing: the endpoint fetcher returns its previous
+cached answer on failure, because a network blip is not evidence that a release
+was withdrawn. Collapsing the two puts every fleet one bad DNS lookup away from
+"nothing is published".
+
+`tests/test_release_paging.py` pins the page size, the bound, the
+single-URL-construction rule, and — as the regression's own record — that
+`em_endpoint_release.select` finds the endpoints release at position 12 of the
+full list while a 10-item slice hides it. The selector was never wrong; the
+page was short.
+
+**One `DEFAULT_GITHUB_REPO`, because there were three and they disagreed.** The
+firmware poll defaulted to this fork while the endpoint and emOS polls defaulted
+to `wilbowes/EchoMuse`, which publishes no `endpoints-v*` at all — so a fresh
+install with nothing configured answered "nothing is published" for ever,
+correctly, about a different repository.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,

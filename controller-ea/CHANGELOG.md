@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.32.0-fx.1
+
+### Spotify and AirPlay binaries can be fetched again
+
+**The controller had stopped seeing the published streaming binaries, and said
+nothing.** It reads the repository's release list ten at a time, and all three
+things it looks for — firmware, emOS, and the Spotify/AirPlay binaries — shared
+that one list. Once ten firmware releases had piled up in front of it, the
+endpoints release fell off the page and became invisible: the panel reported no
+published build for one that existed, was two days old, and carried both files.
+
+Nothing failed and nothing was logged. The only symptom was a button that never
+appeared — and, downstream of that, the AirPlay volume control from firmware
+2.26.0-fx.1 not working, because it needs a shairport-sync build that could not
+be fetched.
+
+It now reads up to 300 releases in one request, and the page size is decided in
+one place so a fourth thing to look for cannot quietly reintroduce it.
+
+### The panel says why there is no button
+
+Two silences are gone with it:
+
+- A hand-uploaded binary with no release in sight said only *"automatic updates
+  leave this alone"*. That reads exactly like a button that failed to render; it
+  now says there is no published release to fetch.
+- A fleet store that could not be loaded at all rendered nothing whatsoever. It
+  now says so.
+
+### One default repository instead of three
+
+The firmware poll defaulted to this fork; the endpoint and emOS polls defaulted
+to upstream, which publishes no endpoint binaries at all. A fresh install with
+nothing configured would have answered *"nothing is published"* for ever —
+correctly, about the wrong repository.
+
 ## 2.31.0-fx.1
 
 ### Firmware can update itself, inside a window you choose

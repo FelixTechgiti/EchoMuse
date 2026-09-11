@@ -109,4 +109,15 @@ check("an unknown or missing kind renders nothing at all", () => {
     null, "an unrecognised state invented a sentence");
 });
 
+// The second half of the invisible button, and the half nobody would guess
+// from the code: `unmanaged` printed "automatic updates leave this alone"
+// with no button whenever no release was visible — which reads exactly like
+// a button that failed to render. It now says which.
+check("a hand upload with no visible release says there is nothing to fetch", () => {
+  const st = publishedStoreState({ kind: 'airplay', state: 'unmanaged' }, null);
+  assert.strictEqual(st.action, null);
+  assert.ok(/no published release/.test(st.text),
+    'a missing release must be named, not left as an absent button');
+});
+
 process.exit(failures === 0 ? 0 : 1);
