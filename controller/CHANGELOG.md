@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.35.0-fx.1
+
+### The binary you installed is now the binary that RUNS
+
+**A file replacement does not replace a running process**, and until now only
+the hand-clicked install said so. Installing over a running Spotify Connect or
+AirPlay receiver renames a directory entry; the process carries on executing
+the inode it already opened, indefinitely. The install reports success, the
+checksum matches, the device's own stat shows the new file — and the thing you
+installed it for still does not work, which is indistinguishable from the new
+build being broken.
+
+The restart that fixes this shipped on the **Install** button. The automatic
+on-connect sync — which is how most devices get most of their binaries, with
+nobody watching the answer — did not have it.
+
+Measured on a live device: a new shairport-sync landed at 17:56 and the
+receiver was still three hours into the previous build afterwards, with every
+panel reporting the new one. Both paths now share one decision, and a test
+fails if a third install path ever appears without answering it.
+
+Nothing changes for an endpoint somebody is listening to: a receiver with
+audio playing is still left alone, and the device reports what it actually
+did rather than what it was asked to do.
+
 ## 2.34.0-fx.1
 
 ### Your devices come back after the rename
