@@ -8153,17 +8153,19 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             value={config.spotifyName ?? ''} disabled={!spotifyCapable || !spotifyReady}
             onChange={v => set('spotifyName', v)}/>
           {/* Classic AirPlay, and the sub-label says so rather than letting
-              somebody discover it. AirPlay 2 needs Avahi (a D-Bus daemon
-              Android does not have), nqptp doing PTP against a 2015 kernel,
-              and twelve native libraries including ffmpeg — against three or
-              four for classic, which decodes ALAC in-tree. */}
+              somebody discover it. The sub-label used to say AirPlay 2 needed
+              "libraries this hardware cannot carry", which was wrong on every
+              count checked (#79) — the hardware meets shairport-sync's stated
+              floor and none of the dependencies is blocked by the platform.
+              What is true is that the build does not exist yet, so that is
+              what it says now. Do not restate the old reasons here. */}
           <Toggle label="AirPlay" disabled={!airplayCapable || !airplayReady}
             sub={!airplayCapable
               ? 'needs newer firmware on this Echo — it has no AirPlay receiver'
               : (airplayReady
                 ? (airplayLive
                   ? `shairport-sync: ${airplayLive}`
-                  : 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — AirPlay 2 needs libraries this hardware cannot carry yet')
+                  : 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — an AirPlay 2 build has not been made for this hardware yet')
                 : `shairport-sync is not installed on this Echo (${airplayWhy})`)}
             value={airplayCapable && airplayReady && (config.airplayEnabled ?? false)}
             onChange={v => set('airplayEnabled', v)}/>

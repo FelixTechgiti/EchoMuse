@@ -1351,16 +1351,21 @@ AirPlay carries, for the same reason.
 same two-gate arrangement as Spotify (`airplay` capability + `airplayStatus`).
 
 **⚠ It is CLASSIC AirPlay, and the sub-label in the dashboard says so** rather
-than letting somebody discover it. AirPlay 2 needs twelve native libraries
-including the ffmpeg trio, it needs Avahi — a D-Bus daemon Android does not
-have — and it needs nqptp doing PTP against a 2015 MediaTek kernel with no
-hardware timestamps, against shairport-sync's own stated minimum of a 2018
-Linux and "a Raspberry Pi B or better". Classic needs three or four libraries,
-decodes ALAC in-tree, and uses the bundled tinysvcmdns.
+than letting somebody discover it. The reasons given here were three blockers
+that all turned out to be wrong on 2026-09-11 (#79): Avahi is not required
+(configure.ac ties AirPlay 2 to no mDNS backend — the gap is ~100 lines in
+`mdns_tinysvcmdns.c`, which declares `ap2name` and `secondary_txt_records`
+unused), nqptp does not use hardware timestamping and says so in its README,
+and the stated floor is a Pi 2 / Pi Zero 2 W, which a 1.3GHz quad-A53 meets.
+What is real is `shm_open` being absent from bionic, an ffmpeg cross-build,
+five more libraries, and 512MB shared with Android. Classic still ships first
+for a sequencing reason: it has not yet been proven to run on a Dot (#16).
 
-The device side is version-agnostic: both put PCM on stdout, and the only
-difference that reaches the firmware is the sample rate. When an AirPlay 2
-build lands it is a config value and a binary, not a rewrite.
+The device side is version-agnostic: both put PCM on stdout. The sample rate
+is **not** the difference it was recorded as — AirPlay 2's Buffered Audio is
+AAC-LC at 44.1kHz, not 48kHz, so `internal/resample` stays in the path either
+way. When an AirPlay 2 build lands it is a config value and a binary, not a
+rewrite.
 
 **The binary exists as of 2026-09-06, and getting there needed a compat
 shim.** `device/shairport/` had never been executed. Five corrections got

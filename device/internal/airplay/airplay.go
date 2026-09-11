@@ -9,32 +9,45 @@
 //
 // # What is actually achievable here, stated plainly
 //
-// The user asked for AirPlay 2 and that remains the target. It is worth
-// writing down what stands between here and there, because the answer changed
-// once the dependency list was read rather than assumed:
+// The user asked for AirPlay 2 and that remains the target. This comment used
+// to list three things standing between here and there. All three were
+// checked against the sources on 2026-09-11 and none of them held (#79); the
+// corrections are kept rather than deleted, because a wrong reason not to do
+// something is worse than no reason.
 //
-//   - **AirPlay 2 needs twelve native libraries**, including the ffmpeg trio
-//     (libavutil/libavcodec/libavformat) for AAC-ELD, plus libplist,
-//     libsodium, libgcrypt, uuid and libsoxr. Every one has to be
-//     cross-compiled for bionic at API 22. Classic AirPlay needs three or
-//     four, and ALAC is decoded in-tree.
-//   - **AirPlay 2 needs Avahi**, which is a D-Bus daemon. Android has no
-//     D-Bus and no Avahi. Classic AirPlay can use shairport-sync's bundled
-//     tinysvcmdns and needs neither.
-//   - **AirPlay 2 needs nqptp**, a second daemon binding UDP 319/320 for PTP.
-//     PTP wants timestamps this 2015 MediaTek kernel does not provide in
-//     hardware.
-//   - **shairport-sync's own stated minimum is a 2018-or-later Linux and "a
-//     Raspberry Pi B or better"**. This is a 2015 MT8163 on Android 5.1.
-//     Under the minimum is not the same as impossible, and it is not a
-//     footing to plan from either.
+//   - **"AirPlay 2 needs Avahi, a D-Bus daemon Android does not have."** Not
+//     so: configure.ac ties --with-airplay-2 to no mDNS backend at all. What
+//     is true is narrower — of the four backends only mdns_avahi.c
+//     implements the second service. mdns_tinysvcmdns.c takes ap2name and
+//     secondary_txt_records and declares both __attribute__((unused)), and
+//     sets no mdns_update, so _airplay._tcp is never advertised. That is
+//     ~100 lines in one file, not a port of Avahi.
+//   - **"nqptp wants timestamps this kernel cannot provide in hardware."**
+//     nqptp's own README: "nqptp does not take advantage of hardware
+//     timestamping." It needs UDP 319/320 exclusively and the privilege to
+//     bind them; the device is rooted and Android runs no PTP service.
+//   - **"The device is under the stated minimum."** The floor was misquoted.
+//     It is "a Raspberry Pi 2 or a Raspberry Pi Zero 2 W, or better" — a
+//     quad Cortex-A53 at 1GHz with 512MB. The MT8163 is a quad Cortex-A53 at
+//     1.3GHz with 512MB, so the device is at or above it.
 //
-// So the build recipe targets CLASSIC AirPlay first, and this package does
-// not care which it gets: both speak the same subprocess interface — PCM on
-// stdout — and the only difference that reaches this code is the sample rate.
-// AirPlay 2 is 48kHz and needs no conversion; classic is 44.1kHz and goes
-// through internal/resample. Nothing here has to change when the AirPlay 2
-// build lands.
+// What is genuinely in the way: shm_open does not exist in bionic and is the
+// nqptp<->shairport clock interface (three call sites, no process-shared
+// mutex in it, so a file-backed mmap substitutes faithfully); ffmpeg has to
+// be cross-built for armv7a/API 22; five more libraries with it; and 512MB is
+// shared with Android, which is the one item that has to be measured rather
+// than read.
+//
+// So the build recipe targets CLASSIC AirPlay first — the sequencing reason,
+// not a technical one: the classic binary has not yet been proven to run on a
+// Dot, and building AirPlay 2 first means debugging two unknowns at once.
+//
+// This package does not care which it gets: both speak the same subprocess
+// interface — PCM on stdout. The sample-rate difference given here was wrong
+// too: AirPlay 2 is NOT 48kHz. Its Buffered Audio is AAC-LC at 44,100 frames
+// per second and its Realtime streams are ALAC exactly as in classic, so
+// internal/resample stays in the path either way. Nothing here has to change
+// when the AirPlay 2 build lands.
 package airplay
 
 import (
