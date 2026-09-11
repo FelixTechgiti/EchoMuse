@@ -100,7 +100,7 @@ SECTIONS: dict[str, dict] = {
 # it is a bug — and deliberately not on a dashboard Stage: two controls owning
 # one value is how they drift.
 STATE_KEYS: frozenset[str] = frozenset({
-    "startupVolume", "idleRing", "idleRingBrightness",
+    "startupVolume", "idleRing", "idleRingBrightness", "idleEffect",
 })
 
 SECTION_IDS: tuple[str, ...] = tuple(SECTIONS)

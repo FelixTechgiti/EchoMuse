@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.36.0-fx.1
+
+### Running light effects on the ring
+
+The ring's Home Assistant light entity now offers animations that keep
+running: a rotating dot, a comet, a rainbow, a colour cycle, a blink, a slow
+breathe and a static gradient. They sit in the same effect dropdown the
+notifications already used, so switching one on is one line in an automation
+or one tap on the light card.
+
+**An effect here is the ring's resting state, not a one-off.** It stays until
+you pick another one or choose None, and it comes back by itself after a
+voice turn, a mute, a volume change or an update — anything that takes the
+ring hands it back afterwards.
+
+The brightness slider governs it like any other light, and turning the ring
+off turns the effect off with it. The colour you picked is used by the
+effects that are a motion rather than a colour scheme, so choosing Rotate
+does not quietly discard it.
+
+Notifications are unchanged: Notify, Alert and Sweep still play once and
+leave the resting ring exactly as it was.
+
+**Nothing on the Echo needs updating for this** — every pattern is one the
+firmware already draws. And the ring still belongs to the voice states
+first: listening, thinking, speaking, the mute ring and the error cues all
+take it, and the effect resumes when they are done. The light under the
+microphone button is untouched, as always.
+
 ## 2.35.0-fx.1
 
 ### Ask the controller whether the network can see an Echo
