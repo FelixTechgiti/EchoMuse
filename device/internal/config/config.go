@@ -466,6 +466,16 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.AirplayEnabled != nil {
 		airplayEnabled = *d.AirplayEnabled
 	}
+	// Copied to a local for beamformingEnabled's reason — never point into
+	// the mutex-guarded struct — and nil is preserved rather than flattened
+	// to false: the controller sends this on every push, so nil only means
+	// a device that has never been configured, and the two are the same
+	// answer here only by luck.
+	var airplayVolumeControl *bool
+	if d.AirplayVolumeControl != nil {
+		v := *d.AirplayVolumeControl
+		airplayVolumeControl = &v
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -492,7 +502,12 @@ func (d *Device) Snapshot() ConfigMessage {
 		SpotifyName:        d.SpotifyName,
 		AirplayEnabled:     &airplayEnabled,
 		AirplayName:        d.AirplayName,
-		ListeningAnim:      d.ListeningAnim,
+		// Absent here for the whole life of the feature, which is why it
+		// never worked on any device: Apply stored it, Snapshot dropped it,
+		// and airplayVolume() therefore read nil and returned no handler.
+		// See the Snapshot guard in config_snapshot_test.go.
+		AirplayVolumeControl: airplayVolumeControl,
+		ListeningAnim:        d.ListeningAnim,
 	}
 }
 

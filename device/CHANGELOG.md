@@ -12,6 +12,32 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.28.0-fx.1
+
+The AirPlay volume slider moves the Echo's volume — which it could not do
+before, on any device.
+
+### AirPlay volume control works at all
+
+The setting existed, the dashboard saved it, the controller pushed it and the
+Echo stored it. Nothing ever read it back: the internal accessor every
+consumer goes through was a hand-written copy that did not carry this one
+field, so the code deciding whether to ask shairport-sync for volume messages
+always saw "unset" and never asked. The feature has been inert since the day
+it shipped, with every panel reporting it as on.
+
+Turning it on now does what it says: the slider in the iPhone's AirPlay
+control changes the Echo's own volume, so spoken answers get louder and
+quieter with it, and the ring shows the level like any other volume change.
+Off by default, and unchanged when off.
+
+**Requires the `endpoints-v1.1.0` shairport-sync**, which the controller
+installs by itself when the setting is on.
+
+A test now fails if any future setting is stored and then dropped the same
+way — the failure had no symptom other than the feature quietly doing
+nothing.
+
 ## 2.27.0-fx.1
 
 A replaced streaming binary is actually used, and music played from Music
