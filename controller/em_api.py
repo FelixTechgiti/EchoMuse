@@ -62,6 +62,7 @@ import em_emos_build
 import em_endpoint_bins
 import em_endpoint_release
 import em_endpoint_restart
+import em_devicepaths
 import em_autoupdate
 import em_firmware
 import em_ingressauth
@@ -1549,7 +1550,10 @@ async def _post_fetch_supervisor_log(request: web.Request) -> web.Response:
     # unattended and only has to carry the last failed start, while this one
     # was asked for by somebody looking at a specific fault and wants the
     # boots either side of it.
-    out = await _shell_run(live, f"busybox tail -c 8192 {SUPERVISOR_LOG}",
+    out = await _shell_run(
+        live,
+        em_devicepaths.first_readable_command(
+            SUPERVISOR_LOG_NAME, "busybox tail -c 8192"),
                            timeout=30.0)
     text = (out or "").strip()
     if not text:
@@ -3672,15 +3676,26 @@ async def _run_secure_link(device_id: str) -> None:
         token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
         ca    = em_pki.ca_pem(_tls_dir)
 
-        await _shell_run(live, f"mkdir -p {DEVICE_TLS_DIR}")
+        await _shell_run(live, em_devicepaths.mkdir_command())
         await asyncio.sleep(1.0)  # let the shell session close cleanly
 
-        ok = await _stream_file_to_device(
-            live, ca.encode("ascii"), f"{DEVICE_TLS_DIR}/ca.pem", mode="644")
-        if ok:
+        # Written to EVERY directory a name has used, because firmware in
+        # the field reads the old one and there is no capability that says
+        # which — see em_devicepaths. A device on current firmware gets a
+        # spare copy it never opens; a device on older firmware gets
+        # credentials that work.
+        ok = True
+        for d in em_devicepaths.write_dirs():
+            ok = await _stream_file_to_device(
+                live, ca.encode("ascii"), f"{d}/ca.pem", mode="644")
+            if not ok:
+                break
             await asyncio.sleep(1.0)
             ok = await _stream_file_to_device(
-                live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
+                live, token.encode("ascii"), f"{d}/token", mode="600")
+            if not ok:
+                break
+            await asyncio.sleep(1.0)
         if not ok:
             await _push_log_event(device_id, "error", "controller",
                                   f"Secure link: credential transfer failed: {ok}")
@@ -6482,7 +6497,12 @@ _supervisor_log_wanted: set[str] = set()
 
 # Supervisor decisions kept on the device, surviving the reboot that /tmp does
 # not. Must match SUP_LOG in device_payloads/start_server.sh.
-SUPERVISOR_LOG = "/data/local/etc/revoice/supervisor.log"
+# The device's persistent log, by name only. The DIRECTORY is no longer a
+# single answer — a rename moved it and firmware in the field still reads the
+# old one — so every read goes through em_devicepaths, which tries each in
+# turn. Keeping the filename here means there is still exactly one place that
+# says what the file is called.
+SUPERVISOR_LOG_NAME = "supervisor.log"
 
 
 async def _collect_supervisor_log(device_id: str) -> None:
@@ -6503,7 +6523,11 @@ async def _collect_supervisor_log(device_id: str) -> None:
     live = _live(device_id)
     if live is None:
         return
-    out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
+    out = await _shell_run(
+        live,
+        em_devicepaths.first_readable_command(
+            SUPERVISOR_LOG_NAME, "busybox tail -c 4096"),
+        timeout=30.0)
     text = (out or "").strip()
     if not text:
         await _push_log_event(device_id, "warn", "controller",
