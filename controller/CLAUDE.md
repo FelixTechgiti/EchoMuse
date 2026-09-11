@@ -2007,6 +2007,44 @@ firmware rendering the ticker is the firmware being replaced, so at
 something. Frozen reads as mid-update rather than off, which is still the
 better of the two, but it is not an animation.
 
+### Installing a binary restarts the endpoint running the old one
+
+**A rename replaces a directory entry, not the inode a process is executing.**
+So installing over a running endpoint reported success, matched md5, and left
+the old code running indefinitely — and the only symptom was that the thing
+you installed it for still did not work, which is indistinguishable from the
+new binary being broken. Noted as "known, not fixed" in #24, then met again
+the day the metadata-capable shairport-sync shipped.
+
+**The comment that justified doing nothing was written about a PLAYING
+stream, and it is right about that case.** Killing a receiver somebody is
+listening to, to update a file nobody has asked to switch to yet, IS the more
+surprising behaviour. It is wrong about the common case, where the endpoint is
+idle and doing nothing silently wastes the install. Watch for this shape: a
+true sentence about the rare case, load-bearing for the common one.
+
+Telling them apart needs to know who owns the music plane, and that is the
+controller's knowledge — no frame of an endpoint's audio passes through here,
+which is exactly why `audio_source` exists. So `em_endpoint_restart.decide` is
+the judgement and the device gets only the verb.
+
+- **`endpoint_restart` is a capability**, announced rather than assumed. An
+  unknown control message is ignored SILENTLY at both ends, so a controller
+  that assumed it would report "restarted, the new binary is live" about a
+  process still executing the old inode — the exact failure the message exists
+  to end, with a reassuring sentence on top.
+- **The device answers what it ACTUALLY did**, and that is what gets reported.
+  The decision says what should happen; the reply says what did. They come
+  apart when an endpoint stops between the health report and the message
+  arriving — rare, and precisely where a confident sentence would be wrong.
+- **No answer is not "no".** A device that went quiet has not told us the old
+  binary is still running, so `restarted` is None there and the note says so
+  rather than inventing the missing half.
+- **A different source playing does not protect this one.** Spotify playing
+  says nothing about whether anyone is listening to AirPlay; reading "something
+  is playing" as "leave everything alone" would make the install a no-op
+  whenever the Echo happened to be in use at all.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,

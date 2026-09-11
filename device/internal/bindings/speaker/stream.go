@@ -203,6 +203,15 @@ func (s *audioStream) isActive() bool {
 	return s.active
 }
 
+// queuedPeriods is how many periods are waiting in the ring, unmixed and
+// unplayed. The ALSA pump loop pops from the same channel, so this is a
+// snapshot and one period may be popped and not yet written — a single
+// period of slop on a figure whose point is the hundreds of milliseconds the
+// hardware pointer cannot see at all.
+func (s *audioStream) queuedPeriods() int {
+	return len(s.ch)
+}
+
 // ready reports whether the pump loop should take a period this round.
 //
 // The prime gate: while not yet playing, hold on silence until the buffer has

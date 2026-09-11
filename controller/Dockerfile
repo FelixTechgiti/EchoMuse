@@ -102,6 +102,7 @@ COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
 COPY em_endpoint_bins.py .
 COPY em_endpoint_release.py .
+COPY em_endpoint_restart.py .
 COPY em_oww_metadata.py .
 COPY em_oww_warmup.py .
 COPY em_arbiter.py .

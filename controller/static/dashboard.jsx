@@ -1618,10 +1618,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       // the bytes are verified either way, but only the device can confirm
       // the file is there and executable, and claiming it did when it never
       // answered is the kind of false success this codebase keeps finding.
-      setEpResult(r => ({ ...r, [kind]: { ok: true, text: res.status
+      // Two separate facts, and the second used to be missing entirely.
+      // res.status is what the DEVICE said when asked whether the FILE is
+      // there; res.restart_note is what happened to the PROCESS that was
+      // running the old one. A rename replaces a directory entry, not the
+      // inode a process is executing, so an install with a perfect md5 could
+      // leave the old code running indefinitely and say nothing about it.
+      const landed = res.status
         ? 'Installed. The switch on the Config tab is live now — no restart needed.'
         : 'Sent and verified, but the device did not answer when asked to '
-          + 'confirm. Reopen this tab in a moment to check.' } }));
+          + 'confirm. Reopen this tab in a moment to check.';
+      setEpResult(r => ({ ...r, [kind]: { ok: true,
+        text: res.restart_note ? `${landed} ${res.restart_note}` : landed } }));
     } catch(e) {
       setEpResult(r => ({ ...r, [kind]: { ok: false, text: e.error || 'Install failed' } }));
     }

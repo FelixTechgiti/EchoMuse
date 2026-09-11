@@ -427,3 +427,44 @@ def test_airplay_metadata_is_built_and_read():
     meta = (root / "device" / "internal" / "airplay" / "metadata.go").read_text()
     assert "pvol" in meta and "ssnc" in meta, \
         "the volume item is not the one being read"
+
+
+def test_endpoint_restart_is_announced_not_assumed():
+    """
+    An unknown control message is ignored SILENTLY at both ends, so a
+    controller that assumed this capability would report "restarted, the new
+    binary is live" about a process still executing the old inode — the exact
+    failure the message exists to end, with a reassuring sentence added.
+
+    And the device's ANSWER is what gets reported, not the request: the
+    decision says what should happen, the reply says what did, and they come
+    apart when an endpoint stops in between.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    caps = device_capabilities()
+    assert "endpoint_restart" in caps, \
+        "firmware no longer announces endpoint_restart"
+
+    ctl = CONTROLLER.read_text()
+    assert "endpoint_restart_capable" in ctl, \
+        "em_controller must expose the capability"
+    assert "endpoint_restart_result" in ctl, \
+        "nothing routes the device's answer back to the waiting install"
+
+    api = API.read_text()
+    assert "em_endpoint_restart.decide" in api, \
+        "the install path does not consult the decision"
+    assert "notify_endpoint_restart_result" in api, \
+        "no waiter for the device's answer"
+
+    # The device must answer even when it did nothing, or the controller
+    # cannot tell "ignored" from "nothing to restart".
+    control = (root.parent / "device" / "internal" / "client" / "control.go").read_text()
+    block = control[control.index('case "endpoint_restart":'):]
+    block = block[:block.index('case "config":')]
+    assert "endpoint_restart_result" in block, \
+        "the device never answers an endpoint_restart"
+    assert "restarted" in block, \
+        "the answer does not say whether anything was actually restarted"
