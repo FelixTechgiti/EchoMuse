@@ -2,6 +2,19 @@
 
 ## 2.29.0-fx.1
 
+### The size of an installed endpoint binary is reported again
+
+After pushing 9MB of librespot to an Echo over a shell, the panel said the
+install had worked and showed no size. The size is the field that answers the
+question you actually have — whether the file that landed is the file you
+built — and on these devices the plain `wc` it was asked with produces nothing
+at all.
+
+It asks busybox first now, which is what Magisk provides and what every other
+command this controller sends to a device already reaches for. The size is
+still allowed to fail: an Echo with no working `wc` reads as an install that
+worked without a size, never as a failed one.
+
 ### The AirPlay volume slider can drive the Echo
 
 Paired with firmware 2.26.0-fx.1. A new Streaming setting — **AirPlay volume
