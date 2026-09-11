@@ -309,7 +309,12 @@ the OTA poller cannot see.
 
 `controller/docker-compose.yml` is the local dev/GPU build (`GPU=1` build arg swaps in onnxruntime-gpu); `controller/docker-compose.deploy.yml` is the user-facing compose that pulls the published image.
 
-`device/tools/` contains standalone diagnostics (`capture_mics`, `bf_capture` + analysis scripts) for mapping the 9-channel mic array; they build inside the same compiler image.
+`device/tools/` contains standalone diagnostics (`capture_mics`, `bf_capture` +
+analysis scripts) for mapping the 9-channel mic array; they build inside the
+same compiler image. **`mdnsprobe` is the exception and links no libc at all**
+— raw ARM syscalls, ~3KB — because it has to reach a device as base64 through
+the shell plane rather than over a cable, and because linking nothing removes
+the bionic question instead of answering it.
 
 ## Architecture
 
