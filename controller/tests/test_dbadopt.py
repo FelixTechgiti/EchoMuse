@@ -18,11 +18,14 @@ import pytest
 import em_dbadopt as a
 
 
-def _db(path, devices=0):
+def _db(path, devices=0, pending=0):
     conn = sqlite3.connect(str(path))
-    conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY, "
+                 "approved INTEGER NOT NULL DEFAULT 0)")
     for i in range(devices):
-        conn.execute("INSERT INTO devices VALUES (?)", (f"dev{i}",))
+        conn.execute("INSERT INTO devices VALUES (?, 1)", (f"dev{i}",))
+    for i in range(pending):
+        conn.execute("INSERT INTO devices VALUES (?, 0)", (f"pending{i}",))
     conn.commit()
     conn.close()
     return path
@@ -156,3 +159,36 @@ def test_running_twice_changes_nothing_the_second_time(tmp_path):
     assert a.adopt_if_needed(str(target))
     assert a.adopt_if_needed(str(target)) is None
     assert a.count_devices(target) == 3
+
+
+def test_a_pending_device_does_not_count_as_one_in_use(tmp_path):
+    """
+    The bug this nearly shipped with, and the one it would have hurt most.
+
+    Under `strict` approval a device inserts its row the moment it connects
+    and then waits. So a controller that came up on an empty database had its
+    fleet reconnect and fill `devices` with pending rows within seconds — and
+    counting those would have made the empty database look "in use",
+    refusing the adoption on exactly the installations that needed it. The
+    symptom would have been the migration appearing not to work at all.
+
+    A pending row is not data anybody loses: the device is still out there
+    and presents itself again within seconds.
+    """
+    _db(tmp_path / "echomuse.db", devices=2)
+    target = _db(tmp_path / "revoice.db", devices=0, pending=1)
+    assert a.count_devices(target) == 0, "a pending device is not an approved one"
+    assert a.adopt_if_needed(str(target)), "the live case must still adopt"
+    assert a.count_devices(target) == 2
+
+
+def test_a_schema_without_the_approved_column_still_counts(tmp_path):
+    # Old enough to predate the column. Counting everything can only make
+    # this REFUSE, never overwrite — the safe direction.
+    legacy = tmp_path / "old.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO devices VALUES ('a')")
+    conn.commit()
+    conn.close()
+    assert a.count_devices(legacy) == 1

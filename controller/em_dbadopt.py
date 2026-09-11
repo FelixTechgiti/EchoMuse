@@ -89,7 +89,19 @@ def decide(*, legacy_exists: bool, legacy_devices: int,
 
 def count_devices(path: Path) -> int:
     """
-    How many devices a database holds, or 0 when that cannot be read.
+    How many APPROVED devices a database holds, or 0 when that cannot be read.
+
+    **Approved, not all — and this is the whole correctness of the guard.**
+    A device that connects to a controller under `strict` approval inserts a
+    row immediately and waits at the door. So the moment the renamed
+    controller came up empty, the fleet reconnected and filled `devices` with
+    pending rows. Counting those would have made the new database look "in
+    use" and refused the adoption on exactly the installations that needed
+    it — the failure would have been indistinguishable from the migration
+    simply not working.
+
+    A pending row is not data anybody can lose: the device is still out
+    there and will present itself again within seconds.
 
     Opened read-WRITE on purpose. A database left in WAL mode may need
     recovery before it can be read at all, and a read-only open fails on
@@ -102,7 +114,14 @@ def count_devices(path: Path) -> int:
     conn = None
     try:
         conn = sqlite3.connect(str(path))
-        row = conn.execute("SELECT COUNT(*) FROM devices").fetchone()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM devices WHERE approved = 1").fetchone()
+        except sqlite3.OperationalError:
+            # A schema old enough to predate the column. Counting everything
+            # is the conservative answer there: it can only make this refuse
+            # to adopt, never make it overwrite something.
+            row = conn.execute("SELECT COUNT(*) FROM devices").fetchone()
         return int(row[0]) if row else 0
     except Exception as e:
         log.info(f"could not count devices in {path.name}: {e}")
