@@ -354,6 +354,49 @@ func (c *Client) Leave(reason string) {
 	c.kill()
 }
 
+// Restart re-executes the endpoint so a REPLACED BINARY takes effect, and
+// reports whether there was anything to restart.
+//
+// The supervisor re-resolves the path on every session, so killing the
+// process is the whole of it: the next `exec` opens the new inode. Nothing
+// here touches the enabled state, which belongs to the user.
+//
+// # Why this exists
+//
+// Installing a new binary over a running endpoint is a rename over a
+// directory entry — the running process keeps the inode it is executing and
+// carries on with the OLD code, indefinitely. The controller therefore
+// reported a successful install of a binary that was not being used, and the
+// only way to find out was that the thing you installed it for still did not
+// work. Noted as "known, not fixed" when librespot discovery was fixed, then met
+// again the day the metadata build shipped.
+//
+// **The comment that justified doing nothing was written about a PLAYING
+// stream**, and it is right about that case and wrong about the common one:
+// killing a receiver somebody is listening to, to update a file nobody asked
+// to switch to yet, is the more surprising behaviour. Whether anyone is
+// listening is a question the controller can answer — it knows which source
+// owns the music plane — so the decision is made there and this is only the
+// verb.
+func (c *Client) Restart() bool {
+	c.mu.Lock()
+	proc, running := c.proc, c.running
+	c.mu.Unlock()
+	if !running {
+		// Not enabled: the next Start picks the new binary up by itself.
+		return false
+	}
+	if proc == nil {
+		// Enabled but between attempts — the supervisor is already about to
+		// exec, and it will exec the new file. Nothing to kill, and saying
+		// "restarted" would claim an action that did not happen.
+		return false
+	}
+	log.Printf("[spotify] restarting to pick up a replaced binary")
+	c.kill()
+	return true
+}
+
 func (c *Client) kill() {
 	c.mu.Lock()
 	proc := c.proc

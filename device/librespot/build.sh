@@ -112,6 +112,24 @@ docker run --rm -v "$OUT:/out" -v "$COMPAT:/compat:ro" -v "$HERE:/alias:ro" "$IM
     RUSTFLAGS='-Clink-arg=/build/android_ifaddrs.o -Clink-arg=/build/ifaddrs_alias.o' \
     cargo build --release --target armv7-linux-androideabi \
         --no-default-features --features '$FEATURES'
+    # Proof rather than assumption, and NOT a duplicate of the feature guard
+    # above. That one reads upstream's Cargo.toml and refuses a default this
+    # build neither enables nor drops — it proves the flag was PASSED. This
+    # proves the flag ARRIVED: that the responder is in the bytes about to be
+    # installed. Those come apart if upstream renames the feature, if it
+    # compiles to nothing on this target, or if a future cargo silently
+    # ignores an unknown one.
+    #
+    # The mDNS responder leaves its service type in the binary, so the check
+    # is a grep. Before the strip, because strip is where a mistake here would
+    # start looking like something else.
+    if ! grep -q '_spotify-connect._tcp' target/armv7-linux-androideabi/release/librespot; then
+        echo 'ERROR: no Spotify Connect discovery in the binary.' >&2
+        echo '       with-libmdns was requested but is not in the output — a' >&2
+        echo '       librespot like this runs perfectly and is never listed' >&2
+        echo '       in the app, which is exactly what shipped on 2026-09-10.' >&2
+        exit 1
+    fi
     # Stripped: the eMMC is 8GB shared with Android and the symbols are of no
     # use on a device with no debugger on it.
     \"\$NDK/bin/llvm-strip\" target/armv7-linux-androideabi/release/librespot

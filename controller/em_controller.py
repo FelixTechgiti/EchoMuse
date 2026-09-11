@@ -1138,6 +1138,19 @@ class Device:
         return "endpoint_health" in (self.capabilities or [])
 
     @property
+    def endpoint_restart_capable(self):
+        """
+        Whether this firmware can re-execute an endpoint on request.
+
+        Separate from endpoint_health for the usual reason, and here it is
+        sharp: an unknown control message is ignored SILENTLY at both ends, so
+        a controller that assumed this would report "restarted, the new binary
+        is live" about a process still executing the old inode — the exact
+        failure the message exists to end, with a reassuring sentence on top.
+        """
+        return "endpoint_restart" in (self.capabilities or [])
+
+    @property
     def base_os(self):
         """
         The userspace the device booted: "emos", "fireos", or None.
@@ -4241,6 +4254,19 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     if msg_type == "button":
                         await handle_button_event(device, msg)
 
+                    elif msg_type == "endpoint_restart_result":
+                        # What the device ACTUALLY did with an endpoint whose
+                        # binary was just replaced. The install path is
+                        # waiting on this: the decision says what should
+                        # happen, this says what did, and they come apart
+                        # when an endpoint stops in between — which is
+                        # exactly where a confident sentence would be wrong.
+                        api.notify_endpoint_restart_result(
+                            device.device_id,
+                            str(msg.get("kind") or ""),
+                            bool(msg.get("restarted")),
+                        )
+
                     elif msg_type == "ambient_light":
                         # A step change in room light, sent by the device the
                         # moment it happens rather than waiting up to 30s for the
@@ -5154,6 +5180,7 @@ async def main():
 
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
+    auto_update_task   = asyncio.create_task(api.auto_update_loop())
     loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
 
     # Device-link TLS: generate/load the CA + server cert. Failure to set
@@ -5218,6 +5245,7 @@ async def main():
         await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()
+        auto_update_task.cancel()
         loop_lag_task.cancel()
         mdns_task.cancel()
         await azc.async_unregister_service(info)

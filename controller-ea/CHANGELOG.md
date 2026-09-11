@@ -1,6 +1,76 @@
 # Changelog
 
+## 2.31.0-fx.1
+
+### Firmware can update itself, inside a window you choose
+
+Home Assistant updates the add-on on its own; firmware never did, so every
+Echo stayed on whatever version it had until somebody clicked. There is now a
+switch for it on the Updates tab, with a window — **03:00-05:00**, or anything
+else, and it may cross midnight.
+
+The window is the point rather than a refinement. An update reboots the Echo,
+and an assistant that goes dead mid-sentence at half past seven in the evening
+is worse than one that is a version behind. Without a window nothing is
+installed automatically, whatever the switch says.
+
+What it will not do:
+
+- **Interrupt anything.** A device in a voice turn, playing from Home
+  Assistant, or playing Spotify, AirPlay or Music Assistant is left for the
+  next look. Firmware too old to say what it is playing is updated only when
+  it has no streaming endpoint switched on at all.
+- **Update more than one Echo at a time.** Three at once measurably stalls the
+  controller, and at three in the morning nobody is awake to notice.
+- **Carry on after a failure.** If an Echo does not come back, the rest are
+  left alone until the next window and the panel says which one and why. A
+  device that does not return is evidence about the update, not about that
+  device.
+
+Every automatic update is written to the device's own log, so one that
+happened overnight can be found afterwards rather than discovered as a version
+number nobody recognises.
+
+The window is **local time as the controller sees it**, and the panel shows
+the controller's own clock next to the field so the two can be checked against
+each other. Under the Home Assistant add-on that is your Home Assistant
+timezone. Running the container yourself, set `TZ` — without it the container
+is UTC, and "03:00" is 3am UTC rather than 3am where you are.
+
+## 2.30.0-fx.1
+
+### Installing librespot or shairport-sync now actually replaces the running one
+
+Installing a new binary over an endpoint that was already running did nothing
+visible and nothing useful: the file landed, the checksum matched, the panel
+said it worked — and the Echo carried on running the **old** program, until
+you happened to toggle it off and on or reboot. The only symptom was that
+whatever you installed it for still did not work.
+
+It is restarted now, so the binary you installed is the one running. With one
+exception: if somebody is listening to that endpoint at that moment, it is
+left alone and you are told so — cutting off music to swap a file nobody asked
+to switch to yet is worse than waiting. It restarts by itself when playback
+ends.
+
+The panel says which of those happened, including the awkward cases: an Echo
+on older firmware that cannot restart on request, and one that did not answer.
+Neither is reported as a success.
+
 ## 2.29.0-fx.1
+
+### The size of an installed endpoint binary is reported again
+
+After pushing 9MB of librespot to an Echo over a shell, the panel said the
+install had worked and showed no size. The size is the field that answers the
+question you actually have — whether the file that landed is the file you
+built — and on these devices the plain `wc` it was asked with produces nothing
+at all.
+
+It asks busybox first now, which is what Magisk provides and what every other
+command this controller sends to a device already reaches for. The size is
+still allowed to fail: an Echo with no working `wc` reads as an install that
+worked without a size, never as a failed one.
 
 ### The AirPlay volume slider can drive the Echo
 

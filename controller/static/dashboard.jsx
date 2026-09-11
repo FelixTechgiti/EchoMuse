@@ -1360,6 +1360,13 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   // a wrong "disabled" notice sends someone to change a setting that is
   // already correct.
   const [autoChecks, setAutoChecks] = useState(true);
+  // Firmware auto-update (#21). `autoUpd` is null until the status fetch
+  // lands, so the panel renders its controls blank rather than claiming the
+  // feature is off — the same reason autoChecks defaults TRUE above.
+  const [autoUpd, setAutoUpd] = useState(null);
+  const [windowDraft, setWindowDraft] = useState('');
+  const [windowError, setWindowError] = useState(null);
+  const [savingAuto, setSavingAuto] = useState(false);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
   const [localFile, setLocalFile] = useState(null);
@@ -1411,7 +1418,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       // Same tab-entry pattern as the asset state below: this changes only
       // when someone edits system config, so polling it would be waste.
       API.get('/api/system/status')
-        .then(s => setAutoChecks(s.update_checks_enabled !== false))
+        .then(s => {
+          setAutoChecks(s.update_checks_enabled !== false);
+          setAutoUpd({
+            enabled: !!s.auto_update_enabled,
+            window:  s.auto_update_window || '',
+            halted:  s.auto_update_halted || null,
+            now:     s.local_time || null,
+          });
+          setWindowDraft(s.auto_update_window || '');
+          setWindowError(null);
+        })
         .catch(() => {});
       // Asset state costs a device shell round trip, so it is fetched on tab
       // entry rather than polled — unlike a release, it only changes when
@@ -1478,6 +1495,31 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       alert(e.error || 'Release check failed');
     }
     setCheckingRelease(false);
+  }
+
+  // Auto-update settings (#21). Fleet-wide rather than per-device, so it
+  // writes system config and re-reads the status the same way the panel
+  // populated itself — a PATCH that succeeded but left the panel showing the
+  // old value is how somebody sets a window twice.
+  async function saveAutoUpdate(next) {
+    setSavingAuto(true);
+    setWindowError(null);
+    try {
+      await API.patch('/api/system/config', next);
+      const s = await API.get('/api/system/status');
+      setAutoUpd({
+        enabled: !!s.auto_update_enabled,
+        window:  s.auto_update_window || '',
+        halted:  s.auto_update_halted || null,
+        now:     s.local_time || null,
+      });
+      setWindowDraft(s.auto_update_window || '');
+    } catch (e) {
+      // The window is validated server-side, so the message names the
+      // format rather than this file guessing at it twice.
+      setWindowError(e.error || 'Could not save');
+    }
+    setSavingAuto(false);
   }
 
   async function pushConfig() {
@@ -1618,10 +1660,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       // the bytes are verified either way, but only the device can confirm
       // the file is there and executable, and claiming it did when it never
       // answered is the kind of false success this codebase keeps finding.
-      setEpResult(r => ({ ...r, [kind]: { ok: true, text: res.status
+      // Two separate facts, and the second used to be missing entirely.
+      // res.status is what the DEVICE said when asked whether the FILE is
+      // there; res.restart_note is what happened to the PROCESS that was
+      // running the old one. A rename replaces a directory entry, not the
+      // inode a process is executing, so an install with a perfect md5 could
+      // leave the old code running indefinitely and say nothing about it.
+      const landed = res.status
         ? 'Installed. The switch on the Config tab is live now — no restart needed.'
         : 'Sent and verified, but the device did not answer when asked to '
-          + 'confirm. Reopen this tab in a moment to check.' } }));
+          + 'confirm. Reopen this tab in a moment to check.';
+      setEpResult(r => ({ ...r, [kind]: { ok: true,
+        text: res.restart_note ? `${landed} ${res.restart_note}` : landed } }));
     } catch(e) {
       setEpResult(r => ({ ...r, [kind]: { ok: false, text: e.error || 'Install failed' } }));
     }
@@ -2393,6 +2443,67 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         )}
                       </>
                     )}
+                  </div>
+                )}
+              </Panel>
+
+              {/* Automatic updates (#21). Fleet-wide, so it sits on every
+                  device's Updates tab saying the same thing — the setting is
+                  about the controller's behaviour, and hiding it behind a
+                  separate settings page is how a feature nobody knows about
+                  stays off.
+
+                  The window is the feature and the copy says so. An OTA here
+                  reboots the device, and a voice assistant that goes dead
+                  mid-sentence at 19:30 is worse than one a version behind. */}
+              <Panel label="Automatic updates">
+                <Toggle
+                  label="Update firmware automatically"
+                  sub={autoUpd?.window
+                    ? `Every Echo, inside ${autoUpd.window}, one at a time, and only while idle.`
+                    : 'Every Echo — but set a window below first, or nothing is installed automatically.'}
+                  value={!!autoUpd?.enabled}
+                  disabled={savingAuto || autoUpd === null}
+                  onChange={v => saveAutoUpdate({ auto_update_enabled: v ? '1' : '0' })}
+                />
+                {/* TextField rather than a hand-rolled input: it is the
+                    shape every other free-text setting already uses, and
+                    rolling one here is how `--panel2` — a token that does not
+                    exist, and renders as nothing — got written. */}
+                <TextField
+                  label="Window"
+                  sub={autoUpd?.now
+                    ? `local time, may cross midnight. Controller clock: ${autoUpd.now}`
+                    : 'local time, may cross midnight (23:00-02:00)'}
+                  value={windowDraft}
+                  placeholder="03:00-05:00"
+                  disabled={savingAuto || autoUpd === null}
+                  onChange={setWindowDraft}
+                />
+                <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginTop:-8 }}>
+                  <Pill small
+                        disabled={savingAuto || autoUpd === null || windowDraft === (autoUpd?.window || '')}
+                        onClick={() => saveAutoUpdate({ auto_update_window: windowDraft })}>
+                    {savingAuto ? 'Saving…' : 'Save window'}
+                  </Pill>
+                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', lineHeight:1.5, flex:'1 1 200px', minWidth:0 }}>
+                    Leave empty for no automatic updates.
+                  </span>
+                </div>
+                {windowError && (
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--warn)', marginTop:10 }}>
+                    {windowError}
+                  </div>
+                )}
+                {/* A halt is the state worth surfacing. It means a device did
+                    not come back and the rest of the fleet is deliberately
+                    waiting for a person — visible only in a log, that is a
+                    stop nobody finds until they wonder why nothing updated. */}
+                {autoUpd?.halted && (
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--warn)', marginTop:12, lineHeight:1.6 }}>
+                    Paused: {autoUpd.halted} did not come back from its update.
+                    No further devices will be updated automatically until the
+                    next window opens.
                   </div>
                 )}
               </Panel>
