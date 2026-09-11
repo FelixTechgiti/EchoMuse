@@ -2466,33 +2466,28 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   disabled={savingAuto || autoUpd === null}
                   onChange={v => saveAutoUpdate({ auto_update_enabled: v ? '1' : '0' })}
                 />
-                <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginTop:14 }}>
-                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>
-                    Window
-                  </span>
-                  <input
-                    value={windowDraft}
-                    onChange={e => setWindowDraft(e.target.value)}
-                    placeholder="03:00-05:00"
-                    disabled={savingAuto || autoUpd === null}
-                    style={{
-                      fontFamily:"'DM Mono',monospace", fontSize:11, padding:'6px 8px',
-                      background:'var(--panel2)', color:'var(--text)',
-                      border:'1px solid var(--hairline)', borderRadius:4, width:130,
-                    }}
-                  />
+                {/* TextField rather than a hand-rolled input: it is the
+                    shape every other free-text setting already uses, and
+                    rolling one here is how `--panel2` — a token that does not
+                    exist, and renders as nothing — got written. */}
+                <TextField
+                  label="Window"
+                  sub={autoUpd?.now
+                    ? `local time, may cross midnight. Controller clock: ${autoUpd.now}`
+                    : 'local time, may cross midnight (23:00-02:00)'}
+                  value={windowDraft}
+                  placeholder="03:00-05:00"
+                  disabled={savingAuto || autoUpd === null}
+                  onChange={setWindowDraft}
+                />
+                <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginTop:-8 }}>
                   <Pill small
                         disabled={savingAuto || autoUpd === null || windowDraft === (autoUpd?.window || '')}
                         onClick={() => saveAutoUpdate({ auto_update_window: windowDraft })}>
-                    {savingAuto ? 'Saving…' : 'Save'}
+                    {savingAuto ? 'Saving…' : 'Save window'}
                   </Pill>
                   <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', lineHeight:1.5, flex:'1 1 200px', minWidth:0 }}>
-                    Local time, and it may cross midnight (23:00-02:00). Leave
-                    empty for no automatic updates.
-                    {/* The controller's own clock, because the window is read
-                        against it and a container with no TZ set is UTC — an
-                        hour nobody chose, silently. */}
-                    {autoUpd?.now && <> Controller clock: <b>{autoUpd.now}</b>.</>}
+                    Leave empty for no automatic updates.
                   </span>
                 </div>
                 {windowError && (
