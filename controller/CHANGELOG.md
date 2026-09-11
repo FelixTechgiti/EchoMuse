@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.32.0-fx.1
+
+### EchoMuse is now Revoice
+
+The fork has its own name. The old one carried "Echo" — Amazon's trademark for
+the hardware this project exists to take back — and it was upstream's name on a
+fork that has been diverging for months.
+
+The rename goes all the way through: prose, dashboard strings, log channels,
+filenames, the on-device paths under `/data/local/etc/revoice`, the SQLite file
+`revoice.db`, the published image `ghcr.io/felixtechgiti/revoice-controller`,
+the TLS server name, the emOS service entry, and the
+`REVOICE_HOME_ASSISTANT_INGRESS` option.
+
+**Updating an existing install is not transparent.** Three things changed under
+you, and the first is the one that loses data if you skip it:
+
+- **Rename `echomuse.db` to `revoice.db`** in your data directory. The
+  controller does not find the old file and starts with an empty database —
+  no devices, no settings, no history. The old file is not deleted, only
+  ignored, so this is recoverable if you notice; it is worth not having to.
+- **Delete `data/tls/`.** The certificate's server name moved from
+  `echomuse-controller` to `revoice-controller`, so the certificate you have
+  no longer matches. Deleting the directory regenerates it. Afterwards push
+  fresh credentials to each device with **Secure link** on its Status tab.
+  Until you do, devices connect unencrypted — unless you run
+  `REQUIRE_DEVICE_TLS=1`, where they do not connect at all.
+- **Devices keep working through all of it.** Firmware from before the rename
+  reads the old paths and is unaffected; the wizard and the debloat sync clean
+  up the files the old name left behind as they go.
+
+`docs/fork-switchover.md` has the full procedure, including the way back.
+
+### The README and every page under `docs/` are now German
+
+Roughly 41,000 words: quickstart, FAQ, the voice pipeline, support bundles,
+the add-on migration, the UAT checklist, the LED ring and audio state models,
+the device/controller wire contract, the rooting guide, the configuration
+reference and the agent-access page.
+
+The README is organised by what the thing does rather than by how it is built,
+so somebody deciding whether to try this reads features first and architecture
+last.
+
+What is deliberately still English: anything you type or click — dashboard
+labels, config keys, environment variables, commands, log lines — because the
+interface is English and a translated label sends you looking for a control
+that is not there. `SETUP.md`, `JOURNAL.md` and `CLAUDE.md` stay English too;
+they are development records rather than guides.
+
 ## 2.31.0-fx.1
 
 ### Firmware can update itself, inside a window you choose
