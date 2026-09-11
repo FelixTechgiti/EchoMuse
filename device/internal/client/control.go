@@ -98,13 +98,18 @@ type ControlClient struct {
 	configAppliedCallback ConfigAppliedCallback
 	volumeSetCallback     VolumeSetCallback
 	muteSetCallback       StateCallback
-	beamLockCallback      BeamLockCallback
-	speakerFlushCallback  StateCallback
-	musicFlushCallback    StateCallback
-	duckCallback          func(on bool)
-	wifiChangeCallback    WifiChangeCallback
-	wifiCommitCallback    StateCallback
-	wifiScanCallback      StateCallback
+	// endpointRestartCallback re-executes one streaming endpoint so a
+	// replaced binary takes effect. Reports whether there was anything
+	// running to restart, which is what stops the controller claiming an
+	// action it did not cause.
+	endpointRestartCallback func(kind string) bool
+	beamLockCallback        BeamLockCallback
+	speakerFlushCallback    StateCallback
+	musicFlushCallback      StateCallback
+	duckCallback            func(on bool)
+	wifiChangeCallback      WifiChangeCallback
+	wifiCommitCallback      StateCallback
+	wifiScanCallback        StateCallback
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -224,6 +229,7 @@ func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCal
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnMuteSet(cb StateCallback)               { c.muteSetCallback = cb }
+func (c *ControlClient) OnEndpointRestart(cb func(string) bool)   { c.endpointRestartCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
@@ -688,6 +694,33 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.muteSetCallback()
 			}
 
+		case "endpoint_restart":
+			// A new binary was just written over a running endpoint. A
+			// rename replaces the directory entry, not the inode the
+			// process is executing, so without this it carries on running
+			// the OLD code indefinitely — and the install looked perfect.
+			//
+			// The controller decides WHETHER to ask: it knows which source
+			// owns the music plane, so it can tell an idle endpoint from
+			// one somebody is listening to. This is only the verb, and it
+			// answers whether it actually did anything.
+			var msg struct {
+				Kind string `json:"kind"`
+			}
+			_ = json.Unmarshal(raw, &msg)
+			restarted := false
+			if c.endpointRestartCallback != nil {
+				restarted = c.endpointRestartCallback(msg.Kind)
+			}
+			// Answered even when nothing happened, and that is the point:
+			// the controller must not report "restarted" for a device that
+			// ignored the message or had nothing to restart.
+			_ = c.writeJSON(map[string]interface{}{
+				"type":      "endpoint_restart_result",
+				"kind":      msg.Kind,
+				"restarted": restarted,
+			})
+
 		case "config":
 			var msg config.ConfigMessage
 			if err := json.Unmarshal(raw, &msg); err == nil {
@@ -1109,7 +1142,18 @@ func capabilities() []string {
 		// AirPlay picker for two hours because an orphan held its port. The
 		// dashboard needs to tell "this firmware is too old to say" from "it
 		// is not running", and those are the same absence without this.
-		"endpoint_health"}
+		"endpoint_health",
+		// "endpoint_restart": this firmware can re-execute a streaming
+		// endpoint so a replaced binary takes effect.
+		//
+		// Announced, not assumed, and the reason is the usual one turned
+		// sharp: an unknown control message is IGNORED, silently, at both
+		// ends. A controller that sent this to older firmware and reported
+		// "restarted, the new binary is live" would be making a specific
+		// claim about a process that is still executing the old inode —
+		// which is exactly the failure this whole message exists to end,
+		// with a reassuring sentence added on top.
+		"endpoint_restart"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

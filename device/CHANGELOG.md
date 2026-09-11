@@ -14,7 +14,8 @@ required of them.
 
 ## 2.26.0-fx.1
 
-The AirPlay slider can move the Echo's own volume.
+The AirPlay slider can move the Echo's own volume, and a replaced streaming
+binary is actually used.
 
 ### What's new
 
@@ -37,6 +38,16 @@ should be your decision rather than a surprise, so it is a switch.
 
 Takes effect when AirPlay next starts, so toggle AirPlay off and on after
 changing it.
+
+### A replaced streaming binary is actually used
+
+Installing a new librespot or shairport-sync over one that was already running
+left the Echo running the old program — a replaced file does not change what a
+running process is executing. The Echo can now be asked to restart just that
+endpoint, so the binary you installed is the one running.
+
+It refuses while somebody is listening to it, and says so rather than cutting
+the music off.
 
 ### What is required of you
 

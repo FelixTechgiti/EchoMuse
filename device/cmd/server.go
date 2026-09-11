@@ -327,6 +327,21 @@ func main() {
 	})
 	applyAirplayConfig(airplayClient, s)
 
+	// Re-execute one endpoint after its binary has been replaced. The
+	// controller decides whether to ask — it is the side that knows whether
+	// anybody is listening — so this only names which one and answers
+	// whether there was anything running to restart.
+	controlClient.OnEndpointRestart(func(kind string) bool {
+		switch kind {
+		case "spotify":
+			return spotifyClient.Restart()
+		case "airplay":
+			return airplayClient.Restart()
+		}
+		log.Printf("[cmd] endpoint_restart for unknown kind %q — ignoring", kind)
+		return false
+	})
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)

@@ -1138,6 +1138,19 @@ class Device:
         return "endpoint_health" in (self.capabilities or [])
 
     @property
+    def endpoint_restart_capable(self):
+        """
+        Whether this firmware can re-execute an endpoint on request.
+
+        Separate from endpoint_health for the usual reason, and here it is
+        sharp: an unknown control message is ignored SILENTLY at both ends, so
+        a controller that assumed this would report "restarted, the new binary
+        is live" about a process still executing the old inode — the exact
+        failure the message exists to end, with a reassuring sentence on top.
+        """
+        return "endpoint_restart" in (self.capabilities or [])
+
+    @property
     def base_os(self):
         """
         The userspace the device booted: "emos", "fireos", or None.
@@ -4240,6 +4253,19 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 try:
                     if msg_type == "button":
                         await handle_button_event(device, msg)
+
+                    elif msg_type == "endpoint_restart_result":
+                        # What the device ACTUALLY did with an endpoint whose
+                        # binary was just replaced. The install path is
+                        # waiting on this: the decision says what should
+                        # happen, this says what did, and they come apart
+                        # when an endpoint stops in between — which is
+                        # exactly where a confident sentence would be wrong.
+                        em_api.notify_endpoint_restart_result(
+                            device.device_id,
+                            str(msg.get("kind") or ""),
+                            bool(msg.get("restarted")),
+                        )
 
                     elif msg_type == "ambient_light":
                         # A step change in room light, sent by the device the

@@ -61,6 +61,7 @@ import em_console_pw
 import em_emos_build
 import em_endpoint_bins
 import em_endpoint_release
+import em_endpoint_restart
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -5152,6 +5153,56 @@ async def _get_device_endpoint_bins(request: web.Request) -> web.Response:
     })
 
 
+# Waiters for `endpoint_restart_result`, keyed (device_id, kind).
+#
+# The device answers whether it ACTUALLY restarted something, and that answer
+# is the one worth reporting: the decision below says what should happen, the
+# reply says what did. They come apart when an endpoint stops between the
+# health report and the message arriving — rare, and precisely the case where
+# a confident sentence would be wrong.
+_endpoint_restart_waiters: dict[tuple[str, str], asyncio.Future] = {}
+
+# How long to wait for it. One control-plane round trip on a fleet whose
+# measured idle RTT is milliseconds; long enough to absorb the excursions
+# seen on this hardware, short enough that a device which ignored the message
+# does not hold an HTTP request open.
+ENDPOINT_RESTART_TIMEOUT_S = 5.0
+
+
+def notify_endpoint_restart_result(device_id: str, kind: str, restarted: bool) -> None:
+    """Called by em_controller when a device answers an endpoint_restart."""
+    fut = _endpoint_restart_waiters.get((device_id, kind))
+    if fut is not None and not fut.done():
+        fut.set_result(bool(restarted))
+
+
+async def _ask_endpoint_restart(live, kind: str) -> bool | None:
+    """
+    Ask the device to re-execute one endpoint; report what it says it did.
+
+    None means it never answered, which is NOT False: a device that went
+    quiet has not told us the old binary is still running, and saying so
+    would be inventing the half of the story that is missing.
+    """
+    key = (live.device_id, kind)
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    _endpoint_restart_waiters[key] = fut
+    try:
+        await live.send_control({"type": "endpoint_restart", "kind": kind})
+        return await asyncio.wait_for(fut, timeout=ENDPOINT_RESTART_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.warning(f"[api] [{live.device_id}] endpoint_restart({kind}) "
+                    f"went unanswered")
+        return None
+    except Exception as e:
+        log.warning(f"[api] [{live.device_id}] endpoint_restart({kind}) "
+                    f"failed: {e}")
+        return None
+    finally:
+        _endpoint_restart_waiters.pop(key, None)
+
+
 @auth.require_admin
 async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
     """
@@ -5162,12 +5213,29 @@ async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
     — including the device's own re-read of the file, which is what turns
     the toggle from disabled to usable without waiting for a reconnect.
 
-    Nothing is stopped first. Replacing the file is a rename over a
-    directory entry, so a running endpoint keeps the inode it is executing
-    and is unaffected; the new binary is picked up the next time the
-    supervisor starts it. Killing a playing endpoint to update a file
-    nobody has asked to switch to yet would be the more surprising
-    behaviour.
+    **A running endpoint is restarted afterwards unless somebody is
+    listening**, and the comment that used to sit here said the opposite.
+
+    Replacing the file is a rename over a directory entry, so a running
+    process keeps the inode it is executing and carries on with the OLD code
+    indefinitely — the install reports success, the md5 matches, and the
+    thing you installed it for still does not work. That reasoning was
+    written about a PLAYING stream, where it is right: killing a receiver
+    somebody is listening to, to update a file nobody asked to switch to
+    yet, is the more surprising behaviour. It is wrong about the common
+    case, where the endpoint is idle and doing nothing silently wastes the
+    install.
+
+    Telling those apart is the controller's knowledge — no frame of an
+    endpoint's audio passes through here, which is why `audio_source` exists
+    — so `em_endpoint_restart.decide` makes the judgement and the device
+    gets the verb. The device then answers what it ACTUALLY did, and that is
+    what the response reports.
+
+    Synchronous, unlike the firmware OTA: there is no reboot, no A/B slot
+    and no rollback to narrate, so the request can simply carry the outcome
+    — including the device's own re-read of the file, which is what turns
+    the toggle from disabled to usable without waiting for a reconnect.
     """
     device_id = request.match_info["id"]
     k = em_endpoint_bins.kind(request.match_info["kind"])
@@ -5219,9 +5287,41 @@ async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
     await _push_log_event(device_id, "info", "controller",
                           f"{k.filename} installed at {k.dest}")
 
+    # Make the new binary the one running, or say why it is not.
+    health = (getattr(live, "endpoint_health", None) or {}) if live else {}
+    decision = em_endpoint_restart.decide(
+        kind=k.key,
+        capable=bool(live and getattr(live, "endpoint_restart_capable", False)),
+        health=health.get(k.key),
+        audio_source=getattr(live, "local_audio_source", None) if live else None,
+    )
+    restarted = None
+    if decision.restart and live is not None:
+        restarted = await _ask_endpoint_restart(live, k.key)
+        if restarted is False:
+            # It had nothing to restart after all — something stopped between
+            # the health report and the message. Not a failure, but the
+            # sentence above would have been untrue.
+            note = (f"{k.key} had already stopped, so the new binary will be "
+                    f"used when it next starts.")
+        elif restarted is None:
+            note = (f"{k.key} did not answer the restart, so it may still be "
+                    f"running the previous binary. Toggle it off and on.")
+        else:
+            note = decision.reason
+    else:
+        note = decision.reason
+    await _push_log_event(device_id, "info", "controller", note)
+
     return _ok({
         "kind":     k.key,
         "installed": entry,
+        # What happened to the RUNNING endpoint, separately from the install.
+        # True only when the device confirmed it; None when it never answered,
+        # which is not the same as "no" — a device that went quiet has not
+        # told us the old binary is still running.
+        "restarted": restarted,
+        "restart_note": note,
         # None when the stat could not be read. Reported as-is rather than
         # filled in, so the dashboard can say "installed, could not confirm"
         # instead of claiming a device state nobody read.

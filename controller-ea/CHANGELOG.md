@@ -2,6 +2,24 @@
 
 ## 2.29.0-fx.1
 
+### Installing librespot or shairport-sync now actually replaces the running one
+
+Installing a new binary over an endpoint that was already running did nothing
+visible and nothing useful: the file landed, the checksum matched, the panel
+said it worked — and the Echo carried on running the **old** program, until
+you happened to toggle it off and on or reboot. The only symptom was that
+whatever you installed it for still did not work.
+
+It is restarted now, so the binary you installed is the one running. With one
+exception: if somebody is listening to that endpoint at that moment, it is
+left alone and you are told so — cutting off music to swap a file nobody asked
+to switch to yet is worse than waiting. It restarts by itself when playback
+ends.
+
+The panel says which of those happened, including the awkward cases: an Echo
+on older firmware that cannot restart on request, and one that did not answer.
+Neither is reported as a success.
+
 ### The size of an installed endpoint binary is reported again
 
 After pushing 9MB of librespot to an Echo over a shell, the panel said the
