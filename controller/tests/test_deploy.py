@@ -2888,3 +2888,78 @@ def test_the_update_ring_hands_back_to_home_assistants_colour():
     fn = fn[:fn.index("async def _run_update_locked")]
     assert "painted_rgb" in fn, \
         "the update ring blanks the ring instead of restoring the resting colour"
+
+
+def test_a_database_row_is_never_read_with_dict_get():
+    """
+    `db.get_device` returns a **`sqlite3.Row`, and a Row is not a dict**:
+    it indexes (`row["ip"]`) and it has `.keys()`, and it has no `.get`.
+    Calling one raises `AttributeError` at request time, not at import —
+    so the handler is fine everywhere the tests look and 500s the first
+    time somebody uses it.
+
+    That is exactly how it shipped: `/api/devices/{id}/mdns_scan` was
+    written with `row.get("ip")`, passed every check in CI, and answered
+    an internal error on its first live call (2026-09-11). The endpoint's
+    whole job is to distinguish a real answer from a missing one, and it
+    could not produce either.
+
+    The guard is per function rather than per file: it finds the names
+    bound from a `db.get_*` call and asserts nothing calls `.get` on one.
+    A dict-shaped read of a Row is always a bug; a `.get` on any other
+    local is fine and stays unremarked.
+    """
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "em_api.py").read_text())
+
+    # Which readers return a Row is read out of em_db's own annotations, not
+    # from a list here — several `db.get_*` functions return a plain dict
+    # (`get_effective_device_config`), where `.get` is exactly right.
+    db_tree = ast.parse((root / "em_db.py").read_text())
+    row_readers = {
+        fn.name for fn in ast.walk(db_tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and fn.returns is not None
+        and "sqlite3.Row" in ast.unparse(fn.returns)
+        and not ast.unparse(fn.returns).lstrip().startswith(("list", "List"))
+    }
+    assert "get_device" in row_readers, \
+        "the scrape found no Row-returning reader — this guard is vacuous"
+
+    def _is_row_read(node: ast.AST) -> bool:
+        """`db.get_x(...)` or `run_in_executor(None, db.get_x, ...)`."""
+        if not isinstance(node, ast.Call):
+            return False
+
+        def _names(a):
+            return (isinstance(a, ast.Attribute) and a.attr in row_readers
+                    and isinstance(a.value, ast.Name) and a.value.id == "db")
+
+        return _names(node.func) or any(_names(a) for a in node.args)
+
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        rows = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and _is_row_read(
+                    node.value.value if isinstance(node.value, ast.Await)
+                    else node.value):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        rows.add(t.id)
+        if not rows:
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in rows):
+                offenders.append(
+                    f"{fn.name}:{node.lineno} — {node.func.value.id}.get(...)")
+
+    assert not offenders, (
+        "sqlite3.Row has no .get — these read a database row as a dict and "
+        "will raise at request time:\n  " + "\n  ".join(offenders))

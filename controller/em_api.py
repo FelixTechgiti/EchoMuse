@@ -6287,8 +6287,11 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
     cfg = await loop.run_in_executor(
         None, db.get_effective_device_config, device_id)
     live = _live(device_id)
-    device_ip = (getattr(live, "ip", "") or row.get("ip") or "") if live else (
-        row.get("ip") or "")
+    # `row` is a sqlite3.Row, which indexes but has no .get — see the guard
+    # in tests/test_deploy.py. Prefer the live device's address: the stored
+    # one is whatever it last registered from, and DHCP moves.
+    stored_ip = row["ip"] or ""
+    device_ip = (getattr(live, "ip", "") or stored_ip) if live else stored_ip
 
     verdicts = []
     for key in em_mdnsscan.SERVICES:

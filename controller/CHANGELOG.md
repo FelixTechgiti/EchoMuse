@@ -29,6 +29,15 @@ first: listening, thinking, speaking, the mute ring and the error cues all
 take it, and the effect resumes when they are done. The light under the
 microphone button is untouched, as always.
 
+### Fixed
+
+- **The network scan added in 2.35.0-fx.1 answered an internal error.** It
+  read the device's stored address as though a database row were a
+  dictionary, which fails only when the endpoint is actually called — so it
+  passed every check and broke on its first use. The scan is the one thing
+  that can tell "nothing answered" from "other hosts answered and yours did
+  not", and it could produce neither.
+
 ## 2.35.0-fx.1
 
 ### Ask the controller whether the network can see an Echo
@@ -58,8 +67,6 @@ It also names the specific fault that cost the most time here: an endpoint
 that advertises an address record pointing at `localhost`, which every client
 resolves to itself, so the device is announced perfectly and reachable by
 nobody.
-
-## 2.35.0-fx.1
 
 ### The binary you installed is now the binary that RUNS
 
