@@ -327,6 +327,6 @@ oww_forge/
   piper_voices.py      Piper ONNX voices — accents/languages, and the phrase
                        preview; catalogue fetched, never hardcoded
   docker-compose.deploy.yml   pulls the published image instead of building
-  config.template.yml  per-wake-word training config template
+  training.template.yml  per-wake-word training config template
   data/                (gitignored) assets, per-word workdirs, finished models
 ```

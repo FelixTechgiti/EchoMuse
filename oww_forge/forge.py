@@ -264,7 +264,7 @@ def cmd_new(args) -> None:
     if cfg_path.exists() and not args.force:
         sys.exit(f"{cfg_path} already exists (use --force to overwrite the config)")
     ww_dir.mkdir(parents=True, exist_ok=True)
-    template = (FORGE_DIR / "config.template.yml").read_text()
+    template = (FORGE_DIR / "training.template.yml").read_text()
     cfg = (
         template.replace("@NAME@", name)
         .replace("@PHRASES@", "\n".join(f'  - "{p}"' for p in phrases))
