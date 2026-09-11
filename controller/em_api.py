@@ -62,6 +62,7 @@ import em_emos_build
 import em_endpoint_bins
 import em_endpoint_release
 import em_endpoint_restart
+import em_autoupdate
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -3707,6 +3708,20 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # when this is False, because a button press is a request rather than
         # background traffic. The flag says the poll is off, nothing more.
         "update_checks_enabled": _update_check_interval() > 0,
+        # Firmware auto-update (#21). Three fields rather than one, because
+        # the three states an operator has to tell apart are "off", "on but
+        # nothing is due", and "on and STOPPED after a device did not come
+        # back" — and the last of those is the one worth a look. A halt shown
+        # only in a log is a halt nobody finds.
+        "auto_update_enabled": _auto_update_settings()[0],
+        "auto_update_window": db.get_config("auto_update_window", "") or "",
+        "auto_update_halted": _auto_update_halted,
+        # The controller's own clock, as the window is read. Shown beside the
+        # field because the container is UTC unless something set TZ, and an
+        # unset TZ turns "03:00-05:00" into 3am UTC — the middle of somebody's
+        # evening in half the world, and silent about it. A window is only as
+        # good as agreement about what time it is.
+        "local_time": time.strftime("%H:%M %Z"),
         "latest_release": release["version"] if release else None,
         # Controller update, surfaced alongside the firmware one so the header
         # can badge it without a second round trip. Read-only by design: the
@@ -3770,6 +3785,8 @@ async def _patch_system_config(request: web.Request) -> web.Response:
         "session_expiry_days",
         "update_check_interval",
         "github_repo",
+        "auto_update_enabled",
+        "auto_update_window",
     }
     body = await _json_body(request)
     loop = asyncio.get_event_loop()
@@ -3780,6 +3797,23 @@ async def _patch_system_config(request: web.Request) -> web.Response:
         if key not in MUTABLE_KEYS:
             unknown.append(key)
             continue
+        # The update window is REFUSED here rather than stored and ignored.
+        # An unparseable window disables the feature (em_autoupdate.parse_window
+        # returns None for anything it cannot read), and a switch that reads
+        # "on" over a window that silently does nothing is the worst of the
+        # available outcomes: the operator believes their fleet is updating
+        # itself. Empty is allowed and means "no window" on purpose — it is
+        # how the feature is turned off without clearing the switch.
+        if key == "auto_update_window":
+            text = str(value).strip()
+            if text and em_autoupdate.parse_window(text) is None:
+                return _error(
+                    "bad_window",
+                    f"{value!r} is not an update window. Use HH:MM-HH:MM, "
+                    f"e.g. 03:00-05:00 (it may cross midnight).",
+                    400,
+                )
+            value = text
         await loop.run_in_executor(None, db.set_config, key, str(value))
         updated[key] = value
 
@@ -6212,6 +6246,149 @@ async def release_poll_loop() -> None:
         # Floor of 1s so even an absurd tiny positive interval cannot spin
         # the loop faster than the event loop allows.
         await asyncio.sleep(max(interval, 1))
+
+
+# How often the auto-update scheduler looks. Not the window's resolution:
+# the window is checked at every tick, so a coarse tick only delays the FIRST
+# device of the night. Five minutes because the thing being decided takes
+# minutes to run and the alternative — a tight loop reading config and
+# building a device list — costs the event loop that sends speaker periods.
+AUTO_UPDATE_TICK_S = 300
+
+# Stop-after-a-failure, for the length of one window. Walking a fleet into the
+# same wall unattended is the specific failure this guards: the first device
+# that does not come back is evidence about the BINARY, not about that device,
+# and the remaining ones are worth more than the convenience of not waiting
+# for a person.
+_auto_update_halted: Optional[str] = None
+
+
+def _auto_update_settings() -> tuple[bool, Optional[em_autoupdate.Window]]:
+    """The two stored values, parsed. Read every tick, so a change takes
+    effect without a restart — the same contract release_poll_loop has."""
+    enabled = (db.get_config("auto_update_enabled", "0") or "0").strip() == "1"
+    window = em_autoupdate.parse_window(db.get_config("auto_update_window", ""))
+    return enabled, window
+
+
+def _auto_update_device_view(row) -> em_autoupdate.DeviceView:
+    """One database row plus its live object, as the decision sees it."""
+    device_id = row["device_id"]
+    live = _live(device_id)
+    cfg = db.get_device_config(device_id)
+    caps = set(getattr(live, "capabilities", None) or []) if live else set()
+    return em_autoupdate.DeviceView(
+        device_id=device_id,
+        approved=bool(row["approved"]),
+        online=live is not None,
+        busy=bool(live is not None and getattr(live, "is_busy", lambda: False)()),
+        audio_source=getattr(live, "local_audio_source", None) if live else None,
+        audio_state_capable="audio_state" in caps,
+        endpoints_enabled=bool(
+            cfg.get("spotifyEnabled")
+            or cfg.get("airplayEnabled")
+            or cfg.get("sendspinEnabled")
+        ),
+        firmware_ver=row["firmware_ver"],
+        updating=(device_id in _updates_in_progress or device_id in _updates_queued),
+    )
+
+
+async def auto_update_loop() -> None:
+    """
+    Install firmware on idle devices, one at a time, inside the operator's
+    window (#21).
+
+    It does not bypass anything: it calls the same `_run_update` the button
+    does, behind the same `_ota_lock`, and every refusal that endpoint makes
+    still applies. What it adds is WHEN, and the answer to that is the whole
+    feature — a voice assistant that reboots mid-sentence at 19:30 is worse
+    than one that is a version behind.
+
+    An update that happened while nobody watched has to be findable
+    afterwards, so every start, outcome and halt is a log event on the device
+    itself. The first sign of an unattended update must never be a version
+    number nobody recognises.
+    """
+    await asyncio.sleep(60)  # let devices reconnect before judging them idle
+
+    while True:
+        try:
+            await _auto_update_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f"[api] Auto-update tick failed: {e}")
+        await asyncio.sleep(AUTO_UPDATE_TICK_S)
+
+
+async def _auto_update_tick() -> None:
+    """One pass. Split out so it can be driven directly."""
+    global _auto_update_halted
+
+    loop = asyncio.get_event_loop()
+    enabled, window = await loop.run_in_executor(None, _auto_update_settings)
+
+    now_local = time.localtime()
+    now_minutes = now_local.tm_hour * 60 + now_local.tm_min
+
+    # Leaving the window clears the halt. A halt is about one night's
+    # evidence, not a permanent verdict: the next window starts fresh, by
+    # which time either a person has looked or the release has moved on.
+    if window is None or not em_autoupdate.in_window(now_minutes, window):
+        _clear_auto_update_halt()
+        return
+    if not enabled or _auto_update_halted:
+        return
+
+    release = await _get_cached_release()
+    target = (release or {}).get("version")
+
+    rows = await loop.run_in_executor(None, db.get_all_devices)
+    views = [
+        await loop.run_in_executor(None, _auto_update_device_view, row)
+        for row in rows
+    ]
+    chosen, _skipped = em_autoupdate.next_candidate(
+        enabled=enabled,
+        window=window,
+        now_minutes=now_minutes,
+        target_version=target,
+        devices=views,
+    )
+    if chosen is None:
+        return
+
+    device_id = chosen.device_id
+    log.info(f"[api] [{device_id}] auto-update: installing {target}")
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Automatic update to {target} started (inside the update window)")
+
+    await _run_update(device_id, release)
+
+    # `_run_update` records its own failure; this reads the verdict rather
+    # than repeating the work. A device that did not come back is evidence
+    # about the binary, so the rest of the fleet waits for a person.
+    err = _update_errors.get(device_id)
+    if err:
+        _auto_update_halted = device_id
+        log.warning(f"[api] auto-update halted after {device_id}: {err}")
+        await _push_log_event(
+            device_id, "error", "controller",
+            f"Automatic update failed — no further devices will be updated "
+            f"automatically until the next window: {err}")
+    else:
+        await _push_log_event(
+            device_id, "info", "controller",
+            f"Automatic update to {target} finished")
+
+
+def _clear_auto_update_halt() -> None:
+    global _auto_update_halted
+    if _auto_update_halted is not None:
+        log.info("[api] auto-update halt cleared — window closed")
+        _auto_update_halted = None
 
 
 async def session_prune_loop() -> None:

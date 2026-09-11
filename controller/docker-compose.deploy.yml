@@ -23,6 +23,13 @@ services:
     network_mode: host
     env_file:
       - .env
+    environment:
+      # The container is UTC unless told otherwise, and the auto-update
+      # window (#21) is evaluated in LOCAL time — so an unset TZ turns
+      # "03:00-05:00" into 3am UTC, which is the middle of somebody's
+      # evening in half the world and silent about it. Under the Home
+      # Assistant add-on Supervisor sets this; here it is yours to set.
+      - TZ=${TZ:-UTC}
     volumes:
       # Persist database (devices, config, users) across upgrades
       - ./data:/app/data

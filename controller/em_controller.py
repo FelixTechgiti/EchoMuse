@@ -5180,6 +5180,7 @@ async def main():
 
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
+    auto_update_task   = asyncio.create_task(api.auto_update_loop())
     loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
 
     # Device-link TLS: generate/load the CA + server cert. Failure to set
@@ -5244,6 +5245,7 @@ async def main():
         await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()
+        auto_update_task.cancel()
         loop_lag_task.cancel()
         mdns_task.cancel()
         await azc.async_unregister_service(info)
