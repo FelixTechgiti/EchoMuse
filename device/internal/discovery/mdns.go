@@ -34,29 +34,71 @@ type ServerInfo struct {
 // proxied BY THE CONTROLLER — so in exactly this fault there is no channel to
 // ask over. See internal/bootlog.
 func FindServer(ctx context.Context) (*ServerInfo, error) {
+	return FindServerWith(ctx, nil)
+}
+
+// FindServerWith is FindServer with a second way in: `recheck` is called
+// BEFORE every browse round, and a controller it returns ends the search.
+//
+// **One failed probe used to hand the whole recovery to mDNS, for as long as
+// that took.** The caller probes the remembered address once, and on failure
+// called FindServer — which browses and nothing else, with a backoff to 60s
+// and no return until multicast answers. So a single transient failure, at
+// the one moment it is GUARANTEED (the controller restarting, its listener
+// down for the length of a container restart), retired the unicast path for
+// the whole outage.
+//
+// Measured on this fleet 2026-09-11, four times in one day, each beginning
+// within a minute of a controller restart: 4m16s, 33m26s, 38m5s and 36m56s
+// of browsing, plus one 2h17m9s session gap. Throughout the last of them the
+// device held its address, the controller was listening (proved against the
+// live add-on), and a 500ms TCP connect to the remembered address would have
+// succeeded — but nothing tried one. The firmware process never restarted;
+// only the search did not end.
+//
+// So the remembered address is re-tested every round. It costs one short
+// connect per round against a backoff that reaches 60s, and it turns the
+// common case — a controller that went away for thirty seconds — back into a
+// reconnect measured in seconds. It does NOT fix whatever stops the browse
+// being answered for tens of minutes (#51); it stops that being the only way
+// back.
+func FindServerWith(ctx context.Context, recheck func(context.Context) *ServerInfo) (*ServerInfo, error) {
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
 	start := time.Now()
 	var reporter bootlog.Escalator
 	rounds := 0
 
+	// Only worth a line if the search was worth one: an all-clear for
+	// something nobody was told about is noise on a flash write.
+	found := func(info *ServerInfo, how string) {
+		log.Printf("mDNS: found Clara server at %s (%s)", info.Addr, how)
+		if reporter.Reported() > 0 {
+			bootlog.Appendf("controller found at %s after %s and %d browse rounds — %s (%s)",
+				info.Addr, time.Since(start).Round(time.Second), rounds,
+				how, DescribeLink())
+		}
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+
+		// Before the browse, not after: when both would work, the cheap one
+		// should win, and the browse round costs the full mDNS timeout.
+		if recheck != nil {
+			if info := recheck(ctx); info != nil {
+				found(info, "remembered address answered")
+				return info, nil
+			}
 		}
 
 		log.Printf("mDNS: browsing for %s.local...", serviceType)
 		rounds++
 		info, err := browse(ctx)
 		if err == nil && info != nil {
-			log.Printf("mDNS: found Clara server at %s", info.Addr)
-			// Only worth a line if the search was worth one: an all-clear for
-			// something nobody was told about is noise on a flash write.
-			if reporter.Reported() > 0 {
-				bootlog.Appendf("controller found at %s after %s and %d browse rounds (%s)",
-					info.Addr, time.Since(start).Round(time.Second), rounds,
-					DescribeLink())
-			}
+			found(info, "mDNS")
 			return info, nil
 		}
 

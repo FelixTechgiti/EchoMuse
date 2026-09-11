@@ -332,7 +332,20 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			} else {
 				lastProbe = fmt.Sprintf("remembered %s did not answer", server.Addr)
 			}
-			found, err := discovery.FindServer(ctx)
+			// ONE failed probe must not retire the unicast path for the
+			// length of the outage, and it used to: FindServer browses and
+			// nothing else. The moment the probe is guaranteed to fail is a
+			// controller RESTART — its listener is down for a container
+			// restart and back seconds later — so the failure that costs the
+			// most is also the most recoverable one. Re-tested every round;
+			// see discovery.FindServerWith for the measurements.
+			remembered := server
+			found, err := discovery.FindServerWith(ctx, func(context.Context) *discovery.ServerInfo {
+				if remembered == nil || !probeTCP(remembered.Addr, probeRecheckTimeout) {
+					return nil
+				}
+				return remembered
+			})
 			if err != nil {
 				return err
 			}
@@ -1419,6 +1432,18 @@ func (c *ControlClient) lastKnownServer() *discovery.ServerInfo {
 	defer c.serverAddrMu.RUnlock()
 	return c.lastServer
 }
+
+// probeRecheckTimeout bounds the remembered-address re-probe that runs before
+// every browse round while a device is searching.
+//
+// Shorter than the 3s the first probe gets, and deliberately so: that one
+// decides whether to skip mDNS entirely and is worth waiting on, while this
+// one runs repeatedly against a backoff that reaches 60s and only has to
+// notice that the controller came back. A LAN round trip to the controller
+// measures 1.2-1.9ms on this fleet, so a second is three orders of magnitude
+// of slack — and the cost of being wrong is one more browse round, not a
+// missed reconnect.
+const probeRecheckTimeout = time.Second
 
 // probeTCP reports whether addr (host:port) accepts a TCP connection
 // within timeout.
