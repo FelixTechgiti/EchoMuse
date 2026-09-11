@@ -5337,6 +5337,56 @@ async def _ask_endpoint_restart(live, kind: str) -> bool | None:
         _endpoint_restart_waiters.pop(key, None)
 
 
+async def _restart_after_install(device_id: str, k) -> tuple[bool | None, str]:
+    """
+    Make the binary just installed the one that is RUNNING, or say why not.
+
+    Shared by both install paths, and it exists because for a while only one
+    of them did this. A rename replaces a directory entry, not the inode a
+    process is executing, so an install over a running endpoint reports
+    success, matches md5, and leaves the old code running indefinitely — and
+    the only symptom is that the thing you installed it for still does not
+    work. The hand-clicked install had the restart; the automatic on-connect
+    sync did not, which is the path that installs on most devices most of the
+    time.
+
+    Measured on Studio 2026-09-11: shairport-sync 1.1.0 landed at 17:56 and
+    the receiver was still 3h8m into the 1.0.0 inode afterwards, with the
+    dashboard, the md5 and the device's own stat all reporting the new file.
+    That is the failure `endpoint_restart` was built to end, arriving through
+    the other door.
+
+    Returns what the device said it did — never what we asked for. None means
+    it did not answer, which is not False.
+    """
+    live = _live(device_id)
+    health = (getattr(live, "endpoint_health", None) or {}) if live else {}
+    decision = em_endpoint_restart.decide(
+        kind=k.key,
+        capable=bool(live and getattr(live, "endpoint_restart_capable", False)),
+        health=health.get(k.key),
+        audio_source=getattr(live, "local_audio_source", None) if live else None,
+    )
+    restarted = None
+    if decision.restart and live is not None:
+        restarted = await _ask_endpoint_restart(live, k.key)
+        if restarted is False:
+            # It had nothing to restart after all — something stopped between
+            # the health report and the message. Not a failure, but the
+            # sentence decision.reason carries would have been untrue.
+            note = (f"{k.key} had already stopped, so the new binary will be "
+                    f"used when it next starts.")
+        elif restarted is None:
+            note = (f"{k.key} did not answer the restart, so it may still be "
+                    f"running the previous binary. Toggle it off and on.")
+        else:
+            note = decision.reason
+    else:
+        note = decision.reason
+    await _push_log_event(device_id, "info", "controller", note)
+    return restarted, note
+
+
 @auth.require_admin
 async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
     """
@@ -5422,30 +5472,7 @@ async def _post_device_endpoint_bin(request: web.Request) -> web.Response:
                           f"{k.filename} installed at {k.dest}")
 
     # Make the new binary the one running, or say why it is not.
-    health = (getattr(live, "endpoint_health", None) or {}) if live else {}
-    decision = em_endpoint_restart.decide(
-        kind=k.key,
-        capable=bool(live and getattr(live, "endpoint_restart_capable", False)),
-        health=health.get(k.key),
-        audio_source=getattr(live, "local_audio_source", None) if live else None,
-    )
-    restarted = None
-    if decision.restart and live is not None:
-        restarted = await _ask_endpoint_restart(live, k.key)
-        if restarted is False:
-            # It had nothing to restart after all — something stopped between
-            # the health report and the message. Not a failure, but the
-            # sentence above would have been untrue.
-            note = (f"{k.key} had already stopped, so the new binary will be "
-                    f"used when it next starts.")
-        elif restarted is None:
-            note = (f"{k.key} did not answer the restart, so it may still be "
-                    f"running the previous binary. Toggle it off and on.")
-        else:
-            note = decision.reason
-    else:
-        note = decision.reason
-    await _push_log_event(device_id, "info", "controller", note)
+    restarted, note = await _restart_after_install(device_id, k)
 
     return _ok({
         "kind":     k.key,
@@ -5744,6 +5771,10 @@ async def _install_endpoint_locked(device_id: str, k, why: str) -> None:
         setattr(live, k.status_attr, fresh)
     await _push_log_event(device_id, "info", "controller",
                           f"{k.filename} installed at {k.dest}")
+    # Same restart as the hand-clicked install, and for longer the stronger
+    # case: this path runs on connect, so it is how most devices get most of
+    # their binaries, with nobody watching the answer.
+    await _restart_after_install(device_id, k)
 
 
 @auth.require_auth

@@ -114,3 +114,87 @@ def test_every_outcome_explains_itself():
     for c in cases:
         d = r.decide(kind="airplay", **c)
         assert d.reason and len(d.reason) > 20, f"thin reason for {c}: {d.reason!r}"
+
+
+# ─── The gate: EVERY install path has to restart, not just the clicked one ───
+
+import ast
+from pathlib import Path
+
+_API = Path(__file__).resolve().parents[1] / "em_api.py"
+
+
+def _installers() -> dict[str, ast.AST]:
+    """
+    Every function in em_api that writes an endpoint binary onto a device.
+
+    Found by what the code DOES — a `_stream_file_to_device(..., k.dest, ...)`
+    — rather than by a written-out list, because a list is the thing that goes
+    stale the day somebody adds a third path.
+    """
+    tree = ast.parse(_API.read_text())
+    found = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if getattr(call.func, "id", None) != "_stream_file_to_device":
+                continue
+            args = [ast.unparse(a) for a in call.args]
+            if "k.dest" in args:
+                found[node.name] = node
+    return found
+
+
+def test_both_install_paths_are_still_the_only_two():
+    """
+    The guard is per call site rather than a count, so a third install path
+    has to answer the question too instead of riding on the total.
+    """
+    assert set(_installers()) == {
+        "_post_device_endpoint_bin", "_install_endpoint_locked"
+    }, ("a new endpoint install path appeared — it must restart the endpoint "
+        "running the old inode, see _restart_after_install")
+
+
+def test_every_install_path_restarts_the_endpoint():
+    """
+    A rename replaces a directory entry, not the inode a process is
+    executing. So an install over a running endpoint reports success, matches
+    md5, and leaves the OLD code running indefinitely — and the only symptom
+    is that the thing you installed it for still does not work, which is
+    indistinguishable from the new binary being broken.
+
+    The hand-clicked install restarted; the automatic on-connect sync did
+    not, and that is the path most devices take most of the time. Measured on
+    Studio 2026-09-11: shairport-sync 1.1.0 landed at 17:56 and the receiver
+    was still 3h8m into the 1.0.0 inode, with the store, the md5 and the
+    device's own stat all reporting the new file.
+    """
+    for name, node in _installers().items():
+        calls = {getattr(c.func, "id", None) for c in ast.walk(node)
+                 if isinstance(c, ast.Call)}
+        assert "_restart_after_install" in calls, (
+            f"{name} installs a binary and never restarts the endpoint "
+            f"running the old one")
+
+
+def test_the_restart_is_decided_in_one_place():
+    """
+    Two copies of the judgement is two that can disagree, and the one that
+    disagrees is the automatic path nobody is watching. `decide` is called
+    from the shared helper only.
+    """
+    tree = ast.parse(_API.read_text())
+    callers = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call)
+                    and ast.unparse(call.func) == "em_endpoint_restart.decide"):
+                callers.add(node.name)
+    assert callers == {"_restart_after_install"}, \
+        f"em_endpoint_restart.decide is called from {sorted(callers)}"
