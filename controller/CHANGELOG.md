@@ -22,6 +22,20 @@ in that case both are left exactly as they are. And the displaced empty
 database is renamed aside with a timestamp rather than deleted, so a wrong
 call is recoverable by hand.
 
+### Echos on older firmware keep working after the rename
+
+The rename also moved the folder on the **device** from
+`/data/local/etc/echomuse/` to `/data/local/etc/revoice/` — on the controller
+and the firmware in the same change. Any Echo whose firmware is older than the
+rename still reads the old folder, so the controller was writing credentials
+and reading the diagnostic log somewhere that Echo never looks: a push that
+reported success and changed nothing.
+
+The controller now writes to both folders and reads from whichever exists.
+That repairs every Echo already in the field without needing a firmware
+update — which matters, because an Echo whose credentials went to the wrong
+place may not be able to authenticate for one.
+
 ### What is required of you
 
 Nothing. Restarting the add-on is enough, and updating to this version does

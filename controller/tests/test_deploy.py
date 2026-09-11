@@ -668,11 +668,21 @@ def test_supervisor_log_path_matches_between_script_and_controller():
     assert m, "start_server.sh no longer defines SUP_LOG"
     script_path = m.group(1)
 
-    m = re.search(r'^SUPERVISOR_LOG = "([^"]+)"', api, re.M)
-    assert m, "em_api.py no longer defines SUPERVISOR_LOG"
-    assert m.group(1) == script_path, (
+    # The controller no longer reads ONE path. A rename moved the directory
+    # and firmware in the field still writes the old one, so it tries each in
+    # turn (em_devicepaths). The property to defend is unchanged and is now
+    # stronger: whatever the script writes must be among what the controller
+    # reads — drift in either direction still fails here.
+    import sys
+    sys.path.insert(0, str(root))
+    import em_devicepaths
+
+    m = re.search(r'^SUPERVISOR_LOG_NAME = "([^"]+)"', api, re.M)
+    assert m, "em_api.py no longer defines SUPERVISOR_LOG_NAME"
+    tried = em_devicepaths.read_paths(m.group(1))
+    assert script_path in tried, (
         f"supervisor log path drifted: script writes {script_path}, "
-        f"controller reads {m.group(1)}"
+        f"controller reads {tried}"
     )
 
     # Three writers now, not two: the FIRMWARE also appends to this file, for
@@ -689,6 +699,11 @@ def test_supervisor_log_path_matches_between_script_and_controller():
         f"supervisor log path drifted: script writes {script_path}, "
         f"firmware writes {m.group(1)}"
     )
+    # And the controller must be able to read what CURRENT firmware writes,
+    # not only what an older one did.
+    assert m.group(1) in tried, (
+        f"the controller does not read the path this firmware writes: "
+        f"{m.group(1)} not in {tried}")
 
 
 def test_supervisor_log_is_persistent_and_bounded():
@@ -762,7 +777,12 @@ def test_the_supervisor_log_can_be_fetched_without_a_failed_update():
         "the supervisor log fetch opens a device shell and must be admin-only"
 
     body = api[i:i + 2000]
-    assert "SUPERVISOR_LOG" in body, \
+    # The path is no longer one constant: a rename moved the directory and
+    # firmware in the field still reads the old one, so every read goes
+    # through em_devicepaths, which tries each in turn. The rule the original
+    # assertion was defending — one shared source of truth, never a literal
+    # here — is unchanged, and this checks the same thing at its new name.
+    assert "SUPERVISOR_LOG_NAME" in body and "em_devicepaths" in body, \
         "the fetch does not use the shared path constant"
     assert "_push_log_event" in body, \
         "the fetched log goes nowhere a person would look"
