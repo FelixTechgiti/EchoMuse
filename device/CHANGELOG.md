@@ -12,6 +12,35 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.29.0-fx.1
+
+### The Echo finds the controller again in seconds, not half an hour
+
+**After the controller restarts — every add-on update — the Echo could lose
+it for over half an hour, while sitting on the network perfectly healthy.**
+Measured on a live device on 11 September: four times in one day, browsing for
+4m16s, 33m26s, 38m5s and 36m56s, plus one gap of 2h17m. The Echo never
+restarted, its Spotify and AirPlay receivers ran throughout, and a ping to the
+controller answered in 1.6ms the whole time.
+
+The cause is one probe. The Echo remembers where the controller was and tries
+that address first; if it does not answer, it falls back to searching the
+network by name — **and then never tried the remembered address again** for as
+long as the search took. The one moment that first probe is certain to fail is
+a controller restart, which is also the case that fixes itself seconds later.
+
+The remembered address is now re-tested before every search round. An update to
+the controller add-on should now cost the Echo a few seconds rather than the
+rest of the evening.
+
+**This does not fix why the search itself can go unanswered for tens of
+minutes** — that is still open. It stops that being the only way back.
+
+### What is required of you
+
+Nothing. If your Echo has been dropping off after add-on updates and coming
+back only when you pull the plug, this is the update for it.
+
 ## 2.28.0-fx.1
 
 The AirPlay volume slider moves the Echo's volume — which it could not do
