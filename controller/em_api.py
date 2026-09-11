@@ -62,6 +62,7 @@ import em_emos_build
 import em_endpoint_bins
 import em_endpoint_release
 import em_endpoint_restart
+import em_mdnsscan
 import em_devicepaths
 import em_autoupdate
 import em_firmware
@@ -525,6 +526,7 @@ async def create_app() -> web.Application:
 
     # System
     app.router.add_get("/api/support/bundle",  _get_support_bundle)
+    app.router.add_get("/api/devices/{id}/mdns_scan", _get_device_mdns_scan)
     app.router.add_get("/api/system/status",    _get_system_status)
     app.router.add_get("/api/system/config",    _get_system_config)
     app.router.add_patch("/api/system/config",  _patch_system_config)
@@ -6189,6 +6191,134 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
     except Exception as e:
         log.error(f"[api] emOS build error: {e}")
         return _error("build_failed", str(e), 500)
+
+
+@auth.require_admin
+async def _get_device_mdns_scan(request: web.Request) -> web.Response:
+    """
+    GET /api/devices/{id}/mdns_scan — can anything else on the LAN see this
+    Echo's streaming endpoints?
+
+    **The controller is a second vantage point, and that is the whole
+    point.** "My Echo is not in my AirPlay / Spotify Connect list" was
+    answered wrong three times in one afternoon (2026-09-11) because every
+    measurement available was taken ON the Echo — and a measurement taken
+    there cannot tell "the records go out" from "the records exist and
+    nobody ever hears them". The controller sits on the same network and
+    already runs a zeroconf stack for its own advertising, so asking it to
+    browse costs nothing and answers the question the device cannot.
+
+    It is a READ. Nothing is pushed, nothing is restarted; the browse is
+    passive and the device is not contacted at all. Admin-only because it
+    reports addresses and instance names from the whole local network, not
+    only ours.
+
+    Every judgement is in `em_mdnsscan`, tested, because the mistakes were
+    all judgements: chiefly reading "the scan found nothing" as "the device
+    is silent", which are opposite conclusions.
+    """
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+
+    try:
+        seconds = min(15.0, max(1.0, float(request.query.get("seconds", 5))))
+    except ValueError:
+        seconds = 5.0
+
+    # Lazy import — em_esphome imports em_api at module level, so the
+    # top-level one would be circular. Same as _delete_device's.
+    import em_esphome
+    azc = em_esphome.get_zeroconf()
+    if azc is None:
+        # Degrade to a stated refusal rather than an empty result, which is
+        # the very confusion this endpoint exists to remove.
+        return _error("no_zeroconf",
+                      "The controller's mDNS stack is not running, so this "
+                      "scan would report nothing and mean nothing.", 503)
+
+    from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
+
+    found: dict[str, list] = {k: [] for k in em_mdnsscan.SERVICES}
+    pending: list = []
+
+    def _on_change(zeroconf, service_type, name, state_change, **kw):
+        # Added AND Updated: a browse started while a record is already in
+        # the cache reports it as an update, and dropping those loses exactly
+        # the devices that were already there.
+        if str(state_change) not in ("ServiceStateChange.Added",
+                                     "ServiceStateChange.Updated"):
+            return
+        pending.append((service_type, name))
+
+    types = [t for t, _ in em_mdnsscan.SERVICES.values()]
+    browser = AsyncServiceBrowser(azc.zeroconf, types, handlers=[_on_change])
+    try:
+        await asyncio.sleep(seconds)
+    finally:
+        await browser.async_cancel()
+
+    key_for = {t: k for k, (t, _) in em_mdnsscan.SERVICES.items()}
+    for service_type, name in pending:
+        info = AsyncServiceInfo(service_type, name)
+        try:
+            if not await info.async_request(azc.zeroconf, 2000):
+                continue
+        except Exception:
+            continue
+        addrs = info.parsed_scoped_addresses() or []
+        v4 = next((a for a in addrs if ":" not in a), "")
+        txt = {}
+        for k, v in (info.properties or {}).items():
+            try:
+                txt[k.decode() if isinstance(k, bytes) else str(k)] = (
+                    v.decode() if isinstance(v, bytes) else ("" if v is None else str(v)))
+            except Exception:
+                continue
+        key = key_for.get(service_type)
+        if key is None:
+            continue
+        found[key].append(em_mdnsscan.Finding(
+            service=key, name=name, address=v4, port=info.port or 0,
+            target=(info.server or ""), txt=txt))
+
+    cfg = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id)
+    live = _live(device_id)
+    device_ip = (getattr(live, "ip", "") or row.get("ip") or "") if live else (
+        row.get("ip") or "")
+
+    verdicts = []
+    for key in em_mdnsscan.SERVICES:
+        enabled = bool(cfg.get(f"{key}Enabled"))
+        v = em_mdnsscan.verdict(key, found[key], device_ip, enabled)
+        note = None
+        mine = [f for f in found[key] if f.address and f.address == device_ip]
+        if mine:
+            note = em_mdnsscan.txt_note(mine[0].txt)
+        verdicts.append({
+            "service": v.service, "enabled": v.enabled,
+            "reachable": v.reachable, "visible": v.visible,
+            "detail": v.detail, "note": note,
+            "advertised": [f._asdict() for f in mine],
+        })
+
+    return _ok({
+        "device_id": device_id,
+        "device_ip": device_ip,
+        "seconds": seconds,
+        "summary": em_mdnsscan.summarise(
+            [em_mdnsscan.Verdict(d["service"], d["enabled"], d["reachable"],
+                                 d["visible"], d["detail"]) for d in verdicts]),
+        "services": verdicts,
+        # The count of OTHER hosts answering is what makes a negative mean
+        # anything, so it is reported rather than left implicit.
+        "others_seen": {k: len({f.address for f in v if f.address
+                                and f.address != device_ip})
+                        for k, v in found.items()},
+    })
 
 
 @auth.require_admin
