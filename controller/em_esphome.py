@@ -2763,6 +2763,21 @@ _pending_caps: dict[str, list[str]] = {}
 _azc: Optional[AsyncZeroconf] = None
 
 
+def get_zeroconf() -> Optional[AsyncZeroconf]:
+    """
+    The controller's own zeroconf stack, or None before it starts.
+
+    Exposed so a diagnostic can BROWSE from here rather than opening a second
+    one: two stacks on one host both bind 5353, and a tool built to answer
+    questions about mDNS must not change the thing it is measuring.
+
+    None is a real answer and callers must say so rather than reporting an
+    empty result — "the scan did not run" and "nothing is out there" are
+    opposite conclusions, which is the whole lesson of em_mdnsscan.
+    """
+    return _azc
+
+
 async def start_esphome_servers(
     devices: dict,   # device_id → em_controller.Device
     host: str = "0.0.0.0",

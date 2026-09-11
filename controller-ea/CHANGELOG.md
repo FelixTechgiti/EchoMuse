@@ -2,6 +2,36 @@
 
 ## 2.35.0-fx.1
 
+### Ask the controller whether the network can see an Echo
+
+"My Echo is not in my AirPlay or Spotify Connect list" was answered wrong
+three times in one afternoon, and every wrong answer had the same cause:
+everything measurable was measured **on the Echo**, and from there you cannot
+tell "the announcements go out" from "the announcements exist and nobody ever
+hears them".
+
+The controller sits on the same network and already runs the machinery to
+announce itself, so it can simply listen — which is the second point of view
+that was missing. A new admin check reports, per device, whether its streaming
+endpoints are actually visible from somewhere else on the network.
+
+It is a read. Nothing is pushed, nothing restarted, and the Echo is not
+contacted at all.
+
+**The result distinguishes two answers that look identical and mean opposite
+things.** "Nothing answered at all, from any host" is a statement about the
+check — a quiet moment, or multicast not reaching the controller — and says
+nothing whatsoever about your device. "Other devices answered and yours did
+not" is a real finding. Reading the first as the second is what produced two
+confident wrong diagnoses, so the two can no longer render the same way.
+
+It also names the specific fault that cost the most time here: an endpoint
+that advertises an address record pointing at `localhost`, which every client
+resolves to itself, so the device is announced perfectly and reachable by
+nobody.
+
+## 2.35.0-fx.1
+
 ### The binary you installed is now the binary that RUNS
 
 **A file replacement does not replace a running process**, and until now only
