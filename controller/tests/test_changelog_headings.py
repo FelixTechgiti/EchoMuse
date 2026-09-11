@@ -108,3 +108,38 @@ def test_a_version_heading_carries_nothing_but_its_version(path):
         f"{bad}. cut-release.yml starts a section at such a line, so whatever "
         f"follows it becomes the release notes."
     )
+
+
+@pytest.mark.parametrize("path", CHANGELOGS, ids=lambda p: p.parent.name)
+def test_no_version_appears_twice(path):
+    """
+    Two entries under one version number is a truncated release, from the
+    third direction this file already guards two of.
+
+    cut-release.yml extracts from a version heading to the NEXT version
+    heading, so the second entry for a version is not merged into the first —
+    it is the section that follows it, and the extraction stops before it
+    reaches it. Whichever half is lower in the file never reaches the tag,
+    and a tag annotation cannot be corrected afterwards.
+
+    It happened to controller 2.35.0-fx.1, which carried two separate `##
+    2.35.0-fx.1` sections: the mDNS scan and the endpoint-restart fix both
+    shipped in that release and only the first was published with it. Nothing
+    failed — every other rule here was satisfied, because each heading is a
+    well-formed version on its own.
+    """
+    seen = {}
+    dupes = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not VERSION_HEADING.match(line):
+            continue
+        key = line.strip()
+        if key in seen:
+            dupes.append(f"{key} at lines {seen[key]} and {n}")
+        else:
+            seen[key] = n
+    assert not dupes, (
+        f"{path.relative_to(REPO)} has a version heading more than once: "
+        f"{dupes}. Only the first section reaches the release notes — merge "
+        f"them into one entry with `###` subsections."
+    )
