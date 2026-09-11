@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.23.1-ea.1 (Early Access)
+
+**Brings Early Access level with 2.23.1.** That's the fix for the add-on not
+starting on Proxmox VMs using the `kvm64` CPU type (see 2.23.1 below), plus one
+change that was in 2.23.0 but never had an Early Access build: the USB console
+idle timeout is now a number box rather than a slider, so any whole number of
+minutes can be entered.
+
+No database migration, no firmware update.
+
+## 2.23.1
+
+**Fixed: the add-on would not start on Proxmox VMs using the `kvm64` CPU
+type** (#496). It stopped at startup with `NumPy was built with baseline
+optimizations: (X86_V2) but your machine doesn't support: (X86_V2)`.
+
+NumPy 2.4 needs a newer CPU than `kvm64` provides, which is why Home
+Assistant's other add-ons ran fine and this one did not. EchoMuse now uses
+NumPy 2.3.5, which runs the whole controller on `kvm64` at the same speed and
+with the same wake word scores. A new build check runs every image on an
+emulated `kvm64` CPU, so a later update cannot bring this back unnoticed.
+
+If you switched your VM's CPU type to work around this, you can leave it as it
+is. No database migration, no firmware update, and nothing to do on your
+devices.
+
 ## 2.23.0
 
 The Early Access work from ea.1 to ea.15, in one release. The headline is that
