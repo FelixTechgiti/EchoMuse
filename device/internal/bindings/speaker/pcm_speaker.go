@@ -685,8 +685,16 @@ func periodRMS(period []byte) float64 {
 	return math.Sqrt(float64(sum)/float64(n)) / 32768.0
 }
 
-// PlaybackDelay reports frames handed to the hardware and not yet played, and
-// whether the hardware is actually running.
+// PlaybackDelay reports how many frames stand between a sample pushed into the
+// MUSIC plane right now and the moment it is heard, and whether the hardware
+// is actually running.
+//
+// It is the hardware's own delay PLUS what is still waiting in the music
+// plane's software ring — see PlaybackFrames for why leaving the ring out is
+// not a rounding error but a bias that a scheduled protocol converges on.
+// Music rather than voice because its only caller is Sendspin, asking about
+// audio it is about to push; a voice-plane answer would be a different
+// question with the same name.
 //
 // Read from procfs on every call rather than cached, and the reason is the
 // question being asked: a scheduled protocol needs to know where playback IS,
@@ -710,5 +718,5 @@ func (p *PcmSpeaker) PlaybackDelay() (int64, bool) {
 	if !pos.Running() {
 		return 0, false
 	}
-	return pos.Delay, true
+	return PlaybackFrames(pos.Delay, p.music.queuedPeriods()), true
 }

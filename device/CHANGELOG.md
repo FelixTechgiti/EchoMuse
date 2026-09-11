@@ -12,10 +12,40 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.27.0-fx.1
+
+A replaced streaming binary is actually used, and music played from Music
+Assistant lands on time.
+
+### A replaced streaming binary is actually used
+
+Installing a new librespot or shairport-sync over one that was already running
+left the Echo running the old program — a replaced file does not change what a
+running process is executing. The Echo can now be asked to restart just that
+endpoint, so the binary you installed is the one running.
+
+It refuses while somebody is listening to it, and says so rather than cutting
+the music off.
+
+### Sendspin audio no longer settles a beat behind
+
+Music Assistant tells each speaker the exact instant to play every chunk, and
+the Echo aims for it by measuring how much audio is still ahead in its own
+pipeline. It was only counting half of it — the part the sound hardware knows
+about, not the buffer in front of that — so it aimed at the wrong moment,
+corrected towards the wrong moment, and stayed there.
+
+On its own that is latency you would probably not name. In a group with any
+other speaker it is an echo, and nothing on the Echo reported anything wrong,
+because every number it had agreed with itself.
+
+### What is required of you
+
+Nothing. If you use Music Assistant groups, this is the update to take.
+
 ## 2.26.0-fx.1
 
-The AirPlay slider can move the Echo's own volume, and a replaced streaming
-binary is actually used.
+The AirPlay slider can move the Echo's own volume.
 
 ### What's new
 
@@ -38,16 +68,6 @@ should be your decision rather than a surprise, so it is a switch.
 
 Takes effect when AirPlay next starts, so toggle AirPlay off and on after
 changing it.
-
-### A replaced streaming binary is actually used
-
-Installing a new librespot or shairport-sync over one that was already running
-left the Echo running the old program — a replaced file does not change what a
-running process is executing. The Echo can now be asked to restart just that
-endpoint, so the binary you installed is the one running.
-
-It refuses while somebody is listening to it, and says so rather than cutting
-the music off.
 
 ### What is required of you
 

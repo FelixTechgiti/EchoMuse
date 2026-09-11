@@ -278,6 +278,23 @@ func main() {
 		BufferSeconds:      speaker.MusicBufferSeconds,
 		MinBufferMs:        1000,
 		RequiredLeadTimeMs: 100,
+		// OutputDelayMs is ZERO ON PURPOSE, and that is a different
+		// statement from the field being absent.
+		//
+		// It covers only what lies BEYOND the hardware pointer — the
+		// codec, the amplifier and the analog path — because everything in
+		// front of it is measured rather than declared: PlaybackDelay
+		// reports ALSA's own delay plus the music ring's occupancy, so the
+		// two buffers that actually hold hundreds of milliseconds are
+		// already in the corrector's signal.
+		//
+		// What remains is a handful of milliseconds nobody has measured on
+		// this board, and a guess here is the one thing this field must not
+		// carry: it is a FIXED offset the clock filter cannot see or undo,
+		// so a wrong number moves this speaker permanently out of a group
+		// that is otherwise correct. Zero until somebody puts a microphone
+		// in front of it.
+		OutputDelayMs: 0,
 	}, "wlan0", pcmSpeaker, dataClient.MusicPlane().For(musicplane.Sendspin))
 	dataClient.MusicPlane().Register(musicplane.Sendspin, func(why musicplane.Reason) {
 		sendspinClient.Leave(string(why))

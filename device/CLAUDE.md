@@ -1226,6 +1226,45 @@ Two things not to undo:
   statement: absent means nobody measured, and a caller that does not know its
   own pipeline should not assert there is none.
 
+## What `PlaybackDelay` measures, and the buffer it used to miss
+
+**`PlaybackDelay()` is the only thing standing between Sendspin's scheduler
+and reality, and for the life of the package it reported half the pipeline.**
+It returned ALSA's own `delay` from procfs — appl_ptr minus hw_ptr, frames the
+hardware has been handed and not yet played. In FRONT of that sits the music
+plane's software ring, which the DMA pointer cannot see: a period pushed by a
+producer waits its turn in a Go channel, gets mixed, and only then becomes a
+frame ALSA knows about.
+
+**For a scheduled protocol that gap is a bias, not noise, and it converges
+rather than cancelling.** `Runtime.correctLocked` asks when the next sample
+would play (`now + queued/rate`), compares it to the timestamp the server
+chose, and pads or trims the difference. Under-report the pipeline and it
+concludes it is early by exactly the ring depth, so it pads; the padding goes
+into the ring; the measurement does not move, because the ring is the part it
+cannot see. The loop settles with the audio coming out LATE by the ring depth
+and holds it there — and every number it logs agrees with itself, so nothing
+on the device reports a fault. In a Music Assistant group with any correct
+speaker, the symptom is an echo.
+
+`speaker.PlaybackFrames(hwDelay, queuedPeriods)` is the sum, untagged and
+host-tested for `musicprime.go`'s reason. Each ring entry is exactly one
+period by construction — `PumpMusic` takes one period and the channel carries
+them whole — so the depth is a count of periods and not of bytes.
+
+**It answers about the MUSIC plane specifically.** Its only caller is Sendspin
+asking about audio it is about to push. A voice-plane answer would be a
+different question wearing the same name, and the name is what a future caller
+will read.
+
+**`OutputDelayMs` stays 0, and that is now written down at the call site.**
+It covers only what lies beyond the hardware pointer — codec, amplifier,
+analog path — because everything in front of it is measured. What remains is a
+handful of milliseconds nobody has put a microphone in front of, and a guess
+is the one thing that field must not carry: it is a FIXED offset the clock
+filter can neither see nor undo, so a wrong number moves this speaker
+permanently out of a group that is otherwise correct.
+
 ## The AirPlay slider can move the device volume (#30)
 
 **Off by default, and a setting rather than a behaviour, because the

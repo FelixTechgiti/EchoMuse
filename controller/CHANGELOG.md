@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.29.0-fx.1
+## 2.30.0-fx.1
 
 ### Installing librespot or shairport-sync now actually replaces the running one
 
@@ -19,6 +19,8 @@ ends.
 The panel says which of those happened, including the awkward cases: an Echo
 on older firmware that cannot restart on request, and one that did not answer.
 Neither is reported as a success.
+
+## 2.29.0-fx.1
 
 ### The size of an installed endpoint binary is reported again
 
