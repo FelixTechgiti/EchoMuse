@@ -2963,3 +2963,40 @@ def test_a_database_row_is_never_read_with_dict_get():
     assert not offenders, (
         "sqlite3.Row has no .get — these read a database row as a dict and "
         "will raise at request time:\n  " + "\n  ".join(offenders))
+
+
+def test_the_mdns_scan_answers_for_an_offline_device():
+    """
+    The network scan must NOT require the device to be connected.
+
+    It is a passive browse from the controller and never touches the Echo, so
+    it still answers while the control link is down — and that is when it is
+    worth the most. "The endpoints are still advertising" and "the Echo is
+    gone" are two halves of a diagnosis that nothing else in this dashboard
+    separates, and on 2026-09-11 a device sat offline for a quarter of an hour
+    with no way to tell which had happened.
+
+    The natural mistake is the one every other device endpoint here makes
+    correctly: reach for `_live()` and refuse when it is None, because almost
+    every handler is about to send the device something. This one is not, and
+    a refusal would remove the endpoint exactly on the failure it was built
+    for. So the row comes from the database and a live device is used only to
+    prefer its current address over the stored one.
+    """
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "em_api.py").read_text()
+
+    fn = src[src.index("async def _get_device_mdns_scan"):]
+    fn = fn[:fn.index("\n@", 1)] if "\n@" in fn[1:] else fn
+    fn = fn[:fn.index("\nasync def ", 1)] if "\nasync def " in fn[1:] else fn
+
+    assert "db.get_device" in fn, \
+        "the scan does not read the stored row, so it cannot answer offline"
+    assert "device_offline" not in fn and "not_connected" not in fn, \
+        "the scan refuses an offline device — that is the case it exists for"
+
+    live_uses = [ln for ln in fn.splitlines() if "_live(" in ln]
+    assert live_uses, "no _live() at all — the scan cannot prefer a live address"
+    for ln in live_uses:
+        assert "return" not in ln, \
+            f"_live() is used as a gate rather than as a preference: {ln.strip()}"
