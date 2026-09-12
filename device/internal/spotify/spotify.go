@@ -160,6 +160,15 @@ type Options struct {
 	// ExtraArgs are appended verbatim, for a device that needs something
 	// this package does not model.
 	ExtraArgs []string
+	// OnEvent receives librespot's player events. Nil switches the whole
+	// mechanism off — no FIFO, no script, no --onevent — for the reason
+	// AirPlay's OnVolume gates its metadata block: a pipe nobody drains is
+	// worse than no pipe, and here it would strand a shell process per event.
+	//
+	// The event this exists for is a PAUSE. Without it the music plane's
+	// 5.46 seconds play out after the user has stopped, which is what "es
+	// dauert 6-7 Sekunden bis sie aufhoert" was measuring.
+	OnEvent func(Event)
 }
 
 // Client supervises one librespot process.
@@ -171,6 +180,10 @@ type Client struct {
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
+
+	// onevent is the --onevent value, empty when the plumbing is not up.
+	// Written once per start, read by args() on the same goroutine.
+	onevent string
 
 	// What the endpoint has actually been doing, for endpoint.Health.
 	// Under mu with the rest: they are read together and a torn pair is a
@@ -251,6 +264,21 @@ func (c *Client) Start() error {
 	// fielded fleet is every device that has ever been updated.
 	if n := orphan.Takeover(c.opts.Binary); n > 0 {
 		log.Printf("[spotify] stopped %d orphaned instance(s) left by a previous run", n)
+	}
+
+	// Player-event plumbing, built before the process that will use it. Both
+	// halves can fail harmlessly: writeEventPlumbing returns "" and args()
+	// then omits --onevent, leaving an endpoint that behaves exactly as it did
+	// before this existed.
+	c.onevent = ""
+	if c.opts.OnEvent != nil {
+		onevent, pipe := writeEventPlumbing(c.opts.CacheDir)
+		if onevent != "" {
+			c.onevent = onevent
+			stop := ctx.Done()
+			cb := c.opts.OnEvent
+			go runEventReader(pipe, stop, cb)
+		}
 	}
 
 	log.Printf("[spotify] enabled as %q", c.name())
@@ -458,6 +486,13 @@ func (c *Client) args() []string {
 		// which is unfirewallable; internal/netfilter opens exactly this one
 		// and reads it from the same constant.
 		"--zeroconf-port", fmt.Sprint(netfilter.SpotifyZeroconfPort),
+	}
+	// Player events, and only when somebody is reading them. c.onevent is set
+	// by start() once the FIFO and the script are actually on disk, so a
+	// device where that failed runs exactly as it did before rather than
+	// pointing librespot at a script that is not there.
+	if c.onevent != "" {
+		a = append(a, "--onevent", c.onevent)
 	}
 	return append(a, c.opts.ExtraArgs...)
 }

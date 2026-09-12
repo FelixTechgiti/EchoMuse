@@ -332,8 +332,33 @@ func main() {
 	// The serial is the FALLBACK name, not the name: the controller pushes
 	// the device's label, and "G090LF1180570SPJ" is not a speaker anybody
 	// picks out of a list in the Spotify app.
-	spotifyClient := spotify.New(spotify.Options{Name: deviceID},
-		pcmSpeaker, dataClient.MusicPlane().For(musicplane.Spotify))
+	spotifyClient := spotify.New(spotify.Options{
+		Name: deviceID,
+		// Drop the buffered music when Spotify stops producing it.
+		//
+		// The music plane holds 5.46 seconds and librespot keeps it FULL,
+		// because the pipe backpressures it rather than the other way round.
+		// So a pause used to leave the Echo playing for another six or seven
+		// seconds — measured by its owner 2026-09-12, and the arithmetic
+		// agrees. Starting was never slow (the local prime is four periods,
+		// 171ms), and that asymmetry is what identified the buffer rather
+		// than the network.
+		//
+		// Gated on Spotify actually OWNING the plane. Without that check a
+		// pause on an idle Spotify would discard whatever AirPlay, Sendspin
+		// or Home Assistant had queued — a fix for one source that breaks
+		// the other three, which is the kind of thing the arbiter exists to
+		// prevent and which nothing downstream would report.
+		OnEvent: func(e spotify.Event) {
+			if !e.EndsPlayback() {
+				return
+			}
+			if dataClient.MusicPlane().Owner() != musicplane.Spotify {
+				return
+			}
+			pcmSpeaker.FlushMusic()
+		},
+	}, pcmSpeaker, dataClient.MusicPlane().For(musicplane.Spotify))
 	dataClient.MusicPlane().Register(musicplane.Spotify, func(why musicplane.Reason) {
 		spotifyClient.Leave(string(why))
 	})
