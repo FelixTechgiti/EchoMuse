@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.43.0-fx.1
+
+### Der Zustand der Audio-Endpunkte steht jetzt auf der Status-Seite
+
+**Er stand vorher als Unterzeile unter einem Schalter in der Konfiguration —
+und wurde dort wochenlang von niemandem gefunden.** Wer wissen will, ob
+librespot läuft, schaut auf die Status-Seite, weil dort der Zustand steht.
+Genau diese Anzeige war am 12. September die eine fehlende Information, die
+einen ganzen Tag Fehlersuche an einem Endpunkt gekostet hat, den niemand
+sehen konnte.
+
+Gerät → **Status** zeigt jetzt eine Karte **Audio-Endpunkte** mit „läuft — seit
+12m" beziehungsweise „läuft NICHT — N Startversuche — letzter Abbruch: …".
+Sie bleibt still, wenn die Firmware nichts berichten kann und wenn nichts
+eingeschaltet ist — ein Panel, das ein gesundes Gerät anklagt, ist das, was
+alle zu überspringen lernen.
+
+In der Konfiguration bleibt stehen, **ob das Programm installiert ist** — das
+erklärt, warum ein Schalter ausgegraut ist, und ist damit eine Frage über die
+Einstellung. Ob der Prozess läuft, ist es nicht.
+
+### Spotify- und AirPlay-Name sind jetzt immer gerätespezifisch
+
+Ein Gerätename kann keine Flotteneinstellung sein. Wird er einmal für die
+Flotte gesetzt, kündigt sich **jeder** Echo im Haus unter demselben Namen an —
+das macht die Liste in der App nicht mehrdeutig, sondern unbrauchbar. Und das
+ist kein Randfall: es passiert in dem Moment, in dem ein zweites Gerät
+dazukommt.
+
+Beide Namen werden nie von der Flotte geerbt, auch dann nicht, wenn ein Gerät
+gar keinen eigenen gesetzt hat — sonst hört wieder jedes unbenannte Gerät auf
+denselben Namen. Sie bleiben auf dem Gerät bearbeitbar, **auch wenn der Rest
+des Abschnitts der Flotte folgt**: ob ein Echo Spotify Connect überhaupt
+betreibt, ist eine Flottenentscheidung, wie er heißt, nicht. Im Flotten-Formular
+sind die Felder abgeschaltet und sagen warum, statt einen Wert anzunehmen, der
+nichts Gutes tun kann.
+
+### Ein veraltetes Dashboard kann sich nicht mehr so lange verstecken
+
+Die Dashboard-Hülle wird jetzt mit `no-store` ausgeliefert statt nur mit
+`no-cache`. Der Unterschied ist der springende Punkt: `no-cache` heißt „vor
+der Benutzung nachfragen", was ein Browser befolgen mag und ein
+Zwischenspeicher nicht.
+
+Am 12. September zeigte ein Dashboard durch den Ingress-Proxy eine **zwei Tage
+und ein Dutzend Releases alte** Oberfläche — noch mit dem alten Projektnamen in
+der Kopfzeile — während direkt daneben die aktuelle Versionsnummer stand. Die
+kommt aus der API und ist deshalb immer richtig: die eine Zahl, mit der man das
+ausschließen würde, war die, die getäuscht hat. Ein harter Neuladen half nicht,
+ein privates Fenster sofort.
+
+Die Veraltet-Erkennung dafür liegt **im Bundle selbst** und kann für einen
+Client, der zu alt ist, um sie zu haben, nie auslösen. Strenge Header auf der
+3 KB großen Hülle sind das Einzige, was einem bereits zurückgefallenen Client
+hilft.
+
 ## 2.42.0-fx.1
 
 ### Ein Echo, der schon läuft, kann auf emOS umgestellt werden statt neu eingerichtet

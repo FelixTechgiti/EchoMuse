@@ -674,10 +674,26 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
             "static/dashboard.js",
             f"static/dashboard.js?v={stamp}",
         )
+    # `no-store`, not just `no-cache`, and the difference is the whole point:
+    # no-cache means "revalidate before using", which a browser may honour and
+    # an intermediary may not. Home Assistant's ingress proxy sits between this
+    # handler and the page, and on 2026-09-12 a dashboard served through it was
+    # TWO DAYS and a dozen releases stale — showing the pre-rename "EchoMuse"
+    # header — while `/api/system/status` answered with the current version
+    # right beside it. A hard reload did not clear it.
+    #
+    # That is the worst possible shape for this failure, because the one number
+    # anybody checks to rule it out comes from the API and is therefore always
+    # correct. The staleness check added for exactly this lives INSIDE the
+    # bundle, so it cannot fire for a client too stale to have it — a detector
+    # shipped in the artefact whose staleness it detects can only ever catch
+    # the next one. Strict headers on this 3KB wrapper are the only thing that
+    # helps a client that is already behind.
     return web.Response(
         text=page,
         content_type="text/html",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate",
+                 "Pragma": "no-cache"},
     )
 
 

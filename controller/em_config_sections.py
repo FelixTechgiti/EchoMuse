@@ -103,6 +103,24 @@ STATE_KEYS: frozenset[str] = frozenset({
     "startupVolume", "idleRing", "idleRingBrightness", "idleEffect",
 })
 
+# Keys that ARE user-facing settings but can never be inherited from the
+# fleet, because their whole job is to tell two devices apart.
+#
+# A Spotify or AirPlay name is what the Echo calls itself in somebody's app.
+# Set one at fleet level and every Echo in the house announces the SAME name,
+# which does not make the picker ambiguous so much as useless — and it is not
+# an edge case, it is what happens the moment a second device exists. The
+# section they live in (`streaming`) is still the right home for the toggles
+# beside them: whether an Echo runs Spotify Connect at all is exactly the kind
+# of thing a fleet decides together.
+#
+# Distinct from STATE_KEYS on purpose, though the merge treats them the same.
+# STATE_KEYS are not settings at all — they are hardware state the device
+# writes back, and no dashboard control owns them. These are settings somebody
+# types, and the dashboard must show them as device-scoped rather than
+# silently ignoring a fleet value that was entered in good faith.
+DEVICE_ONLY_KEYS: frozenset[str] = frozenset({"spotifyName", "airplayName"})
+
 SECTION_IDS: tuple[str, ...] = tuple(SECTIONS)
 
 
@@ -148,6 +166,11 @@ def merge(global_cfg: dict, device_cfg: dict, section_ids) -> dict:
     for key in STATE_KEYS:
         if key in device_cfg:
             effective[key] = device_cfg[key]
+    # Same rule, different reason — see DEVICE_ONLY_KEYS. Taking the device's
+    # value when it has one is only half of it: when it has NONE, the fleet's
+    # must not leak in either, or every unnamed Echo answers to one name.
+    for key in DEVICE_ONLY_KEYS:
+        effective[key] = device_cfg.get(key, "")
     return effective
 
 
