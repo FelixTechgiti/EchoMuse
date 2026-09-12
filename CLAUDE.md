@@ -119,10 +119,11 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   2026-09-12 gemessen: **114 Remote-Branches, 101 davon längst in `main`
   gemergt.** Ein liegengebliebener Branch mit überholten Fassungen ist eine
   Falle — wer daraus später einen PR öffnet, überschreibt die bessere Lösung.
-  **Eine Sitzung kann das nicht selbst**, siehe die nächste Regel: Sie legt den
-  Branch an, und stehen bleibt er trotzdem. Also beim Merge in der Weboberfläche
-  löschen oder am Ende der Sitzung dazusagen, welche Branches offen sind — sonst
-  wächst die Liste genau so weit wie schon einmal.
+  **Ob eine Sitzung das selbst kann, hängt an ihrer Anmeldung** — siehe die
+  Tabelle in der Regel weiter unten. Mit der `gh`-Anmeldung dieses
+  Arbeitsplatzes geht es. Wo der `403` kommt, beim Merge in der Weboberfläche
+  löschen oder am Ende der Sitzung dazusagen, welche Branches offen sind —
+  sonst wächst die Liste genau so weit wie schon einmal.
 - **Ein PR, der ein Issue erledigt, schließt es**: `Closes #nnn` im Rumpf, nicht
   „Relates to #nnn". GitHub schließt nur bei den Schlüsselwörtern. Ein Fehler,
   der längst behoben ist und offen dasteht, wird als nächstes priorisiert — und
@@ -134,18 +135,32 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   von einem älteren Stand ab, und Git meldet den Konflikt erst dem, der später
   rebast. Wer eine Datei groß umbaut, prüft danach, wer dieselbe Datei anfasst:
   `gh pr list --json number,headRefName,files`.
-- **Eine Sitzung darf Branches nur ANLEGEN und FORTSCHREIBEN.** Jeder andere
-  Schreibzugriff auf eine Ref wird von GitHub mit `403` auf `git-receive-pack`
-  abgelehnt — gemessen am 2026-09-12 an beiden Formen, die es trifft: einen Tag
-  anlegen, und einen gemergten Branch löschen. Beides mit derselben Anmeldung,
-  mit der ein `git push -u origin <branch>` Sekunden vorher durchlief. Es ist
-  also keine Regel über Tags, sondern über die ART des Schreibzugriffs, und die
-  Fehlermeldung nennt sie nicht: Git meldet `the remote end hung up
-  unexpectedly`, den 403 sieht nur, wer `GIT_CURL_VERBOSE=1` setzt.
+- **Was eine Sitzung an einer Ref schreiben darf, hängt an ihrer ANMELDUNG,
+  nicht daran, dass sie eine Sitzung ist.** Nur Anlegen und Fortschreiben geht
+  überall; alles andere wird von GitHub mit `403` auf `git-receive-pack`
+  abgelehnt — und die Fehlermeldung nennt das nicht: Git meldet `the remote end
+  hung up unexpectedly`, den 403 sieht nur, wer `GIT_CURL_VERBOSE=1` setzt.
+
+  Zwei Messungen vom 2026-09-12, beide an diesem Repo, mit
+  **unterschiedlichem Ergebnis** — deshalb steht hier die Anmeldung und nicht
+  „eine Sitzung":
+
+  | Anmeldung | Tag anlegen | gemergten Branch löschen |
+  |---|---|---|
+  | GitHub-App-Installationstoken (Sitzung über die Weboberfläche) | `403` | `403` |
+  | `gh`-Keyring-Anmeldung dieses Arbeitsplatzes (`repo`, `read:org`, `gist`) | nicht gemessen | **ging** — 113 Branches gelöscht, die Liste von 114 auf 1 gebracht |
+
   **Für Tags ist der Weg `cut-release.yml`**, beschrieben unten unter
   „Releasing on this fork" — erst dort lesen, nicht am Tag herumprobieren.
-  Für das Löschen gibt es keinen: die Weboberfläche oder `gh` auf einem
-  Rechner mit eigener Anmeldung.
+  Fürs Löschen gilt: erst versuchen, und nur wenn der 403 kommt, die
+  Weboberfläche nehmen. Eine Sitzung, die es könnte und es aufgrund dieser
+  Regel nicht tut, händigt jemandem eine Liste von Knöpfen aus — genau das,
+  was weiter unten bei `cut-release.yml` als Fehler benannt ist.
+
+  **Hier stand am 2026-09-12 kurzzeitig „eine Sitzung darf nur anlegen und
+  fortschreiben", und das war zu weit** — dieselbe Form wie die Tag-Regel, die
+  es korrigiert hat, nur eine Ebene höher: Es nannte den Fall, an dem gemessen
+  wurde, statt die Bedingung. Die Bedingung ist das Token.
 
 ### §5 Urheberschaft: kein Claude, in keinem Feld
 
@@ -420,6 +435,51 @@ The posture is therefore **not to own the OS work, but not to prevent it**:
 keep `pkg/led`, `pkg/mic`, `pkg/speaker` and `pkg/buttons` honest as
 interfaces, and treat each Android call site as something to isolate. Nothing
 here commits the project to shipping a distro.
+
+### emOS is the target, FireOS is the compatibility base
+
+**"Should FireOS be dropped entirely" was asked on 2026-09-12 and answered no
+— for now, and on distribution rather than on code.** The assessment and the
+conditions that would change it are #120; this is the part that governs a
+change while the answer stands.
+
+The technical case for dropping it is real and is mostly **#117 / #141**: under
+FireOS a plug in the headphone jack degrades the whole audio subsystem, the
+controller sees `no mic frames for 10s` and tears down the satellite, and that
+teardown is what users report as music stopping. Every register on both the
+codec and the SoC is identical between audible and silent, so the live
+hypothesis is Amazon's audio HAL — and **under emOS that hypothesis does not
+exist**, with the line-out transition verified clean there on 2026-09-04.
+Behind it sits everything that exists only to fight Android for hardware it is
+not using: the `stop media` nudge loop, `waitForFreePcm`, `retryOpen`, the jack
+drift reconciler, the debloat payload, the pm-hide list, `svc wifi`.
+
+What forbids it today is not any of that:
+
+- **emOS cannot ship a bootable image** — one carries the device's own kernel
+  and DTBs, so only the `init` is published and each user assembles the image
+  from their own boot partition. Dropping FireOS replaces a flash with a build
+  step, for everybody.
+- **amonet-biscuit v2.0.0 (10 September 2026) closes the door from outside.**
+  It replaces the bootloaders, after which FireOS 5 does not boot — and emOS
+  with it, since emOS pairs our init with the FireOS 5 kernel; the init is
+  aarch64 and FireOS 6's kernel is 32-bit. Somebody following a third party's
+  current instructions today lands where emOS cannot run at all. **This is the
+  decisive one**, and it is the reason the answer can change without anything
+  in this repository changing.
+- **emOS is 0.4 — bench-proven, not field-proven.**
+
+Two consequences for judging a change, and they are the whole point of writing
+this down:
+
+- **Design for emOS, then make it work on FireOS**, rather than the other way
+  round. A path that only exists because Android is in the way is a workaround,
+  not the design.
+- **Say so at the call site when something is FireOS-only.** The cost of not
+  doing it is not confusion now, it is that nobody can tell later which code
+  leaves with FireOS and which was load-bearing all along — the same problem
+  the rename shims have, where "delete it once no such device can exist" is
+  only actionable because each one says what it is waiting for.
 
 ## Writing to people: bottom line first
 
