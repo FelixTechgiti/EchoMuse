@@ -3991,6 +3991,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [wifiPsk, setWifiPsk]   = useState('');
   const [wifiNetworks, setWifiNetworks] = useState([]);
   const [duplicateDeviceId, setDuplicateDeviceId] = useState(null);
+  // MIGRATING a device that is already in the fleet, rather than provisioning
+  // a new one. emOS flow only — see the guard in runConnectAndroid.
+  const [migrating, setMigrating] = useState(false);
   const [progress, setProgress] = useState(null);
   const [latestRelease, setLatestRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
@@ -4043,6 +4046,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setStepState((next === 'emos' ? _EMOS_STEPS : _WIZARD_STEPS).map(() => 'pending'));
     setStep(0);
     setLog([]);
+    // An intent to migrate belongs to the flow it was expressed in. Carrying
+    // it into the FireOS flow would let a stale click past the refusal that
+    // exists because re-provisioning FireOS over FireOS rewrites the
+    // partitions the device is running from.
+    setMigrating(false);
+    setDuplicateDeviceId(null);
   }
 
   // Abandon whatever step is in flight.
@@ -4391,9 +4400,31 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // _merge_device(): device_id is the only identifying field on the
     // device object, and it IS ro.serialno (set at registration time in
     // em_controller.py), not a separate serial/serial_number/id field.
+    //
+    // MIGRATION IS THE EXCEPTION, AND ONLY FOR emOS. Crossing a fielded device
+    // from FireOS to emOS is not re-provisioning: /data survives a
+    // boot-partition write, so the Revoice install, the link credentials, the
+    // remembered controller, the mute state and the WiFi configuration all
+    // come across, the serial is unchanged, and the controller goes on talking
+    // to the same device row. Deleting it first — which is what this refusal
+    // used to require, and what the FAQ still tells people to do — throws away
+    // the per-device config for nothing and changes every Home Assistant
+    // entity id, because HA keys entities on the device's identity and a
+    // re-added device is a new one.
+    //
+    // Not offered for the FireOS flow: re-provisioning FireOS over FireOS
+    // rewrites the same partitions the device is already running from, which
+    // is the destructive case this refusal exists for.
     if (serial && knownDevices && knownDevices.length) {
       const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial));
-      if (match) {
+      if (match && isEmos && migrating) {
+        addLog(`Migrating "${match.label || match.device_id}" to emOS — its controller entry, `
+             + 'per-device config and Home Assistant entities are kept.', 'ok');
+        addLog('  /data survives the boot-partition write, so the server binary, the TLS '
+             + 'credentials, the remembered controller and the WiFi configuration come across.');
+        addLog('  What does NOT come across: anything in the boot image itself. Keep the '
+             + 'escrowed image from the next step — it is the only way back.', 'warn');
+      } else if (match) {
         // Close the live ADB session before throwing — otherwise the
         // transport stays open and _lastUsbDevice keeps pointing at it.
         // On retry, requestDevice() disconnects the WebUSB interface but
@@ -7320,6 +7351,19 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   )}
                   {diagnostics && (
                     <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                  {/* Migration keeps the row; the delete below throws it away.
+                      Offered first because it is what somebody crossing their
+                      own device almost always means, and because the delete is
+                      the one that cannot be undone. */}
+                  {step === 0 && duplicateDeviceId && isEmos && (
+                    <Pill onClick={() => {
+                      setMigrating(true);
+                      setDuplicateDeviceId(null);
+                      markStep(0, 'pending');
+                      addLog(`Will migrate "${duplicateDeviceId}" to emOS and keep its settings. `
+                           + 'Run the step again.', 'ok');
+                    }}>Migrate "{duplicateDeviceId}" to emOS (keep its settings)</Pill>
                   )}
                   {step === 0 && duplicateDeviceId && (
                     <Pill danger onClick={async () => {

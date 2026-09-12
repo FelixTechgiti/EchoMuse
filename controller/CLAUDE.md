@@ -5,6 +5,47 @@ Project-wide direction, the device/controller compatibility rules, the wire
 protocol and the release scheme are in the repo-root `CLAUDE.md`; the device
 firmware is in `device/CLAUDE.md`.
 
+
+## Migrating a fielded device to emOS keeps its row, and that is the whole point
+
+**The wizard refused a device it already knew, and the FAQ told people to
+delete it first.** Correct for a re-provision; wrong for a FireOS → emOS
+crossover, and expensive in a way that is not obvious at the moment of
+clicking.
+
+`/data` survives a boot-partition write. The Revoice install, the link
+credentials, `controller.json`, `state.json`, `console.pw`, the oww assets and
+`wpa_supplicant.conf` all come across, and the serial — and therefore the
+`device_id` — does not change. So the controller carries on talking to the same
+row. Deleting it first throws away the per-device config for nothing **and
+changes every Home Assistant entity id**, because HA keys entities on the
+device's identity and a re-added device is a new one. That last consequence is
+already documented under "My device changed its HA entity IDs" and was being
+recommended by another page in the same docs set.
+
+Three rules, pinned by `tests/emos_migration.test.mjs`:
+
+- **Migration is emOS-only.** Re-provisioning FireOS over FireOS rewrites the
+  partitions the device is running from, which is the destructive case the
+  refusal exists for. `if (match && isEmos && migrating)` — all three.
+- **The plain refusal stays.** The `else if (match)` branch is what stops an
+  ordinary re-provision wiping through a registered device, and a guard that
+  only checked for the migration branch would pass a file that had lost it.
+- **Switching flows clears the intent.** A migration chosen in the emOS flow
+  must not survive a switch to FireOS, or a stale click walks past the
+  refusal.
+
+The test is a SOURCE guard and strips comments before matching, for this
+tree's recurring reason: the comments here quote the rule they explain, so a
+guard that reads the raw file matches its own justification rather than the
+code obeying it.
+
+**What the migration does not need is a new registration path**, and looking
+for one is the wrong instinct — `ensure_device_token` already returns the
+existing token for a known device, the config is keyed by `device_id`, and the
+device re-registers by itself. The only thing in the way was one refusal in
+the browser.
+
 ## Running the controller
 
 **Bare metal (Python 3.12):**

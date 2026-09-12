@@ -136,8 +136,22 @@ amonet-Unlock **v1.1.0**; siehe die erste Frage auf dieser Seite.
 emOS hat kein adb, der Assistent sieht das Gerät also nicht direkt. Öffne die
 USB-Konsole, führe `/init recovery` aus, und der Echo startet in TWRP neu — wo
 der erste Schritt des Assistenten ihn annimmt. Das braucht emOS 0.4 oder
-neuer. Sagt der Assistent danach, das Gerät sei bereits registriert, lass ihn
-den alten Eintrag löschen.
+neuer.
+
+Sagt der Assistent danach, das Gerät sei bereits registriert, wähle
+**„Migrieren"** und nicht Löschen. Löschen wirft die Konfiguration dieses
+Geräts weg und ändert **alle** Home-Assistant-Entitäts-IDs, weil HA Entitäten
+an der Geräteidentität festmacht und ein neu hinzugefügtes Gerät ein neues
+ist. Migrieren behält beides.
+
+### Kann ich meinen bestehenden Echo auf emOS umstellen, ohne alles neu einzurichten?
+**Ja.** `/data` überlebt das Schreiben der Boot-Partition, also kommen die
+Revoice-Installation, die Link-Zugangsdaten, der gemerkte Controller, der
+Mute-Zustand und die WLAN-Konfiguration mit — und die Seriennummer ändert sich
+nicht, also auch nicht die Geräte-ID. Im Assistenten den emOS-Ablauf wählen
+und beim ersten Schritt **„Migrieren"** statt Löschen. Die vollständige
+Anleitung, samt dem, was nicht mitkommt, steht in
+[emos-migration.md](emos-migration.md).
 
 ---
 

@@ -185,6 +185,7 @@ Schalter, der stillschweigend nichts tut.
 |---|---|
 | [Schnellstart](docs/quickstart.md) | Von null zum ersten Gespräch |
 | [Rooting](docs/rooting.md) | Den Dot einmalig entsperren |
+| [Auf emOS umstellen](docs/emos-migration.md) | Ein Gerät, das schon läuft, ohne Neueinrichtung auf emOS bringen |
 | [Konfiguration](docs/configuration.md) | Jeder Regler, in verständlichen Worten erklärt |
 | [FAQ](docs/faq.md) | Die Dinge, die am häufigsten schiefgehen |
 | [Sprachpipeline](docs/voice-pipeline.md) | Der ganze Weg vom Mikrofon zur Antwort |
