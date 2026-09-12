@@ -624,3 +624,27 @@ jobs:
           cc -O2 -Wall -Wextra -o /tmp/shmcheck \
             device/shairport/compat/shmcheck.c
           REVOICE_SHM_DIR=/tmp/revoice-shmcheck /tmp/shmcheck
+
+      # The AirPlay 2 advertisement. The backend itself is sockets and a
+      # responder thread and cannot run here; what CAN be wrong without
+      # anything failing is the bookkeeping, so that lives in mdns_ap2.c and
+      # this drives it. The specific mistake it catches: shairport resends
+      # only the SECONDARY records on an update, so a backend reading the
+      # absent primary set as "clear" retires _raop._tcp's TXT the first time
+      # somebody joins a group — a speaker that works until it is used.
+      - name: The AirPlay 2 advertisement merges an update correctly
+        run: |
+          cc -O2 -Wall -Wextra -o /tmp/mdnscheck \
+            device/shairport/compat/mdnscheck.c
+          /tmp/mdnscheck
+
+      # The uuid shim. shairport-sync uses three libuuid functions at one site
+      # to mint the AirPlay identifier that goes in `pi=`; bionic has no
+      # libuuid and util-linux is the wrong size of dependency for it. Nothing
+      # downstream validates the result, so a wrong version nibble or a source
+      # that fills half the buffer would reach a phone's picker unreported.
+      - name: The uuid shim mints RFC 4122 version 4 identifiers
+        run: |
+          cc -O2 -Wall -Wextra -I device/shairport/compat \
+            -o /tmp/uuidcheck device/shairport/compat/uuidcheck.c
+          /tmp/uuidcheck
