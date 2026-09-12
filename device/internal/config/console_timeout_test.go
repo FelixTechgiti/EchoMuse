@@ -3,21 +3,40 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// Point the record at a temp directory for the duration of one test.
+// Point the console records at temp directories for the duration of one test.
 // Restored via t.Cleanup rather than at the end of the test body: a failing
 // assertion returns early, and a leaked override would make every later test
 // write into the previous one's directory.
+//
+// As MANY directories as the firmware really writes, so a test cannot pass by
+// only ever looking at one of them — that is precisely how the legacy copy
+// went unnoticed. The directories are NOT created here: writeRecord's MkdirAll
+// is part of what is under test, since on a device the legacy directory may
+// genuinely be absent.
+func withTempDirs(t *testing.T) []string {
+	t.Helper()
+	saved := consoleDirs
+	base := t.TempDir()
+	dirs := make([]string, 0, len(saved))
+	for i := range saved {
+		dirs = append(dirs, filepath.Join(base, "dir"+strconv.Itoa(i)))
+	}
+	consoleDirs = dirs
+	t.Cleanup(func() { consoleDirs = saved })
+	return dirs
+}
+
+// withTempPath is withTempDirs for a test that only cares about the CURRENT
+// record — the path an init built since the rename opens.
 func withTempPath(t *testing.T) string {
 	t.Helper()
-	saved := consoleTimeoutPath
-	dir := t.TempDir()
-	consoleTimeoutPath = filepath.Join(dir, "console.timeout")
-	t.Cleanup(func() { consoleTimeoutPath = saved })
-	return consoleTimeoutPath
+	withTempDirs(t)
+	return recordPaths(consoleTimeoutName)[0]
 }
 
 func TestWriteConsoleTimeoutStoresMinutes(t *testing.T) {

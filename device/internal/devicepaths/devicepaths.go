@@ -32,8 +32,19 @@ package devicepaths
 
 import (
 	"os"
-	"path/filepath"
+	"path"
 )
+
+// `path`, not `path/filepath`, and the difference is not cosmetic: every
+// directory named here is a path ON THE DEVICE, which is Linux, so the
+// separator is `/` no matter what machine the code was compiled on.
+//
+// `path/filepath` asks the HOST, and on the target that is the same answer —
+// the firmware runs on the device. It is a different answer on a developer's
+// Windows workstation, where `filepath.Join` returns `\data\local\etc\…` and
+// the four tests in this package failed against their `/`-shaped literals.
+// That is a guard going red about the machine it runs on rather than about
+// the code, which is the fastest way to teach somebody to skip a suite.
 
 // CurrentDir is where this firmware writes.
 const CurrentDir = "/data/local/etc/revoice"
@@ -56,17 +67,48 @@ func Read(name string) string {
 
 // Write returns the path `name` should be WRITTEN to. Always the current
 // directory: a write is what migrates the file.
-func Write(name string) string { return filepath.Join(CurrentDir, name) }
+func Write(name string) string { return path.Join(CurrentDir, name) }
+
+// AllDirs returns every directory a record must be written to, current first.
+//
+// **The difference from Write is who reads the file back**, and that is the
+// whole reason both exist.
+//
+// Write is for a file this firmware reads itself — the discovery cache, the
+// mute state. One writer and one reader, updated together by the same OTA, so
+// writing the current path and falling back on read is enough: the first
+// write migrates the file and the fallback stops being consulted.
+//
+// AllDirs is for a file a DIFFERENT program reads, on its own update
+// schedule. emOS's init is the case that exists: it reads the console
+// password and idle-timeout records, and it arrives only when somebody
+// flashes a boot partition. So this firmware cannot know which directory the
+// init in front of it opens, and cannot upgrade that init either — the same
+// position the CONTROLLER is in when it pushes to a device, which is why
+// em_devicepaths.write_dirs() writes both rather than choosing by version.
+// There is no capability for "which directory do you read", and there could
+// not be one: the reader is not on the wire.
+//
+// The cost is an empty legacy directory holding one file on a device that
+// never carried the old name. The cost of the alternative is a console
+// password that reports success and changes nothing — and, in the CLEARING
+// direction, a password belonging to a previous owner that stays in front of
+// the console after its new owner was told it was removed.
+func AllDirs() []string {
+	dirs := make([]string, 0, 1+len(LegacyDirs))
+	dirs = append(dirs, CurrentDir)
+	return append(dirs, LegacyDirs...)
+}
 
 // pick is the pure half, so the ordering can be tested without a filesystem
 // shaped like a device's.
 func pick(name, current string, legacy []string, exists func(string) bool) string {
-	cur := filepath.Join(current, name)
+	cur := path.Join(current, name)
 	if exists(cur) {
 		return cur
 	}
 	for _, d := range legacy {
-		if p := filepath.Join(d, name); exists(p) {
+		if p := path.Join(d, name); exists(p) {
 			return p
 		}
 	}
