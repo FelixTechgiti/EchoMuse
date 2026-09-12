@@ -29,6 +29,22 @@ Assistant erkennt die Geräte von selbst.
 Sag dein Wakeword, sprich mit [Assist](https://www.home-assistant.io/voice_control/),
 hör die Antwort aus dem Dot. Gebrauchte Geräte kosten um die 10 €.
 
+> **⚠️ Installiere `amonet-biscuit` v2.0.0 NICHT auf einem Echo, auf dem
+> Revoice läuft.**
+> Version 2.0.0 des Unlocks (10. September 2026) ersetzt die Bootloader des
+> Echo, und danach bootet FireOS 5 nicht mehr. Revoice läuft ausschließlich
+> auf FireOS 5 — emOS eingeschlossen, denn emOS benutzt den FireOS-5-Kernel.
+> Der XDA-Thread fordert bereits entsperrte Nutzer inzwischen zum Update auf.
+> Wenn auf deinem Echo Revoice läuft: tu es nicht.
+>
+> - **Du entsperrst gerade einen neuen Echo?** Nimm **amonet-biscuit v1.1.0**,
+>   das weiterhin im XDA-Thread hängt.
+> - **Schon aktualisiert?** Versuche nicht, durch Flashen von FireOS 5 oder
+>   eines älteren amonet zurückzukommen. v2.0.0 hat Preloader, LK und
+>   TrustZone überschrieben, und die alten von Hand zurückzuschreiben ist
+>   genau der Weg, auf dem ein Echo hart gebrickt wird. Revoice läuft heute
+>   nicht auf FireOS 6, dieser Echo bleibt also vorerst dort.
+
 ---
 
 ## Was Revoice kann
