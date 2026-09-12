@@ -75,6 +75,12 @@ var lifecycleMarkers = []string{
 	"pcmspeaker initialised",
 	"pcmspeaker closed",
 	"orphaned instance",
+	// The all-clear for a device that could not hear the network. Its onset
+	// carries "cannot" and is forwarded as a failure; without this the log
+	// would hold every onset and no recovery, which reads as every outage
+	// still running. An all-clear has no generic outcome word to match on,
+	// which is why this list is component-named where the failures are not.
+	"[mcast] hears",
 }
 
 // noiseMarkers are relayed by something else or are pure volume. `[mem]` has
