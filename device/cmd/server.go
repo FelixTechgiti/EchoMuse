@@ -35,6 +35,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/hostname"
 	"github.com/wilbowes/EchoMuse/internal/logrelay"
+	"github.com/wilbowes/EchoMuse/internal/mcast"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
 	"github.com/wilbowes/EchoMuse/internal/netfilter"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
@@ -365,6 +366,7 @@ func main() {
 	})
 	applyAirplayConfig(airplayClient, s)
 	applyFirewall()
+	startNetworkRepair(spotifyClient, airplayClient)
 
 	// Re-execute one endpoint after its binary has been replaced. The
 	// controller decides whether to ask — it is the side that knows whether
@@ -1415,6 +1417,15 @@ func applySendspinConfig(c *sendspin.Client) {
 // port would be open for a second with nothing behind it — harmless, but the
 // opposite order is harmless too and reads correctly.
 func applyFirewall() {
+	netfilter.Sync(netfilter.Exec, firewallWant())
+}
+
+// firewallWant is the rule set the current config calls for. Split out of
+// applyFirewall so the reconciler below asks the SAME question rather than
+// keeping a second copy of it — a reconciler that re-applies a stale list
+// would fight every config change, and the two lists drifting is the kind of
+// disagreement nothing reports.
+func firewallWant() []netfilter.Rule {
 	snap := config.Get().Snapshot()
 	var want []netfilter.Rule
 	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
@@ -1434,7 +1445,7 @@ func applyFirewall() {
 	// Unconditional: a device nobody can ping is a device that reads as "off
 	// the network" when it is not, and an afternoon went into that mistake.
 	want = append(want, netfilter.PingRule())
-	netfilter.Sync(netfilter.Exec, want)
+	return want
 }
 
 // applySpotifyConfig starts or stops the Spotify Connect endpoint from the
@@ -1864,4 +1875,63 @@ func coresTotal() int {
 		}
 	}
 	return n
+}
+
+// startNetworkRepair keeps the two pieces of network state Android takes back
+// from us, and both were found the same afternoon (2026-09-12) on one device
+// that was announcing services nobody could reach.
+//
+// **The firewall rules do not survive.** The firmware wrote them at startup
+// and said so in its log; thirty-nine minutes later the INPUT chain held
+// nineteen rules, all Amazon's, none ours, with `policy DROP` counting 137
+// packets. netd rebuilds the filter table on network events and keeps only
+// what it wrote. `applyFirewall` runs at startup and on config push, which can
+// be hours apart — and in between the device advertises what it cannot serve.
+//
+// **The mDNS multicast membership does not survive either**, and that one is
+// worse because nothing about it looks wrong: librespot and shairport-sync
+// keep their sockets bound to 5353 while `/proc/net/igmp` has lost
+// 224.0.0.251, so no query ever arrives and both go invisible together. That
+// is why a reboot always "fixed" it and why the two endpoints always vanished
+// as a pair.
+//
+// One goroutine and one ticker for both. They are the same kind of fault —
+// Android writing state back underneath us, the shape `reconcileJackRouting`
+// already exists for — and a second ticker would be a second wake-up on a
+// device where the mic pipeline has a 160ms deadline.
+//
+// Neither repair is gated on the base OS. The firewall question is about the
+// TABLE rather than about which userspace booted, and the membership question
+// is about the KERNEL; emOS answers both the same way, and a device that one
+// day loses a membership under emOS is repaired without anybody remembering
+// this comment.
+func startNetworkRepair(sp *spotify.Client, ap *airplay.Client) {
+	watcher := &mcast.Watcher{
+		Read: func() (string, error) {
+			b, err := os.ReadFile(mcast.ProcPath)
+			return string(b), err
+		},
+		// Only while something that should be a member is running: the group
+		// is correctly absent when both endpoints are off, and restarting what
+		// the user switched off would be worse than the bug.
+		Active: func() bool { return sp.Running() || ap.Running() },
+		Rejoin: func() {
+			// Restart only what is running. Restart() on a stopped endpoint
+			// would start one nobody asked for.
+			if sp.Running() {
+				sp.Restart()
+			}
+			if ap.Running() {
+				ap.Restart()
+			}
+		},
+	}
+	go func() {
+		t := time.NewTicker(mcast.DefaultInterval)
+		defer t.Stop()
+		for now := range t.C {
+			netfilter.Reconcile(netfilter.ListInput, netfilter.Exec, firewallWant())
+			watcher.Tick(now)
+		}
+	}()
 }
