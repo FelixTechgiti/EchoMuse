@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.46.0-fx.1
+
+### Die Netzwerkprüfung sagt jetzt, welche AirPlay-Generation der Echo anbietet
+
+**Für den Fall, dass der Echo im Dashboard als sichtbar gilt und auf deinem
+iPhone trotzdem nicht auftaucht.** Bisher war die eine Eigenschaft, die das
+erklären kann, von hier aus unsichtbar.
+
+Der Echo meldet sich als **klassisches AirPlay** (`_raop._tcp`) an. Die
+Kennung, die neuere Apple-Geräte für AirPlay 2 erwarten (`_airplay._tcp`),
+sendet er nie — nicht, weil etwas fehlschlägt, sondern weil der eingebaute
+shairport-sync sie gar nicht senden kann. Ob ein Abspielgerät ein
+Klassik-Ziel anzeigt, hängt vom Gerät ab und davon, wo man nachschaut.
+
+Die Prüfung unter **Gerät → Status** sucht deshalb jetzt auch nach
+`_airplay._tcp` und schreibt daneben, wie viele *andere* Geräte in deinem Netz
+es anbieten. Listet dein Player die und den Echo nicht, ist das der
+Unterschied — und nicht dein WLAN.
+
+**Es ist kein Fehler und wird auch nicht als einer angezeigt.** AirPlay 2 auf
+dem Echo ist ein eigenes Vorhaben; was hier steht, ist nur die Auskunft, die
+bisher fehlte.
+
 ## 2.45.0-fx.1
 
 ### Der Spotify-Regler kann jetzt die Lautstärke des Echo steuern

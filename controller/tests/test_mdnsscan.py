@@ -260,3 +260,66 @@ def test_the_most_common_value_wins_not_the_first_seen():
     c = m.txt_compare(_txt(k="ours"),
                       [_txt(k="rare"), _txt(k="common"), _txt(k="common")])
     assert c.differing == (("k", "ours", "common", 2),)
+
+
+# --- AirPlay generation: classic vs AirPlay 2 -------------------------------
+#
+# Filed after a device that was advertised, reachable, port-open and visible to
+# the controller still did not appear in its owner's AirPlay picker. The scan
+# browsed `_raop._tcp` only, so the one property that could explain it — this
+# build never advertises `_airplay._tcp` — was invisible from here.
+
+def test_airplay2_is_browsed_but_never_becomes_a_verdict():
+    """A service nobody switched on must not render as an endpoint that is down.
+
+    It is also one the device CANNOT offer, so a verdict would report a
+    permanent fault about a build decision.
+    """
+    assert m.AIRPLAY2_TYPE == "_airplay._tcp.local."
+    types = [t for t, _ in m.SERVICES.values()]
+    assert m.AIRPLAY2_TYPE not in types, (
+        "AirPlay 2 is in SERVICES, so it gets its own enabled/visible verdict "
+        "and renders as a broken endpoint")
+
+
+def test_the_note_says_the_build_cannot_do_it_rather_than_was_not_seen():
+    """The distinction is the whole value of the line.
+
+    "Not seen" invites somebody to go looking for a network fault. The truth is
+    that shairport-sync built --with-tinysvcmdns has no code to advertise the
+    second service, so no amount of network will produce it.
+    """
+    note = m.airplay_generation_note(0)
+    assert "never" in note and "cannot" in note
+    assert "not seen" not in note.lower()
+
+
+def test_the_note_reports_how_many_others_offer_airplay2():
+    note = m.airplay_generation_note(4)
+    assert "4 other host(s)" in note
+    # And it points the reader at the comparison rather than at the radio,
+    # because that comparison is what they can act on.
+    assert "not the network" in note
+
+
+def test_with_no_airplay2_on_the_network_the_note_says_so_plainly():
+    """Zero others is a real reading and must not read as "3 others"-shaped.
+
+    It means the network offers no example of the difference, which is a
+    different next step: look at the client, not at the other devices.
+    """
+    note = m.airplay_generation_note(0)
+    assert "No other host here advertises it" in note
+    assert "other host(s) on this network do advertise" not in note
+
+
+def test_the_note_never_claims_a_fault():
+    """Same rule as txt_note: a difference is not a failure.
+
+    A build decision rendered as a fault is how somebody spends an evening on
+    their router for something that was never going to work.
+    """
+    for n in (0, 1, 9):
+        note = m.airplay_generation_note(n)
+        for word in ("fault", "broken", "error", "failed"):
+            assert word not in note.lower(), f"{word!r} in: {note}"
