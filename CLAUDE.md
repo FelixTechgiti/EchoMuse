@@ -752,8 +752,9 @@ needs openwakeword or aiohttp.
 hash the controller has to agree with, `tmoutcheck` for the idle-timeout
 parser, `pathcheck` for finding either record across the rename, and
 `nodecheck` for taking device numbers from the kernel rather than the
-compiled-in table. All five `#include init.c` whole and drive the real
-functions, so none can drift from the device. CI runs all of them, builds the init for aarch64 in the pinned
+compiled-in table — char devices from `/sys/class`, and the block half from
+the GPT, which init currently only REPORTS on (#131). All five `#include
+init.c` whole and drive the real functions, so none can drift from the device. CI runs all of them, builds the init for aarch64 in the pinned
 compiler image, and asserts the result is static — a dynamically linked PID 1
 produces no output at all, which is indistinguishable from a kernel that never
 started.
