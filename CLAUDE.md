@@ -658,10 +658,19 @@ Both suites plus `go vet` run in CI on every push/PR
 pure-logic modules only — see `controller/CLAUDE.md` before adding one that
 needs openwakeword or aiohttp.
 
-**emOS is C with no test framework, so its two off-target tools ARE its
-suite** — `ringsim --check` for the boot ring's invariants and `pwcheck` for
-the password hash the controller has to agree with. Both `#include init.c`
-whole and drive the real functions, so neither can drift from the device.
-CI runs both, builds the init for aarch64 in the pinned compiler image, and
-asserts the result is static — a dynamically linked PID 1 produces no output
-at all, which is indistinguishable from a kernel that never started.
+**emOS is C with no test framework, so its off-target tools ARE its suite** —
+`ringsim --check` for the boot ring's invariants, `pwcheck` for the password
+hash the controller has to agree with, `tmoutcheck` for the idle-timeout
+parser, and `pathcheck` for finding either record across the rename. All four
+`#include init.c` whole and drive the real functions, so none can drift from
+the device. CI runs all of them, builds the init for aarch64 in the pinned
+compiler image, and asserts the result is static — a dynamically linked PID 1
+produces no output at all, which is indistinguishable from a kernel that never
+started.
+
+**This sentence said "two" until 2026-09-12, with three tools in the tree.**
+`tmoutcheck` had been added and the count beside it was not, which is the
+ordinary way a number in prose goes stale — nothing reads it, so nothing can
+notice. A count is a claim about a directory; prefer naming what each tool
+covers, since that is the part a reader actually needs and the part that is
+wrong in a way somebody would spot.

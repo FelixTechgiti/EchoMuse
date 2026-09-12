@@ -1903,7 +1903,46 @@ static int svc_backoff(int fails)
  * with nothing to type, and the file is the only thing standing between them
  * and a device they own.
  */
-#define CONSOLE_PW "/data/local/etc/revoice/console.pw"
+/* Overridable like LEDDIR and CONSOLE_TMOUT, so the off-target checks can
+ * point the records somewhere they are allowed to write. */
+#ifndef CONSOLE_PW
+#define CONSOLE_PW        "/data/local/etc/revoice/console.pw"
+#endif
+#ifndef CONSOLE_PW_LEGACY
+#define CONSOLE_PW_LEGACY "/data/local/etc/echomuse/console.pw"
+#endif
+
+/* Open a record the FIRMWARE writes and INIT reads: the current path first,
+ * then the one the pre-rename name used.
+ *
+ * **This init and the firmware in front of it update on completely
+ * independent schedules.** A new init arrives only when somebody flashes a
+ * boot partition; the firmware arrives by OTA. The rename moved the constant
+ * on both sides in the same commit — the shape that took the fleet down once
+ * already through the TLS server name — so both mixed states have to work:
+ *
+ *   - NEW init, OLD firmware — the firmware writes the legacy path only.
+ *     Without this fallback init finds nothing, the console has no password
+ *     at all, and the dashboard goes on showing one configured.
+ *   - OLD init, NEW firmware — handled on the other side, by the firmware
+ *     writing every path (devicepaths.AllDirs). It cannot be handled here,
+ *     because "here" is the old init.
+ *
+ * Current first, so that once a device has both copies the current one wins
+ * and the legacy path is consulted only when nothing is at the new one.
+ *
+ * Returns -1 when neither exists, which every caller already reads as "no
+ * record" — the direction both records must fail in, since refusing to behave
+ * on a missing file would strand the owner in front of a console they cannot
+ * open.
+ */
+static int open_record(const char *current, const char *legacy)
+{
+    int fd = open(current, O_RDONLY);
+    if (fd >= 0)
+        return fd;
+    return open(legacy, O_RDONLY);
+}
 
 struct sha256 {
     unsigned int  h[8];
@@ -2041,7 +2080,7 @@ static void pw_hash(const unsigned char *salt, int saltlen,
 static int pw_load(long *iters, unsigned char *salt, int *saltlen,
                    unsigned char want[32])
 {
-    int fd = open(CONSOLE_PW, O_RDONLY);
+    int fd = open_record(CONSOLE_PW, CONSOLE_PW_LEGACY);
     if (fd < 0)
         return 0;
     char b[256];
@@ -2087,7 +2126,10 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
  * is allowed to write. The CI runner is not root and /data does not exist
  * there, which the first version of tmoutcheck.c discovered the hard way. */
 #ifndef CONSOLE_TMOUT
-#define CONSOLE_TMOUT "/data/local/etc/revoice/console.timeout"
+#define CONSOLE_TMOUT        "/data/local/etc/revoice/console.timeout"
+#endif
+#ifndef CONSOLE_TMOUT_LEGACY
+#define CONSOLE_TMOUT_LEGACY "/data/local/etc/echomuse/console.timeout"
 #endif
 
 /* Console idle timeout in SECONDS for the shell's TMOUT, or 0 for none.
@@ -2105,7 +2147,7 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
  */
 static long console_timeout_secs(void)
 {
-    int fd = open(CONSOLE_TMOUT, O_RDONLY);
+    int fd = open_record(CONSOLE_TMOUT, CONSOLE_TMOUT_LEGACY);
     if (fd < 0)
         return 0;
     char b[32];

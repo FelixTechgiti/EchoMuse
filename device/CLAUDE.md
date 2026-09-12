@@ -1800,8 +1800,39 @@ file and puts the prompt in front of the shell**, because the console has to
 work when the firmware is not running — which is precisely when someone needs
 it.
 
-Three things not to undo:
+Four things not to undo:
 
+- **It is written to EVERY directory in `devicepaths.AllDirs()`, and an empty
+  record removes every one of them.** This is the one record whose reader is
+  not updated by the same OTA that updates its writer: a new init arrives only
+  when somebody flashes a boot partition, so the firmware cannot know whether
+  the init in front of it opens `/data/local/etc/revoice/` or the pre-rename
+  `/data/local/etc/echomuse/`, and cannot upgrade it either. Writing both
+  needs no answer from the other side — the same reason
+  `em_devicepaths.write_dirs()` writes both when the CONTROLLER pushes to a
+  device, and there could be no capability for it, because the reader is not
+  on the wire.
+
+  **The CLEARING direction is the dangerous one, and the reason this was worth
+  fixing before anybody hit it.** Somebody clears a console password because
+  it belongs to a PREVIOUS OWNER — that is what the wizard's clear exists for
+  — so a removal that misses the path an old init reads reports success while
+  leaving the new owner locked out by exactly the password the operation was
+  for. Change detection therefore has to consider a write needed when *any*
+  path disagrees, not just the current one; comparing against one file would
+  report "no change" and leave the running init on a stale record for ever.
+
+  Init's half is `open_record` in `emos/init/init.c`: current path first,
+  legacy second, covering the mirror case of a new init in front of old
+  firmware. `emos/init/pathcheck.c` drives the real function through all four
+  combinations, and `device/internal/config/console_paths_test.go` holds the
+  firmware side — including that the set really does contain more than one
+  directory, or every assertion about "every path" would pass while proving
+  nothing. `console.timeout` gets the identical treatment in the same change:
+  splitting them would leave a device whose password migrated and whose
+  timeout did not, which is a state nobody would think to look for. Filed as
+  #94 and fixed before it was ever reached, since the fleet runs FireOS, where
+  the console password is inert.
 - **The field is a POINTER.** An empty record is the legitimate "no password"
   setting, so with a plain string plus `omitempty` a removal would be
   indistinguishable from a field nobody sent, and clearing the password could
