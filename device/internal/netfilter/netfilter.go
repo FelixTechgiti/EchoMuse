@@ -255,6 +255,7 @@ func Sync(run Runner, want []Rule) {
 func All() []Rule {
 	out := append([]Rule{}, SpotifyRules()...)
 	out = append(out, AirPlayRules()...)
+	out = append(out, NqptpRules()...)
 	return append(out, PingRule())
 }
 
