@@ -2380,6 +2380,44 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </Panel>
                   );
                 })()}
+
+                {/* AUDIO ENDPOINTS — whether the programs the Echo speaks for
+                    itself are actually RUNNING.
+                    
+                    On Status because it is state, and that is not a detail.
+                    This reading lived as the sub-label of a switch in Config
+                    for weeks, where its owner never found it — they looked
+                    where a status belongs. It is the one instrument that says
+                    whether librespot is alive, and its absence cost a full day
+                    of diagnosing an endpoint blind (2026-09-12).
+
+                    Silent when the firmware cannot report and when nothing is
+                    enabled, for endpointHealthLine's reason: accusing a
+                    working Echo, or describing something nobody switched on,
+                    is how a panel becomes the one everybody learns to skip. */}
+                {(() => {
+                  const sp = endpointHealthLine(
+                    device.endpointHealth && device.endpointHealth.spotify,
+                    device.endpointHealthCapable);
+                  const ap = endpointHealthLine(
+                    device.endpointHealth && device.endpointHealth.airplay,
+                    device.endpointHealthCapable);
+                  if (!sp && !ap) return null;
+                  return (
+                    <Panel label="Audio endpoints">
+                      <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
+                        <div>
+                          {sp && row('Spotify Connect', sp,
+                                     sp.startsWith('running') ? 'var(--ok)' : 'var(--warn)')}
+                        </div>
+                        <div>
+                          {ap && row('AirPlay', ap,
+                                     ap.startsWith('running') ? 'var(--ok)' : 'var(--warn)')}
+                        </div>
+                      </div>
+                    </Panel>
+                  );
+                })()}
               </div>
             );
           })()}
@@ -7675,6 +7713,18 @@ const SECTION_LABELS = {
   playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
   ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth',
 };
+// MIRROR of em_config_sections.DEVICE_ONLY_KEYS, pinned by
+// tests/test_config_sections.py. These are settings somebody types that can
+// never be inherited from the fleet, because their whole job is to tell two
+// devices apart: set a Spotify name fleet-wide and every Echo in the house
+// announces the same one, which is not an ambiguous picker but a useless one.
+//
+// Distinct from the config STATE keys, which are not settings at all and have
+// no control anywhere. These have controls, and the controls have to say what
+// they are: editable on a device whatever its section scope, and refused with
+// a reason on the fleet form rather than silently ignored.
+const DEVICE_ONLY_KEYS = new Set(['spotifyName', 'airplayName']);
+
 const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
   keys.forEach(k => { KEY_SECTION[k] = sid; });
@@ -7745,7 +7795,7 @@ function ScopeToggle({ local, onChange, disabled }) {
   );
 }
 
-function Stage({ n, title, chips, desc, children, scope, dim }) {
+function Stage({ n, title, chips, desc, children, scope, dim, footer }) {
   return (
     <Panel>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -7759,6 +7809,11 @@ function Stage({ n, title, chips, desc, children, scope, dim }) {
       {/* dim: a section following the fleet is shown read-only rather than
           hidden, so you can still see what it is inheriting. */}
       <div style={dim}>{children}</div>
+      {/* OUTSIDE the dim, deliberately. A section following the fleet is shown
+          read-only — but a key that can never come from the fleet is not
+          inheriting anything, so dimming it would say something false and,
+          worse, make it unusable. See DEVICE_ONLY_KEYS. */}
+      {footer}
     </Panel>
   );
 }
@@ -7837,7 +7892,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // per-input plumbing to forget.
   const set = (k, v) => {
     if (disabled) return;
-    if (scoped && !isLocal(KEY_SECTION[k])) return;
+    // DEVICE_ONLY_KEYS are exempt from the section gate: their section can be
+    // following the fleet — whether this Echo runs Spotify Connect at all is
+    // a fleet decision — while the NAME it announces is still its own. Gating
+    // them on the section would make a device that inherits the toggles
+    // unable to be named, which is the state a second device arrives in.
+    if (scoped && !DEVICE_ONLY_KEYS.has(k) && !isLocal(KEY_SECTION[k])) return;
     onChange(k, v);
   };
 
@@ -8397,7 +8457,33 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       <Stage n="07" title="Streaming"
         chips={<><ScopeChip tone="device">Device</ScopeChip></>}
         desc="Protocols the Echo speaks for itself, with no controller in the path. Music reaches the speaker straight from the source, so it keeps playing through a controller restart — and it is mixed with voice on the device, so a spoken question ducks it rather than stopping it. A voice request through Home Assistant always wins: the Echo leaves the group and plays what it was asked for, and does not rejoin by itself."
-        scope={scopeEl('streaming')} dim={secStyle('streaming')}>
+        scope={scopeEl('streaming')} dim={secStyle('streaming')}
+        footer={
+          /* The NAMES sit outside the dim, because they are the one thing in
+             this section that can never be inherited — see DEVICE_ONLY_KEYS.
+             An Echo whose Streaming section follows the fleet still has to be
+             nameable, and on the fleet form there is nothing sensible to type
+             at all, so it says so rather than accepting a value that would
+             make every device answer to one name. */
+          <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+            <TextField label="Spotify name"
+              sub={scoped
+                ? 'what THIS Echo is called in the Spotify app. Blank uses its serial, which nobody picks out of a list'
+                : 'set per device — two Echos announcing the same name make the picker useless'}
+              value={scoped ? (config.spotifyName ?? '') : ''}
+              placeholder={scoped ? undefined : 'per device'}
+              disabled={!scoped || !spotifyCapable || !spotifyReady}
+              onChange={v => set('spotifyName', v)}/>
+            <TextField label="AirPlay name"
+              sub={scoped
+                ? 'what THIS Echo is called in the AirPlay list. Blank uses its serial'
+                : 'set per device — two Echos announcing the same name make the picker useless'}
+              value={scoped ? (config.airplayName ?? '') : ''}
+              placeholder={scoped ? undefined : 'per device'}
+              disabled={!scoped || !airplayCapable || !airplayReady}
+              onChange={v => set('airplayName', v)}/>
+          </div>
+        }>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           {/* Offered only where the firmware announces it. The value reads
               through sendspinCapable so an incapable device shows the
@@ -8418,15 +8504,16 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!spotifyCapable
               ? 'needs newer firmware on this Echo — it has no Spotify endpoint'
               : (spotifyReady
-                ? (spotifyLive
-                  ? `librespot: ${spotifyLive}`
-                  : 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path')
+                // Whether the binary is INSTALLED belongs here: it is why the
+                // toggle is disabled, which is a question about the setting.
+                // Whether the process is RUNNING moved to the Status tab —
+                // that is state, and a reading of state under a switch is
+                // where nobody looks for it (found the hard way, 2026-09-12:
+                // it sat here for weeks and its owner had never seen it).
+                ? 'the Echo appears in the Spotify app as a speaker and plays from it directly, with no Home Assistant in the path'
                 : `librespot is not installed on this Echo (${spotifyWhy})`)}
             value={spotifyCapable && spotifyReady && (config.spotifyEnabled ?? false)}
             onChange={v => set('spotifyEnabled', v)}/>
-          <TextField label="Spotify name" sub="what this Echo is called in the Spotify app. Blank uses its serial, which nobody picks out of a list"
-            value={config.spotifyName ?? ''} disabled={!spotifyCapable || !spotifyReady}
-            onChange={v => set('spotifyName', v)}/>
           {/* Classic AirPlay, and the sub-label says so rather than letting
               somebody discover it. The sub-label used to say AirPlay 2 needed
               "libraries this hardware cannot carry", which was wrong on every
@@ -8438,15 +8525,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub={!airplayCapable
               ? 'needs newer firmware on this Echo — it has no AirPlay receiver'
               : (airplayReady
-                ? (airplayLive
-                  ? `shairport-sync: ${airplayLive}`
-                  : 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — an AirPlay 2 build has not been made for this hardware yet')
+                ? 'the Echo appears in the AirPlay list and plays from a phone or Mac directly. Classic AirPlay — an AirPlay 2 build has not been made for this hardware yet'
                 : `shairport-sync is not installed on this Echo (${airplayWhy})`)}
             value={airplayCapable && airplayReady && (config.airplayEnabled ?? false)}
             onChange={v => set('airplayEnabled', v)}/>
-          <TextField label="AirPlay name" sub="what this Echo is called in the AirPlay list. Blank uses its serial"
-            value={config.airplayName ?? ''} disabled={!airplayCapable || !airplayReady}
-            onChange={v => set('airplayName', v)}/>
           {/* The consequence is IN THE LABEL, which is the whole reason this
               is a setting at all. An Echo has one volume and shares it with
               the assistant, so a phone that drops AirPlay to 20% drops the

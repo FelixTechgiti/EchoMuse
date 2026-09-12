@@ -36,7 +36,7 @@ def test_every_config_key_belongs_somewhere():
     orphans = defaults - mapped - cs.STATE_KEYS
     assert not orphans, (
         f"config key(s) belong to no section and are not declared state: "
-        f"{sorted(orphans)} — add them to em_config_sections.SECTIONS"
+        f"{sorted(orphans)} — add them to cs.SECTIONS"
     )
     strays = mapped - defaults
     assert not strays, (
@@ -294,3 +294,67 @@ def test_the_echo_reference_override_is_scoped_and_offered():
 
     jsx = DASHBOARD.read_text()
     assert "aecRefSource" in jsx, "the dashboard must offer the control"
+
+
+# ── Endpoint names can never come from the fleet ─────────────────────────────
+
+def test_endpoint_names_are_device_only():
+    """
+    A Spotify or AirPlay name is what the Echo calls itself in somebody's app.
+    Inherited from the fleet, every Echo in the house announces the SAME name
+    — which is not an ambiguous picker, it is a useless one. Not an edge case
+    either: it is what happens the moment a second device exists.
+    """
+    assert "spotifyName" in cs.DEVICE_ONLY_KEYS
+    assert "airplayName" in cs.DEVICE_ONLY_KEYS
+
+
+def test_a_fleet_name_never_reaches_a_device_that_has_none():
+    """
+    Taking the device's value when it HAS one is only half the rule. The half
+    that bites is the other one: a device with no name of its own must not
+    fall back to the fleet's, or every unnamed Echo answers to one name.
+    """
+    fleet = {"spotifyName": "Kitchen", "airplayName": "Kitchen",
+             "spotifyEnabled": True}
+    eff = cs.merge(fleet, {}, [])
+    assert eff["spotifyName"] == ""
+    assert eff["airplayName"] == ""
+    # The toggle beside it is still a fleet decision and must still inherit.
+    assert eff["spotifyEnabled"] is True
+
+
+def test_a_device_name_wins_even_without_the_section_override():
+    """
+    The device's own name applies whether or not it overrides `streaming` —
+    the same unconditional treatment STATE_KEYS get, for a different reason.
+    """
+    fleet = {"spotifyName": "Kitchen"}
+    eff = cs.merge(fleet, {"spotifyName": "Studio"}, [])
+    assert eff["spotifyName"] == "Studio"
+
+
+def test_the_toggles_beside_the_names_are_still_fleet_scoped():
+    """
+    Whether an Echo runs Spotify Connect at all is exactly the kind of thing a
+    fleet decides together — only the NAME is an identity. Widening this to
+    the whole streaming section would take the toggles with it.
+    """
+    for key in ("spotifyEnabled", "airplayEnabled", "sendspinEnabled"):
+        assert key not in cs.DEVICE_ONLY_KEYS
+
+
+def test_the_dashboard_mirror_of_device_only_keys_matches():
+    """
+    The dashboard carries its own copy so a write can be gated in the browser.
+    Drift is silent in the worst direction: a key the browser thinks is
+    fleet-scoped becomes uneditable on a device whose section follows the
+    fleet, which is exactly the state a second device arrives in.
+    """
+    src = DASHBOARD.read_text(encoding="utf-8")
+    m = re.search(r"const DEVICE_ONLY_KEYS = new Set\(\[(.*?)\]\)", src, re.S)
+    assert m, "dashboard.jsx no longer declares DEVICE_ONLY_KEYS"
+    mirrored = set(re.findall(r"'([^']+)'", m.group(1)))
+    assert mirrored == set(cs.DEVICE_ONLY_KEYS), (
+        f"dashboard mirror {sorted(mirrored)} != "
+        f"{sorted(cs.DEVICE_ONLY_KEYS)}")
