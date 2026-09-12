@@ -12,6 +12,77 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.30.0-fx.1
+
+### An Echo that cannot verify the controller no longer goes silently dead
+
+**This is the other half of the fault described in controller 2.38.0-fx.1,
+and it is the half that prevents a repeat.**
+
+The encrypted link is verified against a name inside the controller's
+certificate. When that check fails the Echo has, until now, simply retried —
+for ever, at five-second intervals, with no fallback and nothing anybody
+could read. There is no way in: the Echo's shell is reached through the
+controller it cannot connect to, and a power cycle changes nothing.
+
+It now falls back to the unencrypted link after three consecutive
+verification failures, says loudly why in the log the controller collects,
+and keeps re-testing the encrypted one about once a minute so a repaired
+controller is picked up on its own. The dashboard shows the link as **ws
+(plain)** instead of **wss (TLS)**, which is the point: a fault you can see
+beats one you cannot.
+
+Two deliberate limits. The link token is **not** sent over the fallback — if
+verification failed because something is on the network rather than because
+of a stale name, handing it the shared secret would be worse than the
+outage — and **Require encrypted device connections**, if you have enabled
+it, still refuses the fallback outright. Only a failure to VERIFY counts: a
+controller that is merely switched off refuses both links equally and never
+moves a device off encryption.
+
+### Settings that survived a reboot stopped surviving an update
+
+The rename moved two files the Echo keeps for itself, and nothing carried
+them across, so both were silently lost the moment a device took the new
+firmware:
+
+- **the remembered controller address**, which is what lets an Echo
+  reconnect in seconds after an update instead of searching the network for
+  it — losing it put every updated device straight back on the slow path
+  the file exists to avoid;
+- **the microphone mute state**, which came back unmuted.
+
+Both are now read from the old location when the new one is empty, and
+re-written to the new one, so this happens exactly once per device and then
+never again.
+
+### The Echo now records what its radio was doing while it was unreachable
+
+**Nothing here changes behaviour.** It adds one measurement to a log that is
+only written when something is already wrong, and it exists because the last
+outage could not be explained afterwards.
+
+On 11 September an Echo was unreachable for 22 hours while still holding its
+network address. From the controller's side it was invisible — a scan heard
+seven other Spotify Connect devices and two other AirPlay devices on the same
+network, and not this one. From the Echo's side the controller did not answer
+either. So both halves of the network failed at once on an interface that
+still looked configured, and the log had nothing that could say why.
+
+The `no controller` lines in the Echo's own log now carry the WiFi state
+alongside the address: whether the radio is still associated, which access
+point to, and the signal strength. That separates the two explanations — a
+connection that is up and carrying nothing, or one that has dropped and is
+searching — which need opposite fixes.
+
+Nothing acts on it yet, on purpose: the repair for one of those cases is to
+drop and re-make the WiFi connection, and doing that to a device whose only
+remote access IS that connection is not something to attempt on a guess.
+
+To read it: **Devices → your Echo → Updates → Fetch supervisor log**, after
+the next outage. Requires controller 2.38.0-fx.1 or newer, which reads the
+whole file.
+
 ## 2.29.0-fx.1
 
 ### The Echo finds the controller again in seconds, not half an hour

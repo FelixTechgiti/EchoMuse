@@ -101,7 +101,7 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 	// Restore persisted mute state before the persist hook is wired, so the
 	// restore itself doesn't rewrite the file. Mute is device-sovereign —
 	// it must come back with or without a controller.
-	if st, ok := loadDeviceState(statePath); ok && st.Muted {
+	if st, ok := loadDeviceState(stateReadPath()); ok && st.Muted {
 		server.mute.RestoreMuted() // ADC only; LEDs painted after init below
 	}
 	server.mute.persist = func() {

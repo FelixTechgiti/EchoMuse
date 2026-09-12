@@ -12,6 +12,7 @@ import (
 	"github.com/grandcat/zeroconf"
 
 	"github.com/wilbowes/EchoMuse/internal/bootlog"
+	"github.com/wilbowes/EchoMuse/internal/wifi"
 )
 
 const serviceType = "_emcontroller._tcp"
@@ -103,9 +104,13 @@ func FindServerWith(ctx context.Context, recheck func(context.Context) *ServerIn
 		}
 
 		if reporter.Due(time.Since(start)) {
-			bootlog.Appendf("no controller for %s — %d browse rounds, %s",
+			// The radio's own state rides the FAULT line and not the
+			// all-clear: it costs two wpa_cli invocations, and an address
+			// alone cannot say whether the link carries anything — see
+			// wifi.Describe.
+			bootlog.Appendf("no controller for %s — %d browse rounds, %s, %s",
 				time.Since(start).Round(time.Second), rounds,
-				DescribeLink())
+				DescribeLink(), wifi.Describe())
 		}
 
 		log.Printf("mDNS: no server found, retrying in %s", backoff)

@@ -44,19 +44,45 @@ def test_read_paths_try_the_current_one_first():
     assert len(paths) == len(p.write_dirs())
 
 
-def test_the_read_command_falls_through_each_path():
-    cmd = p.first_readable_command("supervisor.log", "busybox tail -c 4096")
+def test_the_read_command_visits_each_path():
+    cmd = p.every_readable_command("supervisor.log", "busybox tail -c 4096")
     for path in p.read_paths("supervisor.log"):
         assert path in cmd
-    assert cmd.count("||") == len(p.write_dirs()) - 1
+
+
+def test_every_path_is_read_and_not_just_the_first():
+    # The one that bit: supervisor.log has TWO writers — start_server.sh,
+    # which the controller pushes, and the firmware's bootlog, which arrives
+    # by OTA — so a current controller against old firmware puts them in two
+    # different directories. Stopping at the first readable path returns one
+    # writer's half and reports success, which is how a device's own account
+    # of a 22-hour outage went unread on 2026-09-11.
+    cmd = p.every_readable_command("supervisor.log", "busybox tail -c 4096")
+    assert "||" not in cmd, (
+        "the paths must not short-circuit each other — a file present at "
+        "the current path would then hide the legacy one entirely"
+    )
+    assert cmd.count("busybox tail -c 4096") == len(p.write_dirs())
+
+
+def test_each_chunk_says_which_file_it_came_from():
+    # Two halves of one story, written by two programs, arriving in one
+    # blob: without the path in front of each, the reader cannot tell which
+    # program fell silent.
+    cmd = p.every_readable_command("supervisor.log", "busybox tail -c 4096")
+    for path in p.read_paths("supervisor.log"):
+        assert f'echo "--- {path} ---"' in cmd
 
 
 def test_a_missing_file_does_not_become_output():
-    # Every attempt discards stderr, so a path that is not there falls
-    # through silently instead of putting an error into the log text the
-    # caller then has to recognise and strip.
-    cmd = p.first_readable_command("supervisor.log", "busybox tail -c 4096")
+    # Two guards, because they fail differently: the existence test keeps a
+    # missing file from producing a header with nothing under it, and the
+    # stderr redirect keeps the reader's own complaint out of the log text
+    # the caller would then have to recognise and strip.
+    cmd = p.every_readable_command("supervisor.log", "busybox tail -c 4096")
     assert cmd.count("2>/dev/null") == len(p.write_dirs())
+    for path in p.read_paths("supervisor.log"):
+        assert f"[ -f {path} ]" in cmd
 
 
 def test_one_mkdir_covers_every_directory():

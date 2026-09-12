@@ -1107,6 +1107,54 @@ Three things are load-bearing:
   paragraph explaining the rule rather than the code obeying it, which is this
   tree's recurring source-guard trap.
 
+### The outage that was neither, and the instrument added for it
+
+**PR #89 above would not have shortened the 22-hour outage of 2026-09-11**,
+and saying so is the point of this section — the fix is right and its
+diagnosis did not cover this case.
+
+Measured while it was happening and immediately after the power cycle that
+ended it:
+
+| observation | source |
+|---|---|
+| Spotify Connect **not** seen while 7 other hosts answered | controller mDNS scan, during |
+| AirPlay **not** seen while 2 other hosts answered | controller mDNS scan, during |
+| `remembered 192.168.178.174:8767 did not answer` | device supervisor log |
+| both endpoints visible, `target=revoice-g090l91180250an1.local.` | controller mDNS scan, after reboot |
+| `wlan0=192.168.178.140` throughout | device supervisor log |
+
+So **multicast and unicast failed together on an interface that still held
+its address**. A re-probe every browse round finds nothing when nothing
+answers, so the remembered-address path cannot help here; and the device
+being absent from the controller's scan while seven neighbours answered says
+this is the Echo, not the network.
+
+**The Echo's mDNS invisibility and its controller dropouts are the same
+event**, which the two were not known to be. That settles a question the
+endpoint work had been carrying separately: there is no endpoint
+announcement fault to chase on top of the connectivity one.
+
+Two explanations remain and they want OPPOSITE actions — an association that
+is up and carrying nothing (re-associate) against one that has dropped and is
+scanning (do not, it prolongs it). `wifi.Describe` rides the `no controller`
+lines to tell them apart, and **nothing acts on it**: the repair for the
+first case is to drop the WiFi of a device whose only management path is that
+WiFi, which is not something to do on a guess. Instrument first.
+
+**And the record of it was being read half at a time.** `supervisor.log` has
+TWO writers — `start_server.sh`, which the controller pushes, and
+`internal/bootlog`, which arrives by OTA — so they cross the rename on their
+own schedules, and a current controller against firmware below v2.28.0-fx.1
+puts them in `/data/local/etc/revoice` and `/data/local/etc/echomuse`
+respectively. `em_devicepaths.first_readable_command` stopped at the first,
+so the fetch returned the supervisor's two lines and reported success while
+the firmware's account of the whole outage sat unread in the other directory.
+It reads every path now. The general shape: **"try each location until one
+works" is correct for a file with ONE writer and silently wrong for a file
+with two**, because the second writer's absence looks identical to the file
+simply not being there.
+
 **The two failures above are now separable, and only one of them is fixed.**
 The 2026-09-10 log in #51 is NOT this case: that device ran `v2.24.0-fx.1`,
 which predates the endpoint cache, so it was genuinely mDNS-only. Tonight's
