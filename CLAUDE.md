@@ -124,6 +124,25 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   Arbeitsplatzes geht es. Wo der `403` kommt, beim Merge in der Weboberfläche
   löschen oder am Ende der Sitzung dazusagen, welche Branches offen sind —
   sonst wächst die Liste genau so weit wie schon einmal.
+
+  **Die Bedingung ist GEMERGT, und beim selben Aufräumen wurde sie
+  überschritten**: 113 der 114 Refs fielen, aber nur 101 waren gemergt. Ein
+  gemergter Branch ist eine Kopie von etwas, das in `main` steht; ein
+  ungemergter ist die **einzige** Kopie seiner Arbeit. Vier davon sind in
+  offenen Issues benannt (#111, #112, #113, #114), jedes mit dem Satz „lebt nur
+  auf dem Branch X" — und X gibt es seitdem nicht mehr.
+
+  Verloren ist nichts, und das ist nachgesehen statt angenommen: die
+  Tip-Commits lösen über die API weiterhin auf und ihre Bäume lassen sich
+  vollständig lesen (`GET /repos/:o/:r/contents/<pfad>?ref=<sha>`). Zwei
+  Einschränkungen, die man erst merkt, wenn man es braucht: **`git fetch origin
+  <sha>` geht nicht** — der Server verweigert eine SHA, die kein Ref erreicht,
+  also ist Auschecken kein Weg —, und ein Commit ohne Ref hängt daran, dass
+  GitHub nicht aufräumt. Wer so einen Branch löscht, hält die SHA in einem
+  Issue fest; wer daraus wieder Arbeit macht, legt zuerst wieder ein Ref an
+  (`git push origin <sha>:refs/heads/archive/<name>`, mit der `gh`-Anmeldung
+  des Arbeitsplatzes — über den Proxy einer Sitzung ist der Ref-Schreibpfad
+  geblockt, auch der, den `create_branch` nimmt).
 - **Ein PR, der ein Issue erledigt, schließt es**: `Closes #nnn` im Rumpf, nicht
   „Relates to #nnn". GitHub schließt nur bei den Schlüsselwörtern. Ein Fehler,
   der längst behoben ist und offen dasteht, wird als nächstes priorisiert — und
