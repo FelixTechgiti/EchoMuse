@@ -1989,14 +1989,22 @@ func startNetworkRepair(sp *spotify.Client, ap *airplay.Client) {
 	// It measures and logs; nothing acts on it. Same posture as `wifi.Describe`
 	// on the `no controller` lines — the mechanism is below anything this
 	// project controls, and every remedy available here is a guess.
+	//
+	// Reading a counter rather than sending a query is not a refinement: the
+	// query version could not work on this platform at all, because FireOS
+	// drops the unicast replies it asked for. See internal/mcast.
 	prober := &mcast.Prober{
-		Ask: func() mcast.Reading {
-			// The self set is read per probe rather than cached: DHCP moves
-			// this device's address, and a stale entry would count its own
-			// responder as the network and report a deaf device as healthy —
-			// which is the exact reading that made this fault invisible for a
-			// day.
-			return mcast.Ask(mcast.ProbeService, mcast.ProbeWait, mcast.SelfAddrs())
+		Sample: func() mcast.Reading {
+			// The firewall's own counter on the mDNS rule. It cannot be fooled
+			// by the firewall because it IS the firewall — the version that
+			// SENT a query measured the drop policy instead and reported a
+			// device deaf whose 5353 rule had accepted 93,704 packets.
+			listing, err := netfilter.CountInput()
+			if err != nil {
+				return mcast.Reading{Err: err}
+			}
+			n, ok := netfilter.PacketsFor(listing, "udp", mcast.MDNSPort, mcast.Iface)
+			return mcast.Reading{Packets: n, Found: ok}
 		},
 		Active: func() bool { return sp.Running() || ap.Running() },
 	}

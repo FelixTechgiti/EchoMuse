@@ -1,133 +1,90 @@
 package mcast
 
-import (
-	"errors"
-	"fmt"
-	"net"
-	"strings"
-	"time"
-)
+import "time"
 
 // The second way to become invisible, and the one the membership watcher above
-// cannot see.
+// cannot see: the membership present, both endpoints healthy, and nothing from
+// the link arriving at all (#142).
 //
-// # The measurement this exists to repeat
+// # The instrument this replaces, and why it was wrong
 //
-// Taken 2026-09-12 with `device/tools/mdnsprobe` running ON the device, at the
-// same minute as a controller-side scan (#142):
+// The first version SENT an mDNS query from an ephemeral port with the
+// unicast-response (QU) bit set and counted who answered. That reasoning was
+// about not disturbing the responders — it never binds 5353 — and it missed the
+// platform this runs on.
 //
-//	on the device:    _spotify-connect._tcp.local -> 328 bytes from 192.168.178.140
-//	                  (itself, four answers, complete and correct — nothing else)
-//	from controller:  "Spotify Connect was not seen from this device, while
-//	                   6 other host(s) did answer."
+// **On FireOS the replies cannot arrive.** They come from foreign unicast
+// addresses to a port no firewall rule names; `-m state --state ESTABLISHED`
+// does not match them, because the query went to 224.0.0.251 and the answer
+// comes from 192.168.178.x, which is a different flow to conntrack; and the
+// chain policy is DROP. So the probe measured the firewall and reported zero
+// however healthy the network was.
 //
-// **The device does not hear the six hosts the controller hears.** Its own
-// responder answers its own query, which is local delivery rather than the
-// air — while every reading taken on the device says the endpoints are
-// healthy, because they are.
+// Measured on hardware 2026-09-12: the warning was in the log while that
+// device's own `udp dpt:5353` rule had accepted **93,704 packets**. The device
+// was never deaf. `device/tools/mdnsprobe` has the same design and the same
+// blind spot, which is why the reading that opened #142 said "heard only
+// itself" — that was an artefact, not a network fault.
 //
-// # Deaf is not the same as unheard, and assuming otherwise was wrong
+// The lesson is in this repository already, one section along: "Advertised is
+// not reachable — FireOS drops every inbound port." Every plane this project
+// has is dialled BY the device, so nothing had ever needed an inbound rule, and
+// an instrument that quietly needed one was written anyway.
 //
-// The obvious reading is that one mechanism explains everything: the
-// controller's browse is a multicast QUERY, it never arrives, nothing answers,
-// the device is in no picker. **Measured on hardware 2026-09-12, the first
-// time this shipped, that chain does not hold.** The device logged the deaf
-// line and the controller's own scan answered "Every enabled endpoint is
-// visible on the network", with eight other Spotify hosts seen, in the same
-// minute.
+// # What it does now
 //
-// Announcements go out UNPROMPTED. A responder that hears nothing still
-// advertises, and a device can therefore be deaf and listed at once. So this
-// package measures one direction and says so; visibility is a separate
-// question with its own instrument (`em_mdnsscan`), and the two have to be
-// read together rather than one inferred from the other.
+// It reads the packet counter on the firewall's own mDNS rule. That cannot be
+// fooled by the firewall because it IS the firewall: a rule that accepted a
+// packet counted it. It costs one exec, sends nothing, and asks nothing of
+// anybody else's network — where the old probe asked every host on the link to
+// answer, every cycle, for ever.
 //
-// And the membership was PRESENT for that reading. `Watcher` would have looked,
-// found 224.0.0.251 on wlan0, and correctly done nothing. Anyone reading the
-// watcher as "the mDNS fix" is wrong about half the outages.
+// # Deaf is not the same as unheard
 //
-// # Why this only measures
-//
-// The mechanism is a layer below anything this project controls — the leads are
-// the AP's IGMP snooping, multicast-to-unicast conversion, and the DTIM path,
-// and the device is on 5GHz where all three are most likely. Every remedy
-// available here is a guess: a forced leave/rejoin, an endpoint restart, a band
-// change. `wifi.Describe` is the precedent in this tree — it rides the
-// `no controller` lines and nothing acts on it, because the repair for a zombie
-// association is to drop the WiFi of a device whose only management path is
-// that WiFi. Instrument first.
-//
-// What is missing is not another theory, it is DURATION and FREQUENCY with
-// nobody present. That is what decides between the remaining leads, and it is
-// what this writes down.
-//
-// # Why it never binds 5353
-//
-// `mdnsprobe` binds an ephemeral port and sets the unicast-response (QU) bit,
-// and the comment at the top of it says why: whether two responders on one host
-// interfere is part of the question being asked, so the instrument must not
-// become a third. The same applies with more force in-process — librespot and
-// shairport-sync are children of this program, and a parent that took 5353
-// first could stop either from binding it at all. A detector that breaks mDNS
-// to measure mDNS is worse than no detector.
+// Announcements go out unprompted, so a responder that hears nothing still
+// advertises, and a device can be deaf and listed at once — measured the same
+// day, when this warning and the controller's "every enabled endpoint is
+// visible" were both true in the same minute. This package measures one
+// direction and says so; visibility is `em_mdnsscan`'s question.
 
 const (
-	// ProbeService is the broadest question mDNS has: every responder on the
-	// link answers a service enumeration. The point is "is ANYBODY out there",
-	// so asking about a specific service would measure that service's
-	// popularity as well as this device's hearing.
-	ProbeService = "_services._dns-sd._udp.local"
+	// MDNSPort is the rule whose counter is read.
+	MDNSPort = "5353"
 
-	// MDNSPort and the group are where the question goes. The reply comes back
-	// to our own ephemeral port because of the QU bit.
-	MDNSPort = 5353
+	// Iface is where mDNS arrives on this hardware. The rule is per-interface,
+	// so this has to agree with what `internal/netfilter` inserts.
+	Iface = "wlan0"
 
-	// ProbeWait is how long to collect replies. mDNS responders are required to
-	// delay a shared-record answer by 20-120ms to spread the burst, and a busy
-	// link keeps trickling for a while after that; a second is long past the
-	// spec's window and still short enough to sit inside a ticker.
-	ProbeWait = 1 * time.Second
-
-	// HealthyInterval / SilentInterval are the adaptive cadence.
-	//
-	// A probe asks every host on the link to answer, so this is not free to
-	// anybody else on that network — 1440 of them a day is a poor neighbour.
-	// Five minutes while healthy is one query per 300s against responders that
-	// announce more often than that unprompted.
-	//
-	// The moment it goes quiet the question changes: how LONG was it deaf is
-	// the number #142 needs, and that is measured from the recovery, not from
-	// the onset. So the silent cadence is the fast one. It costs nothing on
-	// anybody else's network either, because a device that hears nothing is by
-	// definition not being heard.
+	// HealthyInterval / SilentInterval are the adaptive cadence. Reading a
+	// counter is one exec and puts nothing on the network, so the only cost is
+	// the wake-up; five minutes while healthy, a minute once it looks quiet, so
+	// that an outage is dated from its recovery to the minute.
 	HealthyInterval = 5 * time.Minute
 	SilentInterval  = 60 * time.Second
 
-	// ProbeMisses is how many consecutive silent probes make a device deaf. One
-	// lost query is ordinary on WiFi and multicast is unacknowledged by design;
-	// hearing something, by contrast, is unambiguous and clears immediately.
+	// ProbeMisses is how many consecutive windows with no new packet make a
+	// device deaf. Two, so a single quiet window on a sleepy network is not an
+	// alarm — mDNS chatter on an ordinary LAN runs about a packet a second, so
+	// two five-minute windows of absolute silence is a real fault.
 	ProbeMisses = 2
 )
 
-// Reading is one probe's result.
+// Reading is one sample of the counter.
 type Reading struct {
-	// Peers is how many DISTINCT hosts answered that are not this device.
-	// The whole measurement lives in the word "not": the fault reading above
-	// had a complete, correct answer in it — from itself.
-	Peers int
-	// Self is how many replies came from one of this device's own addresses.
-	// Reported because Self>0 with Peers==0 is the exact signature, and it
-	// separates "the responders are dead" from "nothing on the link is heard".
-	Self int
-	// Err is set when the probe could not be carried out at all. Failure to
-	// look is not evidence of absence — the same rule the membership watcher
-	// and the wake-word reconcile follow — so a reading with an error never
-	// counts as silence.
+	// Packets is the rule's lifetime total. Only its CHANGE is meaningful.
+	Packets int64
+	// Found says the rule was in the listing at all. A missing rule is not a
+	// zero reading: it means the firewall is not in the state we believe, and
+	// the sample says nothing about the network.
+	Found bool
+	// Err is set when the listing could not be read. Failure to look is not
+	// evidence of absence — the rule the membership watcher and the wake-word
+	// reconcile both follow.
 	Err error
 }
 
-// Heard reports whether this probe reached anybody else.
-func (r Reading) Heard() bool { return r.Err == nil && r.Peers > 0 }
+// Usable reports whether this sample can be compared against another.
+func (r Reading) Usable() bool { return r.Err == nil && r.Found }
 
 // Event is a transition worth a log line. Nothing is logged in between: a
 // healthy device writes one line when it goes deaf and one when it comes back,
@@ -136,42 +93,63 @@ type Event int
 
 const (
 	EventNone Event = iota
-	// EventDeaf — the device stopped hearing the link.
+	// EventDeaf — no mDNS packet arrived for the whole of the miss window.
 	EventDeaf
-	// EventHeard — it started again. Carries how long it was out, which is the
-	// number the issue is open for.
+	// EventHeard — packets are arriving again. Carries how long the gap was,
+	// which is the number #142 is open for.
 	EventHeard
 )
 
-// Tracker turns a series of readings into those two transitions. Pure, so the
-// whole decision is host-testable and only the socket is not.
+// Tracker turns a series of counter samples into those two transitions. Pure,
+// so the whole decision is host-testable and only the exec is not.
 type Tracker struct {
-	// Misses is how many consecutive silent readings declare deafness.
+	// Misses is how many consecutive silent windows declare deafness.
 	Misses int
 
+	have      bool  // a comparable baseline exists
+	last      int64 // the counter as of the previous usable sample
 	misses    int
 	deaf      bool
-	silentAt  time.Time // when the first of the current run of silent probes was taken
-	lastPeers int       // how many were heard the last time anything was
+	silentAt  time.Time // when the first silent window of this run was sampled
 	lastHeard time.Time
+	lastDelta int64
 	episodes  int
+	resets    int
 }
 
-// Observe folds one reading in and reports a transition, if there was one.
+// Observe folds one sample in and reports a transition, if there was one.
 //
 // The duration reported with EventHeard is measured from the FIRST silent
-// probe, not from the one that crossed the miss threshold. The device was
-// already deaf then; the threshold only governs when we are willing to say so.
+// sample, not from the one that crossed the miss threshold: the device was
+// already quiet then, and the threshold only governs when we are willing to
+// say so.
 func (t *Tracker) Observe(now time.Time, r Reading) (Event, time.Duration) {
 	if t.Misses <= 0 {
 		t.Misses = ProbeMisses
 	}
-	if r.Err != nil {
+	if !r.Usable() {
 		return EventNone, 0
 	}
-	if r.Peers > 0 {
+	if !t.have {
+		t.have, t.last = true, r.Packets
+		return EventNone, 0
+	}
+
+	// A counter that went DOWN means the rule was re-inserted, which this
+	// firmware does on every config push and every repair — `internal/netfilter`
+	// deletes and re-inserts rather than trusting `-C`. That is not silence, and
+	// reading it as silence would report a fault every time somebody saved a
+	// setting. Re-baseline and wait for the next window.
+	if r.Packets < t.last {
+		t.last = r.Packets
+		t.resets++
+		return EventNone, 0
+	}
+
+	if r.Packets > t.last {
+		t.lastDelta = r.Packets - t.last
+		t.last = r.Packets
 		t.misses = 0
-		t.lastPeers = r.Peers
 		t.lastHeard = now
 		if t.deaf {
 			t.deaf = false
@@ -181,6 +159,7 @@ func (t *Tracker) Observe(now time.Time, r Reading) (Event, time.Duration) {
 		}
 		return EventNone, 0
 	}
+
 	if t.misses == 0 {
 		t.silentAt = now
 	}
@@ -196,15 +175,14 @@ func (t *Tracker) Observe(now time.Time, r Reading) (Event, time.Duration) {
 // Deaf reports the current state, which is what chooses the cadence.
 func (t *Tracker) Deaf() bool { return t.deaf }
 
-// Episodes is how many times this device has gone deaf since it started. The
+// Episodes is how many times this device has gone deaf since it started — the
 // frequency half of what #142 asks for; the duration half rides EventHeard.
 func (t *Tracker) Episodes() int { return t.episodes }
 
-// LastHeard is when anything other than this device was last heard, and how
-// many answered then. Zero time means never — which on a device that has just
-// started is not a fault, and is why the deaf line says "probed" rather than
-// "lost".
-func (t *Tracker) LastHeard() (time.Time, int) { return t.lastHeard, t.lastPeers }
+// LastHeard is when mDNS last arrived, and how many packets that window
+// carried. Zero time means the counter has not moved since this firmware
+// started, which on a device that has just booted is not a fault.
+func (t *Tracker) LastHeard() (time.Time, int64) { return t.lastHeard, t.lastDelta }
 
 // Interval is the cadence the current state calls for.
 func (t *Tracker) Interval() time.Duration {
@@ -212,108 +190,4 @@ func (t *Tracker) Interval() time.Duration {
 		return SilentInterval
 	}
 	return HealthyInterval
-}
-
-// Query builds the mDNS question. Exported and pure because the one thing that
-// can silently ruin this instrument is a malformed packet: every responder
-// would ignore it, every probe would read zero, and the device would be
-// reported deaf for ever while hearing perfectly.
-//
-// The QU bit (0x8000 on the class) asks for a unicast reply to our source port.
-// It is what lets this bind an ephemeral port instead of 5353 — see the package
-// comment — and it is the same choice mdnsprobe made for the same reason.
-func Query(name string) ([]byte, error) {
-	b := []byte{
-		0, 0, // ID 0: mDNS matches on the question, not on an ID
-		0, 0, // flags: a query, not truncated, no recursion
-		0, 1, // one question
-		0, 0, 0, 0, 0, 0,
-	}
-	for _, label := range strings.Split(strings.Trim(name, "."), ".") {
-		if label == "" || len(label) > 63 {
-			return nil, fmt.Errorf("mcast: %q is not a usable mDNS name", name)
-		}
-		b = append(b, byte(len(label)))
-		b = append(b, label...)
-	}
-	b = append(b, 0)       // root label
-	b = append(b, 0, 12)   // QTYPE PTR
-	b = append(b, 0x80, 1) // QCLASS IN, with the unicast-response bit
-	return b, nil
-}
-
-// IsResponse reports whether a datagram is an mDNS response rather than
-// something else that happened to arrive on our ephemeral port.
-//
-// Deliberately the whole of the parsing. What is being counted is that a packet
-// from another host ARRIVED; its contents would say what that host runs, which
-// is a different question and one nothing here asks. A full DNS parser would be
-// a second place for this to fail silently.
-func IsResponse(b []byte) bool {
-	return len(b) >= 12 && b[2]&0x80 != 0
-}
-
-// SelfAddrs returns this host's own unicast addresses, for telling our
-// responder's reply apart from the network's.
-func SelfAddrs() map[string]bool {
-	out := map[string]bool{}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return out
-	}
-	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok {
-			out[n.IP.String()] = true
-		}
-	}
-	return out
-}
-
-// Ask sends one query and counts who answers. The socket half, kept as small as
-// the decision above is large.
-func Ask(service string, wait time.Duration, self map[string]bool) Reading {
-	q, err := Query(service)
-	if err != nil {
-		return Reading{Err: err}
-	}
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
-	if err != nil {
-		return Reading{Err: err}
-	}
-	defer c.Close()
-
-	dst := &net.UDPAddr{IP: net.ParseIP(Group), Port: MDNSPort}
-	if _, err := c.WriteToUDP(q, dst); err != nil {
-		return Reading{Err: err}
-	}
-	if err := c.SetReadDeadline(time.Now().Add(wait)); err != nil {
-		return Reading{Err: err}
-	}
-
-	peers := map[string]bool{}
-	var mine int
-	buf := make([]byte, 2048)
-	for {
-		n, from, err := c.ReadFromUDP(buf)
-		if err != nil {
-			// A deadline is the ordinary end of a probe, not a failure to look:
-			// zero replies IS the reading. Anything else means the socket went
-			// away under us, and that must not be counted as silence.
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				break
-			}
-			return Reading{Err: err}
-		}
-		if !IsResponse(buf[:n]) {
-			continue
-		}
-		ip := from.IP.String()
-		if self[ip] {
-			mine++
-			continue
-		}
-		peers[ip] = true
-	}
-	return Reading{Peers: len(peers), Self: mine}
 }

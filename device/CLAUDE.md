@@ -1549,91 +1549,94 @@ come from different places — one from Amazon's init, one from a filesystem emO
 deliberately mounts. The same mistake is available for every other Android tool
 this firmware reaches for, because `/system` is there under both bases.
 
-## Two ways to go invisible, and only one of them is repairable (`internal/mcast`)
+## Two ways to go invisible, and the instrument that measured neither
+(`internal/mcast`)
 
-**A device can be absent from every picker for two completely different
-reasons, and every on-device reading looks identical in both.** Both were
-measured on 2026-09-12, hours apart, on the same Echo. Conflating them is how a
-repair gets credited for outages it cannot touch.
+**A device can be absent from every picker for two different reasons, and every
+on-device reading looks identical in both.** Conflating them is how a repair
+gets credited for outages it cannot touch.
 
 | | what is true | what fixes it |
 |---|---|---|
 | **the membership is gone** | `/proc/net/igmp` has lost 224.0.0.251 while both responders still hold UDP 5353 | restarting the endpoints re-joins the group — `Watcher` |
-| **the membership is present and nothing arrives** | 224.0.0.251 joined, both endpoints healthy, and the device hears *only itself* while the controller hears six other hosts | **unknown** — `Prober` measures it and nothing acts |
+| **the membership is present and nothing arrives** | 224.0.0.251 joined, both endpoints healthy, and no mDNS reaches the interface | **unknown** — `Prober` measures it and nothing acts |
 
-**Deaf is NOT the same as unheard, and the first field run proved it.**
-v2.37.0-fx.1 went onto a device and within ten minutes logged the deaf line —
-while the controller's own scan of that same device answered *"Every enabled
-endpoint is visible on the network"*, eight other Spotify hosts seen, the same
-minute. Both readings were correct. Announcements go out UNPROMPTED, so a
-responder that hears nothing still advertises, and a device can be deaf and
-listed at once.
+`Watcher` reads the membership on the network-repair ticker. The rules that
+matter: **it opens no socket of its own** (joining from here would put the
+membership on a socket the responders do not own — the group would read as
+present, the watcher would fall silent, and the responders would still never
+see a query, removing the symptom and the instrument together); a **failed read
+is not absence**; and both the miss threshold and the doubling backoff exist
+because a re-association is exactly when the membership is legitimately gone
+for a moment AND when a restart is least likely to help.
 
-That kills the tidy causal chain this was written against ("the query never
-arrives, so nothing answers, so it is in no picker") and it is why the log line
-states the measurement and explicitly hands visibility to `em_mdnsscan` rather
-than concluding it. Pinned by `TestTheDeafLineDoesNotClaimTheDeviceIsInvisible`,
-because the wrong version reads better and would come back.
+### The probe that measured the firewall, and shipped three times
 
-**The same run separated two hypotheses, which is what the instrument was for.**
-`/proc/net/arp` on the deaf device held **28 entries for other hosts on the
-LAN** — a table that fills from ARP broadcasts. So L2 BROADCAST arrives and
-multicast does not, which rules out the whole class of "the AP is not sending
-this station group traffic at all": DTIM buffering and power-save hit broadcast
-and multicast together. What is left has to distinguish the two, and IGMP
-snooping is exactly that — a switch forwards broadcast always and multicast only
-to ports it has seen a membership report on. Note `/proc/net/dev`'s `multicast`
-column is **unusable on this driver**: it read 0 against 293,964 received
-packets, so it is not implemented rather than measuring zero.
+**`Prober`'s first version was wrong in a way this repository had already
+written down one section above.** It SENT an mDNS query from an ephemeral port
+with the unicast-response (QU) bit set and counted who answered — reasoning
+carefully about not binding 5353, and not at all about whether the answers could
+arrive.
 
-`Watcher` reads the membership on the network-repair ticker and restarts
-whatever should be a member. The rules that matter: **it opens no socket of its
-own** (joining from here would put the membership on a socket the responders do
-not own — the group would read as present, the watcher would fall silent, and
-librespot and shairport-sync would still never see a query, removing the symptom
-and the instrument together); a **failed read is not absence**; and both the miss
-threshold and the doubling backoff exist because a re-association is exactly
-when the membership is legitimately gone for a moment AND when a restart is
-least likely to help.
+They cannot. The replies come from foreign unicast addresses to a port no rule
+names; `-m state --state ESTABLISHED` does not match them, because the query
+went to 224.0.0.251 and the answer comes from 192.168.178.x, which conntrack
+sees as a different flow; and the chain policy is DROP. **So it measured the
+drop policy.** Read off hardware 2026-09-12, with the warning live in the log:
 
-`Prober` is the second half, and it is **instrumentation only**. It asks the
-same question `device/tools/mdnsprobe` asks — a service enumeration from an
-**ephemeral port with the unicast-response (QU) bit set**, so it never binds
-5353 and cannot stop its own children from binding it — and counts responders
-that are **not this device**. That word is the whole measurement: the fault
-reading had a complete, correct four-answer reply in it, from the Echo's own
-responder, which is why every check run on the device read healthy through the
-outage.
+```
+93704   14M ACCEPT   udp  --  wlan0  *  0.0.0.0/0  0.0.0.0/0  udp dpt:5353
+```
+
+The device had accepted ninety-three thousand mDNS packets. It was never deaf.
+
+**`device/tools/mdnsprobe` has the same design and the same blind spot**, which
+is why the reading that opened #142 — "heard only itself" — is an artefact
+rather than a network fault, and why every conclusion drawn from it (including
+an ARP-table argument about broadcast arriving while multicast did not) has to
+be re-derived rather than repaired.
+
+Three things worth keeping from it:
+
+- **The lesson was already in this file.** "Advertised is not reachable: FireOS
+  drops every inbound port" is the section immediately above, and its whole
+  point is that every plane this project has is dialled BY the device, so
+  nothing had ever needed an inbound rule. An instrument that quietly needed one
+  was written anyway, directly underneath.
+- **It survived three releases**, because its output was plausible and nothing
+  contradicted it — the device really was hard to find in a picker, so a warning
+  saying so read as confirmation. A wrong instrument that agrees with the
+  symptom is worse than none.
+- **It asked every host on the link to answer, on a cadence, for ever.** That
+  cost was accepted for a measurement that could never have worked.
+
+### What it does now
+
+It reads the packet counter on the firewall's own mDNS rule
+(`netfilter.CountInput` / `PacketsFor`). That cannot be fooled by the firewall
+because it IS the firewall: a rule that accepted a packet counted it. One exec,
+nothing sent, nothing asked of anybody else's network.
 
 Four things not to unpick:
 
-- **Nothing acts on it**, and that is the same call `wifi.Describe` makes on the
-  `no controller` lines. The mechanism is below anything this project controls
-  — the AP's IGMP snooping, multicast-to-unicast conversion, the DTIM path —
-  and every remedy available here is a guess. What was missing was never another
-  theory; it was DURATION and FREQUENCY with nobody present, and that is what
-  chooses between the remaining leads (#142).
-- **The cadence is adaptive, and the silent one is the fast one** — 5 minutes
-  while healthy, 60s while deaf. A probe asks every host on the link to answer,
-  so a fixed fast cadence is a poor neighbour on somebody else's network; but an
-  outage is dated from its RECOVERY, so the state that needs resolution is the
-  quiet one. A device that hears nothing is by definition not being heard, so
-  the fast half costs that network nothing.
-- **One line per transition, never per probe.** The relay is rationed at six
-  lines a minute on the liveness channel — a warning per minute for a
-  four-hour outage is #404 with a different payload.
-- **Both lines have to survive `logrelay.Classify`, and they are two different
-  problems.** The onset carries `cannot` and is forwarded as a failure by the
-  outcome markers; an all-clear has no generic outcome word at all, so
-  `[mcast] hears` is a named lifecycle marker. Without it the log holds every
-  onset and no recovery, which reads as every outage still running — and the
-  device is perfectly reachable over unicast throughout, so nothing else in the
-  system reports anything.
+- **A counter that goes DOWN is a rule re-insertion, never silence.** Counters
+  are per-rule, and this firmware deletes and re-inserts on every config push
+  and every repair rather than trusting `-C`. Reading a reset as silence would
+  report a fault every time somebody saved a setting.
+- **A MISSING rule is not a zero reading.** Zero is a measurement; absent means
+  the firewall is not in the state we believe and the sample says nothing.
+- **Nothing acts on it**, the same call `wifi.Describe` makes on the
+  `no controller` lines. What is missing is duration and frequency with nobody
+  present (#142).
+- **Deaf is not the same as unheard.** Announcements go out UNPROMPTED, so a
+  responder that hears nothing still advertises, and a device can be deaf and
+  listed at once — measured the same day, when this warning and the controller's
+  "every enabled endpoint is visible" were both true in the same minute. The log
+  line states the measurement and hands visibility to `em_mdnsscan`, pinned by
+  `TestTheDeafLineDoesNotClaimTheDeviceIsInvisible`.
 
-Both are gated on an endpoint actually being enabled. A device with both
-switched off has nothing to be invisible with: the group is correctly absent,
-and counting that as a fault would restart what the user turned off and date an
-"outage" that was somebody flipping a switch back.
+Both halves are gated on an endpoint actually being enabled. A device with both
+switched off has nothing to be invisible with.
 
 ## AirPlay latency, and why the prime depth is not one number
 
