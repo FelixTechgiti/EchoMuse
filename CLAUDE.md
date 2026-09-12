@@ -151,21 +151,34 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   ein neues Issue; ein halb erledigtes offenes Issue verrät niemandem, was
   daran noch fehlt.
 
-  **Und dasselbe Schlüsselwort schließt auch dann, wenn der Satz das Gegenteil
-  sagt.** GitHub sucht das Muster, nicht die Aussage: `Closes #142?` mit
-  „**Nein**, bleibt offen" dahinter ist eine Schließreferenz, und die Frage,
-  die Verneinung und die Sprache sind für den Parser nicht da. Am 2026-09-12
-  passiert — PR #143 instrumentiert #142 und repariert absichtlich nichts, der
-  Hinweis darauf stand als rhetorische Frage in der Beschreibung, und der Merge
-  hat das Issue in derselben Sekunde geschlossen. Das Einzige, was es verriet,
-  war die Timeline.
+  **Und dasselbe Schlüsselwort wirkt ÜBERALL im Text, in jeder Funktion.**
+  GitHub sucht das Muster, nicht die Aussage: eine Frage, eine Verneinung, ein
+  Zitat, eine Erklärung des Fehlers — alles gleich. Am 2026-09-12 hat das
+  #142 **zweimal** geschlossen, und der zweite Fall ist der lehrreiche:
 
-  Die allgemeine Form ist dieselbe wie bei den Backticks in §2: **ein
-  Schlüsselwort, auf das eine Maschine reagiert, gehört nicht in Fließtext, der
-  es verneint.** Wer sagen will, dass ein Issue offen bleibt, nennt es ohne das
-  Wort davor („#142 bleibt offen — dies ist Spur 3 von dreien"). Und weil der
-  Aufruf Erfolg meldet, gilt §2s zweite Hälfte auch hier: hinterher nachsehen,
-  welche Issues ein Merge geschlossen hat.
+  | Versuch | wo | Text |
+  |---|---|---|
+  | 1 | PR-Beschreibung | das Schließwort mit `#142`, als rhetorische Frage, mit „**Nein**, bleibt offen" dahinter |
+  | 2 | Squash-Nachricht | **dasselbe, in Anführungszeichen, als Beleg dafür dass Versuch 1 das Issue geschlossen hat** |
+
+  Die Regel stand nach Versuch 1 schon hier — als „nicht in einer Verneinung",
+  und das war zu eng. Der Fehler wurde beschrieben, indem er wiederholt wurde.
+  Dieselbe Form wie die Tag-Regel und die Branch-Regel weiter unten: der Fall,
+  an dem gemessen wurde, statt der Bedingung.
+
+  Praktisch heißt das: **das Wort gar nicht tippen, außer man meint es.** Ein
+  Issue, das offen bleiben soll, wird ohne Schlüsselwort genannt („#142 bleibt
+  offen — dies ist Spur 3 von dreien"). Wer den Fehler dokumentieren muss,
+  umschreibt das Muster, statt es zu setzen. In dieser Datei ist es harmlos —
+  Dateiinhalt schließt nichts; **gefährlich sind nur Commit-Nachricht und
+  PR-Beschreibung**, und das sind genau die beiden Stellen, an denen man beim
+  Erklären zitiert.
+
+  Und weil der Aufruf Erfolg meldet, gilt §2s zweite Hälfte auch hier:
+  **nach jedem Merge nachsehen, welche Issues er geschlossen hat.** Beim
+  zweiten Mal stand die Regel schon da und wurde nicht befolgt — die Prüfung
+  kostet einen Aufruf und ist das Einzige, was den Fehler sichtbar macht.
+
 - **Ein Merge nach `main` kann fremde offene PRs still brechen** — sie zweigen
   von einem älteren Stand ab, und Git meldet den Konflikt erst dem, der später
   rebast. Wer eine Datei groß umbaut, prüft danach, wer dieselbe Datei anfasst:
