@@ -1380,6 +1380,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [securing, setSecuring] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scan, setScan] = useState(null);
+  // The device's own account of why nothing can reach it. Result goes to the
+  // Logs tab rather than here: it is a wall of iptables and netstat output,
+  // which is the right shape for a log and the wrong shape for a panel.
+  const [diagBusy, setDiagBusy] = useState(false);
   const [fetchingSup, setFetchingSup] = useState(false);
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
@@ -1556,6 +1560,29 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     } catch(e) { alert(e.error || 'Secure link failed'); }
     // Leave the button disabled briefly — transfer + reconnect takes ~10s.
     setTimeout(() => setSecuring(false), 15000);
+  }
+
+  async function doNetDiag() {
+    // The other direction. `Network visibility` asks whether the Echo is
+    // HEARD; this asks why nothing can reach it when it is. Both are needed
+    // and they are not the same question: on 2026-09-12 both endpoints were
+    // advertised perfectly and neither accepted a connection, which is the
+    // whole of what was filed as a Spotify discovery bug.
+    //
+    // Result lands in the Logs tab, not here — it is iptables and netstat
+    // output, which is the right shape for a log and the wrong shape for a
+    // panel.
+    setDiagBusy(true);
+    try {
+      const r = await API.post(
+        `/api/devices/${device.device_id}/net_diag`, {});
+      alert(r.empty
+        ? 'The device did not answer. Nothing can be concluded from that — try again.'
+        : 'Collected. See the Logs tab for the result.');
+    } catch(e) {
+      alert(e.error || 'Inbound reachability check failed');
+    }
+    setDiagBusy(false);
   }
 
   async function doMdnsScan() {
@@ -2167,6 +2194,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                             is when it matters most, because "the endpoints
                             are still advertising" and "the Echo is gone"
                             look identical from every other panel here. */}
+                        <Pill small disabled={diagBusy || !device.connected}
+                              onClick={doNetDiag}>
+                          {diagBusy ? 'Checking…' : 'Inbound reachability'}
+                        </Pill>
                         <Pill small disabled={scanning} onClick={doMdnsScan}>
                           {scanning ? 'Scanning…' : 'Network visibility'}
                         </Pill>
@@ -2217,6 +2248,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                                 )}
                                 {v.compared && (
                                   <div style={{ color:'var(--warn)' }}>{v.compared}</div>
+                                )}
+                                {v.port_open === false && (
+                                  <div style={{ color:'var(--error)' }}>
+                                    Advertised, but the controller cannot open a
+                                    connection to it. Spotify Connect and AirPlay
+                                    both need your phone to reach the device, so
+                                    nothing can use this endpoint.
+                                  </div>
                                 )}
                                 {(v.advertised || []).map(a => (
                                   <div key={a.name} style={{ color:'var(--muted)' }}>
