@@ -178,6 +178,10 @@ type Client struct {
 	restarts  int
 	startedAt time.Time
 	lastExit  string
+	// credsRefused says the session that just ended was refused the stored
+	// credential. Under mu with the rest because the stderr relay sets it
+	// from its own goroutine while supervise reads it. See credentials.go.
+	credsRefused bool
 	// proc is the live process, held so a preemption can end it.
 	proc *os.Process
 }
@@ -472,6 +476,16 @@ func (c *Client) supervise(ctx context.Context) {
 		if err != nil {
 			log.Printf("[spotify] librespot exited: %v", err)
 		}
+		// A refused credential is the one exit that repeats for ever unless
+		// something acts, and restarting is not acting. Deleting the blob
+		// puts librespot back into discovery, which is the state that can
+		// actually be repaired from a phone. credentials.go has the why.
+		c.mu.Lock()
+		refused := c.credsRefused
+		c.mu.Unlock()
+		if refused {
+			clearCredentials(c.opts.CacheDir)
+		}
 		// A process that ran for a while and then exited is the ordinary
 		// case — a session moved to another device, a network blip — and
 		// deserves a prompt restart. One that dies immediately is a
@@ -514,9 +528,13 @@ func (c *Client) session(ctx context.Context) error {
 	c.proc = cmd.Process
 	c.startedAt = time.Now()
 	c.restarts++
+	// Per SESSION, not per process lifetime: the question supervise asks is
+	// whether THIS run was refused, and a flag left set would delete a
+	// credential a later, healthy run had just stored.
+	c.credsRefused = false
 	c.mu.Unlock()
 
-	go relayLog(stderr)
+	go c.relayLog(stderr)
 	c.pump(stdout)
 
 	err = cmd.Wait()
@@ -598,10 +616,24 @@ func (c *Client) pump(r io.Reader) {
 	}
 }
 
-func relayLog(r io.Reader) {
+// relayLog passes librespot's stderr through and watches it for the ONE line
+// that needs acting on rather than reading.
+//
+// The watch lives here because this is the only place that sees librespot's
+// own words: the exit status is `exit status 1` for every fault it has, so a
+// credential refusal and a missing ALSA device are indistinguishable by the
+// time `session` returns. See credentials.go for why that distinction has to
+// be made at all.
+func (c *Client) relayLog(r io.Reader) {
 	s := bufio.NewScanner(r)
 	for s.Scan() {
-		log.Printf("[librespot] %s", s.Text())
+		line := s.Text()
+		log.Printf("[librespot] %s", line)
+		if credentialRejection(line) {
+			c.mu.Lock()
+			c.credsRefused = true
+			c.mu.Unlock()
+		}
 	}
 }
 

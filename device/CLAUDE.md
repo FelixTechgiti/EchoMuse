@@ -1302,6 +1302,54 @@ tick yet, must not render as "not running". Accusing a working Echo for the
 first thirty seconds of every reconnect is how this becomes the line everyone
 learns to ignore.
 
+## A refused Spotify credential must be DELETED, not retried
+
+**An endpoint that can only be repaired from the network cannot be repaired by
+restarting it, and librespot's own repair path is what the restart breaks.**
+
+librespot keeps the last login's credential blob in its cache (`--cache`; the
+audio half is disabled) so the Echo stays authorised across reboots. When
+Spotify stops accepting that blob, spirc initialisation fails and the process
+EXITS. The supervisor restarts it, it reads the same dead blob, it exits again.
+Measured on hardware 2026-09-12: `could not initialize spirc: Invalid state
+{ Login request was denied: INVALID_CREDENTIALS }` every 15-30s, indefinitely,
+with `[spotify] librespot exited: exit status 1` behind each one.
+
+**The loop is not merely wasteful — it disables the repair.** Zeroconf sign-in
+is two requests: the app reads the device's public key from `getInfo`,
+encrypts its blob against it, and POSTs that to `addUser`. The key pair is
+generated PER PROCESS, so a restart between those two requests decrypts the
+blob with a key it was not encrypted for and the device answers `MAC mismatch`.
+That line sat ten seconds before an exit in the same log, and reading it as a
+second fault is the trap: it is the recovery failing because of the fault it
+would have ended.
+
+`internal/spotify/credentials.go` deletes the blob after it has been refused,
+so librespot comes back in the state a speaker nobody has used yet is in —
+advertised, waiting to be picked. The cost is one tap in the app.
+
+Three things not to unpick:
+
+- **`MAC mismatch` is deliberately NOT a rejection of the stored credential**,
+  and that is the whole subtlety. It comes from `librespot_discovery::server`
+  and is somebody else's blob failing to decrypt. Counting it would delete a
+  working authorisation every time a phone's sign-in raced a restart — the
+  expensive direction, since it signs the speaker out of an account it was
+  correctly authorised for.
+- **The flag is per SESSION, cleared at each start**, or a refusal would
+  outlive itself and delete the credential a later healthy run had just
+  stored.
+- **The watch lives in the stderr relay because nothing else can see it.**
+  Every librespot fault exits 1, so by the time `session` returns, a refused
+  credential and a missing ALSA device are the same value. The distinction
+  exists only in librespot's own words.
+
+The general shape is worth keeping: **a stored credential that the far end has
+stopped accepting is not a transient error and must not be retried.** The same
+question applies to the device link token and to any future cached
+authorisation — retrying forever looks like resilience and is a device that can
+never come back.
+
 ## Advertised is not reachable: FireOS drops every inbound port (`internal/netfilter`)
 
 **This is what #77 was, after weeks of looking at mDNS.** FireOS ships
