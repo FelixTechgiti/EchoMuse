@@ -1091,6 +1091,17 @@ against the live add-on, an HTTP GET to the device WebSocket port answering
 `426 Upgrade Required` from `websockets/17.1` — and once reconnected the ping
 to it measured **1.189/1.619/1.885 ms at 0% loss**.
 
+**Confirmed in the field on 2026-09-12, and the number is the whole point.**
+A device on v2.30.0-fx.1 took an in-place OTA restart — a fresh process, no
+in-memory `lastServer`, exactly the case that used to cost half an hour — and
+reconnected in **5.9 seconds** (`Disconnected` 02:06:03 UTC, `Connected …
+version=v2.30.0-fx.1` 02:06:09), with both endpoints enabled 160ms after
+that. Against 33m26s, 38m5s and 36m56s on the same device and the same
+network a day earlier. Note it needed BOTH halves of this to work: the
+endpoint cache to have an address to try, and the legacy-path fallback in
+`internal/devicepaths` to find it, since the rename had moved
+`controller.json` out from under it.
+
 `FindServerWith` re-tests the remembered address before every browse round.
 Three things are load-bearing:
 
