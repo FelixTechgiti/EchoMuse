@@ -82,7 +82,7 @@ jobs:
           echo "Install from the device's Updates tab → Streaming endpoints." \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: endpoint-binaries
           # The md5 rides along: it is the only identity either end can agree
