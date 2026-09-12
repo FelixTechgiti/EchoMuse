@@ -64,6 +64,7 @@ import em_endpoint_release
 import em_endpoint_restart
 import em_mdnsscan
 import em_devicepaths
+import em_netdiag
 import em_autoupdate
 import em_firmware
 import em_ingressauth
@@ -476,6 +477,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_post("/api/devices/{id}/supervisor_log",
                         _post_fetch_supervisor_log)
+    app.router.add_post("/api/devices/{id}/net_diag", _post_device_net_diag)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
@@ -1523,6 +1525,44 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     if msg.get("error"):
         return _error("scan_failed", msg["error"], 502)
     return _ok({"networks": msg.get("networks") or []})
+
+
+@auth.require_admin
+async def _post_device_net_diag(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/net_diag
+
+    Ask the device why nothing can reach IT, and push the answer into its
+    log events where the Logs tab already shows it.
+
+    **This closes the gap that let #77 run for weeks.** Every plane in this
+    system is dialled BY the device, so nothing had ever tested the other
+    direction, and the one measurement behind "the endpoint is reachable"
+    had been taken on the device against its own loopback. From another host
+    on the same subnet, both endpoints and ICMP were silent.
+
+    Read-only — see em_netdiag for what each check rules out. Admin, and a
+    POST rather than a GET, because it costs a shell session on the device.
+    """
+    device_id = request.match_info["id"]
+    live = _live(device_id)
+    if live is None:
+        return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    out = await _shell_run(live, em_netdiag.script(), timeout=45.0)
+    text = (out or "").strip()
+    if not text:
+        # A shell that answered nothing is not a device with nothing to say,
+        # and reporting an empty result as a finding is the conflation this
+        # tree keeps having to correct.
+        await _push_log_event(device_id, "warn", "controller",
+            "Inbound reachability check returned nothing — the shell session "
+            "did not answer, so this says nothing about the device.")
+        return _ok({"text": "", "empty": True})
+
+    await _push_log_event(device_id, "info", "controller",
+                          "Inbound reachability:\n" + text)
+    return _ok({"text": text, "empty": False})
 
 
 @auth.require_admin
@@ -6193,6 +6233,35 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         return _error("build_failed", str(e), 500)
 
 
+async def _tcp_reachable(host: str, port: int, timeout: float = 2.0):
+    """
+    Can this controller open a TCP connection to the advertised endpoint?
+
+    True, False, or None when there was nothing to try. The controller is a
+    second host on the same network, which is the whole point: a device can
+    only ever tell you that it is listening, never that anybody can arrive.
+
+    A refused connection counts as REACHABLE — the host answered, which is
+    what this asks. Only a timeout or an unreachable route is a negative,
+    because those are what a phone hitting a silent speaker experiences.
+    """
+    if not host or not port:
+        return None
+    try:
+        fut = asyncio.open_connection(host, port)
+        reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except ConnectionRefusedError:
+        return True
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
 @auth.require_admin
 async def _get_device_mdns_scan(request: web.Request) -> web.Response:
     """
@@ -6305,6 +6374,7 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
         note = None
         mine = [f for f in found[key] if f.address and f.address == device_ip]
         compared = None
+        port_open = None
         if mine:
             note = em_mdnsscan.txt_note(mine[0].txt)
             # What the OTHER receivers on this network say that we do not.
@@ -6316,10 +6386,20 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
                     mine[0].txt,
                     [f.txt for f in found[key]
                      if f.address and f.address != device_ip]))
+            # **Advertised is not reachable, and nothing here had ever
+            # checked.** Every plane in this system is dialled BY the
+            # device, so "the endpoint answers" rested on a measurement
+            # taken on the device against its own loopback — while from
+            # another host on the same subnet both endpoints were silent
+            # (#77, 2026-09-12). Spotify Connect and AirPlay both need the
+            # phone to call the speaker, so an advertisement nobody can
+            # connect to is the whole fault, and it rendered as success.
+            port_open = await _tcp_reachable(mine[0].address, mine[0].port)
         verdicts.append({
             "service": v.service, "enabled": v.enabled,
             "reachable": v.reachable, "visible": v.visible,
             "running": v.running,
+            "port_open": port_open,
             "detail": v.detail, "note": note, "compared": compared,
             "advertised": [f._asdict() for f in mine],
         })

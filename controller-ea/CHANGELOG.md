@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.41.0-fx.1
+
+### Advertised is not the same as reachable, and nothing had ever checked
+
+**This is the fault behind "my Echo does not show up in Spotify", and it was
+never about Spotify.** Measured on 12 September from a PC on the same network
+as the Echo: neither streaming endpoint accepted a connection, and the device
+did not answer a ping either — while everything else on that network,
+including other AirPlay and Spotify Connect speakers, worked normally.
+
+Spotify Connect and AirPlay both need **your phone to call the speaker**. An
+Echo that only ever dials outward cannot host either, no matter how correct
+its announcements are.
+
+It went unnoticed for weeks because every connection in Revoice is made *by*
+the Echo — the control link, the audio, the shell, updates — so nothing had
+ever tried the other direction. The one measurement behind "the endpoint
+answers" had been taken on the Echo itself, against its own loopback.
+
+Two additions close that:
+
+- **Network visibility now also opens a connection** to the advertised port
+  from the controller, which is a second machine on your network. When the
+  endpoint is advertised but unreachable it says so plainly, in red, instead
+  of reporting success.
+- **Inbound reachability** is a new button beside it. It asks the Echo why
+  nothing can reach it — firewall rules, which addresses its endpoints are
+  actually bound to, its address and routes, and whether it is set to ignore
+  pings — and writes the answer to the Logs tab. Read-only; nothing on the
+  device is changed.
+
+A refused connection counts as reachable, deliberately: the question is
+whether anything is there to answer, and a refusal is a device that replied.
+A timeout is what your phone experiences against a silent speaker.
+
 ## 2.40.0-fx.1
 
 ### The network check now tells you what the working devices say that yours does not

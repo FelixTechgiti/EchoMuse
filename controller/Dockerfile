@@ -105,6 +105,7 @@ COPY em_endpoint_bins.py .
 COPY em_endpoint_release.py .
 COPY em_endpoint_restart.py .
 COPY em_mdnsscan.py .
+COPY em_netdiag.py .
 COPY em_devicepaths.py .
 COPY em_autoupdate.py .
 COPY em_oww_metadata.py .
