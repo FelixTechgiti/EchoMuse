@@ -56,6 +56,12 @@ class Verdict(NamedTuple):
     reachable: bool       # the scan worked at all — see the module docstring
     visible: bool         # this device's endpoint was seen
     detail: str
+    # Whether the endpoint can be running at all. False only for the one
+    # case where "not seen" has a complete explanation that is not about the
+    # network: the device has no controller session, so it never received
+    # the configuration that STARTS the endpoint. Defaulted, so every
+    # existing construction keeps its meaning.
+    running: bool = True
 
 
 # An unresolvable SRV target is the failure that cost the most time here: the
@@ -65,12 +71,23 @@ BAD_TARGETS = ("localhost.", "localhost.local.")
 
 
 def verdict(service: str, findings: list, device_ip: str,
-            enabled: bool) -> Verdict:
+            enabled: bool, connected: bool = True) -> Verdict:
     """
     What this scan proves about one device's one endpoint.
 
     `findings` is everything seen for this service, from every host — the
     other hosts are what make a negative meaningful.
+
+    `connected` is whether the device has a controller session right now,
+    and it changes what a negative MEANS rather than merely decorating it.
+    **Spotify Connect and AirPlay are off by default on the device and are
+    started only by the controller's config push**, so a device with no
+    session runs neither and advertises nothing. Its silence is then a
+    consequence of the lost session and says nothing whatever about the
+    network — which is exactly how it was misread on 2026-09-11, as a second
+    independent symptom when it was the same symptom seen twice.
+
+    A signal downstream of the fault cannot corroborate the fault.
     """
     label = SERVICES.get(service, (None, service))[1]
 
@@ -102,6 +119,17 @@ def verdict(service: str, findings: list, device_ip: str,
                        f"device — try again, and check whether anything else "
                        f"on the network offers {label} at all.")
 
+    if not connected:
+        # Complete explanation, and not about the network. Said before the
+        # others-answered branch, which would otherwise render this as a
+        # finding about the radio.
+        return Verdict(service, True, True, False,
+                       f"{label} is not running: this Echo has no controller "
+                       f"session, and the endpoints are started by the "
+                       f"controller's configuration. This says nothing about "
+                       f"the network — reconnect the device first.",
+                       running=False)
+
     others = len({f.address for f in findings if f.address})
     return Verdict(service, True, True, False,
                    f"{label} was not seen from this device, while "
@@ -121,6 +149,9 @@ def summarise(verdicts: list) -> str:
     # the count. A switched-off one is not a failure, and a scan that did not
     # work is not a finding.
     checked = [v for v in live if v.reachable]
+    if checked and all(not v.running for v in checked):
+        return ("This Echo has no controller session, so its endpoints are "
+                "not running. Nothing here is about the network.")
     visible = [v for v in checked if v.visible]
     if len(visible) == len(checked):
         return "Every enabled endpoint is visible on the network."

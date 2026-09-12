@@ -116,3 +116,68 @@ def test_every_service_has_a_label_and_a_type():
     for key, (typ, label) in m.SERVICES.items():
         assert typ.endswith("._tcp.local."), f"{key} has a malformed type"
         assert label and label != key
+
+
+# ── A disconnected device runs no endpoints ──────────────────────────────────
+#
+# The mistake this encodes, made live on 2026-09-11: the Echo lost its
+# controller session, its Spotify and AirPlay advertisements went with it, and
+# that second silence was read as independent corroboration that the device
+# had fallen off the network. It was the same symptom seen twice. The
+# endpoints are OFF by default on the device and are started only by the
+# controller's config push, so a device with no session cannot be advertising,
+# whatever the network is doing.
+
+def _seen(service, addr):
+    return m.Finding(service=service, name=f"x.{service}.local.",
+                     address=addr, port=1, target="x.local.", txt={})
+
+
+def test_a_disconnected_device_is_not_accused_of_being_unheard():
+    v = m.verdict("spotify", [_seen("spotify", "192.168.1.9")],
+                  "192.168.1.5", True, connected=False)
+    assert v.running is False
+    assert "no controller session" in v.detail
+    assert "says nothing about the network" in v.detail
+    assert "not being heard" not in v.detail
+
+
+def test_a_connected_device_still_gets_the_real_finding():
+    v = m.verdict("spotify", [_seen("spotify", "192.168.1.9")],
+                  "192.168.1.5", True, connected=True)
+    assert v.running is True
+    assert "not being heard" in v.detail
+
+
+def test_being_seen_beats_the_session_check():
+    # Belt and braces: an orphaned endpoint from before a restart really can
+    # answer while the device has no session, and a scan that SAW it must say
+    # so rather than assert it cannot be running.
+    v = m.verdict("airplay", [_seen("airplay", "192.168.1.5")],
+                  "192.168.1.5", True, connected=False)
+    assert v.visible is True
+    assert v.running is True
+
+
+def test_a_scan_that_found_nothing_still_wins():
+    # "Nothing answered at all" is a statement about the SCAN and must never
+    # be overridden by a statement about the device — that ordering is the
+    # whole point of this module.
+    v = m.verdict("spotify", [], "192.168.1.5", True, connected=False)
+    assert v.reachable is False
+    assert "about this scan" in v.detail
+
+
+def test_the_summary_names_the_session_rather_than_the_network():
+    vs = [m.verdict(k, [_seen(k, "192.168.1.9")], "192.168.1.5", True,
+                    connected=False) for k in ("spotify", "airplay")]
+    assert "no controller session" in m.summarise(vs)
+    assert "Nothing here is about the network" in m.summarise(vs)
+
+
+def test_a_switched_off_endpoint_is_not_reported_as_unstarted():
+    # Disabled and "enabled but the device never heard about it" are
+    # different sentences, and the first one already had its own.
+    v = m.verdict("spotify", [], "192.168.1.5", False, connected=False)
+    assert v.running is True
+    assert "switched off" in v.detail

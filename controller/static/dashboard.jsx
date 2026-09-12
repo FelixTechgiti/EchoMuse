@@ -2184,14 +2184,24 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           {(scan.services || []).map(v => {
                             const label = v.service === 'spotify'
                               ? 'Spotify Connect' : 'AirPlay';
-                            // Three states, three colours, because two of
-                            // them are opposite conclusions that used to read
-                            // the same. Amber is "the scan found nothing at
-                            // all", which is a statement about the scan.
+                            // Four states, four colours, because each pair
+                            // of them is a different conclusion that used to
+                            // read the same. Amber is "the scan found nothing
+                            // at all", a statement about the scan; muted with
+                            // running === false is "the device has no session,
+                            // so nothing is running", which is a statement
+                            // about the device and NOT about the network. Red
+                            // is reserved for the one case that is genuinely
+                            // about being heard.
                             const colour = !v.enabled ? 'var(--muted)'
                               : v.visible ? 'var(--ok)'
+                              : v.running === false ? 'var(--muted)'
                               : v.reachable ? 'var(--error)' : 'var(--warn)';
-                            const others = (scan.others_seen || {})[v.service];
+                            // The others-answered count is what makes a
+                            // negative mean something — and means nothing at
+                            // all when the endpoint was never started.
+                            const others = v.running === false
+                              ? null : (scan.others_seen || {})[v.service];
                             return (
                               <div key={v.service} style={{ marginBottom: 4 }}>
                                 <span style={{ color: colour }}>● </span>
