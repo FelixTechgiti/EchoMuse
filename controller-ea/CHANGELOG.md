@@ -23,8 +23,6 @@ which of the two it is rather than deciding for you.
 **It stays silent when the records agree**, deliberately — a line that prints
 on every scan is one nobody reads on the day it matters.
 
-## 2.39.0-fx.1
-
 ### The network check no longer blames the network for a disconnected Echo
 
 **Network visibility** reported *"not seen, while N other hosts answered — the
