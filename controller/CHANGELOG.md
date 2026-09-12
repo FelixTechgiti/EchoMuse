@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.44.0-fx.1
+
+### Die zwei Versionsnummern sagen jetzt, wovon sie reden
+
+Im Kopf steht jetzt **Controller 2.44.0-fx.1**, und die Kachel oben rechts
+heißt **Latest Firmware Release** statt nur „Latest Release".
+
+Beide Zahlen kommen aus demselben Repository, werden aber getrennt
+veroeffentlicht: Firmware traegt `v*`-Tags, der Controller `controller-v*`.
+Sie stimmen nie ueberein und sollen es auch nicht -- sonst muesste jede
+Controller-Aenderung eine Firmware-Auslieferung erzwingen.
+
+Genau das war aus der Oberflaeche aber nicht zu erkennen. Eine nackte Zahl
+neben dem Produktnamen liest sich als DIE Version dessen, was man gerade vor
+sich hat, und die Kachel daneben zeigte eine andere. Am 12. September dreimal
+in einem Nachmittag gefragt, jedes Mal als moeglicher Fehler gemeldet -- und
+jedes Mal war es der korrekte Zustand. Eine Anzeige, die regelmaessig als
+Stoerung durchgeht, kostet mehr als die zwei Woerter, die sie erklaeren.
+
+Nur Beschriftungen. Keine Zahl, keine Abfrage und kein Verhalten geaendert.
+
 ## 2.43.0-fx.1
 
 ### Der Zustand der Audio-Endpunkte steht jetzt auf der Status-Seite
