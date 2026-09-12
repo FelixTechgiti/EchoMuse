@@ -98,6 +98,95 @@ static const struct node nodes[] = {
     { "/dev/stpbt",     192, 0 },
 };
 
+/* The sysfs class a /dev path belongs to, or NULL for a node whose numbers
+ * sysfs cannot answer for at this point in the boot.
+ *
+ * Derived from the path rather than stored as a column in the table above,
+ * because that table is fifty rows and a per-row field is fifty places to get
+ * one wrong. The mapping is a fact about Linux — `/dev/snd` is `sound`,
+ * `/dev/input` is `input` — not a decision taken per device.
+ *
+ * The MediaTek combo chrdevs return NULL and keep their compiled-in numbers on
+ * purpose: three of the four do not exist until `wmt_loader` has detected the
+ * chip, which has not happened yet, so there is nothing in sysfs to read.
+ */
+static const char *sysfs_class(const char *path)
+{
+    if (!strncmp(path, "/dev/input/", 11)) return "input";
+    if (!strncmp(path, "/dev/snd/",   9))  return "sound";
+    return NULL;
+}
+
+/* Read `<major>:<minor>` out of /sys/class/<cls>/<name>/dev. Returns 0 on
+ * success, -1 when the answer is missing or not a pair of numbers.
+ *
+ * **This is the kernel's own answer, and it outranks the table**: the numbers
+ * up there were read off a running FireOS device and are an enumeration
+ * accident, correct for biscuit and a guess anywhere else. `event2` is the
+ * volume button here and the touchscreen on checkers, and opening the wrong
+ * node SUCCEEDS — it just leaves the buttons dead, which is the failure this
+ * whole rule exists to prevent.
+ *
+ * `sysroot` is a parameter rather than a constant so the off-target check can
+ * point it at a directory it is allowed to create, the same way tmoutcheck
+ * and pathcheck redirect their records.
+ *
+ * Strict parsing, and the refusals are the point rather than pedantry: a major
+ * of 0 is reserved and would produce a node that exists and cannot be opened,
+ * which is indistinguishable from a driver that failed to load. Anything this
+ * cannot read leaves the caller on the table entry, so the worst case is the
+ * behaviour that shipped.
+ */
+static int read_devnum(const char *sysroot, const char *cls, const char *name,
+                       int *major, int *minor)
+{
+    char p[256];
+    snprintf(p, sizeof p, "%s/class/%s/%s/dev", sysroot, cls, name);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    char b[64];
+    int n = (int)read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    b[n] = 0;
+
+    int maj = 0, min = 0, digits = 0, seen_colon = 0;
+    for (int i = 0; i < n; i++) {
+        if (b[i] >= '0' && b[i] <= '9') {
+            int *v = seen_colon ? &min : &maj;
+            if (*v > 100000)            /* far past any real dev number */
+                return -1;
+            *v = *v * 10 + (b[i] - '0');
+            digits++;
+        } else if (b[i] == ':' && !seen_colon && digits > 0) {
+            seen_colon = 1;
+            digits = 0;
+        } else if (b[i] == '\n' || b[i] == '\r') {
+            break;                      /* the trailing newline sysfs writes */
+        } else {
+            return -1;                  /* anything else is not a dev number */
+        }
+    }
+    if (!seen_colon || digits == 0 || maj == 0)
+        return -1;
+
+    *major = maj;
+    *minor = min;
+    return 0;
+}
+
+/* The name a sysfs class entry is filed under: the last path component.
+ * Written out rather than using basename(), whose POSIX form may modify its
+ * argument and whose GNU form needs _GNU_SOURCE — neither is worth importing
+ * for four lines. */
+static const char *node_name(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
 /* ── The boot progress ring ──────────────────────────────────────────────────
  *
  * The twelve-LED ring is an is31fl3236 at i2c-0 0x3f, driven by writing 12
@@ -1512,9 +1601,27 @@ int main(int argc, char **argv)
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
     mkdir("/dev/input", 0755);
     mkdir("/dev/snd", 0755);
-    for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++)
-        mknod(nodes[i].path, S_IFCHR | 0600,
-              makedev(nodes[i].major, nodes[i].minor));
+    /* sysfs first, the table as fallback, per node — see read_devnum. The
+     * three counters are the only way to tell the good outcome from the
+     * useless one: on biscuit sysfs should AGREE with the table, so nothing
+     * observable changes either way, and `sysfs=0` would mean the classes had
+     * not been populated yet and this bought nothing. `differ` is the one to
+     * look at twice — on this board it should be 0, and anything else is a
+     * row in the table that has been wrong all along. */
+    int n_sysfs = 0, n_table = 0, n_differ = 0;
+    for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++) {
+        int maj = nodes[i].major, min = nodes[i].minor;
+        const char *cls = sysfs_class(nodes[i].path);
+        if (cls && read_devnum("/sys", cls, node_name(nodes[i].path),
+                               &maj, &min) == 0) {
+            n_sysfs++;
+            if (maj != nodes[i].major || min != nodes[i].minor)
+                n_differ++;
+        } else {
+            n_table++;
+        }
+        mknod(nodes[i].path, S_IFCHR | 0600, makedev(maj, min));
+    }
 
     umask(022);   /* nodes exist; every child inherits a sane mask from here */
 
@@ -1527,7 +1634,11 @@ int main(int argc, char **argv)
         close(fd);
         if (n > 0) write_at(512, buf, n);
     }
-    note("stage=mounts done devtmpfs_rc=%d tty=%d\n", dtr, access(TTY, F_OK));
+    /* The node counters ride this line rather than getting one of their own:
+     * the boot trail is a fixed-size buffer rewritten in place, so a line
+     * costs the tail of the previous boot. */
+    note("stage=mounts done devtmpfs_rc=%d tty=%d nodes=%d/%d differ=%d\n",
+         dtr, access(TTY, F_OK), n_sysfs, n_sysfs + n_table, n_differ);
     led_claim();
     led_step();                                  /* 1: mounts and device nodes */
 

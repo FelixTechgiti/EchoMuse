@@ -753,9 +753,26 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   unplug.
 - The speaker amp idles on and hisses. Gating it on idle is **not** the fix —
   toggling it clicks audibly, which is why the injected silence stream exists.
-- Hardware is resolved by fixed major/minor numbers, against the project's own
-  "resolve by name, not number" rule. Fine for biscuit, wrong for a second
-  board.
+- **Device numbers now come from the kernel where it has them**, and from the
+  compiled-in table only where it does not (#128). `/dev/input/*` and
+  `/dev/snd/*` are resolved through `/sys/class/<cls>/<name>/dev`, which is
+  mounted well before the nodes are created; sysfs wins when it disagrees,
+  because it describes the running kernel while the table describes the board
+  it was read off.
+
+  **Still open, and only a device can close it:** whether the input and ALSA
+  drivers have probed by the time init reaches that point. If they have not,
+  `/sys/class/sound` is empty, every node falls back, and nothing has changed.
+  The boot trail says which happened — `nodes=<from sysfs>/<total>` on the
+  `stage=mounts` line, with `differ=` counting rows where the kernel and the
+  table disagreed. On biscuit `differ=0` is the expected reading, and anything
+  else is a table row that has been wrong all along.
+
+  The **block** nodes are still numbered by hand, deliberately: resolving a
+  partition by name needs the by-name map rather than `/sys/class/block`,
+  because the board-specific part is the partition NUMBER. Separate job, worse
+  failure mode — a rule written against the wrong by-name map is inverted
+  rather than merely broken.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
 - **A device on emOS cannot start the wizard directly, and nothing in the
