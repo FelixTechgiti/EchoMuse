@@ -794,22 +794,35 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   what to do with them.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
-- **A device on emOS cannot start the wizard directly, and nothing in the
-  wizard says so** — but since 0.4 there is a one-command way round it, so
-  this is an unhelpful error rather than the dead end it was.
+- **A device on emOS cannot start the wizard directly**, and it still cannot —
+  but since #134 the wizard SAYS SO, so this is a detour rather than the dead
+  end it was.
 
   Step 0 needs adbd, which emOS does not have and will not — `f_acm` is the
   whole point of not needing a daemon. So the USB picker offers nothing and
-  the step fails with an error about the wrong device, which does not name the
-  actual reason.
+  `requestDevice` fails with `No device selected.`
 
-  **`/init recovery` from the console is the way through.** The wizard's first
-  step already accepts a device that is in TWRP (it reads the FireOS build off
+  **That one sentence covers two situations that look identical and want
+  opposite responses**, which is what made it a dead end: a dismissed picker
+  or a charge-only cable, where retrying is right, and a Dot on emOS, where
+  retrying can never work. Nothing in the page can tell them apart —
+  enumerating serial ports needs a user gesture of its own — so the fix is
+  wording rather than detection, and `connectFailureAdvice` names both causes
+  and gives the route out of the second. The step's own description says it
+  too, in both flows, so nobody has to fail first.
+
+  **`/init recovery` from the console is that route.** The wizard's first step
+  already accepts a device that is in TWRP (it reads the FireOS build off
   `/system`, since every property in recovery belongs to the ramdisk), so
-  reaching recovery is the whole of what was missing. What remains is that
-  nothing tells you that, and the duplicate-serial guard still refuses a
-  device that is already registered — it offers to delete it, which is the
-  right answer but has to be found.
+  reaching recovery is the whole of what was missing.
+
+  **The duplicate-serial half of this entry is done and was stale here.** The
+  wizard no longer merely offers to delete a registered device: step 0 renders
+  *Migrate "<id>" to emOS (keep its settings)* beside *Delete "<id>" from
+  controller*, and migration keeps the row, the config and every Home
+  Assistant entity id — see `controller/CLAUDE.md`, "Migrating a fielded device
+  to emOS keeps its row". Left listed as open long after it shipped, which is
+  the cost of a gap list nothing tests.
 
   Noticed by Wil on 2026-09-05, after the flow was built. The design's open
   questions covered FireOS → emOS and deferred it; **nobody asked the
