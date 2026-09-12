@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.45.0-fx.1
+
+### Der Spotify-Regler kann jetzt die Lautstärke des Echo steuern
+
+Bisher drehte der Regler in der Spotify-App die Musik **innerhalb von
+librespot** leiser. Damit lagen zwei Lautstärken übereinander: die des Echo und
+eine zweite davor, die sonst niemand sieht — weder das Dashboard noch Home
+Assistant noch der LED-Ring.
+
+Unter **Konfiguration → Streaming** steht jetzt „Spotify volume moves this
+Echo". Eingeschaltet setzt der Regler die Gerätelautstärke selbst und lässt den
+Ring aufblitzen, so wie es ein Tastendruck tut.
+
+**Aus als Voreinstellung, und das ist Absicht.** Dieser Echo hat *eine*
+Lautstärke und teilt sie mit dem Assistenten: Wer Spotify auf ein Fünftel
+zieht, zieht die nächste gesprochene Antwort mit. Das ist eine vertretbare
+Lesart von „stellt die Gerätelautstärke" und genau das, was gewünscht war —
+aber niemand sollte es zum ersten Mal merken, wenn der Assistent flüstert.
+
+Für AirPlay gibt es denselben Schalter seit 2.29.0-fx.1. Die beiden sind
+unabhängig: Wer den einen einschaltet, hat über den anderen nichts gesagt.
+
+### Was dazugehört
+
+Der Schalter braucht **Firmware 2.36.0-fx.1** auf dem Gerät und **librespot
+0.8.0** als Endpunkt-Binary. Die Flags, die librespot davon abhalten, selbst zu
+dämpfen, existieren in 0.7.1 nicht — und 0.7.1 kann auf manchen Konten
+ohnehin keinen einzigen Titel abspielen.
+
+Solange die Firmware älter ist, bleibt der Schalter wirkungslos statt falsch:
+Das Gerät ignoriert einen Konfigurationsschlüssel, den es nicht kennt.
+
 ## 2.44.0-fx.1
 
 ### Die zwei Versionsnummern sagen jetzt, wovon sie reden
