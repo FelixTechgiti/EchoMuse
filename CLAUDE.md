@@ -150,6 +150,22 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   Bleibt ein Teil übrig, schließt der PR das Issue trotzdem, und der Rest wird
   ein neues Issue; ein halb erledigtes offenes Issue verrät niemandem, was
   daran noch fehlt.
+
+  **Und dasselbe Schlüsselwort schließt auch dann, wenn der Satz das Gegenteil
+  sagt.** GitHub sucht das Muster, nicht die Aussage: `Closes #142?` mit
+  „**Nein**, bleibt offen" dahinter ist eine Schließreferenz, und die Frage,
+  die Verneinung und die Sprache sind für den Parser nicht da. Am 2026-09-12
+  passiert — PR #143 instrumentiert #142 und repariert absichtlich nichts, der
+  Hinweis darauf stand als rhetorische Frage in der Beschreibung, und der Merge
+  hat das Issue in derselben Sekunde geschlossen. Das Einzige, was es verriet,
+  war die Timeline.
+
+  Die allgemeine Form ist dieselbe wie bei den Backticks in §2: **ein
+  Schlüsselwort, auf das eine Maschine reagiert, gehört nicht in Fließtext, der
+  es verneint.** Wer sagen will, dass ein Issue offen bleibt, nennt es ohne das
+  Wort davor („#142 bleibt offen — dies ist Spur 3 von dreien"). Und weil der
+  Aufruf Erfolg meldet, gilt §2s zweite Hälfte auch hier: hinterher nachsehen,
+  welche Issues ein Merge geschlossen hat.
 - **Ein Merge nach `main` kann fremde offene PRs still brechen** — sie zweigen
   von einem älteren Stand ab, und Git meldet den Konflikt erst dem, der später
   rebast. Wer eine Datei groß umbaut, prüft danach, wer dieselbe Datei anfasst:

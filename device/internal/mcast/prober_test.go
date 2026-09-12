@@ -158,3 +158,32 @@ func TestTheDeafLineSaysWhenTheLinkWasLastAudible(t *testing.T) {
 		t.Errorf("the deaf line drops what was heard before:\n%s", seen)
 	}
 }
+
+// Hearing and being heard are two directions, and the line must not infer one
+// from the other. Measured on hardware 2026-09-12, the first time this shipped:
+// the device logged the deaf line while the controller's own scan answered
+// "Every enabled endpoint is visible on the network", eight other hosts seen.
+// Announcements go out unprompted and do not need a query to have arrived.
+//
+// A line asserting the consequence sends the next reader to check the picker,
+// find the device in it, and write the instrument off.
+func TestTheDeafLineDoesNotClaimTheDeviceIsInvisible(t *testing.T) {
+	p := deafProber(func() Reading { return Reading{Self: 1} })
+	now := time.Now()
+	out := capture(t, func() {
+		p.Tick(now)
+		p.Tick(now.Add(time.Minute))
+	})
+	for _, claim := range []string{"in no picker", "not visible", "invisible"} {
+		if strings.Contains(strings.ToLower(out), claim) {
+			t.Errorf("the deaf line asserts %q, which this probe does not "+
+				"measure and which was false on hardware:\n%s", claim, out)
+		}
+	}
+	// And it has to point at what DOES answer that question, or the reader is
+	// left with half a diagnosis.
+	if !strings.Contains(out, "scan") {
+		t.Errorf("the deaf line does not send the reader to the scan that "+
+			"answers visibility:\n%s", out)
+	}
+}
