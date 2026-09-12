@@ -102,6 +102,7 @@ jobs:
           node controller/tests/boot_image_length.test.mjs
           node controller/tests/number_field.test.mjs
           node controller/tests/unlock_verdict.test.mjs
+          node controller/tests/emos_migration.test.mjs
 
   device-tests:
     name: Device Go tests
