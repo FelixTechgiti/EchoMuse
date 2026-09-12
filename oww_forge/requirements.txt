@@ -12,13 +12,13 @@ torch-audiomentations==0.11.0
 acoustics==0.2.6
 pronouncing==0.2.0
 datasets==2.14.6
-pyarrow==13.0.0  # datasets 2.14 uses pa.PyExtensionType, removed in newer pyarrow
+pyarrow==14.0.1  # datasets 2.14 uses pa.PyExtensionType, removed in newer pyarrow
 deep-phonemizer==0.0.19
 # piper-sample-generator (v2.0.0) runtime deps
 piper-phonemize==1.1.0
 webrtcvad==2.0.10
 # torch.onnx.export needs the onnx package at model-save time
-onnx==1.17.0
+onnx==1.22.0
 # asset downloads + audio IO
 huggingface_hub>=0.19
 soundfile
