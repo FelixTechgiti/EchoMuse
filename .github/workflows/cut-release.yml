@@ -33,7 +33,7 @@ on:
       kind:
         description: Which half to release
         type: choice
-        options: [controller, firmware, endpoints]
+        options: [controller, firmware, endpoints, emos]
         required: true
       version:
         description: 'Version with no prefix, e.g. 2.23.0-fx.1'
@@ -93,6 +93,18 @@ jobs:
             # descriptions, the md5s and the licence offer, all facts about
             # the artifact rather than prose about a change.
             endpoints)  tag="endpoints-v$v";  notes_file="" ;;
+            # emOS has its own namespace for the reasons emos/README.md
+            # gives: build.sh stamps `git describe --match 'emos-v*'` into
+            # /etc/os-release, and the firmware OTA selects tags starting
+            # `v` with a `server` asset, which `emos-v*` matches neither of.
+            #
+            # It carries THREE version components where upstream uses two
+            # (emos-v0.4.0-fx.1 against upstream's emos-v0.4). The shape
+            # check above and tests/test_changelog_headings.py are both
+            # written for MAJOR.MINOR.PATCH, and padding the patch digit
+            # keeps every guard exactly as it is rather than loosening two
+            # of them for one kind. emos/CHANGELOG.md says so at the top.
+            emos)       tag="emos-v$v";       notes_file="emos/CHANGELOG.md" ;;
           esac
           echo "tag=$tag"               >> "$GITHUB_OUTPUT"
           echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
