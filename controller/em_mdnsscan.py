@@ -31,6 +31,50 @@ SERVICES = {
     "airplay": ("_raop._tcp.local.", "AirPlay"),
 }
 
+# AirPlay 2's own service type, browsed alongside the endpoints and given NO
+# verdict of its own.
+#
+# **The device can never advertise it, and that is a property of the build
+# rather than a fault.** `device/shairport/build.sh` configures
+# `--with-tinysvcmdns` and no `--with-airplay-2`, and of shairport-sync's four
+# mDNS backends only `mdns_avahi.c` implements the second service —
+# `mdns_tinysvcmdns.c` declares `ap2name` and `secondary_txt_records`
+# `__attribute__((unused))` and registers no `mdns_update`. So this build
+# offers classic AirPlay (`_raop._tcp`) and nothing else, for ever, until #79
+# is done.
+#
+# It is browsed because that fact is INVISIBLE from here otherwise, and it is
+# the first thing somebody needs when their Echo is advertised, reachable, and
+# still absent from the AirPlay picker on their phone. Whether a client shows a
+# RAOP-only receiver depends on the client and on where in its UI they look,
+# and neither is knowable from the controller — but "this device offers classic
+# AirPlay only, and N other hosts here offer AirPlay 2" turns an unanswerable
+# question into a comparison they can act on.
+#
+# **Never a Verdict.** A service the user did not switch on and cannot switch
+# on must not render as an endpoint that is down; that is the "a control whose
+# feature the device lacks is shown disabled WITH THE REASON, never as a
+# control that silently does nothing" rule, one layer out.
+AIRPLAY2_TYPE = "_airplay._tcp.local."
+
+
+def airplay_generation_note(ap2_others: int) -> str:
+    """
+    What to say next to the AirPlay verdict about which generation this is.
+
+    Takes only the count of OTHER hosts advertising `_airplay._tcp`, because
+    our own count is known at compile time: it is always zero, and asking the
+    network about it would dress a build property up as a measurement.
+    """
+    base = ("This is classic AirPlay: the device advertises `_raop._tcp` and "
+            "never `_airplay._tcp`, which this build cannot do at all.")
+    if ap2_others > 0:
+        return (base + f" {ap2_others} other host(s) on this network do "
+                f"advertise it. If your player lists those and not this Echo, "
+                f"that difference is the reason, not the network.")
+    return (base + " No other host here advertises it either, so nothing on "
+            "this network shows what the difference would look like.")
+
 
 class Finding(NamedTuple):
     """One service instance seen on the network."""

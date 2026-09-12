@@ -6374,7 +6374,12 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
             return
         pending.append((service_type, name))
 
+    # AirPlay 2's type rides along, browsed but never given a verdict — see
+    # em_mdnsscan.AIRPLAY2_TYPE. Without it the one property that explains an
+    # Echo which is advertised, reachable and still absent from somebody's
+    # AirPlay picker is invisible from here.
     types = [t for t, _ in em_mdnsscan.SERVICES.values()]
+    types.append(em_mdnsscan.AIRPLAY2_TYPE)
     browser = AsyncServiceBrowser(azc.zeroconf, types, handlers=[_on_change])
     try:
         await asyncio.sleep(seconds)
@@ -6382,6 +6387,10 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
         await browser.async_cancel()
 
     key_for = {t: k for k, (t, _) in em_mdnsscan.SERVICES.items()}
+    # Counted rather than collected: the only question asked of it is how many
+    # OTHER hosts offer AirPlay 2, and keeping the records would invite a
+    # second, unasked verdict about them.
+    airplay2_others: set[str] = set()
     for service_type, name in pending:
         info = AsyncServiceInfo(service_type, name)
         try:
@@ -6400,6 +6409,8 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
                 continue
         key = key_for.get(service_type)
         if key is None:
+            if service_type == em_mdnsscan.AIRPLAY2_TYPE and v4:
+                airplay2_others.add(v4)
             continue
         found[key].append(em_mdnsscan.Finding(
             service=key, name=name, address=v4, port=info.port or 0,
@@ -6429,6 +6440,14 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
         port_open = None
         if mine:
             note = em_mdnsscan.txt_note(mine[0].txt)
+            if key == "airplay":
+                # Which GENERATION this is, and how the network compares. Our
+                # own address is excluded because this build never advertises
+                # the type at all — counting ourselves would be impossible
+                # rather than merely wrong.
+                gen = em_mdnsscan.airplay_generation_note(
+                    len(airplay2_others - {device_ip}))
+                note = f"{note} {gen}" if note else gen
             # What the OTHER receivers on this network say that we do not.
             # Same browse, same instant, same LAN — which is what makes this
             # worth more than a comparison against documentation. Collected
