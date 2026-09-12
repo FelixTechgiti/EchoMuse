@@ -172,3 +172,30 @@ func TestWriteNeverBlocksWhenTheSenderIsStuck(t *testing.T) {
 		t.Fatal("Write blocked on a stuck sender")
 	}
 }
+
+// Go says "deadline exceeded", not "timeout", and that gap cost a real
+// silence: `[sendspin] session ended: context deadline exceeded` repeated every
+// two minutes for hours on a live device and reached the controller not once
+// (measured 2026-09-12). A list of outcome words that cannot hear the standard
+// library's own phrasing has a hole in exactly the place Go programs use.
+func TestGoesDeadlineWordingIsAFailure(t *testing.T) {
+	for _, line := range []string{
+		"[sendspin] session ended: context deadline exceeded",
+		"[ota] read tcp 10.0.0.2:443: i/o deadline exceeded",
+	} {
+		level, forward := Classify(line)
+		if !forward || level != LevelWarn {
+			t.Errorf("%q is not relayed as a warning (level=%q forward=%v)",
+				line, level, forward)
+		}
+	}
+}
+
+// And the rest of the policy is unchanged: a cancellation is an ordinary
+// shutdown, not a fault, so widening to "context" wholesale would put every
+// clean stop on the liveness channel.
+func TestACancellationIsStillNotAFailure(t *testing.T) {
+	if _, forward := Classify("[sendspin] session ended: context canceled"); forward {
+		t.Error("a cancelled context was relayed as a failure")
+	}
+}

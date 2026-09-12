@@ -54,6 +54,16 @@ var failureMarkers = []string{
 	"refused",
 	"timeout",
 	"timed out",
+	// Go's own words for the same outcome, and the gap that proved the point.
+	// `context.DeadlineExceeded` formats as "context deadline exceeded" and
+	// `os.ErrDeadlineExceeded` as "i/o deadline exceeded" — neither contains
+	// "timeout", so the most common way a Go program says it timed out was the
+	// one way this list could not hear. Measured on a live device 2026-09-12:
+	// `[sendspin] session ended: context deadline exceeded` had been repeating
+	// every two minutes for hours, and reached the controller not once. That is
+	// the endpoint-orphan fault of 2026-09-10 exactly, with a different
+	// payload — which is what this package exists to make impossible.
+	"deadline exceeded",
 	"exited",
 	"panic",
 	"giving up",
