@@ -12,6 +12,33 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.39.0-fx.1
+
+### Ein Fehler, der stundenlang lief und den niemand sehen konnte
+
+**Sendspin scheiterte auf einem Gerät alle zwei Minuten, stundenlang, und
+nichts davon kam jemals im Controller-Log an.** Gefunden, weil jemand zufällig
+eine Root-Shell auf dem Gerät hatte — genau die Lage, die der Log-Weiterleiter
+abschaffen sollte.
+
+Der Grund ist eine Wortlücke. Die Firmware reicht Logzeilen an den Controller
+weiter, wenn sie nach einem Fehler klingen — `failed`, `exited`, `timeout` und
+ähnliche. Go schreibt einen abgelaufenen Zeitgeber aber als **`context
+deadline exceeded`**, und darin steht kein `timeout`. Die häufigste Art, wie
+ein Go-Programm sagt „Zeit abgelaufen", war also die eine, die nicht gehört
+wurde.
+
+Steht jetzt in der Liste. Ein abgebrochener Vorgang (`context canceled`)
+bleibt bewusst draußen — das ist ein normales Beenden, kein Fehler, und den
+Kanal damit zu fluten wäre schlimmer als die Lücke.
+
+**Was das für dich ändert:** Fehler dieser Art tauchen künftig im
+Home-Assistant-Log und im Support-Paket auf, statt nur auf dem Gerät. Warum
+Sendspin auf diesem Gerät nicht verbindet, ist eine eigene Frage und wird
+getrennt verfolgt.
+
+Wenn du 2.38.0-fx.1 noch nicht installiert hast: diese Version enthält sie.
+
 ## 2.38.0-fx.1
 
 ### Die Warnung aus 2.37.0-fx.1 sagte einen Satz zu viel

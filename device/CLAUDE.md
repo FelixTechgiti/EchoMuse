@@ -951,7 +951,18 @@ Four rules, and the first is the one that would hurt:
   next line through rather than costing a message of its own.
 - **Match OUTCOMES, not components.** The classifier looks for `failed`,
   `exited`, `could not`, `timeout` and so on, so a subsystem written next year
-  is relayed the day it breaks without anyone remembering to add it. The
+  is relayed the day it breaks without anyone remembering to add it.
+
+  **That only works if the list speaks the language the code actually uses**,
+  and it did not: `context.DeadlineExceeded` formats as `context deadline
+  exceeded` and contains no `timeout`, so the most common way a Go program says
+  it timed out was the one phrasing this list could not hear. Measured on a live
+  device 2026-09-12 — `[sendspin] session ended: context deadline exceeded`
+  repeating every two minutes for hours, reaching the controller not once. The
+  same silence as the endpoint orphan this package was built for, with a
+  different payload. `deadline exceeded` is in the list now; `context canceled`
+  deliberately is not, because a cancellation is an ordinary shutdown and
+  widening to `context` would put every clean stop on the liveness channel. The
   lifecycle exceptions are deliberate and few — `PcmSpeaker initialised` is
   relayed because its ABSENCE is the tell for a device whose PCM Android will
   not release, and an absence is only legible when the presence is normally
