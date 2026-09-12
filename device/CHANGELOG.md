@@ -12,6 +12,26 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.34.0-fx.1
+
+### Turning the AirPlay 2 clock daemon off now closes its ports
+
+A firewall rule that nothing can remove is a port left open for a service
+that is not running. The two PTP ports the clock daemon needs were opened
+correctly and were never in the list the firmware removes from, so switching
+the daemon off left UDP 319 and 320 accepting connections with nothing behind
+them.
+
+Nothing was exposed that a running daemon would not also have exposed, and
+the daemon is not installed on any device in this fleet yet — but the whole
+point of writing rules from the firmware rather than by hand is that turning
+a feature off takes its rules with it.
+
+Two tests now make this class of mistake fail rather than ship: one drives it
+(enable the daemon, disable it, check the ports are gone), and one reads the
+source and requires every rule constructor to appear in the removal list, so
+the next one added cannot be forgotten.
+
 ## 2.33.0-fx.1
 
 ### Everything this fork has built now works on emOS too

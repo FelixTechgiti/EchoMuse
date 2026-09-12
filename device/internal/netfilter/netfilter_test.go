@@ -2,6 +2,7 @@ package netfilter
 
 import (
 	"errors"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -240,5 +241,60 @@ func TestIcmpAcceptsOnlyEchoRequest(t *testing.T) {
 	s := strings.Join(PingRule().spec(), " ")
 	if !strings.Contains(s, "--icmp-type echo-request") {
 		t.Fatalf("ping rule is wider than echo-request: %s", s)
+	}
+}
+
+// ── Every rule this package can write must be in All() ──────────────────────
+
+func TestEveryRuleConstructorIsInAll(t *testing.T) {
+	// Sync removes what is in All() and not in `want`. A constructor that is
+	// reachable from a caller but missing from All() therefore writes rules
+	// nothing can ever take away: turn the feature off, and its ports stay
+	// open for a service that is not running. That is the exact failure
+	// All()'s own comment names, and it happened — `NqptpRules` was added,
+	// wired into applyFirewall, and left out of All(), so UDP 319 and 320
+	// survived the clock daemon being disabled.
+	//
+	// A source guard rather than a list, because a list is the thing that
+	// gets forgotten. Anything declared `func XRules() []Rule` has to be
+	// named inside All()'s body.
+	src, err := os.ReadFile("netfilter.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func All() []Rule {")
+	if start < 0 {
+		t.Fatal("All() is gone — Sync has nothing to remove from")
+	}
+	end := strings.Index(body[start:], "\n}")
+	if end < 0 {
+		t.Fatal("could not find the end of All()")
+	}
+	all := body[start : start+end]
+
+	ctors := regexp.MustCompile(`func (\w+Rules)\(\) \[\]Rule`).FindAllStringSubmatch(body, -1)
+	if len(ctors) < 2 {
+		t.Fatalf("found %d rule constructors — the guard is not looking at the "+
+			"right file", len(ctors))
+	}
+	for _, m := range ctors {
+		if !strings.Contains(all, m[1]+"()") {
+			t.Fatalf("%s() is not in All(), so Sync can never remove what it "+
+				"writes — turning that feature off would leave its ports open",
+				m[1])
+		}
+	}
+}
+
+func TestTurningTheClockDaemonOffClosesItsPorts(t *testing.T) {
+	// The behaviour the omission cost, driven rather than read.
+	f := newFake()
+	Sync(f.run, append(AirPlayRules(), NqptpRules()...))
+	Sync(f.run, AirPlayRules())
+	for _, r := range NqptpRules() {
+		if f.count(r) != 0 {
+			t.Fatalf("PTP port left open with no daemon behind it: %s", r)
+		}
 	}
 }
