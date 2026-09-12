@@ -12,6 +12,56 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.33.0-fx.1
+
+### Everything this fork has built now works on emOS too
+
+**Preparation for running an Echo with no Amazon userspace on it at all.**
+Nothing changes on a FireOS device: every behaviour below is identical there,
+and the whole of this release is about what happens on the other base.
+
+The firmware takes hardware away from Amazon's services on the way up — the
+mixer before the microphone, the media server before the speaker, the ring
+driver before the LEDs, the button service before the buttons. Under emOS
+none of those services exist, and the requests were being made anyway.
+
+**One of them decided whether the Echo started at all.** The button
+initialiser returned whatever `stop acebutton` returned, and the firmware
+treats that as fatal. Whether an emOS device booted therefore rested on what
+Amazon's `stop` does when it has no property service to talk to — it happens
+to ignore the failure and exit 0, so it would have worked. Resting "does this
+Echo come up" on a vendor binary's undocumented exit code is not something to
+leave in place because it happens to hold.
+
+Also on emOS: the Bluetooth proxy no longer tries to disable an Android
+Bluetooth stack that is not installed, and the microphone no longer logs a
+failure about a service that does not exist on every single boot.
+
+### Changing the WiFi network works on emOS
+
+**This one would genuinely have been broken**, and silently: the dashboard's
+network change is the only control here that reaches past the kernel into
+Android's framework. FireOS runs wpa_supplicant under that framework and the
+only safe lever is `svc wifi disable`/`enable`; emOS runs it directly, has no
+`svc`, and the change would have been refused every time with an error about
+a missing file.
+
+emOS now gets its own path, and everything around it is unchanged — the
+backup, the association and address checks, the automatic rollback when the
+new network does not work, and the recovery at startup if the power went out
+mid-change. That safety net is what makes this shippable before anyone has
+tried it on a real emOS device: the worst case is that the Echo puts its old
+network back and reboots, not that it ends up somewhere nobody can reach it.
+
+### A correction to 2.31.0-fx.1's notes
+
+That entry said emOS has no firewall so there is nothing to open. **Half
+right.** emOS has no default-deny policy — that is one of Amazon's startup
+scripts, which does not run — but it does mount Amazon's system partition, so
+`iptables` is there and works. The Echo writes the same four rules, into a
+table that already accepts everything. They do nothing, which is correct, and
+they cost nothing worth measuring.
+
 ## 2.32.0-fx.1
 
 ### Spotify Connect recovers instead of failing for ever

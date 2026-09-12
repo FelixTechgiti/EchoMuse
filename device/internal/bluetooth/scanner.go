@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/platform"
 )
 
 const (
@@ -378,6 +380,17 @@ func (s *Scanner) flush() {
 // (same ENOEXEC constraint as svc in internal/wifi).
 func (s *Scanner) ensureBluedroidDisabled() {
 	if s.bluedroidDisabled {
+		return
+	}
+	// **emOS has no Bluedroid and no package manager**, so /dev/stpbt is
+	// already ours and there is nothing to disable. Saying so once beats
+	// four `pm disable` failures and a `settings put` failure on every start
+	// of a device with nothing wrong with it — and `pm` not existing is the
+	// ORDINARY answer there, not a fault worth a log line each.
+	if !platform.IsAndroid() {
+		s.bluedroidDisabled = true
+		log.Println("[ble] no Android Bluetooth stack to disable (emOS) — " +
+			"/dev/stpbt is unowned")
 		return
 	}
 	pkgs := []string{

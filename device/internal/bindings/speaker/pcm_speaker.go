@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/androidsvc"
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
@@ -198,7 +199,7 @@ func (p *PcmSpeaker) Init() error {
 	// unmute must come last. The old order (amp on → unmute → open PCM)
 	// unmuted a floating DAC and then hit it with the stream-open
 	// transient — the "click" on every service start.
-	exec.Command("stop", "mixer").Run()
+	androidsvc.StopQuietly("mixer")
 	// Android's media stack takes the speaker for itself when a headphone
 	// plug is present at boot, and ALSA parks a blocking open behind it with
 	// no timeout — stranding the whole device, since everything else in
@@ -211,7 +212,12 @@ func (p *PcmSpeaker) Init() error {
 	// `running` again while we still hold the PCM — so one stop before the
 	// wait is a race we lose whenever it returns and re-grabs the device
 	// before we open it.
-	stopMedia := func() { exec.Command("stop", "media").Run() }
+	// Nothing to ask under emOS: no mediaserver means the PCM is never taken,
+	// so waitForFreePcm finds it free on its first look and the nudge is
+	// never spent. StopQuietly keeps that a decision rather than four failed
+	// fork/execs per retry — and this loop RETRIES, which is what made the
+	// cost comment written for a one-shot go stale once before.
+	stopMedia := func() { androidsvc.StopQuietly("media") }
 	stopMedia()
 	if !waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout, stopMedia) {
 		// Return rather than open. tinyalsa's open has no timeout, so

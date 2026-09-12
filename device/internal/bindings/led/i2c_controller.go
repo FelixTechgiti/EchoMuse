@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/wilbowes/EchoMuse/internal/androidsvc"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"os"
-	"os/exec"
 )
 
 // i2C device that sets the current led
@@ -52,8 +52,8 @@ func (i *I2CController) Init() error {
 		return err
 	}
 
-        // privacy_brightness may not exist on all devices — ignore error
-        _ = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm)
+	// privacy_brightness may not exist on all devices — ignore error
+	_ = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm)
 
 	//if err = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm); err != nil {
 	//	return err
@@ -61,8 +61,10 @@ func (i *I2CController) Init() error {
 
 	// ledcontroller may overwrite our led config
 	// solution: let android kill it
-	cmd := exec.Command("stop", "ledcontroller")
-	_ = cmd.Run()
+	// Amazon's own ring driver, which would otherwise repaint under us.
+	// Nothing owns the ring under emOS but the kernel's boot animation, and
+	// init has already handed that back by the time the firmware runs.
+	androidsvc.StopQuietly("ledcontroller")
 	//if err = cmd.Run(); err != nil {
 	//	return err
 	//}
@@ -92,18 +94,18 @@ func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	var targetColor bytes.Buffer
-    for _, curLed := range LEDs {
-        for j, storedLed := range led.Leds {
-            if curLed.ID == storedLed.ID {
-                led.Leds[j] = curLed  // update stored with incoming
-                break
-            }
-        }
-    }
-    for _, l := range led.Leds {
-        targetColor.Write(l.BuildArgument())
-    }
-    return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
+	for _, curLed := range LEDs {
+		for j, storedLed := range led.Leds {
+			if curLed.ID == storedLed.ID {
+				led.Leds[j] = curLed // update stored with incoming
+				break
+			}
+		}
+	}
+	for _, l := range led.Leds {
+		targetColor.Write(l.BuildArgument())
+	}
+	return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
 }
 
 func NewDefaultController() (led.Controller, error) {

@@ -65,6 +65,17 @@ var (
 	cached string
 )
 
+// IsAndroid reports whether the firmware booted on Amazon's Android
+// userspace, which is where `stop`, `pm`, `svc` and the property service mean
+// anything.
+//
+// **Unknown counts as Android**, matching every other reader of this value:
+// firmware that cannot tell must behave the way the existing fleet does. The
+// cost of being wrong in that direction is a failed exec; the cost of the
+// other direction is hardware nobody asked Android to let go of, which is
+// silence, a dead ring or a dead microphone.
+func IsAndroid() bool { return Base() != EmOS }
+
 // Base returns the detected base OS, resolved once. It cannot change without a
 // reboot, and caching also means the value reported on the first stats tick is
 // the value reported on every later one — a field that flapped would be read as
