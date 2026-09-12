@@ -25,6 +25,16 @@ ausführliche Anleitung, statt so zu tun, als sei es einfach.
 
 ## Schritt 1 — Den Dot rooten (einmalig, pro Gerät)
 
+> **⚠️ Entsperre mit amonet-biscuit v1.1.0, nicht v2.0.0.** v2.0.0
+> (10. September 2026) ersetzt die Bootloader des Echo, sodass FireOS 5 nicht
+> mehr bootet — und Revoice läuft ausschließlich auf FireOS 5, emOS
+> eingeschlossen. Der XDA-Thread bietet inzwischen v2.0.0 zuerst an und
+> fordert entsperrte Nutzer zum Update auf. Falls du es schon installiert
+> hast: **versuche nicht, durch Flashen von FireOS 5 oder eines älteren
+> amonet zurückzukommen** — das heißt Bootloader von Hand schreiben, und
+> genau so wird ein Echo hart gebrickt. Die Einzelheiten stehen ganz oben in
+> [rooting](rooting.md).
+
 Der Dot kommt fest an Amazons Software gebunden. Ihn zu entsperren heißt,
 veränderte Firmware über USB zu flashen — das ist der einzige wirklich
 fummelige Teil des Projekts, dauert beim ersten Mal etwa eine Stunde und ist

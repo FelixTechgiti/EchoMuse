@@ -3,6 +3,22 @@
 > **Du tust das auf eigenes Risiko. Wir übernehmen keine Verantwortung für
 > negative Folgen.**
 
+> **⚠️ Installiere `amonet-biscuit` v2.0.0 NICHT auf einem Echo, auf dem
+> Revoice läuft.**
+> Version 2.0.0 des Unlocks (10. September 2026) ersetzt die Bootloader des
+> Echo, und danach bootet FireOS 5 nicht mehr. Revoice läuft ausschließlich
+> auf FireOS 5 — emOS eingeschlossen, denn emOS benutzt den FireOS-5-Kernel.
+> Der XDA-Thread fordert entsperrte Nutzer inzwischen zum Update auf. Wenn auf
+> deinem Echo Revoice läuft: tu es nicht.
+>
+> - **Du entsperrst gerade einen neuen Echo?** Nimm **amonet-biscuit v1.1.0**,
+>   das weiterhin im XDA-Thread hängt.
+> - **Schon aktualisiert?** Versuche nicht, durch Flashen von FireOS 5 oder
+>   eines älteren amonet zurückzukommen. v2.0.0 hat Preloader, LK und
+>   TrustZone überschrieben, und die alten von Hand zurückzuschreiben ist
+>   genau der Weg, auf dem ein Echo hart gebrickt wird. Revoice läuft heute
+>   nicht auf FireOS 6, dieser Echo bleibt also vorerst dort.
+
 Revoice braucht einen Echo Dot Gen 2, der bereits entsperrt ist und FireOS 5
 läuft. Zwei getrennte Arbeiten bringen dich dorthin, und sie tragen sehr
 unterschiedliche Risiken.
@@ -17,25 +33,24 @@ unterschiedliche Risiken.
   FireOS 6
 - Micro-USB-Kabel erforderlich
 
-> **FireOS 6 gibt es für biscuit und es lässt sich nach dem Entsperren nicht
-> mehr booten.** `Fire OS 6.5.7.0 (NS6570/6077)` existiert wirklich, und die
-> Anleitung von amonet sagt dir, du sollst vor dem Entsperren *darauf*
+> **Welches FireOS bootet, hängt davon ab, welches amonet du benutzt hast.**
+> Bis einschließlich v1.1.0 booten nach dem Entsperren nur ROMs auf
+> FireOS-5-Basis; R0rt1z2s Thread sagte, das Flashen von FireOS 6 „may result
+> in a (soft) brick". v2.0.0 (10. September 2026) dreht das um: FireOS 6
+> bootet, FireOS 5 nicht mehr.
+>
+> Was sich ändert, sind die Bootloader, nicht die Bitbreite des Kernels. Der
+> v2.0.0-Installer schreibt einen neueren Preloader, LK und TrustZone auf das
+> Gerät, und der Kernel von FireOS 5 läuft darauf nicht. Sein LK-Patch startet
+> einen 32- oder 64-Bit-Kernel je nachdem, was das Boot-Image verlangt — die
+> Bitbreite war also nicht das Hindernis. (Das korrigiert eine frühere Fassung
+> dieser Notiz, die es auf die Signaturkette der TrustZone schob.)
+>
+> Revoice läuft, emOS eingeschlossen, auf FireOS 5 und braucht daher
+> **v1.1.0**. Für diese Version ist `Fire OS 6.5.7.0 (NS6570/6077)` weiterhin
+> relevant: ihre Anleitung sagt dir, du sollst vor dem Entsperren *darauf*
 > aktualisieren, weil der Exploit die Firmware-Partitionen unterwegs
-> herabstuft. Nach dem Entsperren booten aber nur ROMs auf FireOS-5-Basis —
-> R0rt1z2s Thread sagt ausdrücklich, dass das Flashen von FireOS 6 „may
-> result in a (soft) brick".
->
-> Zwei Gründe, und der zweite ist der eigentliche. FireOS 6 ist auf diesem
-> Board ein **32-Bit**-Kernel, während amonets Payload 64 Bit erzwang — das
-> ist upstream behoben, indem die cmdline ausgewertet wird. Der Blocker
-> darunter ist die Signaturkette: FireOS 6 braucht vermutlich eine neuere
-> TrustZone, und eine neuere TZ lässt sich nicht flashen, weil der
-> FireOS-5-Preloader eine mit abweichender Signatur nicht bootet. Das liegt
-> unterhalb der Grenze, in die dieses Projekt schreibt, Revoice kann daran
-> also nichts ändern.
->
-> Praktisch: Revoice zielt auf FireOS 5, und ein neueres Android ist auf
-> diesem Gerät kein Weg zu einem neueren Kernel.
+> herabstuft.
 
 ## Was du brauchst
 
@@ -45,7 +60,9 @@ Für das Entsperren selbst (die maßgebliche Liste steht in R0rt1z2s Thread):
   unten zu macOS
 - Python 3 (fürs Patchen des Boot-Images und Anlegen der Magisk-Datenbank)
 - Die folgenden Dateien heruntergeladen und bereit:
-  - `amonet-biscuit-v1.1.0.zip` — aus R0rt1z2s XDA-Thread
+  - `amonet-biscuit-v1.1.0.zip` — aus R0rt1z2s XDA-Thread. **Nicht
+    v2.0.0**, was der Thread inzwischen zuerst anbietet; siehe die
+    Warnung ganz oben auf dieser Seite.
   - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` —
     FireOS-5-Firmware (**genau dieser Build** — siehe unten)
   - `f1r30s.zip` — aus R0rt1z2s XDA-Thread. Tut vier Dinge, nicht eines:
@@ -107,7 +124,9 @@ Das dauerhafte Entsperren, der Bootrom-Exploit und TWRP für dieses Gerät sind
 
 Folge diesem Thread, nicht dieser Seite. Wir verlinken ihn, statt ihn zu
 kopieren, weil eine Kopie veraltet, ohne dass es jemand merkt. Sollten die
-beiden sich je widersprechen, hat der Thread recht.
+beiden sich je widersprechen, hat der Thread recht — **mit einer Ausnahme:
+der Version.** Nimm v1.1.0, nicht v2.0.0. v2.0.0 hält FireOS 5 vom Booten ab,
+und Revoice braucht FireOS 5; siehe die Warnung ganz oben auf dieser Seite.
 
 **Das ist der Teil, der ein Gerät ruinieren kann.** Er führt einen
 Bootrom-Exploit aus, verändert die Partitionstabelle und löscht `userdata`.

@@ -2397,6 +2397,26 @@ throughout — so the rules below are all one rule seen from different angles.
   `system_<slot>` read-only, by NAME and by slot rather than as p13, and read
   `build.prop`. That is also the partition emOS mounts at runtime for bionic
   and tinyalsa, so it is the build that actually matters.
+  **The FireOS 5 check itself used TWRP's getprop until 2026-09-11**, and
+  passed only because v1's TWRP 3.2.3 happens to report 5.1.1. In recovery
+  the release now comes from `/system` (`readFireosBuild().release`), and an
+  unknown one skips the check rather than guessing.
+- **A device unlocked with amonet-biscuit v2.0.0 is refused at the connect
+  step, on EVIDENCE, never on absence** (`_unlockVerdict`). v2.0.0 (R0rt1z2,
+  10 Sep 2026) writes a newer preloader, LK and TrustZone, FireOS 5 does not
+  boot on them, and neither does emOS, which runs the FireOS 5 kernel — so
+  without this the emOS flow would escrow, build and flash an image that
+  cannot boot. Any one of three signs refuses: an MTK image header
+  (`88168858`) at the start of `expdb`, where v2's preloader exploit loads LK
+  from (amonet-koboreru's `LK_PART_NAME`); TWRP 3.7 or later (v2 ships
+  3.7.0_9-0, v1 3.2.3-0); or Android 6+ as the release that matters. A probe
+  that could not run yields empty strings, and empty is NOT evidence — the
+  error that must not happen is refusing a working v1.1.0 device because `od`
+  was missing. The absence of `boot_[ab]_amonet` is deliberately not one of
+  the signs: v2's installer does not rewrite the GPT, so a device upgraded
+  from v1 may still carry v1's names. Derived from R0rt1z2's published
+  sources, not from a v2 device, since none has been through the wizard yet.
+  `unlock_verdict.test.mjs`.
 - **`_STEP_MODE` is enforced at every step, not only on Reconnect.** It existed
   and was correct and was consulted in one place, where a mismatch logged a
   line and left Retry enabled. In Android `/dev/block/other-boot` is amonet's
@@ -2691,3 +2711,21 @@ while a value lives at the call site.**
   inline styles cannot express `:hover` or `:focus-visible` at all, so until
   the class layer existed the dashboard had **no keyboard focus ring
   anywhere**.
+- **Slider or NumberField is a question about the SETTING, not the layout.**
+  A slider is right where the value is tuned by ear against a real room — the
+  LED meter response, `duckDb` — and you drag, listen, and the number is
+  incidental. It is wrong where somebody already knows the number they want,
+  because `step` decides which values exist at all: the console idle timeout
+  ran 0-90 at step 5, so "twenty minutes" meant hitting a 1px target and
+  "seven" could not be expressed (Wil, 2026-09-10).
+  **NumberField takes integers by STRIPPING non-digits as they are typed, not
+  by rounding afterwards**, and those are not equivalent in the way they look.
+  `Math.round("0.1")` is 0, and 0 in that control means NEVER — so the single
+  entry somebody makes when they want the shortest possible timeout would have
+  silently switched the timeout off. Stripping makes 0 reachable only by typing
+  it. It is `type="text"` with `inputMode="numeric"` rather than
+  `type="number"`, because a number input accepts `0.1` and `1e3` anyway and
+  hands some browsers an empty string for them, leaving the filter nothing to
+  bite on. Empty is "still typing" and commits nothing; out of range clamps
+  rather than rejects, since an error nobody can act on beside a box still
+  showing their number is worse than the nearest legal value.

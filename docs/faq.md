@@ -11,6 +11,22 @@ offenen Fehler auf, die vor einem Issue einen Blick wert sind, und
 
 ## Rooten und Entsperren
 
+### Der XDA-Thread sagt, ich soll auf amonet v2.0.0 aktualisieren. Soll ich?
+**Nicht auf einem Echo, auf dem Revoice läuft.** v2.0.0 (10. September 2026)
+ersetzt die Bootloader des Echo, und danach bootet FireOS 5 nicht mehr.
+Revoice läuft ausschließlich auf FireOS 5 — emOS eingeschlossen, denn emOS
+benutzt den FireOS-5-Kernel.
+
+- **Du entsperrst einen neuen Echo:** nimm **v1.1.0**, das weiterhin im Thread
+  hängt.
+- **v2.0.0 ist schon drauf:** versuche nicht, durch Flashen von FireOS 5 oder
+  eines älteren amonet zurückzukommen. v2.0.0 hat Preloader, LK und TrustZone
+  überschrieben, und die alten von Hand zurückzuschreiben ist genau der Weg,
+  auf dem ein Echo hart gebrickt wird. Revoice läuft heute nicht auf FireOS 6,
+  dieser Echo bleibt also vorerst dort.
+
+Warum das so ist, steht ganz oben in [rooting](rooting.md).
+
 ### Das Entsperren läuft auf meinem Mac nicht.
 **Es braucht Linux.** Das Entsperren ist
 [R0rt1z2s Arbeit auf XDA](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
@@ -67,10 +83,12 @@ unbestätigt.
 
 ### Der Assistent sagt, er brauche einen sicheren Kontext.
 Wenn du Home Assistant über einfaches `http://` erreichst, blockiert der
-Browser WebUSB. Trage deine HA-URL unter
-`chrome://flags/#unsafely-treat-insecure-origin-as-secure` ein — etwa
-`http://homeassistant.local:8123` — und starte den Browser neu. Verfolgt als
-[#170](https://github.com/wilbowes/EchoMuse/issues/170).
+Browser WebUSB, und der erste Schritt des Assistenten nennt dir den genauen
+Origin, den du freigeben musst. Entweder du lieferst Home Assistant über HTTPS
+aus, oder du trägst diesen Origin unter
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure` ein und startest
+den Browser neu. Der Eintrag muss Schema, Host **und Port** exakt treffen —
+einer für irgendeine andere Adresse deckt ihn nicht ab.
 
 ### Die USB-Verbindung bricht alle paar Sekunden ab und meldet sich neu an.
 `persist.sys.usb.config` steht auf `mtp,adb`, und das zusammengesetzte
@@ -98,6 +116,28 @@ und nicht die Lösung. Korrigiert am 2026-09-05.)*
 Jeder gescheiterte Schritt bietet eine Diagnose an. Hol sie dir vor dem
 nächsten Versuch — der Zustand, in dem das Gerät ist, *ist* die Diagnose, und
 ein erneuter Versuch zerstört ihn.
+
+---
+
+## emOS
+
+### emOS oder FireOS: was soll ich im Assistenten wählen?
+Der Assistent bietet **emOS** zuerst an. Es ersetzt Android auf dem Echo
+vollständig und behält nur Amazons Kernel — und es ist der Grund, warum sich
+die 3,5-mm-Klinke dort korrekt verhält. **FireOS** ist einen beschrifteten
+Klick daneben und das, worauf die meisten Geräte im Feld laufen. Der
+emOS-Ablauf sichert dein ursprüngliches Boot-Image, bevor er irgendetwas
+schreibt, und es zurückzuspielen dauert etwa zehn Sekunden; der FireOS-Ablauf
+tut das noch nicht
+([#468](https://github.com/wilbowes/EchoMuse/issues/468)). Beide brauchen den
+amonet-Unlock **v1.1.0**; siehe die erste Frage auf dieser Seite.
+
+### Wie führe ich den Assistenten auf einem emOS-Gerät noch einmal aus?
+emOS hat kein adb, der Assistent sieht das Gerät also nicht direkt. Öffne die
+USB-Konsole, führe `/init recovery` aus, und der Echo startet in TWRP neu — wo
+der erste Schritt des Assistenten ihn annimmt. Das braucht emOS 0.4 oder
+neuer. Sagt der Assistent danach, das Gerät sei bereits registriert, lass ihn
+den alten Eintrag löschen.
 
 ---
 
@@ -133,6 +173,17 @@ oder aktualisiere das Add-on aus Home Assistant heraus. **Der Update-Hinweis
 im Dashboard ist ein Hinweis und bleibt es** — der Controller ist dein
 Container, und ein Prozess kann sich nicht mitten in einer Anfrage selbst
 neu starten und dir danach erzählen, wie es lief.
+
+### Home Assistant bietet ein Update an, aber die Installation scheitert.
+Warte ein paar Minuten und versuche es erneut. Home Assistant sieht eine neue
+Version kurz bevor ihr Image fertig veröffentlicht ist, und bis dahin
+scheitert die Installation mit `manifest unknown`. An deiner Installation ist
+nichts falsch.
+
+### Das Add-on startet nicht: „NumPy was built with baseline optimizations: (X86_V2)".
+Behoben in **2.23.1**; aktualisiere das Add-on. Betroffen waren Proxmox-VMs
+mit dem CPU-Typ `kvm64`, dem Befehle fehlen, die NumPy 2.4 brauchte.
+[#496](https://github.com/wilbowes/EchoMuse/issues/496).
 
 ### Der Update-Hinweis zeigt keine Versionshinweise.
 Die Hinweise kommen aus der Tag-Annotation. Sind sie leer, ist das unser
@@ -190,7 +241,10 @@ Siehe [#210](https://github.com/wilbowes/EchoMuse/issues/210) — und bitte
 ergänze deinen Aufbau, dieses Issue braucht mehr Meldungen, als es hat.
 
 ### Das Gerät wird nicht als Ziel für „ein Gespräch beginnen" angeboten.
-Noch nicht umgesetzt. [#335](https://github.com/wilbowes/EchoMuse/issues/335).
+**Aktualisiere den Controller.** `assist_satellite.start_conversation` und
+`assist_satellite.ask_question` werden beide unterstützt, Aufmerksamkeitston
+eingeschlossen. Ein Gerät erscheint erst als Ziel, wenn es ein funktionierendes
+Mikrofon meldet — fehlt es weiterhin, prüfe, ob das Gerät verbunden ist.
 
 ---
 
@@ -243,20 +297,29 @@ Ducking braucht Firmware, die Audio-Mixing ankündigt. Aktualisiere die
 Geräte-Firmware; wenn sie weiter pausiert, sieh unter Gerät → Status nach und
 melde es.
 
+### Manche Befehle brauchen fünfzehn Sekunden bis zur Antwort.
+Behoben in **2.23.0**; aktualisiere den Controller. Es traf kurze Befehle wie
+„Stopp" und das Sprechen direkt nach dem Wakeword, weil Home Assistants
+Erkennung des Sprechendes manchmal gar nicht erst anlief und ihr eigenes
+Fünfzehn-Sekunden-Limit auslief. Passiert es weiterhin, melde es mit einem
+Support-Bundle. [#485](https://github.com/wilbowes/EchoMuse/issues/485).
+
 ### Lange Antworten brechen mittendrin ab.
-Bekannt: [#324](https://github.com/wilbowes/EchoMuse/issues/324). Ein
-Support-Bundle mit dem Zeitpunkt hilft hier wirklich.
+Behoben; aktualisiere den Controller. Bricht eine lange Antwort weiterhin
+früh ab, ist ein Support-Bundle mit dem Zeitpunkt die richtige Meldung.
+[#324](https://github.com/wilbowes/EchoMuse/issues/324).
 
 ### Kann ich ihn unterbrechen, während er spricht?
 Ja — sag das Wakeword noch einmal. Aktiviere es unter **Config → Wake word →
 Barge-in**, falls noch nicht geschehen.
 
 ### Kann er Timer?
-Ja, seit der aktuellen Version — frag danach, wie du es erwarten würdest.
-**Einen klingelnden Timer per Sprache zu stoppen, ist bekanntermaßen
-unzuverlässig**, und diese Hälfte ist noch in Arbeit. Melde, was du gesagt
-hast und was passiert ist; die Formulierungen, die Leute tatsächlich
-benutzen, sind der nützliche Teil.
+Ja — frag danach, wie du es erwarten würdest, und er klingelt auf dem Echo
+selbst. Einen zu stoppen macht den Echo nicht mehr taub. **Einen klingelnden
+Timer per Sprache zu stoppen, kann weiterhin unzuverlässig sein**, weil der
+Klingelton mit dem konkurriert, was du sagst. Melde, was du gesagt hast und
+was passiert ist; die Formulierungen, die Leute tatsächlich benutzen, sind der
+nützliche Teil.
 
 ---
 
@@ -306,9 +369,13 @@ Wenn danach immer noch beide antworten, melde es.
 Noch nicht — [#133](https://github.com/wilbowes/EchoMuse/issues/133).
 
 ### Das Gerät verbindet sich nach einem Neustart nicht wieder mit dem WLAN.
-Wenn dein Netzwerk keinen Internetzugang hat, ist das ein bekanntes
-Android-Verhalten, das das automatische Verbinden blockiert —
-[#317](https://github.com/wilbowes/EchoMuse/issues/317).
+Hat dein Netzwerk keinen Internetzugang, hält Android es für schlecht und
+tritt ihm nicht mehr automatisch bei. **Behoben für Geräte, die der aktuelle
+Assistent eingerichtet hat**
+([#317](https://github.com/wilbowes/EchoMuse/issues/317)). Ein davor
+eingerichtetes Gerät kann weiterhin hineinlaufen; das auf einem Gerät im Feld
+zu bereinigen ist
+[#439](https://github.com/wilbowes/EchoMuse/issues/439).
 
 ### Mein Gerät hat keinen Helligkeitssensor.
 Manche Dots haben einen Sensor aus zweiter Quelle verbaut, der einen anderen
