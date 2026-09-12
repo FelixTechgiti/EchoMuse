@@ -191,6 +191,19 @@ func (s *Server) SetVolumeFromAirPlay(level int) {
 	s.volume.Set(level, true)
 }
 
+// SetVolumeFromSpotify is the same thing for Spotify Connect's slider, and it
+// is a separate method rather than a shared one so the two remain
+// independently greppable — the volume path is where a wrong caller is
+// hardest to notice, because the symptom is a level rather than an error.
+//
+// Both mark the volume SEEDED: somebody has just set it deliberately, so the
+// controller's stored startupVolume must not land on top of that at the next
+// config push. Same reason as AirPlay's.
+func (s *Server) SetVolumeFromSpotify(level int) {
+	s.volumeSeeded.Store(true)
+	s.volume.Set(level, true)
+}
+
 // SeedVolume restores the controller's stored startupVolume — the source of
 // truth for volume, kept current by the volume_state echo — on the first
 // config push of each run. Applying it on *every* push would race a live
