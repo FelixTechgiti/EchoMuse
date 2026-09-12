@@ -4,7 +4,7 @@
 # Usage: ./build.sh [git-ref]
 set -euo pipefail
 
-REF="${1:-v0.7.1}"
+REF="${1:-v0.8.0}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
 IMAGE=revoice-librespot
