@@ -9181,10 +9181,17 @@ function App() {
                 style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--warn)',
                          background: 'none', border: '1px solid var(--warn)', borderRadius: 4,
                          padding: '1px 6px', cursor: 'pointer' }}>
-                {status.controller_version} · reload
+                Controller {status.controller_version} · reload
               </button>
             ) : (
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{status.controller_version}</div>
+              /* "Controller" is not decoration. This number and the firmware
+                 number on every device card are two independently versioned
+                 halves that never agree, and a bare version in the page
+                 header reads as THE version of what you are looking at —
+                 asked three times in one afternoon before the word was
+                 added. The tile below says "Latest Firmware Release" for the
+                 same reason. */
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>Controller {status.controller_version}</div>
             )
           )}
         </div>
@@ -9287,7 +9294,7 @@ function App() {
         {release && (
           <div className="em-summary-release em-inset" style={{ flex: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>Latest Release</div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>Latest Firmware Release</div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>
             </div>
             {/* Actions as ONE flex child, not three.
