@@ -2215,6 +2215,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                                 {v.note && (
                                   <div style={{ color:'var(--warn)' }}>{v.note}</div>
                                 )}
+                                {v.compared && (
+                                  <div style={{ color:'var(--warn)' }}>{v.compared}</div>
+                                )}
                                 {(v.advertised || []).map(a => (
                                   <div key={a.name} style={{ color:'var(--muted)' }}>
                                     {a.name} → {a.target}:{a.port}

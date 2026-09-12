@@ -178,3 +178,107 @@ def txt_note(txt: dict) -> Optional[str]:
                 "receivers exist without it, so this is a difference rather "
                 "than a fault.")
     return None
+
+
+# ── Comparing our advertisement against the ones that work ───────────────────
+#
+# **The measurement that was missing on 2026-09-12.** By then everything the
+# device controls had been verified: complete records, a resolvable SRV
+# target, the advertised port answering, and — decisively — a SECOND HOST on
+# the same network (the controller) hearing all of it. And the Spotify app on
+# a phone on that same network still did not list the device, while it listed
+# other Spotify Connect speakers.
+#
+# At that point the only question left is what those other speakers say that
+# we do not. The scan already collects their records; it was throwing them
+# away and reporting a count. So the count became a diff.
+#
+# **Same network, same instant, same browse** — which is what makes this worth
+# more than any comparison against documentation. A key that every working
+# receiver on this LAN carries and ours does not is a lead; one that only some
+# carry is a difference, and this reports which of the two it is rather than
+# deciding for the reader. That distinction is the whole of `txt_note`'s
+# existing caution: a certified Denon receiver ships without `Stack`, so its
+# absence cannot be a fault on its own.
+
+
+class TxtComparison(NamedTuple):
+    """How our TXT differs from the other hosts advertising this service."""
+    others: int                 # how many other hosts were compared against
+    missing: tuple              # (key, value, how_many_others) we do not send
+    extra: tuple                # (key, value) only we send
+    differing: tuple            # (key, ours, theirs, how_many_others)
+
+
+def _common_value(values: list) -> tuple:
+    """The most frequent value and how often it occurred."""
+    best, count = "", 0
+    for v in set(values):
+        n = values.count(v)
+        if n > count:
+            best, count = v, n
+    return best, count
+
+
+def txt_compare(mine: dict, others: list) -> Optional[TxtComparison]:
+    """
+    Diff our TXT against the other hosts' TXT for the same service.
+
+    `others` is a list of TXT dicts from OTHER hosts. None when there is
+    nothing to compare against — which is a different statement from "no
+    differences" and must not render as one.
+
+    Keys are compared case-insensitively because mDNS TXT keys are, and
+    because a receiver writing `CPath` where another writes `cpath` is not a
+    finding; reporting it as one is noise that buries the real entry.
+    """
+    if not others:
+        return None
+
+    def lower(d):
+        return {str(k).lower(): str(v) for k, v in (d or {}).items()}
+
+    ours = lower(mine)
+    theirs = [lower(o) for o in others if o]
+    if not theirs:
+        return None
+
+    every_key = set()
+    for t in theirs:
+        every_key |= set(t)
+
+    missing, differing = [], []
+    for k in sorted(every_key):
+        values = [t[k] for t in theirs if k in t]
+        value, count = _common_value(values)
+        if k not in ours:
+            missing.append((k, value, count))
+        elif ours[k] != value:
+            differing.append((k, ours[k], value, count))
+
+    extra = tuple(sorted((k, v) for k, v in ours.items() if k not in every_key))
+    # Keyword arguments, because the fields are three same-shaped tuples and
+    # positionally they swapped silently the first time this was written.
+    return TxtComparison(others=len(theirs), missing=tuple(missing),
+                         extra=extra, differing=tuple(differing))
+
+
+def describe_comparison(c: Optional[TxtComparison]) -> Optional[str]:
+    """
+    One line for the panel, or None when there is nothing to say.
+
+    Silent when the records agree: a comparison that prints "no differences"
+    every time is a line everybody learns to skip, and this one has to be
+    read on the day it says something.
+    """
+    if c is None or not (c.missing or c.differing):
+        return None
+
+    parts = []
+    for k, v, n in c.missing:
+        # "all of them" is the shape of a lead; "2 of 8" is the shape of a
+        # difference, and the reader needs to see which this is.
+        parts.append(f"missing {k}={v!r} ({n} of {c.others} others send it)")
+    for k, ours, theirs, n in c.differing:
+        parts.append(f"{k} is {ours!r} here, {theirs!r} on {n} of {c.others}")
+    return "Compared with the other devices on this network: " + "; ".join(parts)

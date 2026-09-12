@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.40.0-fx.1
+
+### The network check now tells you what the working devices say that yours does not
+
+**Network visibility** already answered "is this Echo being heard". It now
+also answers the question that comes next when it *is* being heard and the
+app still does not list it: **what do the other Spotify Connect and AirPlay
+devices on your network advertise that this one does not?**
+
+It compares the Echo's advertisement against every other device answering the
+same scan — same network, same moment — and names the difference:
+
+> Compared with the other devices on this network: missing `Stack='SP'`
+> (8 of 8 others send it)
+
+Same network and same instant is what makes this worth more than a comparison
+against documentation. A key that **every** working receiver on your network
+carries is a lead; one that only some carry is a difference, and the line says
+which of the two it is rather than deciding for you.
+
+**It stays silent when the records agree**, deliberately — a line that prints
+on every scan is one nobody reads on the day it matters.
+
 ## 2.39.0-fx.1
 
 ### The network check no longer blames the network for a disconnected Echo

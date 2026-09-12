@@ -181,3 +181,82 @@ def test_a_switched_off_endpoint_is_not_reported_as_unstarted():
     v = m.verdict("spotify", [], "192.168.1.5", False, connected=False)
     assert v.running is True
     assert "switched off" in v.detail
+
+
+# ── Comparing our advertisement against the ones that work ───────────────────
+#
+# The state this was written for, 2026-09-12: everything the device controls
+# was verified — complete records, a resolvable SRV target, the advertised
+# port answering, and a SECOND HOST on the same network hearing all of it —
+# and the Spotify app on a phone on that same network still did not list it,
+# while it listed other Spotify Connect speakers. The only question left is
+# what those speakers say that we do not, and the scan was collecting their
+# records and reducing them to a count.
+
+def _txt(**kw):
+    return dict(kw)
+
+
+def test_nothing_to_compare_against_is_not_no_differences():
+    # Silence here would read as "we match the others" on a network with no
+    # others — the same conflation this whole module exists to prevent.
+    assert m.txt_compare(_txt(a="1"), []) is None
+    assert m.txt_compare(_txt(a="1"), [{}, None]) is None
+
+
+def test_a_key_every_other_host_sends_is_reported_with_its_count():
+    c = m.txt_compare(
+        _txt(VERSION="1.0", CPath="/"),
+        [_txt(VERSION="1.0", CPath="/", Stack="SP"),
+         _txt(VERSION="1.0", CPath="/", Stack="SP")])
+    assert c.missing == (("stack", "SP", 2),)
+    assert c.others == 2
+    # "all of them" and "some of them" are different findings, so the count
+    # has to survive into the sentence.
+    assert "2 of 2 others send it" in m.describe_comparison(c)
+
+
+def test_keys_are_matched_case_insensitively():
+    # mDNS TXT keys are case-insensitive. A receiver writing CPath where
+    # another writes cpath is not a finding, and reporting it as one buries
+    # the real entry in noise.
+    c = m.txt_compare(_txt(CPath="/"), [_txt(cpath="/")])
+    assert c.missing == () and c.differing == () and c.extra == ()
+    assert m.describe_comparison(c) is None
+
+
+def test_a_differing_value_is_not_reported_as_missing():
+    c = m.txt_compare(_txt(CPath="/"), [_txt(CPath="/zc/0"), _txt(CPath="/zc/0")])
+    assert c.missing == ()
+    assert c.differing == (("cpath", "/", "/zc/0", 2),)
+
+
+def test_a_key_only_we_send_lands_in_extra():
+    c = m.txt_compare(_txt(a="1", mine="x"), [_txt(a="1")])
+    assert c.extra == (("mine", "x"),)
+
+
+def test_the_three_tuples_do_not_swap():
+    # They are three same-shaped tuples and they DID swap positionally the
+    # first time this was written, which the sentence builder then crashed
+    # on. Pinned by content, not by position.
+    c = m.txt_compare(_txt(same="1", differs="ours", only_ours="x"),
+                      [_txt(same="1", differs="theirs", only_theirs="y")])
+    assert c.missing == (("only_theirs", "y", 1),)
+    assert c.extra == (("only_ours", "x"),)
+    assert c.differing == (("differs", "ours", "theirs", 1),)
+    m.describe_comparison(c)          # must not raise
+
+
+def test_agreement_says_nothing_at_all():
+    # A line that prints on every scan is a line nobody reads on the day it
+    # matters.
+    c = m.txt_compare(_txt(VERSION="1.0"), [_txt(VERSION="1.0")])
+    assert m.describe_comparison(c) is None
+    assert m.describe_comparison(None) is None
+
+
+def test_the_most_common_value_wins_not_the_first_seen():
+    c = m.txt_compare(_txt(k="ours"),
+                      [_txt(k="rare"), _txt(k="common"), _txt(k="common")])
+    assert c.differing == (("k", "ours", "common", 2),)
