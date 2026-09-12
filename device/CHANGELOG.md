@@ -12,6 +12,47 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.36.0-fx.1
+
+### Pausing Spotify now stops the sound
+
+**It used to keep playing for another six or seven seconds.** Starting was
+never slow — a second or two — and that asymmetry is what identified the
+cause: the device's music buffer holds 5.46 seconds, librespot keeps it full
+because the pipe between them backpressures rather than the other way round,
+and pausing simply stopped the refill. Everything already queued played out.
+
+The firmware now discards it. Only when Spotify is the source actually playing
+— a pause on an idle Spotify must not throw away what AirPlay, Sendspin or
+Home Assistant have queued — and not at the end of a track, where a flush
+would cut the last second off every song to start the next one.
+
+### The Spotify slider can now set this Echo's volume
+
+**Off by default, and it is a setting rather than a behaviour.** Until now the
+slider in the Spotify app turned the music down inside librespot, which left
+you with two volumes stacked on top of each other: the Echo's own, and a
+second one in front of it that nothing else could see.
+
+Turn on **Spotify volume moves this Echo** (Config → Streaming) and the slider
+sets the device volume instead, flashing the ring the way a button press does.
+
+**Read the label before you switch it on.** This Echo has ONE volume and
+shares it with the assistant, so turning Spotify down to a fifth turns the next
+spoken answer down to a fifth as well. That is what the setting means, and it
+is the reason it is a choice rather than the default.
+
+AirPlay has had the same switch since 2.21.0-fx.1 and they are independent —
+turning one on says nothing about the other.
+
+### What it needs of you
+
+Nothing for the pause fix. The volume setting needs **librespot 0.8.0 or
+newer** on the device: the flags that stop it attenuating in software do not
+exist in 0.7.1. Install it from the dashboard's endpoint store if you have not
+already — 0.7.1 also cannot play at all on some accounts, which is a separate
+reason to.
+
 ## 2.35.0-fx.1
 
 ### The device repairs two pieces of network state Android takes back
