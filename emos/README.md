@@ -768,11 +768,30 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   table disagreed. On biscuit `differ=0` is the expected reading, and anything
   else is a table row that has been wrong all along.
 
-  The **block** nodes are still numbered by hand, deliberately: resolving a
-  partition by name needs the by-name map rather than `/sys/class/block`,
-  because the board-specific part is the partition NUMBER. Separate job, worse
-  failure mode — a rule written against the wrong by-name map is inverted
-  rather than merely broken.
+  The **block** nodes are still numbered by hand, and for those init now
+  **reports rather than acts** (#131). Neither source that would resolve them
+  exists here — the `by-name` symlinks are made by ueventd or TWRP's init, and
+  `/proc/dumchar_info` is measured absent on this kernel — so what is left is
+  the partition table itself, read off `/dev/block/mmcblk0`.
+
+  The same `stage=mounts` line carries it, asked in the direction that needs no
+  guess: not *which partition is `userdata`*, which would need the label, but
+  *what is partition 16 called*, which needs nothing.
+
+  ```
+  gpt=<entries declared> p10=<label> p13=<label> p15=<label> p16=<label>
+  ```
+
+  `gpt=0` means the table could not be read and the inference that this device
+  is GPT at all was wrong. A `-` in a field means that partition answered
+  nothing — an unused slot, a non-ASCII label, or a number past the end.
+
+  **Nothing acts on it, and that restraint is the point rather than timidity:**
+  p16 is `/data`, which init runs `e2fsck -p` against and then mounts
+  read-write, and it is the one partition whose loss a remote user cannot undo.
+  Choosing it with code nobody has watched run on hardware is not a trade worth
+  making for tidiness. Read those four labels off a boot, then #131 decides
+  what to do with them.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
 - **A device on emOS cannot start the wizard directly, and nothing in the

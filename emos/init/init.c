@@ -187,6 +187,132 @@ static const char *node_name(const char *path)
     return slash ? slash + 1 : path;
 }
 
+/* ── Reading the partition table, to REPORT and nothing else ────────────────
+ *
+ * The four block nodes below are created from compiled-in partition NUMBERS,
+ * and the number is the board-specific part — `/sys/class/block/<name>/dev`
+ * cannot help, because it answers "what number is mmcblk0p16" with 179:16.
+ * The question is which partition is called `userdata`.
+ *
+ * **Both sources that would answer it are measured absent here.** The
+ * `/dev/block/platform/*/by-name/` symlinks are made by ueventd on Android and
+ * by TWRP's own init, and emOS runs neither; `/proc/dumchar_info`, the legacy
+ * MediaTek interface, does not exist on this kernel. What is left is the
+ * partition table itself.
+ *
+ * **This code only LOOKS.** Nothing here decides what gets mounted or written,
+ * and that restraint is the point rather than timidity: p16 is `/data`, which
+ * emOS runs `e2fsck -p` against and then mounts read-write, and it is the one
+ * partition whose loss a remote user cannot undo. Choosing it with code nobody
+ * has watched run on hardware is not a trade worth making for tidiness. So the
+ * first change measures, a device reports, and acting on the answer is its own
+ * change (#131).
+ *
+ * The direction of the question is deliberate too. Asking "which partition is
+ * `userdata`" needs the label to be guessed; asking "what is partition 16
+ * called" needs nothing, and answers exactly whether our numbers are the
+ * partitions we think they are.
+ */
+#define GPT_LBA       512u          /* this eMMC's logical block size */
+#define GPT_NAME_U16  36            /* code units in a GPT name field */
+#define GPT_LABEL_MAX 40            /* NUL-terminated ASCII of the above */
+
+static unsigned long long le64(const unsigned char *b)
+{
+    unsigned long long v = 0;
+    for (int i = 7; i >= 0; i--)
+        v = (v << 8) | b[i];
+    return v;
+}
+
+static unsigned le32(const unsigned char *b)
+{
+    return (unsigned)b[0] | ((unsigned)b[1] << 8) |
+           ((unsigned)b[2] << 16) | ((unsigned)b[3] << 24);
+}
+
+/* Decode a GPT name field into ASCII. GPT names are UTF-16LE, NUL-padded; a
+ * code unit with a non-zero high byte is not ASCII and the label is reported
+ * as unusable rather than mangled — a half-decoded name that happens to match
+ * something is worse than no name at all. */
+static int gpt_name_ascii(const unsigned char *name, char *out, size_t n)
+{
+    size_t k = 0;
+    for (int i = 0; i < GPT_NAME_U16 && k + 1 < n; i++) {
+        unsigned lo = name[i * 2], hi = name[i * 2 + 1];
+        if (!lo && !hi)
+            break;                       /* NUL terminates */
+        if (hi || lo < 0x20 || lo > 0x7e)
+            return -1;                   /* not printable ASCII */
+        out[k++] = (char)lo;
+    }
+    out[k] = 0;
+    return k ? 0 : -1;
+}
+
+/* Fill out[i] with the GPT label of partition want[i] (1-based, as in
+ * mmcblk0pN), for n of them. Unanswerable entries are left as the empty
+ * string. Returns the number of entries the header declares, or 0 when the
+ * table cannot be read at all.
+ *
+ * Every bound is checked before it is used. A wrong entry size walks the array
+ * off its stride and yields names that look plausible, which is the failure
+ * this must not have: the whole value of the report is that it can be
+ * believed.
+ */
+static int gpt_labels(const char *disk, const int *want,
+                      char out[][GPT_LABEL_MAX], int n)
+{
+    for (int i = 0; i < n; i++)
+        out[i][0] = 0;
+
+    int fd = open(disk, O_RDONLY);
+    if (fd < 0)
+        return 0;
+
+    unsigned char hdr[96];
+    int rc = 0;
+    if (pread(fd, hdr, sizeof hdr, GPT_LBA) != (ssize_t)sizeof hdr)
+        goto done;
+    if (memcmp(hdr, "EFI PART", 8))
+        goto done;                       /* not GPT, or not at LBA 1 */
+
+    unsigned long long entry_lba = le64(hdr + 72);
+    unsigned entries    = le32(hdr + 80);
+    unsigned entry_size = le32(hdr + 84);
+
+    /* 128 is the minimum the spec allows and the only size anything uses; the
+     * upper bounds are sanity rather than spec, to keep a corrupt header from
+     * turning into a seek somewhere absurd. */
+    if (entry_size < 128 || entry_size > 4096 ||
+        entries == 0 || entries > 512 || entry_lba < 2 || entry_lba > (1u << 24))
+        goto done;
+
+    rc = (int)entries;
+    for (int i = 0; i < n; i++) {
+        if (want[i] < 1 || (unsigned)want[i] > entries)
+            continue;
+        unsigned char ent[512];
+        unsigned sz = entry_size > sizeof ent ? (unsigned)sizeof ent : entry_size;
+        off_t off = (off_t)(entry_lba * GPT_LBA) +
+                    (off_t)(want[i] - 1) * (off_t)entry_size;
+        if (pread(fd, ent, sz, off) != (ssize_t)sz)
+            continue;
+        /* An all-zero type GUID is an unused slot. Reporting a name from one
+         * would be reporting leftovers. */
+        int used = 0;
+        for (int b = 0; b < 16; b++)
+            if (ent[b]) { used = 1; break; }
+        if (!used || sz < 56 + GPT_NAME_U16 * 2)
+            continue;
+        gpt_name_ascii(ent + 56, out[i], GPT_LABEL_MAX);
+    }
+
+done:
+    close(fd);
+    return rc;
+}
+
 /* ── The boot progress ring ──────────────────────────────────────────────────
  *
  * The twelve-LED ring is an is31fl3236 at i2c-0 0x3f, driven by writing 12
@@ -1588,6 +1714,10 @@ int main(int argc, char **argv)
      * at page-cache speed, verify against that same cache, and be lost on the
      * next reboot. Real writes to this eMMC run at about 9MB/s. */
     mknod("/dev/block/mmcblk0p10", S_IFBLK | 0600, makedev(179, 10));
+    /* The whole eMMC, so the partition table can be READ. Nothing mounts it
+     * and nothing writes it — see gpt_labels, and #131 for why acting on what
+     * it finds is a separate change. */
+    mknod("/dev/block/mmcblk0", S_IFBLK | 0600, makedev(179, 0));
     mknod("/dev/null",    S_IFCHR | 0666, makedev(1, 3));
     mknod("/dev/zero",    S_IFCHR | 0666, makedev(1, 5));
     mknod("/dev/tty",     S_IFCHR | 0666, makedev(5, 0));
@@ -1634,11 +1764,26 @@ int main(int argc, char **argv)
         close(fd);
         if (n > 0) write_at(512, buf, n);
     }
-    /* The node counters ride this line rather than getting one of their own:
-     * the boot trail is a fixed-size buffer rewritten in place, so a line
-     * costs the tail of the previous boot. */
-    note("stage=mounts done devtmpfs_rc=%d tty=%d nodes=%d/%d differ=%d\n",
-         dtr, access(TTY, F_OK), n_sysfs, n_sysfs + n_table, n_differ);
+    /* What the partition table calls the four partitions this file numbers by
+     * hand. REPORT ONLY — nothing below reads these, and the block mknods are
+     * untouched. It is the measurement #131 needs before anything acts on it,
+     * and it is asked in the direction that needs no guess: not "which
+     * partition is userdata", which would need the label, but "what is
+     * partition 16 called", which needs nothing. */
+    static const int gpt_want[] = { 10, 13, 15, 16 };
+    char gpt_lbl[4][GPT_LABEL_MAX];
+    int gpt_n = gpt_labels("/dev/block/mmcblk0", gpt_want, gpt_lbl, 4);
+
+    /* All of it rides the one line rather than getting lines of its own: the
+     * boot trail is a fixed-size buffer rewritten in place, so a line costs
+     * the tail of the previous boot. `-` rather than an empty field, so a
+     * label that could not be read is visibly absent instead of looking like
+     * a formatting slip. */
+    note("stage=mounts done devtmpfs_rc=%d tty=%d nodes=%d/%d differ=%d "
+         "gpt=%d p10=%s p13=%s p15=%s p16=%s\n",
+         dtr, access(TTY, F_OK), n_sysfs, n_sysfs + n_table, n_differ, gpt_n,
+         gpt_lbl[0][0] ? gpt_lbl[0] : "-", gpt_lbl[1][0] ? gpt_lbl[1] : "-",
+         gpt_lbl[2][0] ? gpt_lbl[2] : "-", gpt_lbl[3][0] ? gpt_lbl[3] : "-");
     led_claim();
     led_step();                                  /* 1: mounts and device nodes */
 

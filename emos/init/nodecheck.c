@@ -98,6 +98,170 @@ static void check(const char *label, const char *body, int want_rc,
     ok(label, rc == want_rc && maj == want_major && min == want_minor, detail);
 }
 
+/* ── The partition table half ───────────────────────────────────────────────
+ *
+ * The block nodes are numbered by hand too, and there the number is the
+ * board-specific part — so the report init makes about them reads the GPT.
+ * Nothing acts on it yet (#131); what has to be right is that the reader
+ * either answers correctly or says nothing, because a plausible wrong label
+ * would be a measurement somebody later trusts.
+ */
+#define FAKEGPT "/tmp/emos-nodecheck.img"
+
+static void put_u32(unsigned char *b, unsigned v)
+{
+    b[0] = v & 0xff; b[1] = (v >> 8) & 0xff;
+    b[2] = (v >> 16) & 0xff; b[3] = (v >> 24) & 0xff;
+}
+
+static void put_u64(unsigned char *b, unsigned long long v)
+{
+    for (int i = 0; i < 8; i++)
+        b[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+}
+
+/* Write a synthetic GPT. `names[i]` is the label of partition i+1; NULL means
+ * an unused slot, which gets an all-zero type GUID. A name is written as
+ * UTF-16LE exactly as the spec has it, so the decoder is exercised rather
+ * than accommodated. */
+static void make_gpt(const char *sig, unsigned entries, unsigned entry_size,
+                     unsigned long long entry_lba, const char **names, int n)
+{
+    FILE *f = fopen(FAKEGPT, "wb");
+    if (!f) {
+        printf("FAIL  could not write %s\n", FAKEGPT);
+        failures++;
+        return;
+    }
+    unsigned char lba0[512];
+    memset(lba0, 0, sizeof lba0);
+    fwrite(lba0, 1, sizeof lba0, f);          /* protective MBR, unread */
+
+    unsigned char hdr[512];
+    memset(hdr, 0, sizeof hdr);
+    memcpy(hdr, sig, 8);
+    put_u64(hdr + 72, entry_lba);
+    put_u32(hdr + 80, entries);
+    put_u32(hdr + 84, entry_size);
+    fwrite(hdr, 1, sizeof hdr, f);            /* LBA 1 */
+
+    /* Pad to the entry array. */
+    for (unsigned long long l = 2; l < entry_lba; l++)
+        fwrite(lba0, 1, sizeof lba0, f);
+
+    unsigned esz = entry_size ? entry_size : 128;
+    unsigned char *ent = malloc(esz);
+    if (!ent) {
+        printf("FAIL  out of memory building a %u-byte entry\n", esz);
+        failures++;
+        fclose(f);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        memset(ent, 0, esz);
+        /* Guarded, because the deliberately malformed cases pass an entry_size
+         * far below the spec minimum — writing the name at its fixed offset
+         * would run off this buffer and take the whole check with it. */
+        if (names[i] && esz >= 16)
+            memset(ent, 0xab, 16);            /* a non-zero type GUID */
+        if (names[i] && esz >= 56 + 36 * 2) {
+            for (int k = 0; names[i][k] && k < 36; k++) {
+                ent[56 + k * 2]     = (unsigned char)names[i][k];
+                ent[56 + k * 2 + 1] = 0;      /* UTF-16LE high byte */
+            }
+        }
+        fwrite(ent, 1, esz, f);
+    }
+    free(ent);
+    fclose(f);
+}
+
+/* `want` is the partition number asked about; `expect` the label it must come
+ * back with, or "" for "no answer". `want_rc` is the entry count the header
+ * declares, or 0 when the table is unreadable. */
+static void check_gpt(const char *label, int want, int want_rc,
+                      const char *expect)
+{
+    int w[1] = { want };
+    char out[1][GPT_LABEL_MAX];
+    int rc = gpt_labels(FAKEGPT, w, out, 1);
+
+    char detail[128];
+    snprintf(detail, sizeof detail, "rc=%d label=%s", rc,
+             out[0][0] ? out[0] : "(none)");
+    ok(label, rc == want_rc && !strcmp(out[0], expect), detail);
+}
+
+static void gpt_cases(void)
+{
+    static const char *names[] = { "boot_a_amonet", "system", NULL, "cache",
+                                   "userdata" };
+    /* Five entries, so partition 5 is the last one addressable. */
+    make_gpt("EFI PART", 5, 128, 2, names, 5);
+
+    check_gpt("label of partition 1", 1, 5, "boot_a_amonet");
+    check_gpt("label of partition 2", 2, 5, "system");
+    check_gpt("an unused slot answers nothing", 3, 5, "");
+    check_gpt("label of partition 5", 5, 5, "userdata");
+
+    /* Past the declared count. Asking about p16 on a table with five entries
+     * has to be silence, not the last entry or a read off the end. */
+    check_gpt("past the entry count", 16, 5, "");
+    check_gpt("partition 0 is not a partition", 0, 5, "");
+
+    /* A larger entry_size must be honoured as the STRIDE. Getting this wrong
+     * walks the array and yields names that look real — the failure that
+     * would make the whole report untrustworthy. */
+    make_gpt("EFI PART", 5, 256, 2, names, 5);
+    check_gpt("entry_size 256 is the stride", 5, 5, "userdata");
+
+    /* The entry array is where the header says. A fixed offset would be the
+     * same board-specific assumption this is meant to remove. */
+    make_gpt("EFI PART", 5, 128, 34, names, 5);
+    check_gpt("entry array at LBA 34", 2, 5, "system");
+
+    /* Refusals. Each must report an unreadable table rather than salvage
+     * something: rc 0 and no label. */
+    make_gpt("NOT PART", 5, 128, 2, names, 5);
+    check_gpt("wrong signature", 2, 0, "");
+
+    make_gpt("EFI PART", 5, 7, 2, names, 5);
+    check_gpt("entry_size below the spec minimum", 2, 0, "");
+
+    make_gpt("EFI PART", 5, 99999, 2, names, 5);
+    check_gpt("entry_size absurdly large", 2, 0, "");
+
+    make_gpt("EFI PART", 0, 128, 2, names, 5);
+    check_gpt("zero entries", 2, 0, "");
+
+    make_gpt("EFI PART", 5, 128, 1, names, 5);
+    check_gpt("entry array inside the header", 2, 0, "");
+
+    /* A non-ASCII label is reported as absent rather than mangled: a
+     * half-decoded name that happens to match something is worse than none. */
+    make_gpt("EFI PART", 5, 128, 2, names, 5);
+    {
+        /* The high byte of partition 2's first code unit: LBA 2 is byte 1024,
+         * entry index 1 adds 128, the name field adds 56, and the high byte
+         * is one past that. */
+        FILE *f = fopen(FAKEGPT, "r+b");
+        if (!f) {
+            printf("FAIL  could not reopen %s\n", FAKEGPT);
+            failures++;
+        } else {
+            fseek(f, 512 * 2 + 128 * 1 + 56 + 1, SEEK_SET);
+            fputc(0x04, f);                   /* U+04xx — Cyrillic, not ASCII */
+            fclose(f);
+            check_gpt("a non-ASCII label is not mangled", 2, 5, "");
+        }
+    }
+
+    /* No table at all. The ordinary case on a device whose eMMC node could
+     * not be created, and it must not be an error. */
+    unlink(FAKEGPT);
+    check_gpt("no image at all", 2, 0, "");
+}
+
 int main(void)
 {
     /* The ordinary good case: the kernel has registered the device and says
@@ -174,6 +338,8 @@ int main(void)
     /* If this ever reads 0, the path prefixes in sysfs_class stopped matching
      * the table and nothing else would have said so. */
     ok("the table has rows sysfs can answer for", classed > 0, detail);
+
+    gpt_cases();
 
     put_dev("sound", "pcmC0D23p", NULL);
 
