@@ -12,6 +12,41 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.37.0-fx.1
+
+### It now records when this Echo cannot hear the network
+
+Nothing to switch on, nothing to do. This is a measurement, and it is here
+because the fault it measures is currently invisible.
+
+**The symptom is an Echo that disappears from the Spotify and AirPlay pickers
+while everything about it looks perfectly healthy.** It stays reachable, the
+dashboard shows it connected, both endpoints are running, and every check that
+can be run on the device comes back clean — because the problem is that
+multicast queries from the rest of the network stop arriving. Nothing answers
+what it never hears, so it is in no list, and it has no way of knowing.
+
+The firmware now asks the network the same question every few minutes, and
+writes a line to the log when the answer changes:
+
+- when it stops hearing anybody at all, with what it heard last and when
+- when it starts again, **with how long it was out**
+
+Those lines reach the controller, so they land in the Home Assistant log and in
+a support bundle rather than only on the device. One line per change, never one
+per check.
+
+**It does not try to fix anything**, and that is deliberate. The cause sits in
+the access point or the radio path rather than in this device, so every repair
+available here would be a guess — and a guess that restarts the endpoints looks
+like a fix while changing nothing. What was missing is how long these outages
+last and how often they happen; that is what this collects, and it is what
+decides what to do about them. See issue #142.
+
+The check costs one small query every five minutes while things are normal, and
+one a minute while they are not. It runs only while Spotify Connect or AirPlay
+is switched on — with both off there is nothing to be discovered.
+
 ## 2.36.0-fx.1
 
 ### Pausing Spotify now stops the sound

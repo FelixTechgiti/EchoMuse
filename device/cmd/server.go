@@ -1978,4 +1978,27 @@ func startNetworkRepair(sp *spotify.Client, ap *airplay.Client) {
 			watcher.Tick(now)
 		}
 	}()
+
+	// The second way to become invisible, and the one the watcher above cannot
+	// see: the membership present, both endpoints healthy, and nothing from the
+	// link arriving at all (#142). It gets its OWN goroutine rather than riding
+	// the ticker beside it, because its cadence changes with what it finds and
+	// a shared 30s tick would either flood somebody's network while healthy or
+	// date a recovery to the nearest five minutes while deaf.
+	//
+	// It measures and logs; nothing acts on it. Same posture as `wifi.Describe`
+	// on the `no controller` lines — the mechanism is below anything this
+	// project controls, and every remedy available here is a guess.
+	prober := &mcast.Prober{
+		Ask: func() mcast.Reading {
+			// The self set is read per probe rather than cached: DHCP moves
+			// this device's address, and a stale entry would count its own
+			// responder as the network and report a deaf device as healthy —
+			// which is the exact reading that made this fault invisible for a
+			// day.
+			return mcast.Ask(mcast.ProbeService, mcast.ProbeWait, mcast.SelfAddrs())
+		},
+		Active: func() bool { return sp.Running() || ap.Running() },
+	}
+	go prober.Run(nil)
 }

@@ -1520,6 +1520,67 @@ come from different places — one from Amazon's init, one from a filesystem emO
 deliberately mounts. The same mistake is available for every other Android tool
 this firmware reaches for, because `/system` is there under both bases.
 
+## Two ways to go invisible, and only one of them is repairable (`internal/mcast`)
+
+**A device can be absent from every picker for two completely different
+reasons, and every on-device reading looks identical in both.** Both were
+measured on 2026-09-12, hours apart, on the same Echo. Conflating them is how a
+repair gets credited for outages it cannot touch.
+
+| | what is true | what fixes it |
+|---|---|---|
+| **the membership is gone** | `/proc/net/igmp` has lost 224.0.0.251 while both responders still hold UDP 5353 | restarting the endpoints re-joins the group — `Watcher` |
+| **the membership is present and nothing arrives** | 224.0.0.251 joined, both endpoints healthy, and the device hears *only itself* while the controller hears six other hosts | **unknown** — `Prober` measures it and nothing acts |
+
+`Watcher` reads the membership on the network-repair ticker and restarts
+whatever should be a member. The rules that matter: **it opens no socket of its
+own** (joining from here would put the membership on a socket the responders do
+not own — the group would read as present, the watcher would fall silent, and
+librespot and shairport-sync would still never see a query, removing the symptom
+and the instrument together); a **failed read is not absence**; and both the miss
+threshold and the doubling backoff exist because a re-association is exactly
+when the membership is legitimately gone for a moment AND when a restart is
+least likely to help.
+
+`Prober` is the second half, and it is **instrumentation only**. It asks the
+same question `device/tools/mdnsprobe` asks — a service enumeration from an
+**ephemeral port with the unicast-response (QU) bit set**, so it never binds
+5353 and cannot stop its own children from binding it — and counts responders
+that are **not this device**. That word is the whole measurement: the fault
+reading had a complete, correct four-answer reply in it, from the Echo's own
+responder, which is why every check run on the device read healthy through the
+outage.
+
+Four things not to unpick:
+
+- **Nothing acts on it**, and that is the same call `wifi.Describe` makes on the
+  `no controller` lines. The mechanism is below anything this project controls
+  — the AP's IGMP snooping, multicast-to-unicast conversion, the DTIM path —
+  and every remedy available here is a guess. What was missing was never another
+  theory; it was DURATION and FREQUENCY with nobody present, and that is what
+  chooses between the remaining leads (#142).
+- **The cadence is adaptive, and the silent one is the fast one** — 5 minutes
+  while healthy, 60s while deaf. A probe asks every host on the link to answer,
+  so a fixed fast cadence is a poor neighbour on somebody else's network; but an
+  outage is dated from its RECOVERY, so the state that needs resolution is the
+  quiet one. A device that hears nothing is by definition not being heard, so
+  the fast half costs that network nothing.
+- **One line per transition, never per probe.** The relay is rationed at six
+  lines a minute on the liveness channel — a warning per minute for a
+  four-hour outage is #404 with a different payload.
+- **Both lines have to survive `logrelay.Classify`, and they are two different
+  problems.** The onset carries `cannot` and is forwarded as a failure by the
+  outcome markers; an all-clear has no generic outcome word at all, so
+  `[mcast] hears` is a named lifecycle marker. Without it the log holds every
+  onset and no recovery, which reads as every outage still running — and the
+  device is perfectly reachable over unicast throughout, so nothing else in the
+  system reports anything.
+
+Both are gated on an endpoint actually being enabled. A device with both
+switched off has nothing to be invisible with: the group is correctly absent,
+and counting that as a fault would restart what the user turned off and date an
+"outage" that was somebody flipping a switch back.
+
 ## AirPlay latency, and why the prime depth is not one number
 
 **The music plane's prime gate was ~1s of PERMANENT latency for every
