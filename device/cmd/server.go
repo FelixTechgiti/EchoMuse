@@ -1422,6 +1422,14 @@ func applyFirewall() {
 	}
 	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
 		want = append(want, netfilter.AirPlayRules()...)
+		// The clock daemon's PTP ports, and only when it is actually
+		// supervised. Gated on the SUPERVISOR rather than on the config,
+		// because whether this device speaks AirPlay 2 is a property of the
+		// installed binary — opening 319 and 320 for a daemon that is not
+		// there is a hole with nothing behind it.
+		if nqptp.Running() {
+			want = append(want, netfilter.NqptpRules()...)
+		}
 	}
 	// Unconditional: a device nobody can ping is a device that reads as "off
 	// the network" when it is not, and an afternoon went into that mistake.
@@ -1509,12 +1517,55 @@ func applyAirplayConfig(c *airplay.Client, s *server.Server) {
 	// writes the metadata block into the config it launches with.
 	c.SetVolumeHandler(airplayVolume(s))
 	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
+		// The clock daemon FIRST. shairport-sync reads the PTP record nqptp
+		// publishes; starting it second means the receiver's first look finds
+		// nothing, and its own retry is what would have to cover the gap.
+		// There is no reason to lean on that when the ordering is free.
+		startNqptpIfNeeded()
 		if err := c.Start(); err != nil {
 			log.Printf("[cmd] AirPlay is on but cannot run: %v", err)
 		}
 		return
 	}
 	c.Stop()
+	nqptp.Stop()
+}
+
+// nqptp is the AirPlay 2 clock daemon. One per process, because it wants UDP
+// 319 and 320 to itself and a second instance could only fail to bind them.
+var nqptp = &airplay.Nqptp{}
+
+// startNqptpIfNeeded asks the INSTALLED BINARY whether this device speaks
+// AirPlay 2, and runs the clock daemon only if it does.
+//
+// There is deliberately no config key for it. The device has one shairport-
+// sync at a fixed path and whether it is an AirPlay 2 build is a property of
+// how that file was compiled — a toggle would be a second opinion about a
+// question the file already answers, and the two could disagree.
+//
+// Every failure here is logged and survived. An AirPlay 2 binary with no
+// nqptp still serves CLASSIC AirPlay, so refusing to continue would trade a
+// degraded feature for no feature at all.
+func startNqptpIfNeeded() {
+	f, err := airplay.DetectFlavour(airplay.BinaryPath, nil)
+	if err != nil {
+		log.Printf("[cmd] cannot tell which AirPlay flavour is installed: %v", err)
+		return
+	}
+	installed, why := airplay.NqptpAvailable(airplay.NqptpPath)
+	plan := airplay.PlanNqptp(f, installed)
+	if !plan.Run {
+		if f.AirPlay2 {
+			log.Printf("[cmd] AirPlay 2 is installed but nqptp is %s (%s) — "+
+				"classic AirPlay will work, AirPlay 2 will not synchronise",
+				why, airplay.NqptpPath)
+		}
+		nqptp.Stop()
+		return
+	}
+	if err := nqptp.Start(); err != nil {
+		log.Printf("[cmd] AirPlay 2 is installed but its clock daemon cannot run: %v", err)
+	}
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

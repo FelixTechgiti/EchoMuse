@@ -1,0 +1,46 @@
+# Builds shairport-sync WITH AIRPLAY 2, plus nqptp, for the Echo Dot:
+# armv7a, Android API 22, bionic.
+#
+# Separate from Dockerfile, and deliberately so. That image builds the classic
+# binary, which is the one currently being proven on hardware (#16); adding
+# packages to it would put a second variable into somebody else's debugging.
+# Both FROM the same pinned digest, so the toolchain is identical and only the
+# build-host tooling differs.
+FROM ghcr.io/binozo/echogo@sha256:c9456551c639290b1cc3e1df891177beadb5d0d7621a5c2ec81079a276019147
+
+ENV NDK_ROOT=/opt/android/ndk/21.4.7075529
+ENV NDK=/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64
+ENV PATH=$NDK/bin:$PATH
+
+# Everything the classic image carries, plus four for AirPlay 2:
+#
+#   gettext / autopoint  libgpg-error and libplist are built from their GIT
+#                        tags, and both autogen through autopoint. The classic
+#                        recipe dodged this for popt by using a release tarball
+#                        with a generated configure; that is not available here
+#                        for libgpg-error, whose tarballs live on gnupg.org.
+#   texinfo              libgcrypt's `make` descends into doc/ and runs
+#                        makeinfo. --disable-doc is not an option it offers.
+#   python3              ffmpeg's configure uses it for nothing on this path,
+#                        but its build scripts do; cheaper to have than to
+#                        discover missing at minute nine of a build.
+#
+# xxd is REQUIRED for AirPlay 2, not merely useful: configure.ac:421 aborts
+# without it, and Makefile.am:152 uses `xxd -i` to embed plists/.
+#
+# NOT here, and worth writing down: `plistutil`. shairport-sync 5.x requires it
+# (5.5.1's configure.ac:441) and 4.3.7 does not mention it anywhere. If the pin
+# below ever moves to 5.x, add `libplist-utils` here or configure fails with a
+# message about a library.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        autoconf automake libtool pkg-config cmake xxd git ca-certificates \
+        flex bison gettext autopoint texinfo python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CC=armv7a-linux-androideabi22-clang
+ENV CXX=armv7a-linux-androideabi22-clang++
+ENV AR=llvm-ar
+ENV RANLIB=llvm-ranlib
+ENV STRIP=llvm-strip
+
+WORKDIR /build

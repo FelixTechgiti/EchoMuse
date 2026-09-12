@@ -98,6 +98,15 @@ const (
 	// gets a session started and no sound out of it.
 	AirPlayUDPBase  = 6001
 	AirPlayUDPRange = 10
+
+	// NqptpPortA/B are the PTP ports the AirPlay 2 clock daemon needs
+	// INBOUND. Fixed by the protocol rather than chosen: 319 is event and
+	// 320 is general, and nqptp requires exclusive use of both.
+	//
+	// Unlike everything else here they are not our numbers to pick, so a rule
+	// naming them cannot drift from a daemon argument — there is no argument.
+	NqptpPortA = 319
+	NqptpPortB = 320
 )
 
 // Rule is one INPUT accept that belongs to us.
@@ -132,6 +141,53 @@ func AirPlayRules() []Rule {
 			Why: "AirPlay RTP audio/control/timing"},
 	}
 }
+
+// NqptpRules are what the AirPlay 2 clock daemon needs open.
+//
+// Separate from AirPlayRules because it is a separate PROCESS with a separate
+// installed-or-not answer: a device can have an AirPlay 2 shairport-sync and
+// no nqptp, and opening PTP ports for a daemon that is not there is a hole
+// with nothing behind it.
+func NqptpRules() []Rule {
+	return []Rule{
+		{Proto: "udp", Port: fmt.Sprint(NqptpPortA),
+			Why: "PTP event (nqptp, AirPlay 2)"},
+		{Proto: "udp", Port: fmt.Sprint(NqptpPortB),
+			Why: "PTP general (nqptp, AirPlay 2)"},
+	}
+}
+
+// # AirPlay 2 needs inbound ports THAT CANNOT BE NAMED, and no rule here
+// closes that gap
+//
+// Read off rtsp.c on 2026-09-12, and unchanged between 4.3.7 and 5.5.1, so it
+// is not something a version bump fixes:
+//
+//	conn->local_event_port = 0;          // any port   (rtsp.c:3098, :3172)
+//	conn->local_buffered_audio_port = 0; // any port   (rtsp.c:3363)
+//
+// For every AirPlay 2 session shairport-sync binds TWO additional TCP sockets
+// on KERNEL-CHOSEN ephemeral ports, tells the client their numbers in the
+// SETUP response, and waits for the client to connect IN. There is no config
+// option for them. So on a default-DROP firewall an AirPlay 2 session
+// negotiates and then stalls — which presents as a speaker that appears,
+// accepts a connection and plays nothing, rather than as a firewall.
+//
+// The choices, none of which is free, and none of which should be made by
+// whoever happens to be adding a rule:
+//
+//   - Open the ephemeral TCP range on wlan0 (`/proc/sys/net/ipv4/
+//     ip_local_port_range`, typically 32768:61000). Broad, and it is a
+//     speaker on somebody's home network — that is the owner's call.
+//   - Narrow ip_local_port_range system-wide and firewall the small result.
+//     Possible as root; it changes every other process on the device.
+//   - Patch shairport-sync to take the two ports from a configured base. The
+//     narrowest answer and the only one that stays narrow, at the cost of a
+//     patch this build has so far avoided entirely.
+//
+// Nothing here implements any of them, deliberately. It is written down where
+// the next person will look for it, which is more than can be said for how
+// the whole default-DROP problem was found.
 
 // PingRule lets the device answer a ping.
 //
