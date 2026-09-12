@@ -1124,23 +1124,45 @@ ended it:
 | both endpoints visible, `target=revoice-g090l91180250an1.local.` | controller mDNS scan, after reboot |
 | `wlan0=192.168.178.140` throughout | device supervisor log |
 
-So **multicast and unicast failed together on an interface that still held
-its address**. A re-probe every browse round finds nothing when nothing
-answers, so the remembered-address path cannot help here; and the device
-being absent from the controller's scan while seven neighbours answered says
-this is the Echo, not the network.
+**The mDNS half of that table is NOT evidence about the network, and reading
+it as such was the mistake of the night.** Corrected hours later on the same
+device: **Spotify Connect and AirPlay are DISABLED by default and are started
+only by the controller's config push** (`SPOTIFY_ENABLED`/`AIRPLAY_ENABLED`
+default false; `applySpotifyConfig` runs at startup against those defaults
+and again on every push). So a device with no controller session runs neither
+endpoint and advertises nothing — their absence from a scan is a CONSEQUENCE
+of the lost session and never independent evidence about the radio. The one
+AirPlay answer seen mid-outage was the orphaned `shairport-sync` from before
+the restart, still holding port 5000, which is exactly the case
+`internal/orphan` exists for.
 
-**The Echo's mDNS invisibility and its controller dropouts are the same
-event**, which the two were not known to be. That settles a question the
-endpoint work had been carrying separately: there is no endpoint
-announcement fault to chase on top of the connectivity one.
+What survives from that table is the unicast line, and it is enough: a
+remembered address that does not answer while the device holds an IP is a
+real failure to reach the controller, and PR #89's re-probe cannot shorten an
+outage where nothing answers.
 
-Two explanations remain and they want OPPOSITE actions — an association that
-is up and carrying nothing (re-associate) against one that has dropped and is
-scanning (do not, it prolongs it). `wifi.Describe` rides the `no controller`
-lines to tell them apart, and **nothing acts on it**: the repair for the
-first case is to drop the WiFi of a device whose only management path is that
-WiFi, which is not something to do on a guess. Instrument first.
+**The general trap, and the part worth keeping: a signal that is DOWNSTREAM
+of the thing you are diagnosing cannot corroborate it.** Endpoint visibility
+is downstream of the controller session, so "the endpoints went quiet too"
+reads as a second, independent symptom and is the same symptom seen twice.
+The network-visibility check is meaningful only while the device is
+CONNECTED — and `em_api._get_device_mdns_scan` deliberately answers for an
+offline device, which makes it easy to ask the question at exactly the moment
+the answer is worthless.
+
+**The Echo's mDNS invisibility and its controller dropouts are therefore the
+same event** — not because one causes the other through the network, but
+because the endpoints are started by the session. Still useful: there is no
+separate endpoint-announcement fault hiding behind every outage, and any "it
+was not in the picker" observation taken while the device was disconnected is
+worth nothing (#77).
+
+`wifi.Describe` still rides the `no controller` lines, and is worth more now
+rather than less — it answers "was the radio associated" directly rather than
+by inference, which is the whole reason the inference above was available to
+get wrong. **Nothing acts on it**: the repair for a zombie association is to
+drop the WiFi of a device whose only management path is that WiFi, which is
+not something to do on a guess. Instrument first.
 
 **And the record of it was being read half at a time.** `supervisor.log` has
 TWO writers — `start_server.sh`, which the controller pushes, and

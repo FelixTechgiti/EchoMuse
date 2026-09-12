@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.39.0-fx.1
+
+### The network check no longer blames the network for a disconnected Echo
+
+**Network visibility** reported *"not seen, while N other hosts answered — the
+scan works; this device is not being heard"* for an Echo that had simply lost
+its connection to the controller. That reads as a network fault and is not
+one.
+
+Spotify Connect and AirPlay are switched off on the Echo until the controller
+tells it otherwise, so an Echo with no connection is not running either of
+them and cannot be advertising anything. Its silence is a consequence of the
+lost connection and says nothing about your network.
+
+It now says exactly that, and shows the endpoint in grey rather than red:
+
+> Spotify Connect is not running: this Echo has no controller session, and
+> the endpoints are started by the controller's configuration. This says
+> nothing about the network — reconnect the device first.
+
+The check still works while the Echo is offline, which is deliberate and
+unchanged — it just no longer draws the wrong conclusion from it. And
+*"nothing answered at all"* still wins over everything else, because that is
+a statement about the scan rather than about your device.
+
 ## 2.38.0-fx.1
 
 ### Echos went permanently offline after updating to firmware 2.28 or newer

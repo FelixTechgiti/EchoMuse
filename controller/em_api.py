@@ -6296,7 +6296,12 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
     verdicts = []
     for key in em_mdnsscan.SERVICES:
         enabled = bool(cfg.get(f"{key}Enabled"))
-        v = em_mdnsscan.verdict(key, found[key], device_ip, enabled)
+        # A disconnected device runs no endpoints at all — they are started
+        # by the config push — so "not seen" then has nothing to do with the
+        # network. Passed in rather than inferred downstream, because the
+        # verdict is the only place that judgement belongs.
+        v = em_mdnsscan.verdict(key, found[key], device_ip, enabled,
+                                connected=live is not None)
         note = None
         mine = [f for f in found[key] if f.address and f.address == device_ip]
         if mine:
@@ -6304,6 +6309,7 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
         verdicts.append({
             "service": v.service, "enabled": v.enabled,
             "reachable": v.reachable, "visible": v.visible,
+            "running": v.running,
             "detail": v.detail, "note": note,
             "advertised": [f._asdict() for f in mine],
         })
@@ -6314,7 +6320,8 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
         "seconds": seconds,
         "summary": em_mdnsscan.summarise(
             [em_mdnsscan.Verdict(d["service"], d["enabled"], d["reachable"],
-                                 d["visible"], d["detail"]) for d in verdicts]),
+                                 d["visible"], d["detail"], d["running"])
+             for d in verdicts]),
         "services": verdicts,
         # The count of OTHER hosts answering is what makes a negative mean
         # anything, so it is reported rather than left implicit.
