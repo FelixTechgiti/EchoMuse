@@ -50,10 +50,23 @@ func (p *Prober) Tick(now time.Time) time.Duration {
 		// it has to: the device is perfectly reachable over unicast the whole
 		// time, so nothing else in the system reports anything at all. Someone
 		// reading their Home Assistant log is the only person who can see this.
+		//
+		// It says what was MEASURED and stops there. The first version ended
+		// "so it is simply in no picker", which is an inference and was FALSE
+		// the first time this ran on hardware: measured 2026-09-12, the device
+		// reported this line while the controller's own scan answered "Every
+		// enabled endpoint is visible on the network", with eight other hosts
+		// seen. Hearing and being heard are two directions and they fail
+		// separately — announcements go out unprompted and do not need a query
+		// to have arrived. A line that asserts the consequence sends the next
+		// reader to check the picker, find the device in it, and conclude the
+		// instrument is broken.
 		log.Printf("[mcast] this device cannot hear any other host on the "+
 			"network — %d probe(s) for %s answered only by itself (%d reply/"+
-			"replies). %s Unicast is unaffected, so it stays reachable and is "+
-			"simply in no picker. Episode #%d.",
+			"replies). %s Unicast is unaffected. Whether it is still VISIBLE "+
+			"is a separate question: its own announcements may still be "+
+			"getting out, so read the controller's network scan rather than "+
+			"assuming this one. Episode #%d.",
 			p.Tracker.Misses, p.Service, r.Self,
 			describeLastHeard(now, last, peers), p.Tracker.Episodes())
 	case EventHeard:

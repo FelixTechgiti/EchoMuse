@@ -1550,6 +1550,31 @@ repair gets credited for outages it cannot touch.
 | **the membership is gone** | `/proc/net/igmp` has lost 224.0.0.251 while both responders still hold UDP 5353 | restarting the endpoints re-joins the group — `Watcher` |
 | **the membership is present and nothing arrives** | 224.0.0.251 joined, both endpoints healthy, and the device hears *only itself* while the controller hears six other hosts | **unknown** — `Prober` measures it and nothing acts |
 
+**Deaf is NOT the same as unheard, and the first field run proved it.**
+v2.37.0-fx.1 went onto a device and within ten minutes logged the deaf line —
+while the controller's own scan of that same device answered *"Every enabled
+endpoint is visible on the network"*, eight other Spotify hosts seen, the same
+minute. Both readings were correct. Announcements go out UNPROMPTED, so a
+responder that hears nothing still advertises, and a device can be deaf and
+listed at once.
+
+That kills the tidy causal chain this was written against ("the query never
+arrives, so nothing answers, so it is in no picker") and it is why the log line
+states the measurement and explicitly hands visibility to `em_mdnsscan` rather
+than concluding it. Pinned by `TestTheDeafLineDoesNotClaimTheDeviceIsInvisible`,
+because the wrong version reads better and would come back.
+
+**The same run separated two hypotheses, which is what the instrument was for.**
+`/proc/net/arp` on the deaf device held **28 entries for other hosts on the
+LAN** — a table that fills from ARP broadcasts. So L2 BROADCAST arrives and
+multicast does not, which rules out the whole class of "the AP is not sending
+this station group traffic at all": DTIM buffering and power-save hit broadcast
+and multicast together. What is left has to distinguish the two, and IGMP
+snooping is exactly that — a switch forwards broadcast always and multicast only
+to ports it has seen a membership report on. Note `/proc/net/dev`'s `multicast`
+column is **unusable on this driver**: it read 0 against 293,964 received
+packets, so it is not implemented rather than measuring zero.
+
 `Watcher` reads the membership on the network-repair ticker and restarts
 whatever should be a member. The rules that matter: **it opens no socket of its
 own** (joining from here would put the membership on a socket the responders do

@@ -23,10 +23,24 @@ import (
 //
 // **The device does not hear the six hosts the controller hears.** Its own
 // responder answers its own query, which is local delivery rather than the
-// air. One mechanism explains the whole symptom: the controller's browse is a
-// multicast QUERY, it never arrives, so nothing answers and the device is in
-// no picker — while every reading taken on the device says the endpoints are
+// air — while every reading taken on the device says the endpoints are
 // healthy, because they are.
+//
+// # Deaf is not the same as unheard, and assuming otherwise was wrong
+//
+// The obvious reading is that one mechanism explains everything: the
+// controller's browse is a multicast QUERY, it never arrives, nothing answers,
+// the device is in no picker. **Measured on hardware 2026-09-12, the first
+// time this shipped, that chain does not hold.** The device logged the deaf
+// line and the controller's own scan answered "Every enabled endpoint is
+// visible on the network", with eight other Spotify hosts seen, in the same
+// minute.
+//
+// Announcements go out UNPROMPTED. A responder that hears nothing still
+// advertises, and a device can therefore be deaf and listed at once. So this
+// package measures one direction and says so; visibility is a separate
+// question with its own instrument (`em_mdnsscan`), and the two have to be
+// read together rather than one inferred from the other.
 //
 // And the membership was PRESENT for that reading. `Watcher` would have looked,
 // found 224.0.0.251 on wlan0, and correctly done nothing. Anyone reading the

@@ -12,6 +12,28 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.38.0-fx.1
+
+### Die Warnung aus 2.37.0-fx.1 sagte einen Satz zu viel
+
+Die neue Meldung „dieser Echo hört niemanden im Netz" endete mit „also steht er
+in keiner Liste". **Am Gerät gemessen stimmt das nicht**, und zwar schon beim
+ersten Mal: der Echo meldete die Warnung, und im selben Moment sagte die
+Netzwerkprüfung des Controllers „jeder aktivierte Endpunkt ist im Netz
+sichtbar", mit acht anderen Spotify-Geräten in Sicht.
+
+Beides war richtig. **Hören und gehört werden sind zwei Richtungen**, und ein
+Gerät kündigt sich von sich aus an, ohne dass es dafür eine Anfrage hören muss.
+Es kann also taub sein und trotzdem in der Liste stehen.
+
+Die Warnung sagt jetzt nur noch, was gemessen wurde, und verweist für die Frage
+„bin ich sichtbar" auf die Netzwerkprüfung des Controllers, die sie
+beantwortet. Wer den alten Satz gelesen, in die Liste geschaut und das Gerät
+dort gefunden hätte, hätte die ganze Messung für kaputt gehalten.
+
+Sonst ändert sich nichts. Ein Update lohnt nur, wenn du die Warnung im Log
+siehst und wissen willst, was sie wirklich bedeutet.
+
 ## 2.37.0-fx.1
 
 ### It now records when this Echo cannot hear the network
