@@ -12,6 +12,42 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.32.0-fx.1
+
+### Spotify Connect recovers instead of failing for ever
+
+**If your Echo has been restarting its Spotify endpoint every few seconds,
+this fixes it, and you will need to tap the speaker once in the Spotify app
+afterwards.**
+
+librespot remembers the last Spotify login so the Echo stays authorised across
+reboots. When Spotify stops accepting that stored credential — the account's
+password changed, the authorisation was revoked, it simply expired — librespot
+exits, our supervisor restarts it, it reads the same dead credential and exits
+again. Measured on a device on 12 September: `Login request was denied:
+INVALID_CREDENTIALS` every 15 to 30 seconds, indefinitely.
+
+**The loop also breaks the one thing that would have repaired it.** Signing in
+from the app is a two-step exchange: the app reads a key from the Echo,
+encrypts your credential against it, and sends it back. That key is made fresh
+every time librespot starts, so a restart in between means the Echo cannot
+decrypt what it was sent and answers `MAC mismatch`. The repair path was
+failing because of the fault it would have fixed.
+
+The refused credential is now deleted, and librespot comes back up the way a
+speaker nobody has used yet does: advertised, waiting to be picked. **Open
+Spotify, tap this Echo once, and it stays authorised again.**
+
+A rejection from a phone (`MAC mismatch`) deliberately does NOT count — that is
+somebody else's credential failing to decrypt, and treating it as ours would
+sign the speaker out whenever an app's sign-in raced a restart.
+
+### Confirmed from the field: the firewall fix works
+
+The same log shows a Spotify client reaching the Echo and attempting a login —
+an inbound connection, which is exactly what FireOS dropped before 2.31.0-fx.1.
+Discovery is no longer the problem.
+
 ## 2.31.0-fx.1
 
 ### Spotify Connect and AirPlay are reachable at last — the Echo was firewalling them
