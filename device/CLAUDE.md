@@ -181,6 +181,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/spotify/` | Spotify Connect on the device — librespot as a subprocess, the Echo appearing in the Spotify app as a speaker with no Home Assistant in the audio path. A THIRD producer of the same music plane, on the same arbiter. librespot is Rust and this is Go, and that boundary is a choice: `go-librespot` needs Go 1.25 (above the pinned compiler) and cgo against libogg, libvorbis, flac and mpg123, where librespot with rustls needs no system libraries at all — plus a subprocess that crashes takes nothing with it on a device sharing 512MB with Android. **There is no `--sample-rate`, and the design assumed there was.** No released librespot has that option and neither does `dev` — the resampling pull request was never merged — and librespot REFUSES TO START on an unknown option rather than ignoring it, so the pipe backend emits 44.1kHz and `internal/resample` converts it, exactly as for AirPlay. **The pipe backend being famously "too fast" IS the feature here** though: `PumpMusic` blocks when the plane is full, the pipe backpressures, and librespot is paced to playback for free. The capability says the FIRMWARE can run it; `spotify_status` on the register message says whether the binary is actually installed — the same "could it" vs "is it" split as `aec_hw_ref` against `aecRef`, and it has to be a runtime answer because the controller pushes the binary long after registration. **Its build must enable `with-libmdns` explicitly.** `--no-default-features` is reached for to drop the rodio backend and takes librespot's discovery backend with it — a binary that runs perfectly and can never appear in the app, with nothing logged at either end because from librespot's side nothing is wrong (shipped, found 2026-09-10). `build.sh` now diffs upstream's own `default = [...]` against what this build enables and what it deliberately drops, and refuses to build on anything unaccounted for; a librespot release that adds a default feature fails rather than losing it silently. Build recipe in `device/librespot/` |
 | `internal/pcm/` | The sample conversions and the period discipline more than one audio source needs. Two rules, both subtle, both silent when broken. The stereo downmix: adding two int16 channels near full scale wraps to full-scale NEGATIVE, a crack rather than distortion. And `PeriodWriter`: **the music plane is not a byte stream** — the ALSA loop takes ONE item off the channel per iteration and hands it to the hardware as a period, and the mixer returns the music buffer directly when nothing else plays, so a short buffer becomes a short period. It glitches, and the per-stream period accounting counts it as whole, so the underrun margin the instrumentation exists to measure is quietly wrong. `PumpMusic([]byte) error` reads like a stream, which is exactly why the rule is written down once instead of remembered three times |
 | `internal/airplay/` | An AirPlay receiver on the device — shairport-sync as a subprocess, PCM on stdout. A fourth producer of the same music plane. **CLASSIC AirPlay, and the gap to AirPlay 2 is cost rather than a wall.** This row named three blockers until 2026-09-11 and all three were wrong (#79): nqptp does not use hardware timestamping and says so in its own README; `configure.ac` ties AirPlay 2 to no mDNS backend, so Avahi is not required — of the four backends only `mdns_avahi.c` implements the second service, and `mdns_tinysvcmdns.c` declares `ap2name` and `secondary_txt_records` `__attribute__((unused))` and sets no `mdns_update`, which is ~100 lines rather than a D-Bus port; and the stated floor is a Pi 2 / Pi Zero 2 W (quad A53, 1GHz, 512MB), which a 1.3GHz quad-A53 meets rather than misses. What is real: **`shm_open` is absent from bionic** and is the nqptp↔shairport clock interface (three call sites, and no process-shared mutex in it, so a file-backed `mmap` substitutes faithfully), ffmpeg has to be cross-built, and 512MB is shared with Android. The mDNS half is the same work as #77. **The sample rate was wrong too** — AirPlay 2's Buffered Audio is AAC-LC at 44.1kHz, not 48kHz, so `internal/resample` stays in the path either way. This code does not care which it gets: both put PCM on stdout. Build recipe in `device/shairport/` |
+| `internal/netfilter/` | Opens the device's own ports in FireOS's default-deny firewall, and closes them when the endpoint is turned off. Announcing a service and being reachable are two different things and nothing had ever measured the second — see "Advertised is not reachable" below before touching it. Only `-I`/`-D` on fully specified INPUT rules, never a policy change and never a flush: this is a firewall on a device whose only management path is the network |
 | `internal/resample/` | 44.1kHz → 48kHz, a polyphase FIR at exactly 160/147. It exists because classic AirPlay is 44.1kHz by definition and this speaker is 48kHz — Sendspin asks the server for 48kHz and Spotify hands the job to librespot, so AirPlay is the one source that cannot avoid it. **`taps` is a measurement, not a round number**: 16 gives a 15kHz transition band, which sounds like plenty of filter and measures 5.3dB down at 20kHz; 64 gives 3.8kHz, flat to ~19kHz. Cost is BENCHMARKED rather than claimed — ~4ms per second of audio on x86, so 4-8% of one A53 core, which is affordable and not free |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
@@ -1300,6 +1301,75 @@ SILENT: firmware that cannot report, and firmware that has not sent its first
 tick yet, must not render as "not running". Accusing a working Echo for the
 first thirty seconds of every reconnect is how this becomes the line everyone
 learns to ignore.
+
+## Advertised is not reachable: FireOS drops every inbound port (`internal/netfilter`)
+
+**This is what #77 was, after weeks of looking at mDNS.** FireOS ships
+`-P INPUT DROP` with an allowlist of Amazon's own ports, and ours are not on
+it. Read off a live device 2026-09-12:
+
+```
+-P INPUT DROP
+-A INPUT -i wlan0 -p tcp -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i wlan0 -p udp -m udp --dport 5353 -j ACCEPT      <- mDNS
+-A INPUT -i wlan0 -p tcp -m tcp --dport 4070 -j ACCEPT      <- Alexa
+-A INPUT -i wlan0 -p udp -m udp --dport 5000 -j ACCEPT      <- UDP, not TCP
+-A INPUT -p icmp -m state --state RELATED,ESTABLISHED -j ACCEPT
+... policy DROP 605 packets, 89226 bytes
+```
+
+**The blind spot is structural, and it is the part worth carrying forward.**
+Every plane this project has — control, data, shell, OTA — is dialled BY THE
+DEVICE, so `RELATED,ESTABLISHED` covers all of them and nothing in the system
+had ever opened a connection *to* an Echo. mDNS is allowed, so announcements
+go out and are heard. So every instrument read healthy while the feature did
+not work at all, and each measurement taken to check it agreed. **"Advertised"
+was never "reachable", and nothing measured the difference** — which is why
+`em_api._tcp_reachable` and the `port_open` column in the mDNS scan were added
+alongside this.
+
+Three traps in that one page of output:
+
+- **`udp dpt:5000` is not AirPlay.** Amazon opened UDP 5000 for something of
+  their own; shairport-sync's RTSP is **TCP** 5000. A rule read at a glance
+  sends the next person away satisfied.
+- **ICMP is `RELATED,ESTABLISHED` only**, so an echo request — which is NEW —
+  is dropped, while `icmp_echo_ignore_all` reads 0 and says the kernel would
+  have answered. A device that will not answer a ping reads as "off the
+  network"; this one never was, and that mistake cost an afternoon and a
+  wrong accusation aimed at the user's router.
+- **The UDP range is the half that gets forgotten.** With only shairport's
+  control port open, a session negotiates and then plays nothing — which
+  presents as a broken speaker rather than as a firewall.
+
+`internal/netfilter` opens exactly what the ENABLED endpoints need and closes
+what they do not, called from the same two sites as the endpoint start/stop
+(`applyFirewall` in `cmd/server.go`, at startup and on every config push).
+Read the package comment before changing it; the rules that must never be
+written (`-P`, `-F`, `-X`; a rule without an interface and a port) are
+enforced by test, because this is a firewall on a device whose only management
+path IS the network.
+
+Two decisions not to unpick:
+
+- **The ports are PINNED and the daemons are told them from the same
+  constants.** librespot picks a random zeroconf port per start, which no rule
+  can name. Rule and listener disagreeing is exactly the "connects and plays
+  nothing" failure above, so there is one definition and both sides read it —
+  pinned by test in `internal/spotify` and `internal/airplay`.
+- **Delete-then-insert, not `-C` then `-I`.** The obvious idempotence rests on
+  `-C` working, which is an assumption about a binary we do not ship and
+  cannot exercise on the host. An iptables where `-C` misbehaves turns "check,
+  then insert" into "insert" on a path that runs at every start AND every
+  config push — a table that grows for the life of the device. `-D` in a
+  bounded loop then `-I` needs only `-D`, and it REPAIRS a table that is
+  already wrong instead of merely declining to make it worse.
+
+**No iptables at all is an ordinary answer, said once.** emOS has no such
+firewall, so there is nothing to open — and the log relay forwards lines
+matching `could not` to the controller, so a per-rule complaint would put four
+warnings into somebody's Home Assistant log on every reconnect about a device
+with nothing wrong with it.
 
 ## AirPlay latency, and why the prime depth is not one number
 

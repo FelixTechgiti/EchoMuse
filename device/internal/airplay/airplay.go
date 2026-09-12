@@ -65,6 +65,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/endpoint"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
+	"github.com/wilbowes/EchoMuse/internal/netfilter"
 	"github.com/wilbowes/EchoMuse/internal/orphan"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
 	"github.com/wilbowes/EchoMuse/internal/resample"
@@ -560,6 +561,15 @@ func (c *Client) args(cfg string) []string {
 // does not know its own delay should not assert there is none.
 func renderConfig(delaySec float64, metadataPipe string) string {
 	general := "general = {\n"
+	// PINNED, all three, because FireOS drops every inbound port that is not
+	// on an allowlist and a firewall rule cannot name a default that a future
+	// shairport-sync is free to change. internal/netfilter opens exactly
+	// these, reading the same constants — so the rule and the listener cannot
+	// disagree. They disagreeing is a session that negotiates and then plays
+	// nothing, which is the failure this project names most often.
+	general += fmt.Sprintf("  port = %d;\n", netfilter.AirPlayRTSPPort)
+	general += fmt.Sprintf("  udp_port_base = %d;\n", netfilter.AirPlayUDPBase)
+	general += fmt.Sprintf("  udp_port_range = %d;\n", netfilter.AirPlayUDPRange)
 	if delaySec != 0 {
 		general += fmt.Sprintf(
 			"  audio_backend_latency_offset_in_seconds = %.4f;\n", -delaySec)

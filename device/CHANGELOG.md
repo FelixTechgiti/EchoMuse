@@ -12,6 +12,67 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.31.0-fx.1
+
+### Spotify Connect and AirPlay are reachable at last — the Echo was firewalling them
+
+**If your Echo has never appeared in the Spotify app or an AirPlay picker,
+this is why, and this release fixes it.** Nothing about the announcements was
+ever wrong: they went out, the whole network heard them, and every reading we
+could take on the device said the endpoints were healthy. What nobody had
+checked was whether anything could *connect back*.
+
+FireOS runs a default-deny firewall with an allowlist of Amazon's own ports.
+Read off a device on 2026-09-12:
+
+```
+-P INPUT DROP
+-A INPUT -i wlan0 -p tcp -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i wlan0 -p udp -m udp --dport 5353 -j ACCEPT      <- mDNS
+-A INPUT -i wlan0 -p tcp -m tcp --dport 4070 -j ACCEPT      <- Alexa
+-A INPUT -i wlan0 -p udp -m udp --dport 5000 -j ACCEPT      <- UDP, not TCP
+-A INPUT -p icmp -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+Multicast DNS is allowed, so the Echo advertises itself perfectly. Established
+connections are allowed, so the three links to the controller — all of which
+the Echo dials *outward* — have always worked faultlessly. But a phone
+answering that advertisement is a **new inbound connection**, and it is
+dropped. Note the fourth line: Amazon opened UDP 5000 for something of their
+own, while AirPlay's control port is **TCP** 5000, so even the port that looks
+open is not the one we need.
+
+The firmware now opens exactly the ports its own enabled endpoints need, and
+closes them again when you turn an endpoint off:
+
+- **Spotify Connect** — TCP 36000, librespot's discovery listener.
+- **AirPlay** — TCP 5000 for the session, UDP 6001–6010 for the audio. The
+  UDP range is the half that is easy to miss: with only the control port open,
+  a session connects and then plays nothing.
+- **Ping** — the Echo answers a ping now. It never did, which is why a healthy
+  device on a healthy network reads as "not on the network" to anyone trying
+  to diagnose it. An afternoon went into that mistake.
+
+Those port numbers are now **pinned** and passed to librespot and
+shairport-sync from the same constants the firewall rule is built from.
+librespot previously picked a random discovery port on every start, which no
+firewall rule can name.
+
+**What is required of you:** nothing. The rules are applied at startup and
+again whenever a setting changes, and they are scoped to `wlan0`, to the INPUT
+chain, and to those exact ports. The firmware never changes the firewall
+policy and never flushes the table — Amazon's own rules, including the one
+that keeps the controller link alive, are left exactly as they are.
+
+**What to expect:** after the update, your Echo should appear in the Spotify
+app and in AirPlay pickers within a few seconds of the endpoints being
+enabled, and should answer `ping`. If it does not appear, the endpoints
+themselves may simply be switched off — check Config → Audio-Endpunkte in the
+dashboard.
+
+**On emOS there is no such firewall**, so there is nothing to open; the
+firmware says so once in the log and does nothing further.
+
 ## 2.30.0-fx.1
 
 ### An Echo that cannot verify the controller no longer goes silently dead

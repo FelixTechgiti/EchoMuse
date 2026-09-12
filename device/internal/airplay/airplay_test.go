@@ -3,6 +3,7 @@ package airplay
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/netfilter"
 	"github.com/wilbowes/EchoMuse/internal/resample"
 )
 
@@ -454,5 +456,32 @@ func TestAWrittenConfigIsPassedWithMinusC(t *testing.T) {
 	args := strings.Join(c.args(path), " ")
 	if !strings.Contains(args, "-c "+path) {
 		t.Fatalf("the config is not on the command line: %s", args)
+	}
+}
+
+func TestAllThreePortsArePinnedToTheOnesTheFirewallOpens(t *testing.T) {
+	// shairport-sync's defaults are its own to change, and FireOS drops
+	// every inbound port that is not on Amazon's allowlist — so the rule and
+	// the listener have to come from one place. The UDP range is the half
+	// that is easy to forget: with only the control port open a session
+	// negotiates and then plays nothing, which reads as a broken speaker
+	// rather than as a firewall.
+	path := filepath.Join(t.TempDir(), "shairport-sync.conf")
+	c := New(Options{Name: "Lounge", ConfigPath: path}, nil, nil)
+	if got := c.writeConfig(); got != path {
+		t.Fatalf("writeConfig returned %q, want %q", got, path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("port = %d;", netfilter.AirPlayRTSPPort),
+		fmt.Sprintf("udp_port_base = %d;", netfilter.AirPlayUDPBase),
+		fmt.Sprintf("udp_port_range = %d;", netfilter.AirPlayUDPRange),
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("missing %q in:\n%s", want, body)
+		}
 	}
 }
