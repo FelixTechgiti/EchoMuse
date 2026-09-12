@@ -12,6 +12,61 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.35.0-fx.1
+
+### The device repairs two pieces of network state Android takes back
+
+**Both were found on a live device on 12 September, and between them they
+explain a long run of reports that had been filed as separate faults:** the
+Echo vanishing from the Spotify and AirPlay pickers at the same moment,
+minutes at a time, always fixed by a reboot, with every reading on the device
+itself looking perfectly healthy while it happened.
+
+You do not have to do anything after this update. Both repairs run on their
+own and are silent while nothing is wrong.
+
+#### The mDNS multicast membership
+
+An Echo announces itself by joining a multicast group, `224.0.0.251`. That
+membership lives in the kernel against the network interface, not in the
+programs — so anything that takes the interface down and back takes it away,
+and nothing tells them. librespot and shairport-sync carry on holding their
+port, in perfect health as far as they can tell, while no query ever reaches
+them again. Both go invisible together, because they lost the same thing.
+
+Measured while it was happening, with both endpoints running and the
+controller talking to the device the whole time:
+
+    Spotify Connect was not seen from this device, while 7 other host(s)
+    on the network did answer. The scan works; this device is not being heard.
+
+The firmware now reads the membership every 30 seconds and restarts the
+endpoints when it has gone. Two consecutive readings have to agree before
+anything is restarted — a re-association is exactly when the membership is
+briefly and legitimately absent — and repeated repairs back off to at most
+one every 30 minutes, so a fault that cannot be repaired this way does not
+become a restart loop instead.
+
+#### The firewall rules
+
+The firmware opens the ports its endpoints need at startup. Thirty-nine
+minutes later, on the same device, every one of them was gone and only
+Amazon's own rules remained, while the default-deny policy counted 137
+dropped packets. Android rebuilds that table on network events and keeps only
+what it wrote itself.
+
+The rules are now checked on the same 30-second tick and re-applied when
+something has been removed. The check costs one listing; the repair only runs
+when there is something to repair.
+
+#### What this does not answer
+
+**Why the membership is lost is still unknown.** This repairs it reliably and
+cheaply; it does not explain it. Each repair is logged with a running count,
+and that count is the instrument for answering the question properly — a
+device that reports one repair a day and a device that reports twenty are
+different problems.
+
 ## 2.34.0-fx.1
 
 ### Turning the AirPlay 2 clock daemon off now closes its ports
