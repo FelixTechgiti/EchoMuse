@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.42.0-fx.1
+
+### Ein Echo, der schon läuft, kann auf emOS umgestellt werden statt neu eingerichtet
+
+**Bis jetzt hat der Einrichtungsassistent ein Gerät, das er kennt, schlicht
+abgelehnt** — mit dem Hinweis, es erst im Controller zu löschen. Für eine
+echte Neuinstallation ist das richtig. Für den Wechsel von FireOS auf emOS
+ist es falsch, und teuer.
+
+`/data` überlebt das Schreiben der Boot-Partition. Die Revoice-Installation,
+die Link-Zugangsdaten, der gemerkte Controller, der Mute-Zustand, die
+Wakeword-Modelle und die WLAN-Konfiguration kommen alle mit, und die
+Seriennummer ändert sich nicht — der Controller spricht danach mit derselben
+Zeile in seiner Datenbank. Das Gerät vorher zu löschen wirft dagegen die
+Gerätekonfiguration weg **und ändert jede Home-Assistant-Entitäts-ID**, weil
+HA Entitäten an der Geräteidentität festmacht und ein neu hinzugefügtes Gerät
+ein neues ist.
+
+Der Assistent bietet jetzt beides an, und **Migrieren steht zuerst** — es ist
+das, was jemand fast immer meint, und Löschen ist die Richtung, die sich nicht
+rückgängig machen lässt.
+
+**Nur im emOS-Ablauf.** FireOS über FireOS neu aufzuspielen beschreibt genau
+die Partitionen, aus denen das Gerät gerade läuft; das ist der zerstörerische
+Fall, für den die Ablehnung existiert, und daran ändert sich nichts.
+
+Die vollständige Anleitung steht in `docs/emos-migration.md`: was mitkommt und
+was nicht, warum das gesicherte Boot-Image kein Formalismus ist, und was zu
+tun ist, wenn der Ring rot stehen bleibt.
+
+### Die FAQ hat das Gegenteil empfohlen
+
+Der Eintrag „Wie führe ich den Assistenten auf einem emOS-Gerät noch einmal
+aus?" riet, den alten Eintrag löschen zu lassen. Korrigiert.
+
 ## 2.41.0-fx.1
 
 ### Advertised is not the same as reachable, and nothing had ever checked
