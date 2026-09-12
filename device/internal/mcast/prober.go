@@ -10,9 +10,9 @@ import (
 // transitions to the log. It is the instrument described in the package
 // comment; nothing here repairs anything.
 type Prober struct {
-	// Ask performs one probe. Injected so the cadence, the gate and the
-	// wording are all host-testable without a network.
-	Ask func() Reading
+	// Sample reads the firewall's mDNS counter once. Injected so the cadence,
+	// the gate and the wording are all host-testable without a firewall.
+	Sample func() Reading
 	// Active reports whether anything is advertising. Same gate the membership
 	// watcher uses and for the same reason: a device with both endpoints off
 	// has nothing to be invisible with, and probing it would put a question on
@@ -20,16 +20,13 @@ type Prober struct {
 	Active func() bool
 
 	Tracker Tracker
-
-	// Service is only used in the log line, so the reader knows what was asked.
-	Service string
 }
 
 // Tick performs one probe and logs a transition if there was one. Returns how
 // long to wait before the next probe, so a caller can follow the adaptive
 // cadence without duplicating the rule.
 func (p *Prober) Tick(now time.Time) time.Duration {
-	if p.Ask == nil {
+	if p.Sample == nil {
 		return HealthyInterval
 	}
 	if p.Active != nil && !p.Active() {
@@ -38,57 +35,49 @@ func (p *Prober) Tick(now time.Time) time.Duration {
 		// date an outage that was somebody turning a switch back on.
 		return HealthyInterval
 	}
-	if p.Service == "" {
-		p.Service = ProbeService
-	}
-	r := p.Ask()
+	r := p.Sample()
 	ev, out := p.Tracker.Observe(now, r)
 	switch ev {
 	case EventDeaf:
-		last, peers := p.Tracker.LastHeard()
+		last, delta := p.Tracker.LastHeard()
 		// "cannot" is what makes the log relay forward this as a warning, and
 		// it has to: the device is perfectly reachable over unicast the whole
-		// time, so nothing else in the system reports anything at all. Someone
-		// reading their Home Assistant log is the only person who can see this.
+		// time, so nothing else in the system reports anything at all.
 		//
-		// It says what was MEASURED and stops there. The first version ended
+		// It says what was MEASURED and stops there. An earlier version ended
 		// "so it is simply in no picker", which is an inference and was FALSE
-		// the first time this ran on hardware: measured 2026-09-12, the device
-		// reported this line while the controller's own scan answered "Every
-		// enabled endpoint is visible on the network", with eight other hosts
-		// seen. Hearing and being heard are two directions and they fail
-		// separately — announcements go out unprompted and do not need a query
-		// to have arrived. A line that asserts the consequence sends the next
-		// reader to check the picker, find the device in it, and conclude the
-		// instrument is broken.
-		log.Printf("[mcast] this device cannot hear any other host on the "+
-			"network — %d probe(s) for %s answered only by itself (%d reply/"+
-			"replies). %s Unicast is unaffected. Whether it is still VISIBLE "+
-			"is a separate question: its own announcements may still be "+
-			"getting out, so read the controller's network scan rather than "+
-			"assuming this one. Episode #%d.",
-			p.Tracker.Misses, p.Service, r.Self,
-			describeLastHeard(now, last, peers), p.Tracker.Episodes())
+		// on hardware: the device reported this while the controller's scan
+		// answered "Every enabled endpoint is visible on the network".
+		// Announcements go out unprompted and need no query to have arrived.
+		log.Printf("[mcast] this device cannot hear the network — not one mDNS "+
+			"packet has reached %s:%s in %s (%d consecutive windows). %s "+
+			"Unicast is unaffected. Whether it is still VISIBLE is a separate "+
+			"question: its own announcements may still be getting out, so read "+
+			"the controller's network scan rather than assuming this one. "+
+			"Episode #%d.",
+			Iface, MDNSPort, out.Round(time.Second), p.Tracker.Misses,
+			describeLastHeard(now, last, delta), p.Tracker.Episodes())
 	case EventHeard:
 		// The all-clear carries the duration, which is the whole point of the
 		// pair — a line that only said "working again" would date the recovery
 		// and lose the outage.
-		log.Printf("[mcast] hears the network again: %d other host(s) answered "+
-			"after %s of silence.", r.Peers, out.Round(time.Second))
+		_, delta := p.Tracker.LastHeard()
+		log.Printf("[mcast] hears the network again: %d mDNS packet(s) arrived "+
+			"after %s of silence.", delta, out.Round(time.Second))
 	}
 	return p.Tracker.Interval()
 }
 
-// describeLastHeard says when the link was last audible, or that it never has
-// been. A device that has just started and has never heard anybody is a
-// different situation from one that heard six hosts a minute ago, and the deaf
-// line is read by somebody who has neither in front of them.
-func describeLastHeard(now, last time.Time, peers int) string {
+// describeLastHeard says when mDNS last arrived, or that it never has since
+// boot. A device that has just started with a counter that has not moved is a
+// different situation from one that was busy a minute ago, and the deaf line is
+// read by somebody who has neither in front of them.
+func describeLastHeard(now, last time.Time, delta int64) string {
 	if last.IsZero() {
-		return "Nothing else has been heard since this firmware started."
+		return "The counter has not moved since this firmware started."
 	}
-	return "Last heard " + now.Sub(last).Round(time.Second).String() +
-		" ago, when " + strconv.Itoa(peers) + " host(s) answered."
+	return "Last traffic " + now.Sub(last).Round(time.Second).String() +
+		" ago, " + strconv.FormatInt(delta, 10) + " packet(s) in that window."
 }
 
 // Run probes until done is closed, on whatever cadence the state calls for.

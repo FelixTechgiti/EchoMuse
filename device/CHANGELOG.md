@@ -12,6 +12,33 @@ Newest first. Written for the person deciding whether to push this to a
 device they rely on, so it says what changed, what to expect, and what is
 required of them.
 
+## 2.40.0-fx.1
+
+### Die Warnung „dieser Echo hört das Netz nicht" war falsch — und zwar immer
+
+**Wenn du diese Warnung seit v2.37.0-fx.1 im Log hattest: sie hat nie
+gestimmt.** Bitte installier dieses Update, dann verschwindet sie.
+
+Die Messung dahinter hat den Echo etwas gefragt und auf Antworten gewartet, die
+auf diesem Gerät gar nicht ankommen können: FireOS verwirft alles, was
+unaufgefordert hereinkommt, und die Antworten kamen genau so herein. Die
+Messung hat also die Firewall gemessen statt das Netz — und immer „nichts
+gehört" gemeldet, egal wie gesund das Netz war.
+
+Wie falsch das war, zeigt das Gerät selbst: zum Zeitpunkt der Warnung hatte
+seine eigene Firewall **93.704 Netzwerk-Suchpakete durchgelassen**. Der Echo
+hört das Netz einwandfrei.
+
+**Was stattdessen gemessen wird:** der Zähler der Firewall selbst. Der kann
+nicht danebenliegen, weil er dasselbe Stück Software ist, das die Pakete
+durchlässt — was durchgelassen wurde, ist gezählt worden. Nebenbei schickt der
+Echo dafür nichts mehr ins Netz; vorher hat er alle paar Minuten jedes Gerät im
+Haus um eine Antwort gebeten.
+
+**Was das nicht erklärt:** warum ein Gerät in der AirPlay- oder Spotify-Liste
+fehlt. Dafür fällt jetzt nur eine falsche Spur weg. Die Netzwerkprüfung im
+Controller (Gerät → Status) bleibt die Stelle, die diese Frage beantwortet.
+
 ## 2.39.0-fx.1
 
 ### Ein Fehler, der stundenlang lief und den niemand sehen konnte
