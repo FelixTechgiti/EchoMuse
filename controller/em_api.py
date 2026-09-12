@@ -6304,13 +6304,23 @@ async def _get_device_mdns_scan(request: web.Request) -> web.Response:
                                 connected=live is not None)
         note = None
         mine = [f for f in found[key] if f.address and f.address == device_ip]
+        compared = None
         if mine:
             note = em_mdnsscan.txt_note(mine[0].txt)
+            # What the OTHER receivers on this network say that we do not.
+            # Same browse, same instant, same LAN — which is what makes this
+            # worth more than a comparison against documentation. Collected
+            # already; it used to be reduced to a count and thrown away.
+            compared = em_mdnsscan.describe_comparison(
+                em_mdnsscan.txt_compare(
+                    mine[0].txt,
+                    [f.txt for f in found[key]
+                     if f.address and f.address != device_ip]))
         verdicts.append({
             "service": v.service, "enabled": v.enabled,
             "reachable": v.reachable, "visible": v.visible,
             "running": v.running,
-            "detail": v.detail, "note": note,
+            "detail": v.detail, "note": note, "compared": compared,
             "advertised": [f._asdict() for f in mine],
         })
 
