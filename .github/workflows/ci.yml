@@ -440,6 +440,37 @@ jobs:
       # compiler pin still needs a real device in the loop.
       - name: Build compiler image
         run: docker build -t revoice-compiler device/compiler/
+      # A dependency bump can raise a module's `go` directive above the
+      # toolchain in this image, and the build below compiles `./cmd/` and
+      # nothing else — so the same bump goes RED against device/go.mod and
+      # GREEN against any module under device/tools/, which is how #123
+      # reached a mergeable state proposing go 1.25.0 for a tool documented as
+      # building in this image.
+      #
+      # The pinned version is read from the IMAGE, never written down here: a
+      # constant that both halves compare against is one somebody has to
+      # remember to move, and this one already has a comment in the Dockerfile
+      # that would go stale the same way.
+      - name: Every go.mod agrees with the pinned toolchain
+        run: |
+          pinned=$(docker run --rm --entrypoint bash revoice-compiler \
+            -c 'go version' | sed -n 's/.*go\([0-9][0-9.]*\).*/\1/p')
+          [ -n "$pinned" ] || { echo "::error::could not read the pinned Go version"; exit 1; }
+          echo "pinned toolchain: go$pinned"
+          fail=0
+          for f in $(find device -name go.mod | sort); do
+            want=$(sed -n 's/^go \([0-9][0-9.]*\).*/\1/p' "$f" | head -1)
+            [ -n "$want" ] || continue
+            top=$(printf '%s\n%s\n' "$pinned" "$want" | sort -V | tail -1)
+            if [ "$top" != "$pinned" ]; then
+              echo "::error file=$f::declares go $want, above the pinned compiler's go$pinned — moving that pin needs a real device in the loop"
+              fail=1
+            else
+              echo "ok  $f (go $want)"
+            fi
+          done
+          exit $fail
+
       - name: Build firmware
         run: |
           docker run --rm --entrypoint bash \

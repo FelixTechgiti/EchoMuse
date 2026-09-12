@@ -36,6 +36,24 @@ Moving the pin needs **a real device in the loop**. The host tests and
 and this image is exercised only by `compile.sh` and `release.yml`, so a
 green CI run on a pin change proves nothing about it.
 
+**A dependency bump can move the pin from the other end, and only half of
+that was guarded.** A module's `go` directive is a floor the toolchain has to
+meet, so `golang.org/x/net@v0.55.0` raising `device/go.mod` to `go 1.25.0`
+(#122) is a request to move a Go 1.24.0 image — and the pinned-compiler job
+went red, correctly. The same bump against **`device/tools/*/go.mod`** went
+GREEN (#123, proposing `go 1.25.0` for `sendspin_bench`), because that job
+compiles `./cmd/` and nothing else: the tools are documented as building in
+this image and have never been built in CI. So the guard existed for one
+module and for none of the others, which is worse than having none, because
+the green tick reads as coverage.
+
+`Every go.mod agrees with the pinned toolchain` in `ci.yml` now checks all of
+them, and **reads the pinned version out of the image** (`go version`) rather
+than from the Dockerfile comment beside the digest. That comment is the
+obvious place to read it from and is exactly the thing that goes stale when
+somebody moves the digest — the same rule as the firmware constants pinned by
+test against `em_oww_assets`: do not write the number down a second time.
+
 **Compile:**
 ```bash
 cd device
