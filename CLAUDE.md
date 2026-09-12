@@ -119,6 +119,10 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   2026-09-12 gemessen: **114 Remote-Branches, 101 davon längst in `main`
   gemergt.** Ein liegengebliebener Branch mit überholten Fassungen ist eine
   Falle — wer daraus später einen PR öffnet, überschreibt die bessere Lösung.
+  **Eine Sitzung kann das nicht selbst**, siehe die nächste Regel: Sie legt den
+  Branch an, und stehen bleibt er trotzdem. Also beim Merge in der Weboberfläche
+  löschen oder am Ende der Sitzung dazusagen, welche Branches offen sind — sonst
+  wächst die Liste genau so weit wie schon einmal.
 - **Ein PR, der ein Issue erledigt, schließt es**: `Closes #nnn` im Rumpf, nicht
   „Relates to #nnn". GitHub schließt nur bei den Schlüsselwörtern. Ein Fehler,
   der längst behoben ist und offen dasteht, wird als nächstes priorisiert — und
@@ -130,9 +134,18 @@ woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
   von einem älteren Stand ab, und Git meldet den Konflikt erst dem, der später
   rebast. Wer eine Datei groß umbaut, prüft danach, wer dieselbe Datei anfasst:
   `gh pr list --json number,headRefName,files`.
-- **Tags lassen sich aus einer Sitzung nicht pushen** — der Weg ist
-  `cut-release.yml`, beschrieben unten unter „Releasing on this fork". Erst
-  dort lesen, nicht am Tag herumprobieren.
+- **Eine Sitzung darf Branches nur ANLEGEN und FORTSCHREIBEN.** Jeder andere
+  Schreibzugriff auf eine Ref wird von GitHub mit `403` auf `git-receive-pack`
+  abgelehnt — gemessen am 2026-09-12 an beiden Formen, die es trifft: einen Tag
+  anlegen, und einen gemergten Branch löschen. Beides mit derselben Anmeldung,
+  mit der ein `git push -u origin <branch>` Sekunden vorher durchlief. Es ist
+  also keine Regel über Tags, sondern über die ART des Schreibzugriffs, und die
+  Fehlermeldung nennt sie nicht: Git meldet `the remote end hung up
+  unexpectedly`, den 403 sieht nur, wer `GIT_CURL_VERBOSE=1` setzt.
+  **Für Tags ist der Weg `cut-release.yml`**, beschrieben unten unter
+  „Releasing on this fork" — erst dort lesen, nicht am Tag herumprobieren.
+  Für das Löschen gibt es keinen: die Weboberfläche oder `gh` auf einem
+  Rechner mit eigener Anmeldung.
 
 ### §5 Urheberschaft: kein Claude, in keinem Feld
 
@@ -507,12 +520,28 @@ choosing a number**; this repository's own tag list is as stale as the last
 sync. `version.parse` ignores the suffix, so `2.23.0-fx.1` compares equal to
 `2.23.0` and the dashboard's own comparisons are unaffected.
 
-**Tags cannot be pushed from a Claude Code session.** `git push` of any
-`refs/tags/*` — annotated or lightweight — is refused by GitHub with
-`error: RPC failed; HTTP 403` on `git-receive-pack`, while branch pushes from
-the same credential succeed, and the egress proxy records no denial. This
-repository has no tag ruleset and no tag protection rule (checked), and no
-tool here creates a tag ref, so it is a property of that credential.
+**A session's credential may only CREATE and FAST-FORWARD branches.** Every
+other write to a ref is refused by GitHub with `403` on `git-receive-pack`,
+and the rule is about the KIND of write rather than about tags — which is how
+it was written down here at first, from the one case that had been hit.
+Measured 2026-09-12 on both forms:
+
+| write | result |
+|---|---|
+| `git push -u origin <branch>` (create, fast-forward) | works |
+| `git push origin refs/tags/*` (annotated or lightweight) | 403 |
+| `git push origin --delete <merged branch>` | 403 |
+
+The egress proxy records no denial, this repository has no tag ruleset, no tag
+protection rule and no branch protection (all checked), and no tool here
+creates a tag ref — so it is a property of that credential.
+
+**Git does not report the 403**, which is why the deletion case looked like a
+network fault for two attempts: `git push --delete` prints `send-pack:
+unexpected disconnect while reading sideband packet` and then `Everything
+up-to-date`, the second of which reads as success. `GIT_CURL_VERBOSE=1` is
+what shows the `HTTP/1.1 403 Forbidden` on the `POST .../git-receive-pack`.
+Reach for it before concluding a push failed on the network.
 
 **`.github/workflows/cut-release.yml` is the way round it**, and it creates
 only the TAG: `release.yml` and `controller-release.yml` still fire on the tag
