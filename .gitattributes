@@ -1,0 +1,53 @@
+# Line endings.
+#
+# Everything in this repository is built and run on Linux — the pinned compiler
+# image, CI, the controller container, and the device itself. Nothing here is
+# ever executed by Windows. So the worktree gets LF too, on every platform:
+# `text=auto eol=lf` normalises to LF in the repository AND checks out LF.
+#
+# This file exists because the absence of it was measurable on 2026-09-12.
+# With no attributes and Git for Windows' default `core.autocrlf=true`,
+# `git ls-files --eol` reported `i/lf w/crlf` for every script in the tree —
+# including `controller/device_payloads/revoice-debloat.sh`, whose first line
+# in the worktree read `#!/system/bin/sh` followed by a CR. That is an
+# interpreter no device has, and the failure presents as "not found" for a
+# file that is plainly there.
+#
+# Production was never affected: the controller reads its payloads out of an
+# image built on Linux. The exposure is a file copied to a device, compared
+# byte-for-byte, or hashed FROM a Windows worktree.
+#
+# The general rule, which is the one worth keeping: a file that will be read on
+# the device or inside a container must not carry the line endings of the
+# machine that happened to check it out. Setting `core.autocrlf` per-machine is
+# the wrong lever — it is invisible to everyone else and produces commits that
+# change nothing but line endings.
+
+* text=auto eol=lf
+
+# Belt and braces for the files where a CR is not a cosmetic problem but a
+# broken interpreter or a broken parse. These are listed explicitly so that the
+# intent survives someone relaxing the line above.
+*.sh            text eol=lf
+*.py            text eol=lf
+*.go            text eol=lf
+*.c             text eol=lf
+*.h             text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Dockerfile*     text eol=lf
+*.Dockerfile    text eol=lf
+
+# Pushed to the device verbatim — see controller/em_firmware.py.
+controller/device_payloads/**   text eol=lf
+
+# Binary: never touched, never diffed as text.
+*.png           binary
+*.bin           binary
+*.flac          binary
+*.wav           binary
+*.onnx          binary
+*.tflite        binary
+*.ttf           binary
+*.woff          binary
+*.woff2         binary

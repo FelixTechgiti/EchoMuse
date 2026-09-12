@@ -2,6 +2,246 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Arbeitsregeln für diesen Fork
+
+**Dieser Abschnitt ist deutsch, alles darunter bleibt englisch**, und das ist
+kein Stilbruch, sondern die billigere Hälfte einer Abwägung: Der Rest dieser
+Datei ist geerbte Projektkenntnis, die mit Upstream merged. Eine übersetzte
+Fassung wäre bei jedem Sync ein Vollkonflikt auf der ganzen Datei — derselbe
+Grund, aus dem der Go-Modulpfad `github.com/wilbowes/EchoMuse` heißt. Neue
+Regeln dieses Forks stehen hier; sie stammen aus `FelixTechgiti/FahrliX` und
+gelten, weil sie dort jeweils etwas gekostet haben.
+
+**Die drei, die am meisten kosten, wenn sie fehlen:** vor dem ersten Code
+prüfen, ob es schon jemand tut (§1) · keine Backticks in einem Argument, das
+die Shell ersetzt (§2) · dazusagen, WIE verifiziert wurde (§3).
+
+### §1 Vor dem ersten Code: prüfen und anmelden
+
+Mehrere Sitzungen können parallel an diesem Repo arbeiten. Doppelt gebaute
+Arbeit ist der teuerste vermeidbare Fehler, weil eine fertige Lösung weg muss.
+
+```bash
+gh issue view <nr>                   # Zuweisung + Kommentare
+gh pr list --state open              # offener PR dazu?
+git fetch origin && git branch -r    # existiert schon ein Branch?
+git log --oneline origin/main -15    # oft wird gemergt, ohne dass ein Branch bleibt
+```
+
+Dann **anmelden — zuweisen und kommentieren**. Die Zuweisung allein
+benachrichtigt niemanden, der Kommentar tut es:
+
+```bash
+gh issue edit <nr> --add-assignee @me
+gh issue comment <nr> --body-file /tmp/kommentar.md
+```
+
+- **Ohne Issue** nichts bauen, was größer als ein Einzeiler ist. Ein Issue
+  anzulegen ist das Gegenteil einer Reservierung — es macht die Aufgabe erst
+  sichtbar; also auch bei einem gerade selbst angelegten Issue anmelden.
+- **Nach jeder längeren Pause erneut prüfen.** Ein „übernehme ich" von gestern
+  ist keine Reservierung.
+- **Die Prüfung gilt auch für Untersuchungen, nicht nur für Code.** Verdoppelte
+  Diagnosezeit ist bei einem flüchtigen Fehler der teuerste Teil.
+- **Ist es doch passiert: die gemergte Fassung gewinnt**, auch wenn die eigene
+  für besser gehalten wird. Nicht drüberschieben — beisteuern, was ihr fehlt
+  (Tests, Randfälle, Doku), und Abweichungen am Issue zur Diskussion stellen.
+  Eine Gegenmessung, die der anderen widerspricht, ist mehr wert als eine
+  zweite Lösung.
+
+### §2 Backticks in Shell-Argumenten
+
+**An jeder Stelle, an der die Shell den Inhalt ersetzt, führt sie Backticks als
+Befehl aus** — doppelt gequotete Argumente und Here-Dokumente ohne
+Anführungszeichen am Begrenzer. Die Bedingung ist das Ersetzen, nicht ein
+bestimmter Unterbefehl: `gh issue comment --body`, `gh issue create --title`,
+`git commit -m`, `python3 - <<PYEND` sind alle betroffen.
+
+Das trifft dieses Repo härter als die meisten: Commit-Nachrichten und diese
+Datei nennen fast nur Symbole, Pfade und Flags — also Backticks.
+
+```bash
+git commit -F nachricht.txt             # statt -m "… `Symbol` …"
+gh issue comment <nr> --body-file datei.md
+gh issue create --title 'Titel mit `Symbol`'   # einfache Anführungszeichen
+cat > datei.md <<'EOF'                  # Begrenzer gequotet: nichts wird ersetzt
+EOF
+```
+
+**Der Begrenzer darf im Text nicht vorkommen.** Er wird an jeder Zeile geprüft,
+die genau so lautet — auch mitten in einem Codeblock. Ein Here-Dokument, das
+mit `ENDE` schließt und das Wort `ENDE` in einem Beispiel enthält, endet dort,
+und der Rest des Textes läuft als Shell-Befehle weiter.
+
+Zwei Dinge, die man sonst nicht bemerkt:
+
+- **Der Aufruf meldet Erfolg.** Der Schaden steht mitten im Text — aus einem
+  Symbol wird die Ausgabe eines Befehls oder nichts. Also **hinterher
+  gegenlesen**: `git log -1 --format=%B`, `gh issue view <nr> --json comments`.
+- **Der Schaden kann auch ein Hänger sein.** Ein `gh`- oder `git`-Aufruf, der
+  ungewöhnlich lange braucht, ist erst einmal ein Verdacht auf Backticks — der
+  eingesetzte Befehl kann alles sein, auch etwas, das Dateien anfasst.
+  Gegenlesen hilft dann nicht, weil nichts entsteht, was zu lesen wäre.
+
+Vor dem Merge lässt sich das reparieren (`git commit --amend -F datei`,
+`git push --force-with-lease`). Danach steht es in der Historie, und die ist
+das Projektgedächtnis.
+
+### §3 Was „fertig" heißt
+
+**Immer dazusagen, WIE verifiziert wurde**, mit genau diesen Worten, damit sie
+durchsuchbar bleiben:
+
+| Formel | heißt |
+|---|---|
+| am echten Gerät verifiziert | auf einem gerooteten Echo durchgespielt |
+| in CI verifiziert | `go test` / `pytest` / `go vet` gelaufen, keine Hardware |
+| nicht verifiziert | nur gebaut, sonst nichts |
+
+Die dritte wegzulassen, wenn sie zutrifft, ist schlimmer als ein roter Test:
+Der nächste verlässt sich auf etwas, das nie geprüft wurde.
+
+**Was nur am Gerät geht, wird ein Issue — kein Absatz im Chat.** Hardware ist
+hier die Ausnahme, nicht die Regel: Die Testsuiten decken absichtlich nur die
+reinen Logikmodule ab (siehe „Build and test quickref" unten), und der Rest
+lässt sich auf keinem Rechner beantworten. Ein Befund, der im Chat bleibt, ist
+verloren, sobald die Sitzung endet — und genau der wird gebraucht, wenn jemand
+das Gerät gerade in der Hand hat. Das Issue nennt: woran man Erfolg erkennt,
+woran Misserfolg, und was bei einem Fehlschlag mitzubringen ist.
+
+### §4 Git
+
+- **Vor JEDEM Push `git fetch origin`**, nicht nur zu Sitzungsbeginn.
+- **Für neue Arbeit immer ein neuer Branch ab aktuellem `main`**, und nach
+  einem Merge **nie** weiter auf denselben Branch pushen. GitHub hält den PR
+  für abgeschlossen; neue Commits hängen dann ohne offenen PR daran.
+- **Branches nach dem Merge löschen** (`gh pr merge --delete-branch`). Am
+  2026-09-12 gemessen: **114 Remote-Branches, 101 davon längst in `main`
+  gemergt.** Ein liegengebliebener Branch mit überholten Fassungen ist eine
+  Falle — wer daraus später einen PR öffnet, überschreibt die bessere Lösung.
+- **Ein PR, der ein Issue erledigt, schließt es**: `Closes #nnn` im Rumpf, nicht
+  „Relates to #nnn". GitHub schließt nur bei den Schlüsselwörtern. Ein Fehler,
+  der längst behoben ist und offen dasteht, wird als nächstes priorisiert — und
+  das trifft ausgerechnet die heikelsten Punkte, weil die zuerst gebaut werden.
+  Bleibt ein Teil übrig, schließt der PR das Issue trotzdem, und der Rest wird
+  ein neues Issue; ein halb erledigtes offenes Issue verrät niemandem, was
+  daran noch fehlt.
+- **Ein Merge nach `main` kann fremde offene PRs still brechen** — sie zweigen
+  von einem älteren Stand ab, und Git meldet den Konflikt erst dem, der später
+  rebast. Wer eine Datei groß umbaut, prüft danach, wer dieselbe Datei anfasst:
+  `gh pr list --json number,headRefName,files`.
+- **Tags lassen sich aus einer Sitzung nicht pushen** — der Weg ist
+  `cut-release.yml`, beschrieben unten unter „Releasing on this fork". Erst
+  dort lesen, nicht am Tag herumprobieren.
+
+### §5 Urheberschaft: kein Claude, in keinem Feld
+
+**Autor dieses Forks ist Felix Walser.** Entschieden am 2026-09-12; die
+Historie soll das abbilden, nicht das Werkzeug.
+
+**Die Bedingung ist die Zuschreibung, nicht der Trailer.** Der Trailer ist nur
+die Stelle, an der es am häufigsten auffällt; betroffen sind vier Felder, und
+jedes hat eine Selbstprüfung, die einen Aufruf kostet:
+
+| Feld | Selbstprüfung |
+|---|---|
+| Commit-Autor | `git log -1 --format='%an <%ae>'` |
+| Trailer in der Nachricht | `git log -1 --format=%B` |
+| Autor von Issue, PR und Kommentar | `gh api user --jq .login` — **vor** dem Anlegen |
+| Squash-Nachricht beim Merge | Titel und Rumpf selbst setzen |
+
+**Die dritte Zeile prüft niemand**, weil sie sich nicht wie Urheberschaft
+anfühlt: Ein Issue ist keine Arbeit am Code. Es steht aber in derselben Liste,
+und dort ist der Autor das Erste, was dasteht.
+
+**Das überschreibt die Voreinstellung der Sitzung.** Claude Code trägt von sich
+aus `Co-Authored-By` in Commits und einen „Generated with Claude Code"-Hinweis
+in PR-Beschreibungen ein; hier nicht. Und `git config user.name` entscheidet es
+nicht: Eine Sitzung, die über die GitHub-App arbeitet, bekommt ihre Identität
+aus dem Installationstoken.
+
+**Rückwirkend wird nichts umgeschrieben.** Am 2026-09-12 gemessen: 16 der
+letzten 30 Commits tragen `Claude <noreply@anthropic.com>` im Autorenfeld, 27
+der letzten 50 einen Trailer. Das bleibt stehen — die Historie ist das
+Projektgedächtnis, und ein Rewrite von `main` träfe jeden Klon.
+
+### §6 Sprache
+
+Zwei Sprachen, und die Trennung läuft nicht nach Geschmack, sondern danach,
+**wer es liest**: Nutzer deutsch, wer am Code arbeitet englisch. Das ist nicht
+neu entschieden, sondern der Stand, den dieser Fork sich schon gegeben hat —
+am 2026-09-12 an den Dateien selbst nachgesehen:
+
+| Deutsch — für Nutzer | Englisch — für die Arbeit am Code |
+|---|---|
+| Chat | Issues, PR-Titel und -Kommentare |
+| Commit-Nachrichten und PR-Beschreibungen | dieser Abschnitt ausgenommen: der Rest dieser Datei, `device/CLAUDE.md`, `controller/CLAUDE.md` |
+| `README.md`, `docs/` | `SETUP.md`, `EM_CONTROLLER_SPEC.md` — Referenz, keine Anleitung |
+| `controller/CHANGELOG.md` — wer ihn liest, entscheidet über ein Update | `device/CHANGELOG.md` — Firmware-Notizen, und `cut-release.yml` baut die Tag-Annotation daraus |
+| dieser Abschnitt | Code, Kommentare, Log-Zeilen |
+| | **jeder PR gegen `wilbowes/EchoMuse`** |
+
+**Wo der Bestand schon eine Sprache hat, gewinnt der Bestand.** Die offenen
+Issues sind englisch; eine deutsche Hälfte dazu macht die Liste unsuchbar, und
+Suchbarkeit ist der einzige Grund, warum eine Sprache pro Feld überhaupt eine
+Regel ist. Dieselbe Überlegung hält die beiden `CHANGELOG.md` auseinander,
+obwohl sie gleich heißen — der eine wird von jemandem gelesen, der ein Update
+erwägt, der andere von jemandem, der Firmware baut.
+
+**Eine Datei wird nicht nebenbei übersetzt.** Eine halb übersetzte Datei ist
+schlechter als eine in der falschen Sprache, weil sie sich beim Suchen wie zwei
+Dateien verhält. Wer umstellt, stellt die ganze Datei um und sagt es im
+Commit.
+
+- Umlaute richtig schreiben, keine Ersatzschreibweisen (`ae`, `oe`, `ss`).
+- **Bei Unsicherheit lieber fragen als raten** — aber erst alles erledigen, was
+  von der Antwort nicht abhängt.
+
+### §7 Umgebung: Windows
+
+Der Arbeitsplatz ist `O:\Claude-Projekte\Revoice` unter Windows; gebaut und
+gefahren wird auf Linux (Compiler-Image, CI, Controller-Container).
+
+**Zeilenenden regelt `.gitattributes`, keine `core.autocrlf`-Sonderlocke** —
+sonst entstehen Commits, die nur Zeilenenden umstellen. Der Fall, der hier
+wehtut, ist aber der andere und war am 2026-09-12 messbar da: Ohne
+`.gitattributes` und mit `core.autocrlf=true` sagte `git ls-files --eol`
+`i/lf w/crlf` für **jedes** Skript, also auch für
+`controller/device_payloads/revoice-debloat.sh`. Im Arbeitsbaum begann es mit
+`#!/system/bin/sh` plus CR — ein Interpreter, den kein Gerät hat.
+
+Produktiv trug das nichts aus, weil der Controller die Payloads aus dem auf
+Linux gebauten Image liest. Es trägt aus, sobald eine Sitzung eine Datei aus
+**diesem** Arbeitsbaum aufs Gerät schiebt oder byteweise vergleicht — und der
+Fehler meldet sich als „not found" für eine Datei, die dasteht.
+
+**Die allgemeine Form: Eine Datei, die auf dem Gerät oder im Container gelesen
+wird, darf keine Zeilenenden dieses Rechners tragen.** `.gitattributes` hält
+das seit dem 2026-09-12 für Skripte, Payloads und `emos/`.
+
+### §8 Regeln schreiben und wo was hingehört
+
+- **`JOURNAL.md`** und beide `CHANGELOG.md` sind der Record und werden nicht
+  rückwirkend umgeschrieben.
+- **Issues**: alles Offene, alles, was jemand tun soll. **Keine zweite Liste in
+  einer Datei daneben** — zwei Fassungen sind zwei Wahrheiten, und die zweite
+  wird falsch, ohne dass etwas rot wird.
+- **Commit-Rumpf und PR-Beschreibung**: Problem, Lösung, Verifikation. Lieber
+  ausführlich; das ist die Projekthistorie.
+- **Code-Kommentare: nur das Warum.** Kein Nacherzählen von Vorfällen und keine
+  Daten — die stehen in der Commit-Historie, und ein Verweis dorthin veraltet
+  nicht.
+- **Ein Verweis auf eine Ansicht, ein Label oder einen Filter ist eine
+  Behauptung über einen Zustand außerhalb dieses Repos, und die veraltet
+  still** — anders als Code, den ein Test hält. Wer sich darauf verlässt, sieht
+  einmal nach, ob es das noch gibt und noch alles zeigt.
+
+**Eine Regel muss den allgemeinen Fall nennen, nicht den, an dem sie gefunden
+wurde.** Wer hier etwas einträgt, schreibt die **Bedingung** hin, unter der sie
+gilt („jede Stelle, an der die Shell ersetzt"), und den Fund nur als Beispiel.
+Ein Beispiel ist schnell dazugeschrieben; eine zu enge Regel wird gelesen und
+greift trotzdem nicht, weil der eigene Fall nicht wie der beschriebene aussieht.
+
 ## What this is
 
 Revoice repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "biscuit") as an open-source voice assistant satellite. Two components:
@@ -172,9 +412,12 @@ here commits the project to shipping a distro.
 
 Anything a **person** reads leads with the answer and stays short — PR
 comments, issue replies, review feedback, release notes. These go out on the
-project's behalf to someone who did not sit through the reasoning, and Wil
-sends many of them without following the internals: a reply he has to decode
-before he can send it has failed, however accurate it is.
+project's behalf to someone who did not sit through the reasoning: a reply the
+reader has to decode before acting on it has failed, however accurate it is.
+
+*Which language each of these is written in is settled by §6 above, and it is
+not uniform: issue and PR text is English, controller release notes are German.
+The rule below is about shape, and applies either way.*
 
 - **The first line answers it** — the verdict, the decision, or the ask.
   Everything after is support the reader is free to skip.

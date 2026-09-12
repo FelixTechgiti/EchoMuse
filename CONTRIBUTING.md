@@ -1,125 +1,110 @@
-# Contributing
+# Mitmachen
 
-Contributions are welcome, and the most useful ones are usually small. This
-page exists so you can tell, before spending an evening, whether a change is
-wanted and what shape it should take.
+*English readers: this is a fork of [wilbowes/EchoMuse](https://github.com/wilbowes/EchoMuse).
+If your bug is not fork-specific, please report it upstream — it reaches more
+people there. Issues and pull requests on this fork are written in English; the
+user-facing documentation is German.*
 
-## The most valuable thing you can send
+Revoice ist ein Fork von
+[wilbowes/EchoMuse](https://github.com/wilbowes/EchoMuse). Die verbindlichen
+Arbeitsregeln stehen in **[CLAUDE.md](CLAUDE.md)** — die liest Claude Code in
+jeder Sitzung automatisch. Diese Seite ist die Kurzfassung für Menschen.
 
-**A bug report with a support bundle.** Dashboard → Support → Download bundle.
-It is an allowlist — no transcripts, no recordings, no network names, no
-account names — and it carries the controller log, per-device logs, versions,
-config and link metrics. Remote diagnosis used to cost days per round trip;
-with a bundle it is usually one.
+## Was hierher gehört und was nach Upstream
 
-Hardware findings are the next most valuable, because most of us have one kind
-of Echo in one kind of room. If something behaves differently on your unit,
-that is worth an issue on its own.
+**Ein Fehler, der nicht fork-spezifisch ist, gehört nach Upstream.** Dort sitzen
+mehr Geräte, mehr Nutzer und die Entwicklung, der dieser Fork folgt; ein Bericht
+hier erreicht eine Person. Fork-spezifisch ist alles, was nur hier existiert:
 
-## Where to help
+- der Name **Revoice** und was er anfasst — Pfade unter
+  `/data/local/etc/revoice`, `revoice.db`, das Image
+  `ghcr.io/felixtechgiti/revoice-controller`, der TLS-Name `revoice-controller`
+- die Ausgabekette **auf dem Gerät** (`device/internal/outchain`, Capability
+  `output_chain`) — Upstream hat sie nicht und lässt den Controller formen
+- **emOS**, AirPlay 2 und Spotify Connect auf dem Gerät
+- alles rund um `-fx.N`-Versionen und `cut-release.yml`
+- die deutsche Dokumentation
 
-Every open issue carries three labels, and between them they should tell you
-whether to start writing code.
+**Das Wertvollste, was du schicken kannst, ist ein Fehlerbericht mit
+Support-Bundle** (Dashboard → Support → Bundle herunterladen). Es ist eine
+Allowlist — keine Transkripte, keine Aufnahmen, keine Netzwerk- oder
+Kontonamen — und enthält Controller-Log, Gerätelogs, Versionen, Konfiguration
+und Link-Metriken. Eine Ferndiagnose kostete ohne so ein Bundle Tage pro Runde.
 
-**State — read this one first.**
+Hardware-Befunde sind das Zweitwertvollste: Die meisten von uns haben eine Art
+Echo in einer Art Raum. Verhält sich dein Gerät anders, ist das ein eigenes
+Issue wert.
 
-| | |
-|---|---|
-| `ready` | Specified well enough that a PR can be reviewed against the issue text. Start here. |
-| `needs-design` | The problem is agreed, the solution is not. Comment with an approach before writing code. |
-| `needs-decision` | Waiting on a call about direction. A PR cannot settle it. |
-| `blocked` | Waiting on another issue, named in the body. |
-| `needs-reporter` | Waiting on someone outside the project. |
-| `needs-triage` | Just arrived; a maintainer has not read it properly yet. |
+## Bevor du anfängst
 
-**Area** — `area:device` (Go, on the Echo), `area:controller` (Python server),
-`area:dashboard`, `area:provisioning` (rooting, wizard, OTA), `area:ha`
-(add-on, ESPHome, entities), `area:forge` (wake word trainer), `area:docs`.
-
-**Signal** — `good first issue` is small and self-contained. `help wanted` is
-something we would rather not do ourselves. `hardware:welcome` needs a rooted
-Echo to do at all, and those are the ones we most want help with, because most
-of us have one kind of Echo in one kind of room. `needs-hardware` is the
-opposite: it needs measurement on our own bench before anyone can act.
-
-**Before you start, check nobody else has.** `claimed` means there is an open
-PR — GitHub only lets us assign collaborators, so that label is how an outside
-contributor's work in progress is marked. Say so on the issue when you pick
-one up and we will add it.
-
-`ready` is an invitation, and we mean it. If an issue is labelled `ready` and
-a PR arrives that implements it, that PR was not premature — if we got the
-label wrong, that is ours to fix, not yours.
-
-### Quick links
-
-Saved searches for the common questions. Counts move; the filters do not.
-
-- [Ready to pick up](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aready%20-label%3Aclaimed%20-label%3Aneeds-hardware) — Specified, unclaimed, nothing external blocking it.
-- [Good first issue](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3A%22good%20first%20issue%22%20-label%3Aclaimed) — Small and self-contained.
-- [Needs a device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Ahardware%3Awelcome) — Can only be done with a rooted Echo — the ones we most want help with.
-- [Open bugs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Abug%20label%3Aready) — Confirmed and specified.
-- [Design not settled](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aneeds-design) — Comment before writing code.
-- [Someone is on it](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aclaimed) — Check before starting.
-
-By area: [device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adevice) · [controller](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Acontroller) · [dashboard](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adashboard) · [provisioning](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aprovisioning) · [ha](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aha) · [forge](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aforge) · [docs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adocs)
-
-By release: [2.21.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.21.0) · [2.22.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.22.0) · [3.0.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A3.0.0)
-
-## Milestones and releases
-
-Issues are grouped by the release they are meant to land in, and a milestone
-is a theme rather than a bucket:
-
-- **2.21.0** — controller GA, in early access now. Closed to new work.
-- **2.22.0** — link resilience. The audio path survives a bad link (#140).
-- **3.0.0** — Sendspin multi-room, and the output chain moves to the device
-  (#272).
-
-An issue with no milestone is not scheduled, which is not the same as
-unwanted. A `ready` issue outside a milestone is still a fine thing to pick
-up.
-
-## Before you open a PR
+**Anmelden, bevor Code entsteht** — an diesem Repo können mehrere Sitzungen
+parallel arbeiten, und doppelt gebaute Arbeit muss weg:
 
 ```bash
-cd controller && python -m pytest tests/    # needs pytest numpy scipy pyyaml
+gh issue view <nr>            # ist schon jemand dran?
+gh pr list --state open       # gibt es einen offenen PR dazu?
+gh issue edit <nr> --add-assignee @me
+gh issue comment <nr> --body-file /tmp/kommentar.md
+```
+
+Der **Kommentar** ist der wichtige Teil; die Zuweisung allein benachrichtigt
+niemanden. Für alles, was größer ist als ein Einzeiler und noch kein Issue hat:
+vorher eines anlegen.
+
+**`--body-file` statt `--body`, und `-F` statt `-m`.** Issue-Texte und
+Commit-Nachrichten dieses Projekts bestehen fast nur aus Symbolen, Pfaden und
+Flags in Backticks — und überall dort, wo die Shell den Inhalt ersetzt, führt
+sie das zwischen Backticks als Befehl aus. Der Aufruf meldet dabei Erfolg; der
+Schaden steht mitten im Text. Die Fälle, die es schon gekostet hat, stehen in
+[CLAUDE.md](CLAUDE.md), §2.
+
+## Vor einem Pull Request
+
+```bash
+git fetch origin                            # vor JEDEM Push
+cd controller && python -m pytest tests/    # braucht pytest numpy scipy pyyaml
 cd device && go test ./... && go vet ./...
 ```
 
-Both run in CI on every push. **Please add a test if your change is pure
-logic** — the controller suite deliberately cannot import `em_controller` or
-`em_esphome` (they pull in aiohttp, zeroconf and openwakeword), so decisions
-that need coverage get extracted into their own module: see `em_button`,
-`em_linkauth`, `em_turnclock`, `em_barge`. Following that pattern is the
-single easiest way to get a change reviewed quickly.
+Beides läuft bei jedem Push in CI (`.github/workflows/ci.yml`).
 
-Hardware-dependent code is not testable on the host and nobody expects you to
-fake it. Say what you tested it on.
+**Bitte einen Test dazu, wenn deine Änderung reine Logik ist.** Die
+Controller-Suite kann `em_controller` und `em_esphome` absichtlich nicht
+importieren (die ziehen aiohttp, zeroconf und openwakeword herein), also werden
+Entscheidungen, die Abdeckung brauchen, in ein eigenes Modul gezogen — siehe
+`em_button`, `em_linkauth`, `em_turnclock`, `em_barge`. Diesem Muster zu folgen
+ist der einfachste Weg zu einer schnellen Review.
 
-## What we maintain, so you do not have to
+Hardwareabhängiger Code ist auf dem Rechner nicht testbar, und niemand erwartet,
+dass du das fälschst. Schreib dazu, worauf du es geprüft hast.
 
-Please **leave these out of your PR** — we will write them once the change
-lands. This is not about ownership of the project, it is that these files are
-either generated or written from context that only shows up in maintenance.
+**Ein PR, der ein Issue erledigt, schließt es**: `Closes #nnn` im Rumpf, nicht
+„Relates to #nnn" — sonst steht ein längst behobener Fehler weiter als offen und
+wird als nächstes priorisiert.
 
-- **`CLAUDE.md`, `device/CLAUDE.md`, `controller/CLAUDE.md`** — a maintainer
-  log rather than documentation. Most of it is "here is what we got wrong,
-  why, and what not to try again", written after being burnt. It is also the
-  most conflict-prone file in the repo.
-- **`CHANGELOG.md`** — written per release, for the person deciding whether to
-  update.
-- **`controller-ea/`** — generated by `controller/tools/sync_channels.py`.
-  Never edit it; a test fails on drift.
-- **Version pins** in `controller/config.yaml` and release tags.
+**Keine Claude-Urheberschaft**, in keinem Feld: nicht im Commit-Autor, nicht als
+Trailer, nicht als Autor von Issue, PR oder Kommentar. Begründung und die
+Selbstprüfungen dafür stehen in [CLAUDE.md](CLAUDE.md), §5.
 
-**`docs/` is fair game** and improvements there are welcome — it is the
-user-facing documentation, and it is usually the thing that is out of date.
+## Wenn du etwas als fertig meldest
+
+Schreib dazu, **wie** du es geprüft hast — mit einer dieser drei Formeln, damit
+sie durchsuchbar bleiben:
+
+| Formel | heißt |
+|---|---|
+| am echten Gerät verifiziert | auf einem gerooteten Echo durchgespielt |
+| in CI verifiziert | `go test` / `pytest` / `go vet`, keine Hardware |
+| nicht verifiziert | nur gebaut, sonst nichts |
+
+Die dritte wegzulassen, wenn sie zutrifft, ist der schlimmste Fall: Der nächste
+verlässt sich dann auf etwas, das nie geprüft wurde.
 
 ## A few rules that will bite you
 
-Each of these has already cost somebody a bad day, so they are worth knowing
-before you write code rather than after review.
+Diese fünf sind technisch und gelten hier wie bei Upstream — jede hat schon
+jemandem einen schlechten Tag gekostet. Sie stehen auf Englisch, weil sie Code
+beschreiben, der englisch ist.
 
 - **`em_db.MIGRATIONS` is append-only.** The stored `schema_version` is an
   index into that list, so editing a deployed entry corrupts every database
@@ -137,21 +122,26 @@ before you write code rather than after review.
   test enforces it. A payload with no way to reach fielded devices means every
   user updates it by hand.
 
-If a change bumps into one of these and there is genuinely no way around it,
-say so in the PR — that is a discussion, not a rejection.
+Stößt eine Änderung dagegen und es gibt wirklich keinen Weg daran vorbei, sag es
+im PR — das ist eine Diskussion, keine Ablehnung.
 
-## Writing for people
+## Generiertes und Releases
 
-Anything a person reads — PR comments, issue replies, release notes — leads
-with the answer and stays short. Evidence is the number, not the derivation.
-The exception is anything irreversible or anything asking someone to act on
-their own hardware, where the warning stays whatever it costs in length.
+`controller-ea/` wird von `controller/tools/sync_channels.py` **erzeugt**. Nicht
+von Hand ändern; ein Test fällt bei Abweichung um.
 
-Commit messages are the opposite: they are the record, and their density is
-the point. Say why, not just what.
+Versionen dieses Forks tragen ein `-fx.N` (`controller-v2.42.0-fx.1`,
+`v2.15.0-fx.1`), weil Upstreams Tags durch den Sync hier landen und ein
+gleichnamiger Tag beim nächsten Fetch kollidiert. Getaggt wird über
+`.github/workflows/cut-release.yml`, nicht von Hand — die vollständige Prozedur
+samt der Fallen, die sie gekostet hat, steht in [CLAUDE.md](CLAUDE.md) unter
+„Releasing on this fork". Der Versionspin in `controller/config.yaml` gehört in
+einen eigenen Release-PR: Supervisor liest ihn vom Standard-Branch, also ist er
+in der Sekunde live, in der er merged — und bis der Tag gecuttet ist, kann das
+Image noch nicht existieren.
 
-## Licence
+## Lizenz
 
-By contributing you agree your work is licensed under the MIT licence in
-`LICENSE`. If you add a third-party component, add it to `NOTICE.md` and keep
-its licence text beside the code.
+Mit einem Beitrag stimmst du zu, dass deine Arbeit unter der MIT-Lizenz in
+[LICENSE](LICENSE) steht. Wer eine Fremdkomponente hinzufügt, trägt sie in
+[NOTICE.md](NOTICE.md) ein und legt ihren Lizenztext neben den Code.
