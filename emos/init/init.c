@@ -195,10 +195,16 @@ static const char *node_name(const char *path)
  * The question is which partition is called `userdata`.
  *
  * **Both sources that would answer it are measured absent here.** The
- * `/dev/block/platform/*/by-name/` symlinks are made by ueventd on Android and
- * by TWRP's own init, and emOS runs neither; `/proc/dumchar_info`, the legacy
- * MediaTek interface, does not exist on this kernel. What is left is the
- * partition table itself.
+ * `/dev/block/platform/<soc>/by-name/` symlinks are made by ueventd on Android
+ * and by TWRP's own init, and emOS runs neither; `/proc/dumchar_info`, the
+ * legacy MediaTek interface, does not exist on this kernel. What is left is
+ * the partition table itself.
+ *
+ * The `<soc>` is a placeholder and not a glob, deliberately: a `*` followed by
+ * a `/` ENDS THIS COMMENT, and everything after it becomes code. That is what
+ * broke the first version of this file — the compiler reported "stray '`' in
+ * program" forty lines further down, which names the symptom and not the
+ * cause. Worth knowing in a tree whose comments quote paths constantly.
  *
  * **This code only LOOKS.** Nothing here decides what gets mounted or written,
  * and that restraint is the point rather than timidity: p16 is `/data`, which
