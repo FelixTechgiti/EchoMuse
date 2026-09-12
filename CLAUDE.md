@@ -750,9 +750,10 @@ needs openwakeword or aiohttp.
 **emOS is C with no test framework, so its off-target tools ARE its suite** —
 `ringsim --check` for the boot ring's invariants, `pwcheck` for the password
 hash the controller has to agree with, `tmoutcheck` for the idle-timeout
-parser, and `pathcheck` for finding either record across the rename. All four
-`#include init.c` whole and drive the real functions, so none can drift from
-the device. CI runs all of them, builds the init for aarch64 in the pinned
+parser, `pathcheck` for finding either record across the rename, and
+`nodecheck` for taking device numbers from the kernel rather than the
+compiled-in table. All five `#include init.c` whole and drive the real
+functions, so none can drift from the device. CI runs all of them, builds the init for aarch64 in the pinned
 compiler image, and asserts the result is static — a dynamically linked PID 1
 produces no output at all, which is indistinguishable from a kernel that never
 started.
