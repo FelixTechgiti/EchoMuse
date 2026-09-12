@@ -183,6 +183,17 @@ type Device struct {
 	// plain bool a controller turning it off would be indistinguishable from
 	// one that never mentioned it.
 	AirplayVolumeControl *bool
+	// SpotifyVolumeControl is the same decision for Spotify Connect, and it
+	// is a separate key rather than one shared switch: the two endpoints are
+	// installed, enabled and used independently, and somebody who wants the
+	// phone's Spotify slider to own the room has said nothing about AirPlay.
+	//
+	// Default OFF at both ends, for the reason AirPlay's is: this device has
+	// ONE volume, shared with the assistant, so a slider dropped to 20%%
+	// drops the next spoken answer to 20%% as well. Defensible, asked for,
+	// and not something to meet for the first time when the assistant
+	// whispers.
+	SpotifyVolumeControl *bool
 
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
@@ -261,6 +272,8 @@ func (d *Device) loadDefaults() {
 	d.AirplayName = envStr("AIRPLAY_NAME", "")
 	airplayVolumeControl := envBool("AIRPLAY_VOLUME_CONTROL", false)
 	d.AirplayVolumeControl = &airplayVolumeControl
+	spotifyVolumeControl := envBool("SPOTIFY_VOLUME_CONTROL", false)
+	d.SpotifyVolumeControl = &spotifyVolumeControl
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -383,6 +396,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AirplayVolumeControl != nil {
 		d.AirplayVolumeControl = msg.AirplayVolumeControl
 	}
+	if msg.SpotifyVolumeControl != nil {
+		d.SpotifyVolumeControl = msg.SpotifyVolumeControl
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -476,6 +492,11 @@ func (d *Device) Snapshot() ConfigMessage {
 		v := *d.AirplayVolumeControl
 		airplayVolumeControl = &v
 	}
+	var spotifyVolumeControl *bool
+	if d.SpotifyVolumeControl != nil {
+		v := *d.SpotifyVolumeControl
+		spotifyVolumeControl = &v
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -507,6 +528,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		// and airplayVolume() therefore read nil and returned no handler.
 		// See the Snapshot guard in config_snapshot_test.go.
 		AirplayVolumeControl: airplayVolumeControl,
+		SpotifyVolumeControl: spotifyVolumeControl,
 		ListeningAnim:        d.ListeningAnim,
 	}
 }
@@ -580,6 +602,7 @@ type ConfigMessage struct {
 	// Pointer, no omitempty: false is a meaningful value here and a plain
 	// bool would make "turn it off" indistinguishable from "not mentioned".
 	AirplayVolumeControl *bool `json:"airplayVolumeControl"`
+	SpotifyVolumeControl *bool `json:"spotifyVolumeControl"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

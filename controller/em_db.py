@@ -299,6 +299,19 @@ DEFAULT_DEVICE_CONFIG = {
     # Turning it on also moves the attenuation from software to the codec's
     # own gain stage, which is where a 16-bit stream keeps its bits.
     "airplayVolumeControl": False,
+    # spotifyVolumeControl: the same decision for Spotify Connect, and a
+    # SEPARATE key rather than one switch for both.
+    #
+    # The two endpoints are installed, enabled and used independently;
+    # somebody who wants the phone's Spotify slider to own the room has said
+    # nothing about AirPlay, and a shared switch would decide for them.
+    #
+    # False for the reason above: one volume, shared with the assistant.
+    # Turning it on also passes `--mixer none` to librespot, so the slider
+    # stops attenuating in software and lands on the codec's own gain stage
+    # instead — attenuating in both places at once is the audible version of
+    # two limiters in series.
+    "spotifyVolumeControl": False,
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake

@@ -7704,7 +7704,7 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
   "bluetooth": ["bleProxyEnabled"],
-  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName", "airplayVolumeControl"]
+  "streaming": ["sendspinEnabled", "spotifyEnabled", "spotifyName", "airplayEnabled", "airplayName", "airplayVolumeControl", "spotifyVolumeControl"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -8541,6 +8541,15 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             sub="the slider on a phone sets the Echo's own volume and flashes the ring, instead of being turned down inside the AirPlay receiver where nothing else can see it. Note this Echo has ONE volume: turn AirPlay down and the assistant's next answer is quieter too. Takes effect when AirPlay next starts"
             value={config.airplayVolumeControl ?? false}
             onChange={v => set('airplayVolumeControl', v)}/>
+          {/* The same choice for Spotify, and its own switch rather than one
+              shared with AirPlay: the two endpoints are enabled and used
+              independently, and wanting the Spotify slider to own the room
+              says nothing about AirPlay. */}
+          <Toggle label="Spotify volume moves this Echo"
+            disabled={!spotifyCapable || !spotifyReady}
+            sub="the slider in the Spotify app sets the Echo's own volume and flashes the ring, instead of being turned down inside librespot where nothing else can see it. Note this Echo has ONE volume: turn Spotify down and the assistant's next answer is quieter too. Takes effect when Spotify Connect next starts"
+            value={config.spotifyVolumeControl ?? false}
+            onChange={v => set('spotifyVolumeControl', v)}/>
         </div>
       </Stage>
     </div>

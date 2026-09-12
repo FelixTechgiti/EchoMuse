@@ -350,6 +350,21 @@ func main() {
 		// the other three, which is the kind of thing the arbiter exists to
 		// prevent and which nothing downstream would report.
 		OnEvent: func(e spotify.Event) {
+			// The slider, when its owner asked for it to own the room.
+			//
+			// Painted on the ring like a button press rather than applied
+			// silently: a remote set is nobody standing at the device, but a
+			// slider is a person watching for the speaker to answer. Same
+			// call as AirPlay's.
+			//
+			// Not gated on plane ownership, unlike the flush below. Volume is
+			// a property of the DEVICE, and somebody reaching for the slider
+			// means this Echo whether or not Spotify happens to be the source
+			// playing through it at that instant.
+			if e.Kind == "volume_changed" && e.HasVol {
+				s.SetVolumeFromSpotify(server.LevelForSpotifyVolume(e.Volume))
+				return
+			}
 			if !e.EndsPlayback() {
 				return
 			}
@@ -1488,6 +1503,10 @@ func applySpotifyConfig(c *spotify.Client) {
 	// applied to the session that enable creates rather than to the next
 	// one.
 	c.SetName(snap.SpotifyName)
+	// Before start/stop for SetName's reason, and it restarts a RUNNING
+	// endpoint when it changes — `--mixer` is a command-line flag, so a live
+	// librespot cannot be told.
+	c.SetVolumeControl(snap.SpotifyVolumeControl != nil && *snap.SpotifyVolumeControl)
 	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
 		if err := c.Start(); err != nil {
 			log.Printf("[cmd] Spotify Connect is on but cannot run: %v", err)

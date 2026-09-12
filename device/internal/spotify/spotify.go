@@ -169,6 +169,12 @@ type Options struct {
 	// 5.46 seconds play out after the user has stopped, which is what "es
 	// dauert 6-7 Sekunden bis sie aufhoert" was measuring.
 	OnEvent func(Event)
+	// VolumeControl makes the Spotify slider set the DEVICE's volume instead
+	// of attenuating in librespot.
+	//
+	// It is a command-line property (`--mixer none --volume-ctrl linear`), so
+	// changing it restarts the endpoint — see SetVolumeControl.
+	VolumeControl bool
 }
 
 // Client supervises one librespot process.
@@ -494,6 +500,21 @@ func (c *Client) args() []string {
 	if c.onevent != "" {
 		a = append(a, "--onevent", c.onevent)
 	}
+	// Hand the slider to the device instead of applying it here.
+	//
+	// `--mixer none` is what stops librespot scaling the samples. Without it
+	// the slider would attenuate TWICE — once in software and once at the
+	// codec — which is the audible version of the two-limiters-in-series
+	// mistake the output chain is written to avoid.
+	//
+	// `--volume-ctrl linear` is not a preference either. librespot's default
+	// `log` curve exists so a LINEAR multiply on the samples sounds right;
+	// feeding it into a control that is already dB-linear applies the curve
+	// twice. LevelForSpotifyVolume does the conversion, and it needs the
+	// unshaped fraction to do it — see its comment.
+	if c.volumeControl() {
+		a = append(a, "--mixer", "none", "--volume-ctrl", "linear")
+	}
 	return append(a, c.opts.ExtraArgs...)
 }
 
@@ -702,4 +723,33 @@ func Report() map[string]any {
 		rep["size"] = info.Size()
 	}
 	return rep
+}
+
+func (c *Client) volumeControl() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.opts.VolumeControl
+}
+
+// SetVolumeControl turns the device-volume mapping on or off, live.
+//
+// Restarts the endpoint when it changes, and only then: `--mixer` is a
+// command-line flag, so a running librespot cannot be told. Resolved on every
+// config push rather than once at wiring, for the reason AirPlay's
+// SetVolumeHandler is — the setting arrives long after the client is built,
+// and a value fixed at startup would mean turning it on did nothing until the
+// firmware happened to restart, while the dashboard said otherwise.
+func (c *Client) SetVolumeControl(on bool) {
+	c.mu.Lock()
+	was := c.opts.VolumeControl
+	c.opts.VolumeControl = on
+	running := c.running
+	c.mu.Unlock()
+
+	if was == on || !running {
+		return
+	}
+	log.Printf("[spotify] device volume control %s — restarting so librespot "+
+		"picks up the mixer change", map[bool]string{true: "on", false: "off"}[on])
+	c.kill()
 }
