@@ -60,6 +60,44 @@ three are about files that the old name left on a device:
 None of it is dead code — delete it only once no device provisioned as
 EchoMuse can reach this controller, which is not a date anybody can name.
 
+**A fourth shim was MISSING, and it took the fleet down on 2026-09-11.** The
+list above is of files the old name left on a device. What it did not cover
+is the old name baked into a **certificate**, and that is the one that
+bricks: `em_pki.TLS_SERVER_NAME` and the firmware's `tlsServerName` were
+changed together, which is right for a fresh install and catastrophic for an
+existing one, because the SAN is written into a leaf that PERSISTS in `tls/`.
+A controller carried across the rename goes on presenting
+`echomuse-controller` while firmware from v2.28.0-fx.1 demands
+`revoice-controller` — so verification fails on every dial, and the device
+had no fallback at all: it holds a CA, mDNS advertises `tls_port`, so it
+redials wss for ever. There is no way to reach it, because its shell is
+proxied by the controller it cannot connect to, and a power cycle changes
+nothing. A device connected over wss on v2.27.0-fx.1 took v2.29.0-fx.1 and
+never registered again.
+
+Both halves are now fixed and both are worth keeping: `em_pki.server_names()`
+presents BOTH names and `ensure_pki` re-issues the leaf **from the existing
+CA** when the stored one is short a name (so no credential push is needed —
+the CA is what devices pin, and rotating it would need the very link this
+repairs); and `client.choosePlane` falls back to the plain plane after three
+consecutive VERIFICATION failures, withholding the token, loudly, still
+refused by `REQUIRE_DEVICE_TLS`. **The general rule: a constant that both
+halves compare against is not renamed, it is ADDED TO** — and the test that
+would have caught this (`tests/test_pki_names.py`) is a coupling nobody had
+pinned, which is the reason to look for the unpinned couplings rather than
+for more shims.
+
+**The device also had no `em_devicepaths` of its own**, and the same rename
+moved two files it keeps for itself: `controller.json` (the remembered
+controller, so every updated device fell back to mDNS-only discovery — the
+exact fault the cache exists to remove) and `state.json` (mute, silently
+reset to unmuted). `device/internal/devicepaths` now reads the legacy
+directory when the current one is empty and always writes the current one, so
+each file migrates on its first write. Note the asymmetry with the controller
+module, which WRITES both: the device is reading its own files, so a fallback
+read is enough; the controller is pushing to somebody else's device and
+cannot know which firmware will read it.
+
 The upgrade is **not** transparent for an existing install: the database file,
 the certificate SAN and the image name all changed. The procedure is in the
 README's "Umstieg von EchoMuse" section, and it is the only place a user is

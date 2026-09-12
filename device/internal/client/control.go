@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -139,6 +140,13 @@ type ControlClient struct {
 	lastServer    *discovery.ServerInfo
 	serverAddrMu  sync.RWMutex
 
+	// Consecutive TLS VERIFICATION failures, which is what decides whether
+	// to fall back to the plain plane — see choosePlane. Touched only from
+	// connect(), which runs on the single Run goroutine, so it needs no
+	// lock; it deliberately does not ride serverAddrMu, whose readers are
+	// the shell dialler on other goroutines.
+	tlsVerifyFailures int
+
 	// shellCancel cancels a running shell session when shell_close is received.
 	shellCancel context.CancelFunc
 	shellMu     sync.Mutex
@@ -269,7 +277,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	// Only ever a hint: the probe below decides whether it is still true.
 	c.serverAddrMu.Lock()
 	if c.lastServer == nil {
-		if cached := discovery.LoadEndpoint(discovery.CachePath); cached != nil {
+		if cached := discovery.LoadEndpoint(discovery.CacheReadPath()); cached != nil {
 			c.lastServer = cached
 			log.Printf("[control] remembered controller %s — trying it before mDNS",
 				cached.Addr)
@@ -411,24 +419,35 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	// controller lands mid-run, and the very next reconnect should pick it
 	// up without a restart.
 	creds := loadLinkCreds()
+	choice := choosePlane(creds.tlsConf != nil, server.TLSPort, c.tlsVerifyFailures)
+	if choice.Warn != "" {
+		log.Printf("[control] %s", choice.Warn)
+	}
+
 	baseURL := "ws://" + server.Addr
-	if creds.tlsConf != nil {
-		if server.TLSPort > 0 {
-			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
-		} else {
-			// CA on disk but controller has no TLS listener (or a pre-TLS
-			// controller). Deliberate fallback during rollout — flipping
-			// REQUIRE_DEVICE_TLS controller-side is what eventually closes
-			// this downgrade path.
-			log.Printf("[control] CA installed but controller advertises no tls_port — dialling plain ws")
-		}
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	if choice.UseTLS {
+		baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
+		dialer.TLSClientConfig = creds.tlsConf
+	}
+	header := creds.header()
+	if !choice.SendToken {
+		header = http.Header{}
 	}
 
 	log.Printf("[control] Connecting to %s", baseURL)
-	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, baseURL+"/control", creds.header())
+	conn, _, err := dialer.DialContext(ctx, baseURL+"/control", header)
 	if err != nil {
+		// Only a VERIFICATION failure counts. A controller that is simply
+		// down refuses both planes, and counting that would move the fleet
+		// off TLS for the length of any ordinary outage.
+		if choice.UseTLS && isTLSVerifyFailure(err) {
+			c.tlsVerifyFailures++
+		}
 		return err
+	}
+	if choice.UseTLS {
+		c.tlsVerifyFailures = 0
 	}
 	defer conn.Close()
 

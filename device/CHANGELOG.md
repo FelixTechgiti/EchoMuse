@@ -14,6 +14,48 @@ required of them.
 
 ## 2.30.0-fx.1
 
+### An Echo that cannot verify the controller no longer goes silently dead
+
+**This is the other half of the fault described in controller 2.38.0-fx.1,
+and it is the half that prevents a repeat.**
+
+The encrypted link is verified against a name inside the controller's
+certificate. When that check fails the Echo has, until now, simply retried —
+for ever, at five-second intervals, with no fallback and nothing anybody
+could read. There is no way in: the Echo's shell is reached through the
+controller it cannot connect to, and a power cycle changes nothing.
+
+It now falls back to the unencrypted link after three consecutive
+verification failures, says loudly why in the log the controller collects,
+and keeps re-testing the encrypted one about once a minute so a repaired
+controller is picked up on its own. The dashboard shows the link as **ws
+(plain)** instead of **wss (TLS)**, which is the point: a fault you can see
+beats one you cannot.
+
+Two deliberate limits. The link token is **not** sent over the fallback — if
+verification failed because something is on the network rather than because
+of a stale name, handing it the shared secret would be worse than the
+outage — and **Require encrypted device connections**, if you have enabled
+it, still refuses the fallback outright. Only a failure to VERIFY counts: a
+controller that is merely switched off refuses both links equally and never
+moves a device off encryption.
+
+### Settings that survived a reboot stopped surviving an update
+
+The rename moved two files the Echo keeps for itself, and nothing carried
+them across, so both were silently lost the moment a device took the new
+firmware:
+
+- **the remembered controller address**, which is what lets an Echo
+  reconnect in seconds after an update instead of searching the network for
+  it — losing it put every updated device straight back on the slow path
+  the file exists to avoid;
+- **the microphone mute state**, which came back unmuted.
+
+Both are now read from the old location when the new one is empty, and
+re-written to the new one, so this happens exactly once per device and then
+never again.
+
 ### The Echo now records what its radio was doing while it was unreachable
 
 **Nothing here changes behaviour.** It adds one measurement to a log that is

@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/wilbowes/EchoMuse/internal/devicepaths"
 )
 
 // statePath persists mute state across reboots and OTA restarts. It lives
@@ -16,7 +18,15 @@ import (
 // no controller). Volume is the opposite — the controller's stored
 // startupVolume is the source of truth, re-applied via SeedVolume on the
 // first config push each run.
-const statePath = "/data/local/etc/revoice/state.json"
+const stateName = "state.json"
+
+// Written here; read via stateReadPath, which also looks in the pre-rename
+// directory. Mute is device-sovereign, so losing this file on an upgrade
+// silently un-mutes a microphone somebody switched off — the wrong direction
+// to fail in. See internal/devicepaths.
+const statePath = devicepaths.CurrentDir + "/" + stateName
+
+func stateReadPath() string { return devicepaths.Read(stateName) }
 
 type deviceState struct {
 	Muted bool `json:"muted"`

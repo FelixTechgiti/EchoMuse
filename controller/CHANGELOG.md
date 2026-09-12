@@ -2,16 +2,47 @@
 
 ## 2.38.0-fx.1
 
+### Echos went permanently offline after updating to firmware 2.28 or newer
+
+**If your Echo disappeared after a firmware update and has not come back,
+this is why, and updating the add-on fixes it. Nothing is required of you
+beyond the update — your devices keep their installed credentials.**
+
+The device and the controller have to agree on a name inside the encrypted
+link's certificate. The rename from EchoMuse to Revoice changed that name on
+both sides at once, which is correct for a new installation and wrong for
+every existing one: the name is written into a certificate that is created
+once and then kept. So a controller that has been running since before the
+rename still presents the old name, while firmware from v2.28.0-fx.1 onwards
+accepts only the new one.
+
+The device then cannot verify the controller, and it has nowhere else to go —
+it retries the encrypted connection for ever. From the outside it is an Echo
+that simply never comes back: no dashboard entry, no logs, no shell, because
+the shell is reached through the controller it cannot connect to. A power
+cycle does not help. Measured on 11 September: a device connected normally on
+v2.27.0-fx.1, took v2.29.0-fx.1, and never registered again.
+
+The controller now presents **both** names and re-issues its own certificate
+on startup if it is carrying an old one. The certificate authority your
+devices trust is untouched, so nothing has to be pushed to them; the next
+time the Echo retries, it connects.
+
+Firmware 2.30.0-fx.1 adds the other half — a device that cannot verify the
+controller falls back to the unencrypted link and says so, rather than
+retrying in silence. Either side alone is enough to recover; both are worth
+having.
+
 ### The device's supervisor log was being read half at a time
 
 **Fetch supervisor log** could return two lines while the answer sat in a
 second file it never opened.
 
 That file is written by two programs — the start script the controller
-pushes, and the firmware itself — and the rename from EchoMuse to Revoice
-moved the directory under both of them on their own schedules. A controller
-that has been updated and an Echo that has not therefore write to two
-different places, and the fetch stopped at the first one it found.
+pushes, and the firmware itself — and the same rename moved the directory
+under both of them on their own schedules. A controller that has been updated
+and an Echo that has not therefore write to two different places, and the
+fetch stopped at the first one it found.
 
 Measured on a device on firmware v2.27.0-fx.1 with a current start script:
 the button returned the boot and start lines, and the firmware's own account
@@ -19,8 +50,7 @@ of a 22-hour outage — the entire reason the file exists — was never read.
 Nothing reported it, because returning one of the two files looks exactly
 like success.
 
-Both files are now read, each labelled with the path it came from. No action
-is needed; the next fetch simply carries what was already on the device.
+Both files are now read, each labelled with the path it came from.
 
 ## 2.37.0-fx.1
 

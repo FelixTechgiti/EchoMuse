@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/wilbowes/EchoMuse/internal/devicepaths"
 )
 
 // CachePath remembers the controller this device last registered with. It
@@ -44,7 +46,16 @@ import (
 // answer at this address could equally answer an mDNS browse, more easily and
 // without waiting for a restart, and the link is TLS-verified against a fixed
 // SAN wherever credentials are installed.
-const CachePath = "/data/local/etc/revoice/controller.json"
+const CacheName = "controller.json"
+
+// CachePath is where the endpoint is WRITTEN. Reads go through
+// CacheReadPath, which also looks in the pre-rename directory — the rename
+// moved this file out from under every device that had one, which put them
+// straight back on mDNS-only discovery. See internal/devicepaths.
+const CachePath = devicepaths.CurrentDir + "/" + CacheName
+
+// CacheReadPath is where the remembered endpoint should be read from.
+func CacheReadPath() string { return devicepaths.Read(CacheName) }
 
 type cachedServer struct {
 	Host    string `json:"host"`
