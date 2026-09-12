@@ -35,6 +35,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/hostname"
 	"github.com/wilbowes/EchoMuse/internal/logrelay"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
+	"github.com/wilbowes/EchoMuse/internal/netfilter"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -361,6 +362,7 @@ func main() {
 		airplayClient.Leave(string(why))
 	})
 	applyAirplayConfig(airplayClient, s)
+	applyFirewall()
 
 	// Re-execute one endpoint after its binary has been replaced. The
 	// controller decides whether to ask — it is the side that knows whether
@@ -569,6 +571,7 @@ func main() {
 		applySendspinConfig(sendspinClient)
 		applySpotifyConfig(spotifyClient)
 		applyAirplayConfig(airplayClient, s)
+		applyFirewall()
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
 
@@ -1390,6 +1393,38 @@ func applySendspinConfig(c *sendspin.Client) {
 		return
 	}
 	c.Stop(sendspin.GoodbyeUserRequest)
+}
+
+// applyFirewall opens exactly the ports the enabled endpoints need, and
+// closes the ones they do not.
+//
+// **FireOS runs `-P INPUT DROP` with an allowlist of Amazon's own ports**, so
+// an endpoint that is running, correctly advertised and heard by the whole
+// network still cannot be connected to — which is the entire content of #77.
+// Read off a device 2026-09-12, with mDNS (5353) and ESTABLISHED allowed and
+// nothing else of ours; that is why every on-device measurement looked
+// healthy while Spotify Connect and AirPlay did not work at all.
+//
+// Called from the same two places as the endpoint start/stop, so the rules
+// follow the services rather than being set once and forgotten: turning an
+// endpoint off closes its port in the same breath.
+//
+// Deliberately AFTER the endpoints are applied. If the order were reversed a
+// port would be open for a second with nothing behind it — harmless, but the
+// opposite order is harmless too and reads correctly.
+func applyFirewall() {
+	snap := config.Get().Snapshot()
+	var want []netfilter.Rule
+	if snap.SpotifyEnabled != nil && *snap.SpotifyEnabled {
+		want = append(want, netfilter.SpotifyRules()...)
+	}
+	if snap.AirplayEnabled != nil && *snap.AirplayEnabled {
+		want = append(want, netfilter.AirPlayRules()...)
+	}
+	// Unconditional: a device nobody can ping is a device that reads as "off
+	// the network" when it is not, and an afternoon went into that mistake.
+	want = append(want, netfilter.PingRule())
+	netfilter.Sync(netfilter.Exec, want)
 }
 
 // applySpotifyConfig starts or stops the Spotify Connect endpoint from the

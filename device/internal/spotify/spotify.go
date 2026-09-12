@@ -68,6 +68,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/endpoint"
 	"github.com/wilbowes/EchoMuse/internal/musicplane"
+	"github.com/wilbowes/EchoMuse/internal/netfilter"
 	"github.com/wilbowes/EchoMuse/internal/orphan"
 	"github.com/wilbowes/EchoMuse/internal/pcm"
 	"github.com/wilbowes/EchoMuse/internal/resample"
@@ -447,6 +448,12 @@ func (c *Client) args() []string {
 		"--bitrate", fmt.Sprint(c.opts.Bitrate),
 		"--cache", c.opts.CacheDir,
 		"--disable-audio-cache",
+		// PINNED, because FireOS drops every inbound port that is not on an
+		// allowlist and a firewall rule cannot name a number that changes
+		// per start. librespot picks a random zeroconf port by default,
+		// which is unfirewallable; internal/netfilter opens exactly this one
+		// and reads it from the same constant.
+		"--zeroconf-port", fmt.Sprint(netfilter.SpotifyZeroconfPort),
 	}
 	return append(a, c.opts.ExtraArgs...)
 }

@@ -3,12 +3,15 @@ package spotify
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/netfilter"
 )
 
 // fakeSink is the music plane.
@@ -584,5 +587,19 @@ func TestRenamingToTheSameNameDoesNothing(t *testing.T) {
 	}
 	if c.name() != "Lounge" {
 		t.Fatalf("name = %q — an empty rename overwrote it", c.name())
+	}
+}
+
+func TestTheZeroconfPortIsPinnedToTheOneTheFirewallOpens(t *testing.T) {
+	// librespot picks a random discovery port per start, and FireOS drops
+	// every inbound port that is not on Amazon's allowlist — so a random one
+	// can never be opened and the Echo is advertised, heard, and unreachable.
+	// That is #77. The rule and the flag read the same constant here, because
+	// them disagreeing is a speaker in the picker that does nothing when you
+	// tap it, with nothing logged at either end.
+	c := New(Options{Binary: "/bin/true"}, &fakeSink{}, &fakePlane{})
+	want := fmt.Sprintf("--zeroconf-port %d", netfilter.SpotifyZeroconfPort)
+	if got := strings.Join(c.args(), " "); !strings.Contains(got, want) {
+		t.Fatalf("missing %q in: %s", want, got)
 	}
 }
