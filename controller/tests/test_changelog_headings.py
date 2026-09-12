@@ -30,6 +30,10 @@ CHANGELOGS = [
     REPO / "controller" / "CHANGELOG.md",
     REPO / "controller-ea" / "CHANGELOG.md",
     REPO / "device" / "CHANGELOG.md",
+    # emOS carries a three-component version where upstream uses two, so that
+    # this rule and cut-release.yml's shape check both hold unchanged. The
+    # file says why at the top.
+    REPO / "emos" / "CHANGELOG.md",
 ]
 
 # What the extractor treats as the start of a version section.
