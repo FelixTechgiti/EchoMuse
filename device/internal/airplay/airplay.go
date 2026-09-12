@@ -85,10 +85,15 @@ const BinaryPath = "/data/local/bin/shairport-sync"
 const ConfigPath = "/data/local/etc/revoice/shairport-sync.conf"
 
 const (
-	// SourceRate is what classic AirPlay delivers, by definition. AirPlay 2
-	// is 48000 and skips the resampler; the rate is DETECTED from the
-	// binary's own report rather than assumed, because getting it wrong is
-	// a stream that plays 8.8% fast and reads as a broken receiver.
+	// SourceRate is what AirPlay delivers — BOTH flavours, by definition.
+	//
+	// This said AirPlay 2 was 48000 and skipped the resampler, and that it
+	// was detected rather than assumed. Neither was true: nothing detected
+	// anything, and AIRPLAY2.md says Buffered Audio is "AAC stereo at 44,100
+	// frames per second" with Realtime streams ALAC exactly as in classic.
+	// So the default was right and its justification was wrong, which is the
+	// more dangerous half — it invited somebody to "fix" the rate for an
+	// AirPlay 2 build and ship a stream playing 8.8% fast (#79).
 	SourceRate = 44100
 	// DeviceRate is what the speaker runs at.
 	DeviceRate = 48000
@@ -135,8 +140,10 @@ type Options struct {
 	Name string
 	// Binary overrides BinaryPath, for tests.
 	Binary string
-	// SourceRate is the rate the binary emits. 44100 for classic AirPlay,
-	// 48000 for AirPlay 2. Zero means classic.
+	// SourceRate is the rate the binary emits. 44100 for AirPlay — BOTH
+	// flavours, see the constant. Zero takes that default. The field exists
+	// for a future source that is not AirPlay; it is NOT the place to
+	// express a difference between AirPlay 1 and 2, because there is none.
 	SourceRate int
 	// BackendDelaySec is how long OUR side holds a sample between taking it
 	// off the pipe and the speaker emitting it — the music plane's prime
@@ -246,8 +253,51 @@ func Report() map[string]any {
 	default:
 		rep["ok"] = true
 		rep["size"] = info.Size()
+		describeFlavour(rep)
 	}
 	return rep
+}
+
+// describeFlavour asks the installed binary what it is and says what that
+// means for the clock daemon.
+//
+// Asked HERE, at registration, because it is a static property of the boot —
+// the binary does not change under a running firmware, and the consumer is a
+// dashboard deciding what to call this endpoint. The same rule that moved
+// base_os off the stats tick.
+//
+// Every failure is recorded rather than raised. Nothing here decides whether
+// AirPlay runs: an AirPlay 2 binary with no nqptp still serves classic
+// AirPlay, and a binary that will not answer -V may still work perfectly. The
+// job is to make "AirPlay 2 is installed but the clock daemon is not"
+// distinguishable from "AirPlay is broken", which from the front of a
+// dashboard it otherwise is not.
+func describeFlavour(rep map[string]any) {
+	f, err := DetectFlavour(BinaryPath, nil)
+	if err != nil {
+		rep["flavour"] = "unknown"
+		rep["flavour_error"] = err.Error()
+		return
+	}
+
+	rep["version"] = f.Version
+	if !f.AirPlay2 {
+		rep["flavour"] = "classic"
+		return
+	}
+
+	rep["flavour"] = "airplay2"
+	// The nqptp shared-memory STRUCTURE version, which the binary states as
+	// -smi<N>. An ABI number rather than a release number: a shairport built
+	// against one and an nqptp publishing another do not interoperate, and
+	// neither of them says so anywhere a user would look.
+	rep["shm_version"] = f.ShmVersion
+
+	nqptpOK, why := NqptpAvailable(NqptpPath)
+	rep["nqptp"] = map[string]any{"ok": nqptpOK, "reason": why, "binary": NqptpPath}
+	if plan := PlanNqptp(f, nqptpOK); !plan.Run {
+		rep["degraded"] = plan.Reason
+	}
 }
 
 // Start brings the receiver up. Idempotent.
