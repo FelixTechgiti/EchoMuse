@@ -331,16 +331,10 @@ func enableWifi() error {
 // clobbered by that save, and the device silently rejoins the old network
 // (found on hardware 2026-07-11; provisioning never hit it because a
 // factory device has no framework-known networks to save).
+// The per-base half lives in reload.go: emOS has no framework and no `svc`,
+// so the Android lever below is not merely wrong there, it is absent.
 func reloadConf(content string) error {
-	if err := disableWifi(); err != nil {
-		return err
-	}
-	if err := writeConf(content); err != nil {
-		// Leave WiFi usable rather than down next to a bad conf.
-		_ = enableWifi()
-		return err
-	}
-	return enableWifi()
+	return reloadWith(pickSupplicant(), content)
 }
 
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {

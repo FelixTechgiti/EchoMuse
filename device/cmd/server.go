@@ -23,6 +23,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/airplay"
+	"github.com/wilbowes/EchoMuse/internal/androidsvc"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
@@ -90,8 +91,9 @@ func main() {
 	// 2026-07-13 — likely retrying the Bluetooth transport the BLE proxy
 	// takes over). Same stock-service takeover as `stop mixer` /
 	// `stop acebutton` / `stop ledcontroller` in the hardware bindings.
-	// Idempotent: a no-op on boots where init never starts it (Lounge).
-	exec.Command("stop", "smarthomewifid").Run()
+	// Idempotent: a no-op on boots where init never starts it (Lounge), and
+	// a no-op on emOS, which never had it.
+	androidsvc.StopQuietly("smarthomewifid")
 
 	// Keep a second CPU core online. procfs, so this has to be re-applied on
 	// every start — see applyCoreFloor for why the mic pipeline's 160ms

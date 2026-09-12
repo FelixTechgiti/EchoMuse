@@ -3,10 +3,11 @@ package buttons
 import (
 	"context"
 	"errors"
-	"time"
-	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	evdev "github.com/gvalkov/golang-evdev"
-	"os/exec"
+	"github.com/wilbowes/EchoMuse/pkg/buttons"
+	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/androidsvc"
 )
 
 // Historical paths, now only the fallback when resolution by name fails.
@@ -39,9 +40,19 @@ func (e *EvDevController) SetMuteCallback(cb func()) {
 
 // Init the button listeners
 // Kills alexa's native button functions
+//
+// THE ERROR IS FATAL TO THE WHOLE FIRMWARE — `NewButtonController` returns it
+// and `cmd/server.go` calls log.Fatalf — which is why the stop goes through
+// internal/androidsvc rather than exec'ing directly. Under emOS there is no
+// `acebutton` and no property service for `stop` to talk to, and whether that
+// is fatal rests on what Amazon's toolbox does when `property_set` has no
+// socket: it happens to ignore the failure and exit 0, so the device boots.
+// Resting the "does this Echo start at all" decision on a vendor binary's
+// undocumented exit code is the thing being removed here, not a failure that
+// was observed.
 func (e *EvDevController) Init() error {
-	cmd := exec.Command("stop", "acebutton")
-	return cmd.Run()
+	_, err := androidsvc.Stop("acebutton")
+	return err
 }
 
 func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback) (*buttons.EventSubscription, error) {

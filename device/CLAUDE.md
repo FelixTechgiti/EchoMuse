@@ -1350,6 +1350,93 @@ question applies to the device link token and to any future cached
 authorisation — retrying forever looks like resilience and is a device that can
 never come back.
 
+## Running on emOS: the Android call sites, and the one that was load-bearing
+
+The firmware runs on two bases (see `internal/platform`) and almost nothing
+needs to care — mic, speaker, LEDs, buttons, ambient light, jack detect and
+WiFi state are all ALSA, i2c, evdev, sysfs and wpa_supplicant. What DOES care
+is the handful of places that ask Amazon's init to let go of hardware, and one
+place that reaches into Android's framework.
+
+**`stop <service>` × 6 now goes through `internal/androidsvc`**, which is a
+no-op on emOS. Five of those are cost and noise: two wasted fork/execs per
+site per start, and `internal/bindings/mic` logged its failure, so an emOS
+device would print a line about a service that does not exist on every boot.
+
+**The sixth decided whether the device booted at all.**
+`buttons.NewButtonController` returns whatever `stop acebutton` returns and
+`cmd/server.go` calls `log.Fatalf` on it. Whether an emOS device came up
+therefore rested on what Amazon's toolbox `stop` does when `property_set` has
+no socket to write to — it ignores the failure and exits 0, so it would have
+worked. **That is a load-bearing assumption about a vendor binary's
+undocumented exit code, sitting on the path that decides whether an Echo
+starts.** Gating removes the question rather than answering it, and the answer
+was never written down anywhere a reader of this tree could check.
+
+`platform.IsAndroid()` is the gate, and **Unknown counts as Android** — the
+same default `base_os` takes everywhere else, because firmware that cannot
+tell must behave as the existing fleet does. Being wrong that way costs a
+failed exec; being wrong the other way is hardware nobody asked Android to
+release, which presents as silence, a dead ring or a dead microphone.
+
+`internal/bluetooth` skips its `pm disable` sweep the same way: emOS has no
+Bluedroid and no package manager, so `/dev/stpbt` is unowned and there is
+nothing to disable. Said once at info, not four `pm` failures and a `settings`
+failure per start.
+
+### The WiFi change is the one that would really have broken
+
+Everything in `internal/wifi` is portable except the two lines in the middle
+that take wpa_supplicant down and bring it back: the backup, the pending
+marker, the association/address/registration gates, the automatic restore and
+`RecoverIfPending` are all base-independent and correct on both. FireOS runs
+the supplicant under its framework, so `svc wifi disable`/`enable` is the only
+safe lever and the package comment lists what happens to anyone who reaches
+past it. emOS runs the supplicant directly and has **no `svc` on PATH at
+all** — so the Android path does not fail loudly there, it fails as a missing
+binary, `disableWifi` returns an error, and the change is refused every time.
+A dashboard control that refuses every time is exactly the "control that
+silently does nothing" the capability rule forbids.
+
+`reload.go` picks a `supplicant` per base. Three things in the emOS half:
+
+- **`disconnect`, never `terminate`.** It leaves the process running, so the
+  control socket every later step needs — the ROLLBACK's included — stays
+  open. Killing the supplicant on a device whose only management path is that
+  radio removes the means of putting it back.
+- **`reconfigure` before `reassociate`, in that order.** `reassociate` alone
+  re-joins what the supplicant already holds in memory, which is the OLD
+  network; the gates would then pass against the old SSID and commit a change
+  that never happened. That is the same shape as the FireOS clobber the
+  package comment records, reached from the other side, and it is pinned by
+  test.
+- **dhcpcd is not touched.** Forcing a fresh lease by killing it rests on
+  init respawning it, which is true for a service in emOS's table and
+  catastrophic if it is not — the rollback would then also come up with no
+  address. The existing client renews or the IPv4 gate fails and rolls back,
+  which is the safe direction.
+
+**What makes an unproven path shippable is that the safety model is the
+proven part.** A wrong reload cannot strand the device: the gates fail, the
+backup goes back through the same reload, and if even that leaves it without
+an address, `RecoverIfPending` restores the old conf at the next process
+start. The failure mode is a reboot, not an Echo on a network nobody can
+reach.
+
+### What is NOT gated, and the correction that matters
+
+`tinymix`, `getprop` and `iptables` are all reached bare and all keep working,
+because **emOS mounts Amazon's `/system` read-only** — they are files on a
+filesystem, not services. `getprop` additionally has a `/proc/cmdline`
+fallback for the serial, since there is no property service to answer it.
+
+That mount is the trap. "emOS has no firewall" was written in this file and in
+`internal/netfilter` and is **reasoning about the POLICY presented as a fact
+about the BINARY**: the default-deny policy comes from one of Amazon's init
+scripts and does not run, while the binary comes from `/system` and does. The
+same mistake is available for every Android tool this firmware reaches for.
+Ask which of the two an absence would come from before writing it down.
+
 ## Advertised is not reachable: FireOS drops every inbound port (`internal/netfilter`)
 
 **This is what #77 was, after weeks of looking at mDNS.** FireOS ships
@@ -1413,11 +1500,25 @@ Two decisions not to unpick:
   bounded loop then `-I` needs only `-D`, and it REPAIRS a table that is
   already wrong instead of merely declining to make it worse.
 
-**No iptables at all is an ordinary answer, said once.** emOS has no such
-firewall, so there is nothing to open — and the log relay forwards lines
-matching `could not` to the controller, so a per-rule complaint would put four
-warnings into somebody's Home Assistant log on every reconnect about a device
-with nothing wrong with it.
+**emOS still gets the rules, and the first version of this section said it
+did not.** emOS has no default-deny policy — that is Amazon's init script,
+which does not run — but it mounts Amazon's `/system`, so `/system/bin/iptables`
+is present and works. `Sync` therefore inserts four ACCEPT rules into a table
+whose policy is already ACCEPT: no-ops, a handful of execs at startup and per
+config push. Left ungated on purpose, because the question the package answers
+is about the TABLE rather than about which userspace booted — so a device that
+one day runs a firewall under emOS works without anybody remembering this file.
+
+`ErrUnavailable` covers a base with no iptables binary at all, which is neither
+of the two we ship, and it exists so that case is said ONCE: the log relay
+forwards lines matching `could not` to the controller, and a per-rule complaint
+would put four warnings into somebody's Home Assistant log on every reconnect.
+
+The correction is worth keeping as a shape: **"emOS has no firewall" was
+reasoning about the POLICY, written as a fact about the BINARY**, and the two
+come from different places — one from Amazon's init, one from a filesystem emOS
+deliberately mounts. The same mistake is available for every other Android tool
+this firmware reaches for, because `/system` is there under both bases.
 
 ## AirPlay latency, and why the prime depth is not one number
 

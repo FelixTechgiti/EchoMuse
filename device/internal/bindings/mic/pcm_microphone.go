@@ -6,10 +6,10 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os/exec"
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/androidsvc"
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
@@ -49,10 +49,10 @@ func NewMicrophone() (*PcmMicrophone, error) {
 // Init stops the mixer service (required to release the ALSA capture device)
 // then starts the permanent background ALSA read loop.
 func (p *PcmMicrophone) Init() error {
-	cmd := exec.Command("stop", "mixer")
-	if err := cmd.Run(); err != nil {
-		log.Printf("mic: stop mixer: %v (continuing)", err)
-	}
+	// Amazon's mixer service, which holds the codec. Nothing holds it under
+	// emOS, and the log line this used to print on failure would then appear
+	// on every boot of a device with nothing wrong with it.
+	androidsvc.StopQuietly("mixer")
 	// Route the differential mic inputs into the ADCs before opening the PCM.
 	// Without this the ADCs are powered down and capture returns the I2S bus's
 	// own noise floor — with a perfectly healthy ALSA clock, which is what

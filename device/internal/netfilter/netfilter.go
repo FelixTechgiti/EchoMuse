@@ -26,9 +26,22 @@
 // # Why iptables here rather than somewhere else
 //
 // This is the Linux interface, not an Android one — `iptables` is the kernel's
-// own, and the project's direction says to prefer exactly that. Under emOS
-// there is no such firewall at all, so `Sync` finds nothing to do and says so
-// once. Nothing here is FireOS-specific except the reason it is needed.
+// own, and the project's direction says to prefer exactly that. Nothing here
+// is FireOS-specific except the REASON it is needed.
+//
+// **Under emOS the rules are still written, and the first version of this
+// comment said otherwise.** emOS has no default-deny policy — that is Amazon's
+// init script, which does not run — but it mounts Amazon's `/system`, so
+// `/system/bin/iptables` is there and works. So `Sync` inserts four ACCEPT
+// rules into a table whose policy is already ACCEPT: no-ops, costing a handful
+// of execs at startup and on each config push. Left that way deliberately
+// rather than gated on the base, because the question this package answers is
+// "is this port reachable", which is about the TABLE and not about which
+// userspace booted — and a device that one day runs a firewall under emOS then
+// works without anybody remembering this file exists.
+//
+// `ErrUnavailable` therefore covers a base with no iptables binary at all,
+// which is neither of the two we ship. It is not the emOS path.
 //
 // # The rules this may write, and the ones it must never
 //
