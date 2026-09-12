@@ -3398,6 +3398,65 @@ function _bannerMode(banner) {
 
 const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
 
+// What to say when the first step could not get an ADB connection at all.
+//
+// **`No device selected.` covers two situations that look identical and want
+// opposite responses**, and until #134 it named neither. The ordinary one is a
+// dismissed picker, a Dot that is off, or a charge-only cable — replug and
+// retry, and retrying is right. The other is a Dot that is ALREADY RUNNING
+// emOS, where retrying can never work: there is no adbd to find and there
+// never will be, because `f_acm` is the whole point of not needing a daemon.
+// It offers a USB serial console instead, so the ADB picker is empty and there
+// is nothing to pick.
+//
+// **Nothing here can tell the two apart, and that is not a gap to close.**
+// Enumerating serial ports needs a user gesture of its own, so the page cannot
+// go looking for the console to decide. What it can do is stop the second case
+// from being INVISIBLE — which is the whole of what made it a dead end rather
+// than a detour, since the way through has existed since emOS 0.4 and appeared
+// in no dialog.
+//
+// Pure, and returns lines rather than logging them, so the wording is testable
+// without a browser. The wording is the deliverable here: same reasoning as
+// `web_usb_blocked.test.mjs`, which says it outright — what matters is the
+// advice, not the detection.
+//
+// Keyed on the step ID rather than its number: both flows put this step at 0
+// today, and the two lists disagree elsewhere (`install_em` is step 11 in one
+// and step 3 in the other), which is why the failure handler below keys off
+// IDs too.
+function connectFailureAdvice(message, stepId) {
+  if (stepId !== 'connect_android') return [];
+  const m = String(message || '').toLowerCase();
+
+  // The secure-context refusal already carries its own fix, and `webUsbBlocked`
+  // is the one copy of it. Repeating anything here would be a second wording to
+  // keep in step with the first.
+  if (m.includes('secure context') || m.includes('webusb')) return [];
+
+  // Chrome rejects an empty or dismissed picker with this; so does the wrapper
+  // when it gets nothing back. Matched loosely because the two phrasings differ
+  // and neither is ours.
+  if (!m.includes('no device selected') && !m.includes('no device found')) return [];
+
+  return [
+    { level: 'warn', text:
+      'Nothing was selected — and two different situations look identical here.' },
+    { level: 'warn', text:
+      '· The picker was dismissed, or the Dot is off or on a charge-only '
+      + 'cable. Replug and retry.' },
+    { level: 'warn', text:
+      '· The Dot is ALREADY RUNNING emOS. Retrying cannot help: emOS has no '
+      + 'adbd and never will, so it offers a serial console and the ADB picker '
+      + 'has nothing to show.' },
+    { level: 'warn', text:
+      'If it is on emOS: open the console and run `/init recovery`. The Dot '
+      + 'reboots into TWRP, and this step accepts a device that is already '
+      + 'there — it reads the FireOS build off /system rather than trusting '
+      + 'the recovery ramdisk\'s own properties.' },
+  ];
+}
+
 const _INIT_RC_APPEND = `
 service mixer /system/bin/sh
     oneshot
@@ -3488,7 +3547,7 @@ async function _sha256Hex(buf) {
 // 10  wifi             — configure WiFi network                            [inputs]
 // 11  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker. Already running emOS? It has no adbd, so the picker stays empty — run /init recovery from its console first, then connect here.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
   { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
@@ -3558,7 +3617,7 @@ function _wizardLogClass(msg, type) {
 // wpa_supplicant — the real radio, so a network this hardware cannot join is
 // refused at pick time rather than after a flash.
 const _EMOS_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker. Already running emOS? It has no adbd, so the picker stays empty — run /init recovery from its console first, then connect here.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker. Everything after this happens here.' },
   { id: 'escrow_boot',     label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and the ten-second undo.' },
   { id: 'install_em',      label: 'Install Revoice',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
@@ -6912,6 +6971,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         return;
       }
       addLog(`Error: ${e.message}`, 'error');
+      // A connect failure that reached here says nothing about WHY, and one of
+      // its causes cannot be retried out of. See connectFailureAdvice.
+      for (const line of connectFailureAdvice(e.message, STEPS[stepIdx]?.id))
+        addLog(line.text, line.level);
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
       // Collect device state while it is still the state that failed. A
